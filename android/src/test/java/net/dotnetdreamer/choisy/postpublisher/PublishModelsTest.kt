@@ -1,0 +1,182 @@
+package net.dotnetdreamer.choisy.postpublisher
+
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+
+/**
+ * The record has to survive the app being killed and be read back by a worker with no JavaScript
+ * anywhere, so the round-trip is the contract - including the auth header, without which a resumed
+ * upload would be rejected.
+ */
+class PublishModelsTest {
+
+    private fun requestJson(): JSONObject = JSONObject(
+        """
+        {
+          "pendingPostId": "post-1",
+          "headers": { "X-Token": "abc123" },
+          "uploadUrl": "https://example.com/api/download/asyncUpload",
+          "lookupUrlTemplate": "https://example.com/api/download/byName/{uploadGuid}",
+          "uploads": [
+            { "uploadGuid": "g1", "role": "stitched", "path": "file:///a/stitched.mp4",
+              "mimeType": "video/mp4", "pictureId": 5 },
+            { "uploadGuid": "g2", "role": "original", "path": "file:///a/clip-1.mp4",
+              "mimeType": "video/mp4" }
+          ],
+          "createPost": { "url": "https://example.com/api/Post/CreateContentPost",
+                          "bodyTemplate": "{\"downloadId\":\"${'$'}STITCHED\"}" }
+        }
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `a request round-trips through json with its headers intact`() {
+        val original = PublishRequest.from(requestJson())
+        val restored = PublishRequest.from(original.toJson())
+
+        assertEquals("post-1", restored.pendingPostId)
+        // The token has to survive: a resumed upload has no other way to authenticate.
+        assertEquals("abc123", restored.headers["X-Token"])
+        assertEquals(2, restored.uploads.size)
+        assertEquals("stitched", restored.uploads[0].role)
+        assertEquals(5, restored.uploads[0].pictureId)
+        assertNull(restored.uploads[1].pictureId)
+        assertEquals(original.createPost.bodyTemplate, restored.createPost.bodyTemplate)
+    }
+
+    @Test
+    fun `the lookup url is built from the template`() {
+        val request = PublishRequest.from(requestJson())
+        assertEquals(
+            "https://example.com/api/download/byName/g1",
+            request.lookupUrlFor("g1"),
+        )
+    }
+
+    @Test
+    fun `without a template there is no lookup url`() {
+        val json = requestJson().apply { remove("lookupUrlTemplate") }
+        assertNull(PublishRequest.from(json).lookupUrlFor("g1"))
+    }
+
+    @Test
+    fun `a request missing something essential is rejected with its path`() {
+        expectInvalid("invalid_request:pendingPostId") { remove("pendingPostId") }
+        expectInvalid("invalid_request:uploadUrl") { remove("uploadUrl") }
+        expectInvalid("invalid_request:uploads") { remove("uploads") }
+        expectInvalid("invalid_request:createPost") { remove("createPost") }
+        expectInvalid("invalid_request:uploads[0].uploadGuid") {
+            getJSONArray("uploads").getJSONObject(0).remove("uploadGuid")
+        }
+        expectInvalid("invalid_request:uploads[1].role") {
+            getJSONArray("uploads").getJSONObject(1).put("role", "sideways")
+        }
+    }
+
+    private fun expectInvalid(message: String, mutate: JSONObject.() -> Unit) {
+        try {
+            PublishRequest.from(requestJson().apply(mutate))
+            fail("expected $message")
+        } catch (e: RequestException) {
+            assertEquals(message, e.message)
+        }
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
+    @Test
+    fun `a whole entry round-trips`() {
+        val request = PublishRequest.from(requestJson())
+        val state = PublishState.initial(request).apply {
+            phase = Phase.UPLOADING
+            attempts = 2
+            uploads[0].downloadId = 77
+            uploads[0].status = UploadStatus.DONE
+            uploads[0].bytesTotal = 1_000
+            uploads[0].bytesSent = 1_000
+            uploads[1].bytesTotal = 1_000
+        }
+        val entry = PublishEntry(request, state, acked = false, createdAt = 10, updatedAt = 20)
+        val restored = PublishEntry.from(JSONObject(entry.toJson().toString()))
+
+        assertEquals(Phase.UPLOADING, restored.state.phase)
+        assertEquals(2, restored.state.attempts)
+        assertEquals(77, restored.state.uploadFor("g1")?.downloadId)
+        assertEquals(UploadStatus.DONE, restored.state.uploadFor("g1")?.status)
+        assertNull(restored.state.uploadFor("g2")?.downloadId)
+        assertEquals(10L, restored.createdAt)
+    }
+
+    @Test
+    fun `a failure round-trips including whether it is worth retrying`() {
+        val request = PublishRequest.from(requestJson())
+        val state = PublishState.initial(request).apply {
+            phase = Phase.FAILED
+            error = PublishFailure("auth", "token expired", 401, "uploading", "g1", true)
+        }
+        val restored = PublishState.from(JSONObject(state.toJson().toString()))
+        val error = restored.error
+        assertNotNull(error)
+        assertEquals("auth", error!!.code)
+        assertEquals(401, error.httpStatus)
+        assertEquals("uploading", error.phase)
+        assertTrue(error.retryable)
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
+    @Test
+    fun `percent is weighted by bytes, not by file count`() {
+        val request = PublishRequest.from(requestJson())
+        val state = PublishState.initial(request).apply {
+            phase = Phase.UPLOADING
+            // One big file and one small one: finishing the small one is not half the job.
+            uploads[0].bytesTotal = 9_000
+            uploads[1].bytesTotal = 1_000
+            uploads[1].bytesTotal = 1_000
+            uploads[1].status = UploadStatus.DONE
+        }
+        // 1000 of 10000 bytes, against a ceiling of 95.
+        assertEquals(9, state.computePercent())
+    }
+
+    @Test
+    fun `percent never reaches 100 until the post itself exists`() {
+        val request = PublishRequest.from(requestJson())
+        val state = PublishState.initial(request).apply {
+            phase = Phase.UPLOADING
+            uploads.forEach {
+                it.bytesTotal = 1_000
+                it.status = UploadStatus.DONE
+            }
+        }
+        // Every byte is up, but "uploaded" is not "posted".
+        assertEquals(95, state.computePercent())
+
+        state.phase = Phase.DONE
+        assertEquals(100, state.computePercent())
+    }
+
+    @Test
+    fun `live byte counters move the percentage between record writes`() {
+        val request = PublishRequest.from(requestJson())
+        val state = PublishState.initial(request).apply {
+            phase = Phase.UPLOADING
+            uploads.forEach { it.bytesTotal = 1_000 }
+        }
+        assertEquals(0, state.computePercent())
+        assertEquals(47, state.computePercent(mapOf("g1" to 1_000L)))
+    }
+
+    @Test
+    fun `an unknown phase in a stored record reads as queued rather than throwing`() {
+        // Forward compatibility: a record written by a newer build must not wedge an older one.
+        assertEquals(Phase.QUEUED, Phase.from("teleporting"))
+        assertEquals(UploadStatus.QUEUED, UploadStatus.from(null))
+    }
+}

@@ -1,0 +1,102 @@
+ext {
+    junitVersion = project.hasProperty('junitVersion') ? rootProject.ext.junitVersion : '4.13.2'
+    androidxAppCompatVersion = project.hasProperty('androidxAppCompatVersion') ? rootProject.ext.androidxAppCompatVersion : '1.7.1'
+    androidxCoreVersion = project.hasProperty('androidxCoreVersion') ? rootProject.ext.androidxCoreVersion : '1.17.0'
+    androidxJunitVersion = project.hasProperty('androidxJunitVersion') ? rootProject.ext.androidxJunitVersion : '1.3.0'
+    media3Version = project.hasProperty('media3Version') ? rootProject.ext.media3Version : '1.11.1'
+    workManagerVersion = project.hasProperty('workManagerVersion') ? rootProject.ext.workManagerVersion : '2.11.2'
+    okhttpVersion = project.hasProperty('okhttpVersion') ? rootProject.ext.okhttpVersion : '4.12.0'
+    kotlinxCoroutinesVersion = project.hasProperty('kotlinxCoroutinesVersion') ? rootProject.ext.kotlinxCoroutinesVersion : '1.10.2'
+}
+
+buildscript {
+    // Read from the host's variables.gradle so every Kotlin subproject in the build loads ONE
+    // Kotlin Gradle plugin; two versions in a single build fail with "loaded multiple times".
+    ext.kotlin_version = project.hasProperty('kotlin_version') ? rootProject.ext.kotlin_version : '2.2.20'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    // One module, two Capacitor plugin classes. The Kotlin packages stay separate
+    // (...videocomposer and ...postpublisher) because they share nothing but a file path.
+    namespace = "net.dotnetdreamer.choisy.videokit"
+    compileSdk = project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 36
+    defaultConfig {
+        minSdkVersion project.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 24
+        targetSdkVersion project.hasProperty('targetSdkVersion') ? rootProject.ext.targetSdkVersion : 36
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    lint {
+        abortOnError = false
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+    testOptions {
+        // The pure classes (colour matrices, the render plan, the gain ramp, the parsers) touch
+        // android.util.Log and android.net.Uri in places. With this flag the stubbed framework
+        // returns null/0 instead of throwing, which is all those tests need - no Robolectric.
+        unitTests.returnDefaultValues = true
+    }
+}
+
+kotlin {
+    jvmToolchain(21)
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation project(':capacitor-android')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    // NotificationCompat, ServiceCompat.startForeground(service, id, notification, type).
+    implementation "androidx.core:core-ktx:$androidxCoreVersion"
+
+    // --- VideoComposer: the render engine ---
+    implementation "androidx.media3:media3-transformer:$media3Version"
+    implementation "androidx.media3:media3-effect:$media3Version"
+    implementation "androidx.media3:media3-common:$media3Version"
+    implementation "androidx.media3:media3-muxer:$media3Version"
+    // media3-exoplayer arrives transitively through media3-transformer; not listed on purpose.
+
+    // --- PostPublisher: the background transport ---
+    // CoroutineWorker has lived in work-runtime since 2.9.0; work-runtime-ktx is an empty artifact.
+    implementation "androidx.work:work-runtime:$workManagerVersion"
+    implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
+
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$kotlinxCoroutinesVersion"
+
+    testImplementation "junit:junit:$junitVersion"
+    // The real org.json: the android.jar stub returns null from every getter once
+    // returnDefaultValues is on, which would make the parser tests meaningless. Test dependencies
+    // come before the mockable android.jar on the test classpath, so this implementation wins.
+    testImplementation "org.json:json:20250107"
+    testImplementation "com.squareup.okhttp3:mockwebserver:$okhttpVersion"
+    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:$kotlinxCoroutinesVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test:runner:1.7.0"
+    androidTestImplementation "androidx.work:work-testing:$workManagerVersion"
+}

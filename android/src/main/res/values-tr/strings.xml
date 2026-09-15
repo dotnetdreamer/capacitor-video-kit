@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Agent-written Turkish; flagged for native review. -->
+<resources>
+    <string name="choisy_render_channel_name">Video hazırlanıyor</string>
+    <string name="choisy_render_notification_title">Videonuz hazırlanıyor</string>
+    <string name="choisy_render_notification_text">%%%1$d</string>
+
+    <string name="choisy_posting_channel_name">Gönderiliyor</string>
+    <string name="choisy_posting_notification_title">Videonuz gönderiliyor</string>
+    <string name="choisy_posting_notification_text">%%%1$d - %2$s</string>
+</resources>

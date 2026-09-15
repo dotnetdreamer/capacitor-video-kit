@@ -1,0 +1,40 @@
+{
+  "name": "choisy-video-kit",
+  "version": "1.0.0",
+  "description": "Native video composition and native background publishing for Capacitor: edit and encode on the device, then upload in a way that survives the app being killed.",
+  "main": "dist/plugin.cjs.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "license": "UNLICENSED",
+  "private": true,
+  "files": [
+    "android/src/main/",
+    "android/build.gradle",
+    "dist/",
+    "ios/Sources",
+    "Package.swift",
+    "src/"
+  ],
+  "keywords": [
+    "capacitor",
+    "plugin",
+    "native",
+    "video",
+    "editor",
+    "transformer",
+    "upload",
+    "background",
+    "workmanager"
+  ],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    },
+    "android": {
+      "src": "android"
+    }
+  },
+  "peerDependencies": {
+    "@capacitor/core": ">=8.0.0"
+  }
+}

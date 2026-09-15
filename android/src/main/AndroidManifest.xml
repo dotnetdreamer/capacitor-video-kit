@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The render runs inside a foreground service started from the visible Activity, so the
+         cached-app freezer cannot pause the encoder once the customer leaves the editor, and the
+         upload runs inside WorkManager's own one. mediaProcessing is the type made for encoding
+         and exists from API 35; on 34 the render falls back to dataSync (its allowed list includes
+         local file processing); below 34 there is no type permission at all. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Voiceover capture. Hosts usually declare this too for the WebView's getUserMedia; the
+         manifest merger de-duplicates. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <application>
+        <service
+            android:name="net.dotnetdreamer.choisy.videocomposer.RenderService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProcessing|dataSync" />
+
+        <!-- WorkManager runs long-running workers inside its OWN service, so from API 34 the type
+             passed to setForeground() has to be declared on that service rather than one of ours.
+             The library declares it without a type, so this merge adds dataSync. If a future
+             WorkManager ships its own type and the merger reports a conflict, the fix is
+             tools:replace="android:foregroundServiceType" here. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+    </application>
+</manifest>

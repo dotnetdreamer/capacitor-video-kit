@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Render (VideoComposer) -->
+    <string name="choisy_render_channel_name">Preparing video</string>
+    <string name="choisy_render_notification_title">Preparing your video</string>
+    <string name="choisy_render_notification_text">%1$d%%</string>
+
+    <!-- Upload (PostPublisher) -->
+    <string name="choisy_posting_channel_name">Posting</string>
+    <string name="choisy_posting_notification_title">Posting your video</string>
+    <string name="choisy_posting_notification_text">%1$d%% - %2$s</string>
+</resources>
