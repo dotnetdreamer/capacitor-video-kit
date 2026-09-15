@@ -11,3 +11,7 @@ export { PostPublisher } from './post-publisher';
 
 export * from './video-composer/definitions';
 export * from './post-publisher/definitions';
+
+// The editor's framework-free core - the web half of editing, the way web.ts is the web half of
+// the plugins.
+export * from './editor';

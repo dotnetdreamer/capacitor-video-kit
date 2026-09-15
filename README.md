@@ -54,6 +54,39 @@ const state = await VideoComposer.getState({ jobId });
 
 Full contracts: `src/video-composer/definitions.ts` and `src/post-publisher/definitions.ts`.
 
+## Editor core
+
+`src/editor/` is the framework-free half of editing — what `web.ts` is to the plugins. An editor UI
+in any framework builds an `EditManifest` and hands it to `toComposeSpec`:
+
+```ts
+import { reconcileManifest, toComposeSpec, cssFor, filterPreset, VideoComposer } from 'choisy-video-kit';
+
+// Start from a straight cut of the host's clips (or bring back a saved edit).
+let manifest = reconcileManifest(saved, clipKeys, durationsByKey);
+
+// Preview with the SAME maths the native render uses.
+const { filter, tint } = cssFor(filterPreset(manifest.filterId).ops);
+videoEl.style.filter = filter;
+
+// Render.
+const spec = toComposeSpec(manifest, uriByKey, { jobId, pendingPostId });
+await VideoComposer.compose(spec);
+```
+
+| Export | What it is for |
+|---|---|
+| `EditManifest`, `EditClip`, `EditOverlay`, `EditMusic`, `EditVoice` | The edit, in a form that survives being put down and picked up. Overlays keep their **text**, not a bitmap, so a reopened edit is still editable. |
+| `reconcileManifest` | Brings a saved edit back in line with a clip list that changed meanwhile. Clips are referred to by the host's own keys — the core never needs to know the host's clip shape. |
+| `toComposeSpec` | The one translation from an edit to a render. Rasterises text at output scale, computes the bitrate. |
+| `FILTER_PRESETS`, `cssFor`, `filterPreset` | CSS Filter Effects maths shared by the live preview and the native colour matrix. |
+| `videoBitrateFor`, `totalDurationMs`, `isUntouched` | Output policy: stay under the upload cap; skip the encode for one untouched clip. |
+| `rasteriseText`, `rasteriseArrow` | Canvas → PNG at output pixel scale, the caller's half of the overlay contract. |
+
+There is deliberately no UI here. An editor screen belongs to the host and its framework; this
+package holds only what an editor needs in order to agree with the native render. Choisy's Angular
+editor lives in the app at `src/app/modules/video-editor/`.
+
 ## The parts worth knowing about
 
 ### Composer
