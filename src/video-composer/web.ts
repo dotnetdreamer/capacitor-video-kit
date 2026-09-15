@@ -9,6 +9,7 @@ import type {
   PrepareJobResult,
   ProbeOptions,
   ProbeResult,
+  SystemInsetsResult,
   ThumbnailsOptions,
   ThumbnailsResult,
   VideoComposerPlugin,
@@ -52,6 +53,11 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
 
   async capabilities(): Promise<CapabilitiesResult> {
     return { supported: false, reason: 'Not implemented on web.' };
+  }
+
+  /** A browser's own `env(safe-area-inset-*)` is already right. */
+  async systemInsets(): Promise<SystemInsetsResult> {
+    return { top: 0, bottom: 0 };
   }
 
   async prepareJob(_options: PrepareJobOptions): Promise<PrepareJobResult> {

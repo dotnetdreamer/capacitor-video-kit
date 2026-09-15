@@ -6,5 +6,8 @@
  * an editor needs in order to agree with the native render lives here instead.
  */
 export * from './edit-manifest';
+export * from './edit-ops';
+export * from './raster-context';
 export * from './compose-spec';
 export * from './overlay-raster';
+export * from './effects';

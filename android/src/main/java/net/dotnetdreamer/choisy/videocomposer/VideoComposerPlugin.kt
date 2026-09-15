@@ -9,6 +9,8 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.ExportException
@@ -452,29 +454,34 @@ class VideoComposerPlugin : Plugin() {
 
     /**
      * Turns the spec's PNG data URLs into bitmaps, staying inside a memory budget. Thirty overlays
-     * at output scale can add up to more than a mid-range phone will hand out in one go, so the
-     * largest ones are decoded at half size and scaled back up by the placement matrix - the same
-     * pixels, half the peak allocation.
+     * can add up to more than a mid-range phone will hand out in one go, so past the budget the
+     * largest ones are decoded at half size - the same placement, a quarter of the peak allocation.
+     *
+     * A PNG does not have to match the area it covers (`wPx x hPx` is its size on the OUTPUT frame;
+     * full-frame effects arrive at half resolution), so the budget is worked out from the PNGs' real
+     * pixel sizes, read from their headers before anything is decoded, and every overlay's scale
+     * comes from the bitmap that was actually produced.
      */
     private fun decodeOverlays(plan: RenderPlan): List<TimedBitmapOverlay> {
         if (plan.overlays.isEmpty()) return emptyList()
 
-        val budgetExceeded =
-            plan.overlays.sumOf { it.wPx.toLong() * it.hPx.toLong() * 4L } > OVERLAY_BITMAP_BUDGET_BYTES
-        val halveAbove = if (!budgetExceeded) {
-            Long.MAX_VALUE
-        } else {
-            plan.overlays.map { it.wPx.toLong() * it.hPx.toLong() }.sorted()
-                .let { sizes -> sizes[sizes.size / 2] }
+        val sourceSizes = plan.overlays.map { placement ->
+            pngPixelSize(placement.png)
+                ?: throw OverlayDecodeException("overlay ${placement.id} could not be decoded")
         }
+        val sampleSizes = OverlaySizing.sampleSizes(sourceSizes, OVERLAY_BITMAP_BUDGET_BYTES)
 
         val decoded = ArrayList<TimedBitmapOverlay>(plan.overlays.size)
         try {
-            for (placement in plan.overlays) {
-                val sampleSize =
-                    if (placement.wPx.toLong() * placement.hPx.toLong() >= halveAbove) 2 else 1
-                val bitmap = decodePng(placement.png, sampleSize)
+            for ((i, placement) in plan.overlays.withIndex()) {
+                val bitmap = decodePng(placement.png, sampleSizes[i])
                     ?: throw OverlayDecodeException("overlay ${placement.id} could not be decoded")
+                val scale = OverlaySizing.overlayScale(
+                    wPx = placement.wPx,
+                    hPx = placement.hPx,
+                    bitmapW = bitmap.width,
+                    bitmapH = bitmap.height,
+                )
                 decoded += TimedBitmapOverlay(
                     bitmap = bitmap,
                     startUs = placement.startUs,
@@ -483,29 +490,69 @@ class VideoComposerPlugin : Plugin() {
                     anchorY = placement.anchorY,
                     rotationGlDeg = placement.rotationGlDeg,
                     opacity = placement.opacity,
-                    scale = sampleSize.toFloat(),
+                    scaleX = scale.x,
+                    scaleY = scale.y,
                 )
             }
         } catch (e: Exception) {
-            decoded.forEach { it.release() }
+            // These bitmaps never reached a job, so nobody else will hand them back.
+            decoded.forEach { it.recycle() }
             throw if (e is OverlayDecodeException) e else OverlayDecodeException(ErrorMapping.describe(e))
         }
         return decoded
     }
 
-    private fun decodePng(dataUrl: String, sampleSize: Int): Bitmap? {
-        val base64 = dataUrl.substringAfter("base64,", "")
-        if (base64.isEmpty()) return null
-        val bytes = try {
-            Base64.decode(base64, Base64.DEFAULT)
-        } catch (e: IllegalArgumentException) {
-            return null
+    /**
+     * The pixel size an overlay's image will decode to at sample size 1, without decoding it.
+     *
+     * The fast path base64-decodes only the first few characters and reads the PNG header, so
+     * sizing thirty overlays does not allocate thirty copies of their bytes. Anything else - a
+     * payload with whitespace in it, or a format that is not PNG - falls back to the platform
+     * decoder's bounds-only pass over the whole image.
+     */
+    private fun pngPixelSize(dataUrl: String): OverlaySizing.PixelSize? {
+        val marker = dataUrl.indexOf(BASE64_MARKER)
+        if (marker < 0) return null
+        val from = marker + BASE64_MARKER.length
+        if (dataUrl.length - from >= OverlaySizing.PNG_HEADER_BASE64_CHARS) {
+            val header = try {
+                Base64.decode(
+                    dataUrl.substring(from, from + OverlaySizing.PNG_HEADER_BASE64_CHARS),
+                    Base64.DEFAULT,
+                )
+            } catch (e: IllegalArgumentException) {
+                null
+            }
+            OverlaySizing.pngSize(header)?.let { return it }
         }
+
+        val bytes = decodeDataUrl(dataUrl) ?: return null
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        return if (options.outWidth > 0 && options.outHeight > 0) {
+            OverlaySizing.PixelSize(options.outWidth, options.outHeight)
+        } else {
+            null
+        }
+    }
+
+    private fun decodePng(dataUrl: String, sampleSize: Int): Bitmap? {
+        val bytes = decodeDataUrl(dataUrl) ?: return null
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
+
+    private fun decodeDataUrl(dataUrl: String): ByteArray? {
+        val base64 = dataUrl.substringAfter(BASE64_MARKER, "")
+        if (base64.isEmpty()) return null
+        return try {
+            Base64.decode(base64, Base64.DEFAULT)
+        } catch (e: IllegalArgumentException) {
+            null
+        }
     }
 
     /* ======================================================================================== */
@@ -702,6 +749,46 @@ class VideoComposerPlugin : Plugin() {
         )
     }
 
+    /**
+     * How much of the WebView the system bars actually cover, in CSS pixels.
+     *
+     * An editor puts its tools along the bottom edge, and on some phones the WebView is laid out under
+     * a transparent navigation bar while `env(safe-area-inset-bottom)` still reports 0 (the core
+     * SystemBars plugin only injects insets from Android 15). Measuring the overlap - rather than
+     * returning the bar sizes - means a WebView that already sits above the bars gets 0, and never
+     * double padding.
+     */
+    @PluginMethod
+    fun systemInsets(call: PluginCall) {
+        val host = activity
+        val webView = bridge?.webView
+        if (host == null || webView == null) {
+            call.resolve(JSObject().put("top", 0).put("bottom", 0))
+            return
+        }
+        host.runOnUiThread {
+            val decor = host.window.decorView
+            val bars = ViewCompat.getRootWindowInsets(decor)
+                ?.getInsets(WindowInsetsCompat.Type.systemBars())
+            val density = host.resources.displayMetrics.density
+            if (bars == null || density <= 0f) {
+                call.resolve(JSObject().put("top", 0).put("bottom", 0))
+                return@runOnUiThread
+            }
+            val decorAt = IntArray(2).also { decor.getLocationOnScreen(it) }
+            val webAt = IntArray(2).also { webView.getLocationOnScreen(it) }
+            val webTop = webAt[1] - decorAt[1]
+            val webBottom = webTop + webView.height
+            val topOverlap = max(0, bars.top - webTop)
+            val bottomOverlap = max(0, webBottom - (decor.height - bars.bottom))
+            call.resolve(
+                JSObject()
+                    .put("top", topOverlap / density)
+                    .put("bottom", bottomOverlap / density),
+            )
+        }
+    }
+
     @PluginMethod
     fun prepareJob(call: PluginCall) {
         val pendingPostId = call.getString("pendingPostId")
@@ -794,5 +881,8 @@ class VideoComposerPlugin : Plugin() {
 
         /** Peak bitmap allocation allowed for all overlays together. */
         private const val OVERLAY_BITMAP_BUDGET_BYTES = 48L * 1024 * 1024
+
+        /** What precedes the payload in an overlay's `data:image/png;base64,...` URL. */
+        private const val BASE64_MARKER = "base64,"
     }
 }

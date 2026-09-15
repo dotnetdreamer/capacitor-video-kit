@@ -1,13 +1,17 @@
-import type { ComposeOverlay, ComposeSpec } from '../video-composer/definitions';
+import type { ComposeClip, ComposeOverlay, ComposeSpec } from '../video-composer/definitions';
 
 import {
   DEFAULT_OUTPUT,
-  filterPreset,
+  MIN_LAYER_MS,
+  clamp,
+  resolveFilterOps,
   totalDurationMs,
   videoBitrateFor,
   type EditManifest,
 } from './edit-manifest';
-import { rasteriseText } from './overlay-raster';
+import { overlayEndMs } from './edit-ops';
+import { rasteriseOverlay } from './overlay-raster';
+import type { RasterContext } from './raster-context';
 
 export interface ComposeSpecIds {
   jobId: string;
@@ -21,28 +25,42 @@ export class MissingClipError extends Error {
   }
 }
 
+/** Longer than any post can run; the composer clips a track of unknown length to the video's end. */
+const UNKNOWN_TRACK_END_MS = 3_600_000;
+
 /**
  * The one translation from an edit to something the native composer renders.
  *
- * Every number the preview used is carried across unchanged - trims, speeds, the CSS filter ops, the
- * 0..1 overlay centre and its clockwise rotation - and the text overlays are rasterised here, at
- * OUTPUT pixel scale, so the native side only ever places bitmaps.
+ * Every number the preview used is carried across unchanged - trims, speeds, the resolved colour
+ * ops, each layer's 0..1 centre, clockwise rotation, opacity and time window - and every layer is
+ * rasterised here by [rasteriseOverlay], the same function that draws the preview's bitmaps, so the
+ * native side only ever places PNGs and the posted video matches what the customer saw.
+ *
+ * Asynchronous because drawing a layer is: a text layer waits for its web font to load before it is
+ * measured, and photos and stickers have to be decoded before they can be drawn. Layers are drawn
+ * one after another rather than all at once, so a phone holds one layer's canvas at a time instead
+ * of thirty. Rejects with [MissingClipError] for a clip without a file, and with the rasteriser's
+ * error for a photo or sticker that cannot be loaded.
  *
  * @param uriByKey the file each clip key refers to (`file://` or `content://`).
+ * @param raster the host's fonts, stickers and file URLs. Its `output` must be the frame this spec
+ *   renders (`DEFAULT_OUTPUT`), because every `wPx`/`hPx` is measured against it.
  */
-export function toComposeSpec(
+export async function toComposeSpec(
   manifest: EditManifest,
   uriByKey: ReadonlyMap<string, string>,
   ids: ComposeSpecIds,
-  fontFamily = 'system-ui, -apple-system, Roboto, sans-serif',
-): ComposeSpec {
+  raster: RasterContext,
+): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
-  const clips = manifest.clips.map((edit) => {
+  const clips: ComposeClip[] = manifest.clips.map((edit) => {
     const uri = uriByKey.get(edit.clipKey);
     if (!uri) throw new MissingClipError(edit.clipKey);
     return {
-      key: edit.clipKey,
+      // The segment id, not the clip key: split and duplicate put several segments over one source,
+      // and a failure reported against a key could not say which of them it was.
+      key: edit.id,
       uri,
       inMs: Math.max(0, Math.round(edit.inMs)),
       outMs: Math.max(Math.round(edit.inMs) + 100, Math.round(edit.outMs)),
@@ -53,30 +71,34 @@ export function toComposeSpec(
     };
   });
 
-  const overlays: ComposeOverlay[] = manifest.overlays
-    .filter((overlay) => overlay.text.trim().length > 0)
-    .map((overlay) => {
-      const raster = rasteriseText({
-        text: overlay.text,
-        fontSizePx: Math.round(DEFAULT_OUTPUT.width * overlay.fontScale),
-        color: overlay.color,
-        background: overlay.background,
-        fontFamily,
-      });
-      const endMs = overlay.endMs > 0 ? overlay.endMs : totalMs;
-      return {
-        id: overlay.id,
-        png: raster.png,
-        wPx: raster.wPx,
-        hPx: raster.hPx,
-        cx: overlay.cx,
-        cy: overlay.cy,
-        rotationDeg: overlay.rotationDeg,
-        startMs: Math.max(0, Math.round(overlay.startMs)),
-        endMs: Math.max(Math.round(overlay.startMs) + 100, Math.round(endMs)),
-        opacity: 1,
-      };
+  const overlays: ComposeOverlay[] = [];
+  // Manifest order is drawing order: the native render stacks bitmaps in array order.
+  for (const overlay of manifest.overlays) {
+    // An empty text layer is only a placeholder in the editor, and a layer that starts at the very
+    // end would never be on screen.
+    if (overlay.kind === 'text' && overlay.text.trim().length === 0) continue;
+    if (overlay.startMs >= totalMs - 1) continue;
+
+    const bitmap = await rasteriseOverlay(overlay, raster);
+    const startMs = Math.max(0, Math.round(overlay.startMs));
+    const endMs = Math.max(startMs + MIN_LAYER_MS, Math.round(overlayEndMs(overlay, totalMs)));
+    // An effect covers the frame: its bitmap is the whole picture, so it is never moved or turned.
+    const fullFrame = overlay.kind === 'effect';
+    overlays.push({
+      id: overlay.id,
+      png: bitmap.png,
+      wPx: bitmap.wPx,
+      hPx: bitmap.hPx,
+      cx: fullFrame ? 0.5 : overlay.cx,
+      cy: fullFrame ? 0.5 : overlay.cy,
+      rotationDeg: fullFrame ? 0 : overlay.rotationDeg,
+      startMs,
+      endMs,
+      opacity: clamp(overlay.opacity, 0, 1),
     });
+  }
+
+  const music = manifest.music;
 
   return {
     jobId: ids.jobId,
@@ -87,34 +109,37 @@ export function toComposeSpec(
       videoBitrate: videoBitrateFor(totalMs),
       audioBitrate: 128_000,
     },
-    filter: filterPreset(manifest.filterId).ops,
+    filter: resolveFilterOps(manifest),
     overlays,
     audio: {
       originalMuted: manifest.originalMuted,
       originalVolume: 1,
-      music: manifest.music
+      music: music
         ? {
-            uri: manifest.music.uri,
-            startMs: manifest.music.startMs,
-            inMs: 0,
-            // Longer than any post can run; the composer clips the track to the video's end.
-            outMs: 3_600_000,
-            volume: manifest.music.volume,
-            loop: manifest.music.loop,
+            uri: music.uri,
+            startMs: Math.max(0, Math.round(music.startMs)),
+            inMs: Math.max(0, Math.round(music.inMs)),
+            outMs: Math.round(
+              music.outMs > 0
+                ? music.outMs
+                : music.sourceDurationMs > 0
+                  ? music.sourceDurationMs
+                  : UNKNOWN_TRACK_END_MS,
+            ),
+            volume: music.volume,
+            loop: music.loop,
             fadeInMs: 0,
-            fadeOutMs: 400,
+            fadeOutMs: Math.max(0, Math.round(music.fadeOutMs)),
           }
         : null,
-      voiceover: manifest.voice
-        ? [
-            {
-              uri: manifest.voice.uri,
-              startMs: manifest.voice.startMs,
-              durationMs: manifest.voice.durationMs,
-              volume: manifest.voice.volume,
-            },
-          ]
-        : [],
+      voiceover: [...manifest.voiceovers]
+        .sort((a, b) => a.startMs - b.startMs)
+        .map((take) => ({
+          uri: take.uri,
+          startMs: Math.max(0, Math.round(take.startMs)),
+          durationMs: Math.max(0, Math.round(take.durationMs)),
+          volume: take.volume,
+        })),
     },
     // A little way in, so the poster is a frame of the video rather than a fade from black.
     posterAtMs: Math.min(500, Math.max(0, totalMs - 1)),

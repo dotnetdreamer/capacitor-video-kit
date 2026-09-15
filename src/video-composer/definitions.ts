@@ -244,6 +244,13 @@ export interface CapabilitiesResult {
   voiceRecording?: boolean;
 }
 
+export interface SystemInsetsResult {
+  /** CSS pixels of the WebView covered by the status bar. */
+  top: number;
+  /** CSS pixels of the WebView covered by the navigation bar. */
+  bottom: number;
+}
+
 export interface PrepareJobInput {
   /** Clip key, `music`, or `vo:<id>`. Echoed back with the relocated URI. */
   key: string;
@@ -310,6 +317,12 @@ export interface VideoComposerPlugin {
   stopVoiceRecording(): Promise<VoiceRecordingResult>;
 
   capabilities(): Promise<CapabilitiesResult>;
+
+  /**
+   * How much of the WebView the system bars cover, for a full-screen editor laying tools along the
+   * bottom edge. Measured, so it is 0 wherever the WebView already sits clear of the bars.
+   */
+  systemInsets(): Promise<SystemInsetsResult>;
 
   /**
    * Moves (when the file is ours) or copies (when it is not) every input into the job folder, so
