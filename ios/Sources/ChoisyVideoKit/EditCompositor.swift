@@ -30,7 +30,43 @@ final class RenderPlan: @unchecked Sendable {
     }
 }
 
-/// One instruction per clip, covering that clip's range of the OUTPUT timeline.
+/// One video layer of one instruction: which source track its picture comes from, and everything
+/// about how that picture is drawn.
+struct EditLayer {
+    let trackID: CMPersistentTrackID
+    let orientation: CGImagePropertyOrientation
+    let fit: Fit
+
+    /// The part of the oriented source frame to keep, still in the wire's normalised y-DOWN
+    /// fractions because the frame's pixel size is not known until a frame actually arrives. nil is
+    /// the whole frame, and nil is what every spec written before crop existed carries.
+    let crop: ComposeRect?
+
+    /// Where the cropped picture is drawn, already in RENDER PIXELS and already flipped into Core
+    /// Image's y-UP space. Resolved when the composition is built rather than in `render`: the
+    /// rectangle cannot change between frames, and the whole point of keeping it an optional is
+    /// that a clip with no rect reaches the compositor with nothing to compute and nothing to test
+    /// but a nil.
+    let dst: CGRect?
+
+    /// The opacity of the whole layer this clip belongs to. The base track is 1, which `Alpha`
+    /// hands straight back, so the common frame pays nothing for the feature.
+    let opacity: Double
+
+    init(trackID: CMPersistentTrackID, orientation: CGImagePropertyOrientation, fit: Fit,
+         crop: ComposeRect?, rect: ComposeRect?, opacity: Double, render: CGSize) {
+        self.trackID = trackID
+        self.orientation = orientation
+        self.fit = fit
+        self.crop = crop
+        // `render` is what `vc.renderSize` is set to, and the render context the compositor is
+        // handed is built from that, so this is the same rectangle `render` measures per frame.
+        self.dst = rect.map { Placement.destination($0, in: CGRect(origin: .zero, size: render)) }
+        self.opacity = opacity
+    }
+}
+
+/// One instruction per stretch of the OUTPUT timeline over which every layer holds still.
 ///
 /// `AVMutableVideoCompositionLayerInstruction` plays no part in this engine. The moment
 /// `customVideoCompositorClass` is set, AVFoundation hands this object and the raw source frames to
@@ -53,18 +89,19 @@ final class EditInstruction: NSObject, AVVideoCompositionInstructionProtocol, @u
     /// and bypass the compositor entirely: no colour, no overlays, no fit.
     let passthroughTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
 
-    let trackID: CMPersistentTrackID
-    let orientation: CGImagePropertyOrientation
-    let fit: Fit
+    /// BOTTOM first: the builder has already sorted them by z, so drawing them in order is the
+    /// whole of the z handling. One entry is the whole of what this engine built before a second
+    /// video track existed.
+    let layers: [EditLayer]
+
     let plan: RenderPlan
 
-    init(timeRange: CMTimeRange, trackID: CMPersistentTrackID,
-         orientation: CGImagePropertyOrientation, fit: Fit, plan: RenderPlan) {
+    init(timeRange: CMTimeRange, layers: [EditLayer], plan: RenderPlan) {
         self.timeRange = timeRange
-        self.trackID = trackID
-        self.requiredSourceTrackIDs = [NSNumber(value: trackID)]
-        self.orientation = orientation
-        self.fit = fit
+        self.layers = layers
+        // Only the layers that actually have a clip at this instant, which is what lets a layer
+        // that has not started yet cost the engine no decode at all.
+        self.requiredSourceTrackIDs = layers.map { NSNumber(value: $0.trackID) }
         self.plan = plan
         super.init()
     }
@@ -176,21 +213,38 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         guard let dst = ctx.newPixelBuffer() else { throw CompositorError.noBuffer }
         let rect = CGRect(origin: .zero, size: ctx.size)
 
-        var image: CIImage
-        if let src = request.sourceFrame(byTrackID: instr.trackID) {
+        // Black under every layer. With one layer it is the same black `Placement` used to hold
+        // behind its picture, and the frame a source that arrived nil has always produced; with two
+        // it is what shows wherever neither layer reaches.
+        var image = CIImage(color: .black).cropped(to: rect)
+
+        for layer in instr.layers {
+            // nil for a track that has no frame at this instant. The layer is skipped and the frame
+            // is still rendered: a hole in one layer is not a reason to fail an export.
+            guard let src = request.sourceFrame(byTrackID: layer.trackID) else { continue }
             var pic = CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
-                .oriented(instr.orientation)
+                .oriented(layer.orientation)
             // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
             // finished frame instead, any op with a non-zero bias paints the bars: `golden` carries
             // b = [0.1595, 0.1108, 0.0261], which gives rgb(41, 28, 7) bars, and a fade gives grey
             // ones. `contain` is the default fit, so that is the common case and not an edge case.
-            // A colour matrix commutes with the scale and translate in `place`, so moving it earlier
-            // leaves the picture itself identical.
+            // A colour matrix commutes with the scale and translate in `placed`, so moving it
+            // earlier leaves the picture itself identical.
+            //
+            // The wire calls the filter SPEC level - one grade of the composed frame rather than one
+            // per track - and this is still that. The matrix is affine and a source-over blend is a
+            // weighted average of the two pictures, so grading each layer before the blend and
+            // grading the blend afterwards give the same pixels. What differs is only the black
+            // underneath, and leaving that ungraded is the whole point.
             pic = instr.plan.colorMatrix.apply(to: pic)
-            image = Placement.place(pic, into: rect, fit: instr.fit)
-        } else {
-            // A gap the timeline maths should never produce, drawn black rather than thrown.
-            image = CIImage(color: .black).cropped(to: rect)
+            // The crop is the one step that genuinely cannot move: it decides which pixels the fit
+            // is measuring, so it happens inside `placed` and ahead of everything. Both it and
+            // `dst` are nil for a clip that fills the frame, which is every spec written before
+            // this feature; the absence was decided when the instruction was built, and all that is
+            // left here is the coalesce.
+            guard let picture = Placement.placed(pic, crop: layer.crop, into: layer.dst ?? rect,
+                                                 fit: layer.fit) else { continue }
+            image = Alpha.scaled(picture, by: layer.opacity).composited(over: image)
         }
 
         // Microseconds, matching Android's `presentationTimeUs in startUs until endUs` exactly.
@@ -237,32 +291,100 @@ enum Orientation {
 
 enum Placement {
 
-    /// `frame` is already oriented. Returns an image whose extent is exactly `render`, on black.
+    /// Turns a wire rectangle - normalised 0...1, TOP-LEFT origin, y DOWN - into a rectangle of
+    /// `frame` in Core Image's coordinates, which are y-UP from the bottom-left.
+    ///
+    /// The flip is the whole reason this function exists, and it is the single easiest thing in this
+    /// file to get wrong. `r.y` names the rectangle's TOP edge measured downwards from the top, so
+    /// its BOTTOM edge - which is the origin Core Image wants - sits at `1 - (y + h)` measured
+    /// upwards from the bottom. Pass `r.y` straight through instead and every centred rectangle
+    /// still looks perfect, because a centred rectangle is its own mirror; the first off-centre crop
+    /// is the one that comes out reflected, by which point the maths is long since believed.
+    ///
+    /// x needs no such treatment: both systems run x to the right.
+    static func destination(_ r: ComposeRect, in frame: CGRect) -> CGRect {
+        CGRect(x: frame.minX + r.x * frame.width,
+               y: frame.minY + (1 - r.y - r.h) * frame.height,
+               width: r.w * frame.width,
+               height: r.h * frame.height)
+    }
+
+    /// `frame` is already oriented. Returns the picture placed where it belongs, cropped to `dst`
+    /// and TRANSPARENT everywhere else, or nil when there is no picture to place at all.
+    ///
+    /// Nothing black is composited in here: `EditCompositor.render` starts every frame on black and
+    /// draws the layers over it, which for a single layer is the same two operations in the same
+    /// order this function used to perform itself, and for two is the only way an upper layer can
+    /// leave the one underneath showing around it.
     ///
     /// `contain` is `min(sx, sy)`, Android's `LAYOUT_SCALE_TO_FIT`; `cover` is `max(sx, sy)`, its
     /// `LAYOUT_SCALE_TO_FIT_WITH_CROP`. Everything reads `frame.extent` and never the track's
     /// `naturalSize`, which is what makes one video track carrying clips of mixed resolutions safe,
     /// and what keeps the fit right for a source whose buffer the engine had to convert.
-    static func place(_ frame: CIImage, into render: CGRect, fit: Fit) -> CIImage {
-        let normalise = CGAffineTransform(translationX: -frame.extent.origin.x,
-                                          y: -frame.extent.origin.y)
-        let src = frame.transformed(by: normalise).extent
-        guard src.width > 0, src.height > 0 else { return CIImage(color: .black).cropped(to: render) }
+    ///
+    /// `crop` is the part of the oriented frame to keep and is applied FIRST, so the fit measures
+    /// what the customer kept rather than what the camera shot. `dst` is where the result lands. A
+    /// clip with neither carries `crop == nil` and `dst` equal to the whole render frame, and that
+    /// is not an approximation of the old arithmetic, it is the same arithmetic: `dst.minX` and
+    /// `dst.minY` are zero and add nothing, and `dst.width`/`dst.height` ARE the render size.
+    static func placed(_ frame: CIImage, crop: ComposeRect?, into dst: CGRect,
+                       fit: Fit) -> CIImage? {
+        // CROP FIRST, against the frame's own extent, and with the same y flip `destination` does
+        // and for the same reason: `crop.y` is measured from the TOP of the picture while
+        // `extent.minY` is its bottom. Cropping rather than transforming keeps the source pixels
+        // where they are, so the scale below is still measured on real pixels and nothing is
+        // resampled twice.
+        var picture = frame
+        if let c = crop {
+            picture = frame.cropped(to: destination(c, in: frame.extent))
+        }
 
-        let sx = render.width / src.width
-        let sy = render.height / src.height
+        let normalise = CGAffineTransform(translationX: -picture.extent.origin.x,
+                                          y: -picture.extent.origin.y)
+        let src = picture.transformed(by: normalise).extent
+        // A zero-sized source is a clip that contributes nothing rather than a failure, which is
+        // what both engines do with one. It leaves whatever is underneath it showing.
+        guard src.width > 0, src.height > 0 else { return nil }
+
+        let sx = dst.width / src.width
+        let sy = dst.height / src.height
         let s = (fit == .cover) ? max(sx, sy) : min(sx, sy)
         // Do NOT round these. A 1920x1080 source contained into 720x1280 lands on a half-pixel
         // offset of 437.5; Core Image resamples it without complaint, and rounding it would stop
         // `contain` and `cover` being each other's mirror.
-        let tx = (render.width - src.width * s) / 2
-        let ty = (render.height - src.height * s) / 2
+        let tx = dst.minX + (dst.width - src.width * s) / 2
+        let ty = dst.minY + (dst.height - src.height * s) / 2
 
-        return frame
+        return picture
             .transformed(by: normalise
                 .concatenating(CGAffineTransform(scaleX: s, y: s))
                 .concatenating(CGAffineTransform(translationX: tx, y: ty)))
-            .cropped(to: render)
-            .composited(over: CIImage(color: .black).cropped(to: render))
+            // Clipped to the DESTINATION and not to the whole frame. `cover` overflows on purpose,
+            // and a picture placed on half the frame must not spill over the other half. With no
+            // rect the destination IS the whole frame and this is the line that was always here.
+            .cropped(to: dst)
+    }
+}
+
+enum Alpha {
+
+    /// A layer at `opacity`, ready to be composited over what is beneath it.
+    ///
+    /// The ALPHA ROW alone, and nothing on the colour rows. `CIColorMatrix` unpremultiplies before
+    /// it multiplies and premultiplies again afterwards, so this is source-over at `k * a` - what a
+    /// CSS `opacity` on the layer does and what Android's alpha scale does. Measured on this SDK
+    /// with colour management off, blue at k = 0.5 over red: the alpha row gives rgb(128, 0, 128)
+    /// and scaling all four channels gives rgb(128, 0, 64), because the colour is then attenuated
+    /// once by the matrix and once by the premultiply. The filter carries no bias, so anything
+    /// transparent stays transparent and the extent is unchanged.
+    ///
+    /// An opacity of 1 hands the image straight back, the way `ColorMatrix.apply` hands back an
+    /// identity: every frame of every single-layer render goes through here.
+    static func scaled(_ image: CIImage, by opacity: Double) -> CIImage {
+        let k = CGFloat(min(1, max(0, opacity)))
+        guard k < 1 else { return image }
+        return image.applyingFilter("CIColorMatrix", parameters: [
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: k),
+        ])
     }
 }

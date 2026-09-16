@@ -144,7 +144,10 @@ class VideoComposerPlugin : Plugin() {
             }
 
             val probes = HashMap<String, ProbedInput>()
-            for (clip in spec.clips) {
+            // Every layer's footage, not only the base track's: a clip on a second layer is read,
+            // trimmed and decoded exactly like one on the first, and a file that cannot be opened
+            // has to fail the post here, where the failure can still name the clip it came from.
+            for (clip in spec.clips + spec.tracks.flatMap { it.clips }) {
                 if (probes.containsKey(clip.uri)) continue
                 val info = try {
                     Thumbnailer.probe(appContext, clip.uri)
@@ -330,7 +333,7 @@ class VideoComposerPlugin : Plugin() {
                 val frameUs = job.lastFrameUs.get()
                 val progress = if (frameUs > 0L && job.plan.totalUs > 0L) {
                     min(0.99f, frameUs.toFloat() / job.plan.totalUs.toFloat())
-                } else if (job.plan.extraAudioSequences == 0 &&
+                } else if (job.plan.singleSequence &&
                     transformer.getProgress(holder) == Transformer.PROGRESS_STATE_AVAILABLE
                 ) {
                     job.plan.reweight(holder.progress)

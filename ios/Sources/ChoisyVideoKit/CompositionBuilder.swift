@@ -51,6 +51,15 @@ private struct TimelineEntry {
     let gain: Float
 }
 
+/// One video layer's clips after they have been placed, and what the instructions need to name it.
+/// The base track is always the first of these and carries z 0 and full opacity.
+private struct LayerTimeline {
+    let trackID: CMPersistentTrackID
+    let z: Int
+    let opacity: Double
+    let entries: [TimelineEntry]
+}
+
 /// One entry per distinct `uri`. A split or a duplicated clip is two spec entries pointing at the
 /// same file, and loading its tracks again would cost another demux for nothing.
 private final class SourceCache {
@@ -91,10 +100,10 @@ private final class SourceCache {
 /// composition (what media plays when), the audio mix (how loud each track is) and the video
 /// composition (how each frame is drawn).
 ///
-/// The shape mirrors Android's: one video track holding every clip back to back, plus at most one
-/// audio track each for the clips' own sound, the music and the voiceovers. Concurrent Media3
-/// sequences are how Android mixes; parallel composition tracks and one `AVAudioMix` is how
-/// AVFoundation mixes. Neither platform needs a mixer of ours.
+/// The shape mirrors Android's: one video track holding the base clips back to back, one more for
+/// each extra layer, and at most one audio track for each of those, for the music and for the
+/// voiceovers. Concurrent Media3 sequences are how Android mixes; parallel composition tracks and
+/// one `AVAudioMix` is how AVFoundation mixes. Neither platform needs a mixer of ours.
 enum CompositionBuilder {
     /// The parser already clamps `clip.speed`, but the engine clamps again rather than trusting a
     /// spec that may have come from an older JS build.
@@ -207,6 +216,10 @@ enum CompositionBuilder {
 
         let total = cursor
         let totalMs = max(1, msOf(total))
+        // The bottom layer, and the only one whose length counts: `totalMs` is the output's length
+        // and every extra layer is cut to it.
+        let base = LayerTimeline(trackID: video.trackID, z: 0, opacity: 1, entries: entries)
+        var layers = [base]
 
         var params: [AVMutableAudioMixInputParameters] = []
         if let ca = clipAudio {
@@ -222,6 +235,15 @@ enum CompositionBuilder {
             // rule ever changes.
             for e in entries { p.setVolume(e.gain, at: e.range.start) }
             params.append(p)
+        }
+
+        // At most one of these today, because the parser refuses a spec that asks for more layers
+        // than the decoder budget allows. The loop costs nothing and keeps the cap in one place.
+        for track in spec.tracks ?? [] {
+            guard let extra = try await addLayer(track, to: comp, cache: cache,
+                                                 audio: spec.audio, totalMs: totalMs) else { continue }
+            layers.append(extra.layer)
+            if let p = extra.params { params.append(p) }
         }
 
         if let music = spec.audio.music,
@@ -274,13 +296,15 @@ enum CompositionBuilder {
         // AVMutableVideoCompositionLayerInstruction plays no part here either: the moment
         // `customVideoCompositorClass` is set, layer instructions are ignored and every transform -
         // orientation, fit, colour, overlays - happens inside EditCompositor.
-        vc.instructions = entries.map { e in
-            EditInstruction(timeRange: e.range,
-                            trackID: video.trackID,
-                            orientation: Orientation.imageOrientation(e.source.preferredTransform),
-                            fit: e.clip.fit,
-                            plan: plan)
-        }
+
+        // Absent means exactly today, decided here and never again: with no extra layer there is no
+        // second timeline to merge, and this is the instruction list the engine has always built -
+        // one per base clip, naming one source track and carrying one layer.
+        vc.instructions = layers.count == 1
+            ? base.entries.map { EditInstruction(timeRange: $0.range,
+                                                 layers: [editLayer($0, of: base, plan: plan)],
+                                                 plan: plan) }
+            : merged(layers, totalMs: totalMs, plan: plan)
 
         #if DEBUG
         // The instructions must tile the timeline exactly, and a gap costs an
@@ -302,6 +326,187 @@ enum CompositionBuilder {
                                 audioMix: audioMix,
                                 totalMs: totalMs,
                                 plan: plan)
+    }
+
+    /// Lays one extra layer onto its own composition track and answers where its clips landed.
+    ///
+    /// The shape is the base track's, with three differences. It starts at `startMs` rather than at
+    /// zero, and nothing pads the gap: the track is empty before the first insert and AVFoundation
+    /// writes that empty segment itself, which is what "the layer contributes nothing before its
+    /// first clip" means in composition terms. Its sound goes to an audio track of its own, because
+    /// it plays at the same time as the base's and one composition track cannot hold two things at
+    /// once. And it is CUT at the base's end - the base decides the length of the output, so a
+    /// layer that would run past it is trimmed rather than allowed to extend it.
+    ///
+    /// Answers nil when the layer contributes nothing at all, which is a layer starting after the
+    /// base has ended. Nothing is added to the composition in that case: an empty video track is
+    /// the same -11838 at export time that an empty audio track is.
+    private static func addLayer(_ track: ComposeTrack,
+                                 to comp: AVMutableComposition,
+                                 cache: SourceCache,
+                                 audio: ComposeAudio,
+                                 totalMs: Int64) async throws
+        -> (layer: LayerTimeline, params: AVMutableAudioMixInputParameters?)? {
+
+        // Both tracks and the parameters are created on the first clip that actually needs them,
+        // the way `addVoiceovers` creates its own, so a layer that turns out to contribute nothing
+        // leaves no empty track behind for the exporter to choke on.
+        var videoTrack: AVMutableCompositionTrack?
+        var audioTrack: AVMutableCompositionTrack?
+        var params: AVMutableAudioMixInputParameters?
+        var entries: [TimelineEntry] = []
+        var cursor = ms(track.startMs)
+
+        for clip in track.clips {
+            // What is left of the base, which is all the room this layer has. Once that is gone the
+            // rest of the layer is cut: the base's length is the output's length.
+            let roomMs = totalMs - msOf(cursor)
+            guard roomMs > 0 else { break }
+
+            let src = try await cache.source(for: clip)
+
+            // Clamped to the VIDEO TRACK's end for the same reason the base clips are: nothing
+            // validates a range against its source, and over-reaching renders a black tail.
+            let outMsEff = min(clip.outMs, msOf(src.videoRange.end))
+            guard outMsEff > clip.inMs else { throw BuildError.unreadable(clip.key, "empty range") }
+
+            let speed = min(maxSpeed, max(minSpeed, clip.speed))
+            // The cut to the base's end is made in SOURCE milliseconds, before the insert, so that
+            // the speed change still means what the manifest said and so that nothing is demuxed
+            // that no frame will ever show.
+            let roomSrcMs = Int64((Double(roomMs) * speed).rounded(.toNearestOrAwayFromZero))
+            let cutMs = min(outMsEff, clip.inMs + roomSrcMs)
+            // Out of room rather than out of media, so the layer simply ends here. The clip is not
+            // at fault and there is nothing to report.
+            guard cutMs > clip.inMs else { break }
+
+            let srcRange = CMTimeRange(start: ms(clip.inMs), end: ms(cutMs))
+
+            let dest: AVMutableCompositionTrack
+            if let existing = videoTrack {
+                dest = existing
+            } else {
+                guard let created = comp.addMutableTrack(withMediaType: .video,
+                                                         preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                    throw BuildError.internalFailure("layer video track")
+                }
+                videoTrack = created
+                dest = created
+            }
+            do {
+                try dest.insertTimeRange(srcRange, of: src.videoTrack, at: cursor)
+            } catch {
+                throw BuildError.unreadable(clip.key, "insert: \(error)")
+            }
+
+            let clipGain = gain(of: clip, audio)
+            if clipGain > 0, let at = src.audioTrack, let aRange = src.audioRange {
+                // Clamped to the audio track's own end, as the base clips' sound is: a file whose
+                // sound stops before its picture is common enough to plan for.
+                let aEnd = CMTimeMinimum(srcRange.end, aRange.end)
+                if aEnd > srcRange.start {
+                    let destAudio: AVMutableCompositionTrack
+                    if let existing = audioTrack {
+                        destAudio = existing
+                    } else {
+                        guard let created = comp.addMutableTrack(withMediaType: .audio,
+                                                                 preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                            throw BuildError.internalFailure("layer audio track")
+                        }
+                        let p = AVMutableAudioMixInputParameters(track: created)
+                        p.audioTimePitchAlgorithm = .spectral
+                        audioTrack = created
+                        params = p
+                        destAudio = created
+                    }
+                    // A failure must not fail the render: the clip still has a picture, and Android
+                    // would have dropped its audio too.
+                    try? destAudio.insertTimeRange(CMTimeRange(start: srcRange.start, end: aEnd),
+                                                   of: at, at: cursor)
+                }
+            }
+
+            var placed = CMTimeRange(start: cursor, duration: srcRange.duration)
+            if speed != 1 {
+                // Clamped to the room left as well as floored at a millisecond: the source cut
+                // above is a rounded number, and a rounding millisecond either way must not push
+                // the layer past the base it was cut to.
+                let scaledMs = min(roomMs, max(1, Int64((Double(cutMs - clip.inMs) / speed)
+                    .rounded(.toNearestOrAwayFromZero))))
+                let scaled = ms(scaledMs)
+                dest.scaleTimeRange(placed, toDuration: scaled)
+                audioTrack?.scaleTimeRange(placed, toDuration: scaled)
+                placed = CMTimeRange(start: cursor, duration: scaled)
+            }
+
+            entries.append(TimelineEntry(clip: clip, source: src, range: placed, gain: clipGain))
+            cursor = placed.end
+        }
+
+        guard let videoTrack else { return nil }
+        // A step per clip, including the silent ones, exactly as the base track's are set.
+        if let p = params { for e in entries { p.setVolume(e.gain, at: e.range.start) } }
+        return (LayerTimeline(trackID: videoTrack.trackID,
+                              z: track.z,
+                              opacity: track.opacity,
+                              entries: entries), params)
+    }
+
+    /// One clip of one layer as the compositor sees it. The rectangle is resolved into render
+    /// pixels HERE, at build time, so that a clip carrying neither a crop nor a rect costs the
+    /// compositor nothing but a nil test per frame.
+    private static func editLayer(_ e: TimelineEntry, of layer: LayerTimeline,
+                                  plan: RenderPlan) -> EditLayer {
+        EditLayer(trackID: layer.trackID,
+                  orientation: Orientation.imageOrientation(e.source.preferredTransform),
+                  fit: e.clip.fit,
+                  crop: e.clip.crop,
+                  rect: e.clip.rect,
+                  opacity: layer.opacity,
+                  render: plan.renderSize)
+    }
+
+    /// The instruction timeline for two layers or more.
+    ///
+    /// An instruction names the source tracks it needs and the geometry of each, and both have to
+    /// hold still for the whole of its range, so the cut points are the UNION of every layer's clip
+    /// boundaries rather than the base's alone. Between two neighbouring cuts each layer is either
+    /// showing exactly one clip or showing nothing at all, which is exactly what one instruction
+    /// can describe.
+    private static func merged(_ layers: [LayerTimeline], totalMs: Int64,
+                               plan: RenderPlan) -> [EditInstruction] {
+        // Bottom to top by z, and a tie breaks on the order the spec listed them in. The base is
+        // first in this array and carries z 0, so it stays under anything that ties with it.
+        let ordered = layers.enumerated()
+            .sorted { $0.element.z == $1.element.z ? $0.offset < $1.offset : $0.element.z < $1.element.z }
+            .map { $0.element }
+
+        // Milliseconds rather than CMTime: every boundary in here was built from a whole
+        // millisecond, so nothing is lost, and the union needs something it can de-duplicate on.
+        var cutsMs: Set<Int64> = [0, totalMs]
+        for layer in ordered {
+            for e in layer.entries {
+                cutsMs.insert(msOf(e.range.start))
+                cutsMs.insert(msOf(e.range.end))
+            }
+        }
+        let cuts = cutsMs.sorted()
+
+        return (0..<(cuts.count - 1)).map { i in
+            let startMs = cuts[i]
+            let drawn = ordered.compactMap { layer -> EditLayer? in
+                // The clip this layer is showing at that instant, or none at all: before its first
+                // clip and after its last a layer contributes nothing, not even a black frame, and
+                // an instruction that does not name its track is how that is said.
+                guard let e = layer.entries.first(where: {
+                    msOf($0.range.start) <= startMs && startMs < msOf($0.range.end)
+                }) else { return nil }
+                return editLayer(e, of: layer, plan: plan)
+            }
+            return EditInstruction(timeRange: CMTimeRange(start: ms(startMs), end: ms(cuts[i + 1])),
+                                   layers: drawn,
+                                   plan: plan)
+        }
     }
 
     /// Android's `RenderPlan` gain, verbatim: a muted timeline or a muted clip is silent, and

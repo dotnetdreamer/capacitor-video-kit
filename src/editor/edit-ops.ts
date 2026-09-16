@@ -2,15 +2,23 @@ import {
   MAX_LAYERS,
   MAX_SCALE,
   MAX_SPEED,
+  MAX_VIDEO_TRACKS,
   MIN_CLIP_MS,
   MIN_LAYER_MS,
   MIN_SCALE,
   MIN_SPEED,
   clamp,
+  isFullFrameRect,
+  normaliseRect,
+  sameRect,
+  totalDurationMs,
   type EditClip,
+  type EditFit,
   type EditManifest,
   type EditMusic,
   type EditOverlay,
+  type EditRect,
+  type EditVideoTrack,
   type EditVoiceover,
 } from './edit-manifest';
 
@@ -66,23 +74,90 @@ export function sourceMsAt(slot: TimelineSlot, outputMs: number): number {
 /* Clips                                                                                          */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * A segment anywhere in the manifest - the base track or any extra video layer. Ids are unique
+ * across the whole manifest for exactly this reason: every op takes a clip id and nothing else, so
+ * a clip on the second layer has to be reachable and patchable by the same call the first layer's
+ * clips use, or the crop tool and the volume sheet would work on one layer only.
+ */
 export function findClip(manifest: EditManifest, clipId: string): EditClip | null {
-  return manifest.clips.find((clip) => clip.id === clipId) ?? null;
+  const base = manifest.clips.find((clip) => clip.id === clipId);
+  if (base) return base;
+  for (const track of manifest.videoTracks) {
+    const found = track.clips.find((clip) => clip.id === clipId);
+    if (found) return found;
+  }
+  return null;
 }
 
-export function patchClip(manifest: EditManifest, clipId: string, patch: Partial<Omit<EditClip, 'id'>>): EditManifest {
+/** Which layer a segment is on: `null` for the base track, otherwise the extra track's id. */
+export function trackIdOfClip(manifest: EditManifest, clipId: string): string | null | undefined {
+  if (manifest.clips.some((clip) => clip.id === clipId)) return null;
+  const track = manifest.videoTracks.find((t) => t.clips.some((clip) => clip.id === clipId));
+  return track ? track.id : undefined;
+}
+
+export function patchClip(
+  manifest: EditManifest,
+  clipId: string,
+  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit'>> & ClipFramingPatch,
+): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
-  const next = { ...current, ...patch };
-  if (sameFields(current, next)) return manifest;
+  const next = withFraming({ ...current, ...patch } as EditClip, patch);
+  if (sameClip(current, next)) return manifest;
+  if (manifest.clips.some((clip) => clip.id === clipId)) {
+    return { ...manifest, clips: manifest.clips.map((clip) => (clip.id === clipId ? next : clip)) };
+  }
   return {
     ...manifest,
-    clips: manifest.clips.map((clip) => (clip.id === clipId ? next : clip)),
+    videoTracks: manifest.videoTracks.map((track) =>
+      track.clips.some((clip) => clip.id === clipId)
+        ? { ...track, clips: track.clips.map((clip) => (clip.id === clipId ? next : clip)) }
+        : track,
+    ),
   };
 }
 
 export function setClipSpeed(manifest: EditManifest, clipId: string, speed: number): EditManifest {
   return patchClip(manifest, clipId, { speed: Math.round(clamp(speed, MIN_SPEED, MAX_SPEED) * 100) / 100 });
+}
+
+/**
+ * How a segment is framed, as a patch. `null` is the instruction to go back to the default, and it
+ * is a different thing from leaving the key out, which is the instruction to change nothing - the
+ * same distinction [patchOverlay] draws, spelled out here because "no crop" is itself a value a
+ * customer can ask for.
+ */
+export interface ClipFramingPatch {
+  crop?: EditRect | null;
+  rect?: EditRect | null;
+  fit?: EditFit | null;
+}
+
+/** The part of the source that is kept, 0..1 of the oriented frame. `null` is the whole of it. */
+export function setClipCrop(manifest: EditManifest, clipId: string, crop: EditRect | null): EditManifest {
+  return patchClip(manifest, clipId, { crop });
+}
+
+/** Where the segment is drawn on the output frame, 0..1. `null` is the whole frame, as it always was. */
+export function setClipRect(manifest: EditManifest, clipId: string, rect: EditRect | null): EditManifest {
+  return patchClip(manifest, clipId, { rect });
+}
+
+/** This segment's own fit. `null` hands it back to the whole post's [EditManifest.fit]. */
+export function setClipFit(manifest: EditManifest, clipId: string, fit: EditFit | null): EditManifest {
+  return patchClip(manifest, clipId, { fit });
+}
+
+/**
+ * Back to the whole source drawn over the whole frame, fitted the way the rest of the post is -
+ * the "Reset" a crop tool offers, and precisely the state every manifest written before version 3
+ * is already in. All three fields go together because a rectangle without the fit that was chosen
+ * for it is not a state a customer ever asked for.
+ */
+export function resetClipFraming(manifest: EditManifest, clipId: string): EditManifest {
+  return patchClip(manifest, clipId, { crop: null, rect: null, fit: null });
 }
 
 /**
@@ -140,6 +215,11 @@ export function canJoinWithNext(manifest: EditManifest, clipId: string): boolean
     a.speed === b.speed &&
     a.volume === b.volume &&
     a.muted === b.muted &&
+    // Two halves of an earlier split still share their framing. Once one of them has been cropped
+    // or moved on the frame they are no longer one shot, and joining them would throw that away.
+    a.fit === b.fit &&
+    sameRect(a.crop, b.crop) &&
+    sameRect(a.rect, b.rect) &&
     Math.abs(a.outMs - b.inMs) <= 1
   );
 }
@@ -162,10 +242,29 @@ export function duplicateClip(manifest: EditManifest, clipId: string, newId: str
   return { ...manifest, clips };
 }
 
-/** Null for the last segment: a post needs at least one. */
+/**
+ * Null for the last segment of the BASE track: a post needs at least one, and the base is what
+ * fixes how long the post runs.
+ *
+ * A segment on an extra layer has no such floor, and the layer goes with its last clip - an empty
+ * track renders nothing, the native parsers refuse it, and a lane a customer cannot get rid of is
+ * not a state this manifest holds.
+ */
 export function removeClip(manifest: EditManifest, clipId: string): EditManifest | null {
-  if (manifest.clips.length <= 1 || !findClip(manifest, clipId)) return null;
-  return { ...manifest, clips: manifest.clips.filter((clip) => clip.id !== clipId) };
+  if (manifest.clips.some((clip) => clip.id === clipId)) {
+    if (manifest.clips.length <= 1) return null;
+    return { ...manifest, clips: manifest.clips.filter((clip) => clip.id !== clipId) };
+  }
+  const owner = manifest.videoTracks.find((track) => track.clips.some((clip) => clip.id === clipId));
+  if (!owner) return null;
+  return {
+    ...manifest,
+    videoTracks: manifest.videoTracks
+      .map((track) =>
+        track.id === owner.id ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) } : track,
+      )
+      .filter((track) => track.clips.length > 0),
+  };
 }
 
 export function moveClip(manifest: EditManifest, clipId: string, toIndex: number): EditManifest {
@@ -202,6 +301,105 @@ export function insertClip(
   const index = afterClipId ? clips.findIndex((c) => c.id === afterClipId) : -1;
   clips.splice(index >= 0 ? index + 1 : clips.length, 0, clip);
   return { ...manifest, clips };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Video tracks                                                                                   */
+/* -------------------------------------------------------------------------------------------- */
+
+export function findVideoTrack(manifest: EditManifest, trackId: string): EditVideoTrack | null {
+  return manifest.videoTracks.find((track) => track.id === trackId) ?? null;
+}
+
+/**
+ * Starts a second layer of video with one clip on it. Null once [MAX_VIDEO_TRACKS] layers are on
+ * the post, the base track counted: the cap is a decoder budget rather than a matter of taste, and
+ * refusing is the only honest answer to it - a layer accepted and silently dropped is a customer
+ * waiting for a picture that never arrives.
+ *
+ * The layer arrives UNPLACED, covering the frame like any other clip, and [applyLayoutPreset] is
+ * what arranges the two. Placing it here would be this function guessing which arrangement the
+ * customer wanted before they had said.
+ */
+export function addVideoTrack(manifest: EditManifest, clip: EditClip, trackId: string): EditManifest | null {
+  if (manifest.videoTracks.length >= MAX_VIDEO_TRACKS - 1) return null;
+  const track: EditVideoTrack = {
+    id: trackId,
+    clips: [clip],
+    startMs: 0,
+    // One above whatever is already there, so no two layers ever share a place in the drawing order.
+    z: manifest.videoTracks.length + 1,
+    opacity: 1,
+  };
+  return { ...manifest, videoTracks: [...manifest.videoTracks, track] };
+}
+
+/**
+ * Takes a layer off the post.
+ *
+ * What it was arranged beside is left exactly as it is: the base keeps whatever rectangle a layout
+ * wrote onto it, so a caller ending a split screen applies the `full` preset and then removes the
+ * layer. Clearing the base here would be this function guessing, and the rectangle it threw away
+ * might be one the customer set by hand in the crop tool rather than one a preset wrote.
+ */
+export function removeVideoTrack(manifest: EditManifest, trackId: string): EditManifest {
+  if (!findVideoTrack(manifest, trackId)) return manifest;
+  return { ...manifest, videoTracks: manifest.videoTracks.filter((track) => track.id !== trackId) };
+}
+
+/**
+ * Where the layer's first clip lands on the output timeline. Clamped to the post, because the base
+ * track is what fixes its length: a layer starting past the end is one every engine cuts away
+ * entirely and the customer is left dragging a handle that does nothing.
+ */
+export function setTrackStart(manifest: EditManifest, trackId: string, startMs: number): EditManifest {
+  return patchTrack(manifest, trackId, { startMs: Math.round(clamp(startMs, 0, totalDurationMs(manifest))) });
+}
+
+/** How far the whole layer is faded into what is under it. */
+export function setTrackOpacity(manifest: EditManifest, trackId: string, opacity: number): EditManifest {
+  return patchTrack(manifest, trackId, { opacity: clamp(opacity, 0, 1) });
+}
+
+/**
+ * Puts the extra layer under the base, or back over it - the one control over the drawing order a
+ * customer gets while there are two layers.
+ *
+ * Done by moving the CLIPS between the two layers rather than by a `z` of its own. Each clip
+ * carries its own rectangle with it, so every picture stays exactly where it was on the frame and
+ * the only thing that changes is which of them is drawn over the other: a swap of `z` in every way
+ * anybody can see, with `z` itself left saying what the native parsers are allowed to assume, that
+ * the base track is 0 and nothing is ever below it. The alternative is a layer at `z` -1, and then
+ * four engines have to agree about a layer beneath the bottom one for a feature that is two
+ * rectangles.
+ *
+ * The base track is what fixes how long the post runs, so swapping two layers of different lengths
+ * changes it. Nothing else can be true while the base is the bottom layer, and it is the reason
+ * this is one call rather than a `z` a customer could set to anything.
+ */
+export function swapTrackZ(manifest: EditManifest, trackId: string): EditManifest {
+  const track = findVideoTrack(manifest, trackId);
+  if (!track || manifest.clips.length === 0) return manifest;
+  return {
+    ...manifest,
+    clips: track.clips,
+    videoTracks: manifest.videoTracks.map((t) => (t.id === trackId ? { ...t, clips: manifest.clips } : t)),
+  };
+}
+
+function patchTrack(
+  manifest: EditManifest,
+  trackId: string,
+  patch: Partial<Omit<EditVideoTrack, 'id' | 'clips'>>,
+): EditManifest {
+  const current = findVideoTrack(manifest, trackId);
+  if (!current) return manifest;
+  const next = { ...current, ...patch };
+  if (sameFields(current, next)) return manifest;
+  return {
+    ...manifest,
+    videoTracks: manifest.videoTracks.map((track) => (track.id === trackId ? next : track)),
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -453,6 +651,55 @@ export function removeVoiceover(manifest: EditManifest, id: string): EditManifes
  * reference, and a new object with the same values would be an undo step that undoes nothing (a
  * speed chip tapped twice, a slider released where it started, a layer's window set to itself).
  */
+/**
+ * A clip with its framing applied: each of the three fields normalised when it was given, and
+ * DELETED rather than set to `undefined` when it was cleared or came out as the whole frame.
+ *
+ * The deletion is the whole point. A missing `crop` is what tells [toComposeSpec] to leave the
+ * field off the wire, and a missing field on the wire is what tells every engine to take the path
+ * it took before crops existed - one check when the plan is built, none per frame. A key holding
+ * `undefined` looks the same to a reader and survives a round trip through the manifest as a key,
+ * so it would cost exactly that.
+ */
+function withFraming(clip: EditClip, patch: ClipFramingPatch): EditClip {
+  const next: EditClip = { ...clip };
+  if ('crop' in patch) setRect(next, 'crop', patch.crop);
+  if ('rect' in patch) setRect(next, 'rect', patch.rect);
+  if ('fit' in patch) {
+    if (patch.fit) next.fit = patch.fit;
+    else delete next.fit;
+  }
+  return next;
+}
+
+function setRect(clip: EditClip, key: 'crop' | 'rect', value: EditRect | null | undefined): void {
+  const normalised = value ? normaliseRect(value) : undefined;
+  // A crop of the whole frame is no crop. Storing it would cost the render its fast path and would
+  // make [isUntouched] send a clip nobody changed through a re-encode.
+  if (normalised && !isFullFrameRect(normalised)) clip[key] = normalised;
+  else delete clip[key];
+}
+
+/**
+ * Whether a patched segment still says exactly what the original said. Written out field by field
+ * rather than run through [sameFields] because two rectangles holding the same four numbers are
+ * different objects, and an identity comparison on them would report a change every time a crop
+ * gesture settled back where it started.
+ */
+function sameClip(a: EditClip, b: EditClip): boolean {
+  return (
+    a.clipKey === b.clipKey &&
+    a.inMs === b.inMs &&
+    a.outMs === b.outMs &&
+    a.speed === b.speed &&
+    a.volume === b.volume &&
+    a.muted === b.muted &&
+    a.fit === b.fit &&
+    sameRect(a.crop, b.crop) &&
+    sameRect(a.rect, b.rect)
+  );
+}
+
 function sameFields<T extends object>(a: T, b: T): boolean {
   const x = a as Record<string, unknown>;
   const y = b as Record<string, unknown>;

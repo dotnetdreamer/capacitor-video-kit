@@ -14,7 +14,21 @@ import type { FilterOp } from '../video-composer/definitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 2;
+export const MANIFEST_VERSION = 4;
+
+/** How a clip's picture is fitted into the rectangle it is drawn in. */
+export type EditFit = 'contain' | 'cover';
+
+/**
+ * A rectangle in normalised coordinates: 0..1, TOP-LEFT origin with y pointing down - the same
+ * system every overlay's `cx`/`cy` already uses, and the one `ComposeRect` puts on the wire.
+ */
+export interface EditRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 export interface EditClip {
   /**
@@ -32,6 +46,51 @@ export interface EditClip {
   /** 0..1. */
   volume: number;
   muted: boolean;
+  /**
+   * The part of the ORIENTED source frame to keep, as a fraction of it. Absent is the whole frame,
+   * which is what every manifest written before version 3 meant. Applied BEFORE the fit, so the fit
+   * measures the cropped picture and not the original.
+   */
+  crop?: EditRect;
+  /**
+   * Where the cropped picture is drawn on the output frame. Absent is the whole frame, and the fit
+   * then letterboxes exactly as it always did. Present, the fit applies WITHIN this rectangle.
+   */
+  rect?: EditRect;
+  /**
+   * This segment's own fit, for a clip placed in a `rect` that wants filling while the rest of the
+   * timeline is letterboxed. Absent means the manifest's [EditManifest.fit], which is still what a
+   * customer toggles for the whole post and still what a clip added today gets.
+   */
+  fit?: EditFit;
+}
+
+/**
+ * A second layer of video, so two clips can be on screen at once - split screen and picture in
+ * picture. Its clips are a flat SEQUENCE exactly like [EditManifest.clips]: they play one after
+ * another and never overlap EACH OTHER. Overlap happens BETWEEN tracks and nowhere else, because a
+ * track is what each engine can actually hold - one `EditedMediaItemSequence` on Android, one
+ * `AVMutableCompositionTrack` on iOS, both of them non-overlapping by definition.
+ *
+ * Where the two layers sit on the frame is not a property of the track: it is each clip's own
+ * [EditClip.rect], which version 3 already renders. A layout preset is therefore nothing more than
+ * a pair of rectangles written onto the clips of the two tracks.
+ */
+export interface EditVideoTrack {
+  /** Unique within the manifest, and echoed back by the native engines on a failure. */
+  id: string;
+  /** Never empty: a track with nothing on it is dropped rather than carried around. */
+  clips: EditClip[];
+  /**
+   * Where this track's first clip lands on the OUTPUT timeline. The base track always starts at 0
+   * and its length is the length of the post, so a track running past the base is cut and one
+   * ending early leaves the base showing underneath.
+   */
+  startMs: number;
+  /** Higher draws later, so on top. The base track is 0 and a track added today gets 1. */
+  z: number;
+  /** 0..1 over the whole track. 1 is the picture as it is. */
+  opacity: number;
 }
 
 export type TextAlign = 'left' | 'center' | 'right';
@@ -138,13 +197,29 @@ export interface EditAdjust {
 
 export interface EditManifest {
   version: typeof MANIFEST_VERSION;
+  /**
+   * The BASE track. It always starts at 0 and its length is the length of the post: everything in
+   * [EditManifest.videoTracks] is cut to it.
+   */
   clips: EditClip[];
+  /**
+   * Extra video layers over `clips`, at most [MAX_VIDEO_TRACKS] - 1 of them. Empty is the whole of
+   * what every manifest written before version 4 could say, and empty is what [toComposeSpec]
+   * turns back into a spec with no `tracks` key at all - which is what lets every engine keep the
+   * single-sequence path it takes today.
+   *
+   * An array rather than an optional key, unlike a clip's crop: there is no wire fast path to
+   * protect here (the emptiness is tested when the spec is built, once) and every reader would
+   * otherwise have to write `?? []` around a list that is conceptually always there.
+   */
+  videoTracks: EditVideoTrack[];
   /** Id from [FILTER_PRESETS]. */
   filterId: string;
   /** 0..1, how far the preset is applied. */
   filterIntensity: number;
   adjust: EditAdjust;
-  fit: 'contain' | 'cover';
+  /** The whole post's fit, and the default for a segment that carries no [EditClip.fit] of its own. */
+  fit: EditFit;
   /** Mutes every clip's own sound without touching music or voiceover. */
   originalMuted: boolean;
   /** Bottom to top: a later layer is drawn over an earlier one, in the preview and in the render. */
@@ -180,6 +255,14 @@ export const OVERLAY_BASE = {
 /** Every layer kind together. More than this and a mid-range phone runs out of bitmap memory. */
 export const MAX_LAYERS = 30;
 
+/**
+ * How many video layers may be on screen at once, the BASE TRACK INCLUDED - so two means the base
+ * plus one. A decoder budget rather than a matter of taste: a mid-range Android decodes two video
+ * streams at once and the feed behind the editor modal may already be holding one, and the preview
+ * has to play every layer at the same time as the exporter has to decode them.
+ */
+export const MAX_VIDEO_TRACKS = 2;
+
 /** The shortest a clip segment may become. */
 export const MIN_CLIP_MS = 200;
 
@@ -188,6 +271,21 @@ export const MIN_LAYER_MS = 100;
 
 export const MIN_SCALE = 0.2;
 export const MAX_SCALE = 6;
+
+/**
+ * The smallest a crop or a placement rectangle may become, as a fraction of the frame. This is a
+ * degeneracy floor and not a matter of taste - a zero-width rectangle is a black frame, and the
+ * native parsers reject `w <= 0` outright - so a crop tool wanting to stop the customer zooming
+ * past the source's real resolution has to impose its own, tighter, limit on top.
+ */
+export const MIN_RECT_SIZE = 0.01;
+
+/**
+ * How close to the edges of the frame still counts as the whole frame. One unit of the four-decimal
+ * rounding a rectangle is stored at, so a crop box dragged back into the corners collapses to
+ * "absent" rather than sitting one ten-thousandth off it and costing every engine its fast path.
+ */
+const FULL_FRAME_EPSILON = 1e-4;
 
 export const SPEED_CHIPS = [0.5, 1, 1.5, 2, 3] as const;
 export const MIN_SPEED = 0.25;
@@ -608,6 +706,70 @@ function isIdentityOp(op: FilterOp): boolean {
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* Framing                                                                                        */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * A crop or placement rectangle brought inside the frame, or `undefined` for anything that is not
+ * one. Absence is carried through deliberately: "no crop" has to stay a missing field all the way
+ * to the wire, because every engine tests for exactly that to keep doing what it did before crops
+ * existed, and a full-frame rectangle substituted in as a default would quietly cost that.
+ *
+ * The size the customer asked for is what is kept: a rectangle pushed off an edge slides back in
+ * rather than being squashed against it. Squashing is the other reading of "clamp so `x + w <= 1`",
+ * and it turns a crop dragged all the way to the right edge into a zero-width one - a black frame,
+ * and a shape the native parsers refuse.
+ */
+export function normaliseRect(value: unknown): EditRect | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  // Rounded before the corner is clamped against it, not after: rounding a corner up once the room
+  // for it had already been worked out could push `x + w` a ten-thousandth past 1 and hand the
+  // native parsers a rectangle they would have to clamp all over again.
+  const w = round4(clamp(num(raw['w'], 1), MIN_RECT_SIZE, 1));
+  const h = round4(clamp(num(raw['h'], 1), MIN_RECT_SIZE, 1));
+  return {
+    x: Math.min(round4(clamp(num(raw['x'], 0), 0, 1)), round4(1 - w)),
+    y: Math.min(round4(clamp(num(raw['y'], 0), 0, 1)), round4(1 - h)),
+    w,
+    h,
+  };
+}
+
+/**
+ * Whether a rectangle covers the whole frame, which is the same thing as not having one. Absent
+ * answers true, so a caller can ask this one question instead of two.
+ */
+export function isFullFrameRect(rect: EditRect | null | undefined): boolean {
+  if (!rect) return true;
+  return (
+    rect.x <= FULL_FRAME_EPSILON &&
+    rect.y <= FULL_FRAME_EPSILON &&
+    rect.w >= 1 - FULL_FRAME_EPSILON &&
+    rect.h >= 1 - FULL_FRAME_EPSILON
+  );
+}
+
+/** Whether two rectangles say the same thing, with absent and full-frame counting as the same. */
+export function sameRect(a: EditRect | null | undefined, b: EditRect | null | undefined): boolean {
+  if (isFullFrameRect(a) && isFullFrameRect(b)) return true;
+  if (!a || !b) return false;
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
+/**
+ * Whether a segment is framed at all - cropped, placed in a rectangle, or fitted differently from
+ * the rest of the post. A whole-frame crop or rectangle is not: it renders exactly as no crop does,
+ * [toComposeSpec] leaves it off the wire for that reason, and [isUntouched] has to agree or a
+ * customer who opened the crop tool and changed nothing would pay for a re-encode.
+ */
+export function isClipFramed(clip: EditClip, manifestFit: EditFit = 'contain'): boolean {
+  if (!isFullFrameRect(clip.crop)) return true;
+  if (!isFullFrameRect(clip.rect)) return true;
+  return clip.fit !== undefined && clip.fit !== manifestFit;
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* Construction                                                                                   */
 /* -------------------------------------------------------------------------------------------- */
 
@@ -627,6 +789,7 @@ export function emptyManifest(): EditManifest {
   return {
     version: MANIFEST_VERSION,
     clips: [],
+    videoTracks: [],
     filterId: 'none',
     filterIntensity: 1,
     adjust: neutralAdjust(),
@@ -642,28 +805,42 @@ export function emptyManifest(): EditManifest {
  * Brings any manifest this package has ever written up to the current shape, filling what an older
  * one did not have. Version 1 had one voiceover, no segment ids, text-only overlays sized by
  * `fontScale`, and no filter intensity or Adjust.
+ *
+ * Version 2 to version 3 adds nothing at all, on purpose: a version-2 manifest simply has no crop,
+ * no placement rectangle and no per-segment fit, and absence is exactly what the renderer did
+ * before those existed. Nothing is defaulted in on its behalf - a whole-frame crop written into
+ * every clip would be the same picture but a different spec, and every engine would lose the fast
+ * path it takes when the fields are missing. A version-2 manifest reopened today renders frame for
+ * frame as it did.
+ *
+ * Version 3 to version 4 adds nothing either, for the same reason: a version-3 manifest simply has
+ * no second video track, and an empty `videoTracks` is the whole of what one video layer ever
+ * meant. The migration is the empty array, and [toComposeSpec] turns that back into a spec with no
+ * `tracks` key - byte for byte the spec version 3 produced.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
   const base = emptyManifest();
 
+  // One set of ids for the WHOLE manifest, base track and extra tracks together. Every op that
+  // takes a clip takes its id and nothing else, so two clips sharing one id on different layers
+  // would be two clips a customer could never tell apart or address separately.
   const usedIds = new Set<string>();
-  const clips: EditClip[] = Array.isArray(raw['clips'])
-    ? raw['clips'].map((c: any) => {
-        let id = typeof c.id === 'string' && c.id ? c.id : String(c.clipKey);
-        while (usedIds.has(id)) id = `${id}~`;
-        usedIds.add(id);
-        return {
-          id,
-          clipKey: String(c.clipKey),
-          inMs: num(c.inMs, 0),
-          outMs: num(c.outMs, 100),
-          speed: clamp(num(c.speed, 1), MIN_SPEED, MAX_SPEED),
-          volume: clamp(num(c.volume, 1), 0, 1),
-          muted: !!c.muted,
-        };
-      })
-    : [];
+  const clips: EditClip[] = readClips(raw['clips'], usedIds);
+
+  // A track with no clips is dropped rather than kept: it renders nothing, the native parsers
+  // reject it outright, and an empty lane in the timeline is a thing a customer cannot get rid of.
+  // The cap counts the base track, so only MAX_VIDEO_TRACKS - 1 of these survive.
+  const videoTracks: EditVideoTrack[] = (Array.isArray(raw['videoTracks']) ? raw['videoTracks'] : [])
+    .map((t: any, i: number): EditVideoTrack => ({
+      id: typeof t?.id === 'string' && t.id ? t.id : `vt-${i}`,
+      clips: readClips(t?.clips, usedIds),
+      startMs: Math.max(0, Math.round(num(t?.startMs, 0))),
+      z: Math.max(0, Math.round(num(t?.z, i + 1))),
+      opacity: clamp(num(t?.opacity, 1), 0, 1),
+    }))
+    .filter((track: EditVideoTrack) => track.clips.length > 0)
+    .slice(0, MAX_VIDEO_TRACKS - 1);
 
   const overlays: EditOverlay[] = Array.isArray(raw['overlays'])
     ? raw['overlays'].map((o: any): EditOverlay => {
@@ -746,6 +923,7 @@ export function normaliseManifest(input: unknown): EditManifest {
   return {
     version: MANIFEST_VERSION,
     clips,
+    videoTracks,
     filterId: typeof raw['filterId'] === 'string' ? raw['filterId'] : base.filterId,
     filterIntensity: clamp(num(raw['filterIntensity'], 1), 0, 1),
     adjust: { ...neutralAdjust(), ...(raw['adjust'] ?? {}) },
@@ -773,8 +951,29 @@ export function reconcileManifest(
   const current = manifest ? normaliseManifest(manifest) : emptyManifest();
   const known = new Set(clipKeys);
   const kept = current.clips.filter((edit) => known.has(edit.clipKey));
+
+  // Extra layers are reconciled but never grown: a source the host has added belongs on the base
+  // timeline, where the customer put every other one, and silently appending it to a picture-in-
+  // picture layer would drop a clip on top of their video without anybody asking for it. A layer
+  // left with nothing goes, because an empty track is not a state the manifest holds.
+  const videoTracks = current.videoTracks
+    .map((track) => ({ ...track, clips: track.clips.filter((edit) => known.has(edit.clipKey)) }))
+    .filter((track) => track.clips.length > 0);
+
+  // Both what the extra layers are holding and what the base is holding count here, which is why
+  // they are reconciled first. A source that is ONLY on a layer is already in the post, so leaving
+  // it out of `seen` would read it as a source the host had just added and drop a second copy of
+  // it onto the base timeline, underneath the picture in picture the customer built with it. And an
+  // appended clip landing on an id a layer already holds would make the pair indistinguishable,
+  // because every op takes a clip id and stops at the first clip that answers to it.
   const seen = new Set(kept.map((edit) => edit.clipKey));
   const usedIds = new Set(kept.map((edit) => edit.id));
+  for (const track of videoTracks) {
+    for (const edit of track.clips) {
+      seen.add(edit.clipKey);
+      usedIds.add(edit.id);
+    }
+  }
   const added = clipKeys
     .filter((key) => !seen.has(key))
     .map((key) => {
@@ -784,7 +983,7 @@ export function reconcileManifest(
       return defaultClipEdit(key, durations.get(key) ?? 0, id);
     });
 
-  return { ...current, clips: [...kept, ...added] };
+  return { ...current, clips: [...kept, ...added], videoTracks };
 }
 
 /** How long the finished video runs, after every trim and speed change. */
@@ -795,9 +994,16 @@ export function totalDurationMs(manifest: Pick<EditManifest, 'clips'>): number {
   );
 }
 
-/** Each source clip once, in the order it first appears on the timeline. */
-export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips'>): string[] {
-  return [...new Set(manifest.clips.map((clip) => clip.clipKey))];
+/**
+ * Each source clip once, in the order it first appears - the base track first, then every extra
+ * video layer. This is the list of sources the post actually uploads and the list [toComposeSpec]
+ * needs a file for, so a layer's footage has to be in it or a split screen would be posted with
+ * half of itself missing.
+ */
+export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips' | 'videoTracks'>): string[] {
+  const keys = manifest.clips.map((clip) => clip.clipKey);
+  for (const track of manifest.videoTracks) keys.push(...track.clips.map((clip) => clip.clipKey));
+  return [...new Set(keys)];
 }
 
 /**
@@ -806,6 +1012,9 @@ export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips'>): string[] 
  */
 export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<string, number>): boolean {
   if (manifest.clips.length !== 1) return false;
+  // A second layer is two pictures at once, which no single file on disk is, however little was
+  // done to the clip underneath it.
+  if (manifest.videoTracks.length > 0) return false;
   if (resolveFilterOps(manifest).length > 0) return false;
   if (manifest.originalMuted || manifest.fit !== 'contain') return false;
   if (manifest.overlays.length > 0) return false;
@@ -813,7 +1022,9 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   return manifest.clips.every((clip) => {
     const source = durations.get(clip.clipKey) ?? 0;
     const untrimmed = clip.inMs === 0 && (source === 0 || Math.abs(clip.outMs - source) <= 100);
-    return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted;
+    // A cropped or reframed clip is a different picture from the file on disk, however little else
+    // was done to it, so it has to go through the renderer rather than be posted as it is.
+    return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted && !isClipFramed(clip, manifest.fit);
   });
 }
 
@@ -823,10 +1034,53 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function round4(value: number): number {
+/** The four decimals a stored rectangle and a resolved filter amount are both held at. */
+export function round4(value: number): number {
   return Math.round(value * 10_000) / 10_000;
 }
 
 function num(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/** A stored fit, or `undefined` for anything else - including the absence that means "the post's". */
+function readFit(value: unknown): EditFit | undefined {
+  return value === 'cover' || value === 'contain' ? value : undefined;
+}
+
+/**
+ * A stored list of segments, brought up to the current shape. Shared by the base track and every
+ * extra video track so the two can never drift: a clip on the second layer is the same kind of
+ * thing as a clip on the first, carrying the same trim, speed, sound and framing, and the ONLY
+ * difference between the layers is which rectangle of the frame their clips are drawn in.
+ *
+ * `usedIds` is threaded through rather than owned here because ids are unique across the whole
+ * manifest, not within one track.
+ */
+function readClips(value: unknown, usedIds: Set<string>): EditClip[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((c: any) => {
+    let id = typeof c?.id === 'string' && c.id ? c.id : String(c?.clipKey);
+    while (usedIds.has(id)) id = `${id}~`;
+    usedIds.add(id);
+    const clip: EditClip = {
+      id,
+      clipKey: String(c?.clipKey),
+      inMs: num(c?.inMs, 0),
+      outMs: num(c?.outMs, 100),
+      speed: clamp(num(c?.speed, 1), MIN_SPEED, MAX_SPEED),
+      volume: clamp(num(c?.volume, 1), 0, 1),
+      muted: !!c?.muted,
+    };
+    // Assigned rather than listed, so a clip that has none of these keeps none of them: an
+    // `undefined` under the key is still a key, and it would survive a round trip through a
+    // structured clone and read as "framed" to anything checking with `in`.
+    const crop = normaliseRect(c?.crop);
+    if (crop) clip.crop = crop;
+    const rect = normaliseRect(c?.rect);
+    if (rect) clip.rect = rect;
+    const fit = readFit(c?.fit);
+    if (fit) clip.fit = fit;
+    return clip;
+  });
 }

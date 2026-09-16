@@ -131,6 +131,212 @@ class ComposeSpecParserTest {
         assertEquals(Fit.CONTAIN, ComposeSpecParser.parse(nonsense).clips[0].fit)
     }
 
+    @Test
+    fun `a clip with no crop and no rect keeps both absent`() {
+        // The engines' fast paths test for null, so this is the back-compatibility promise itself:
+        // a manifest written before the fields existed must not come out of here carrying them.
+        val spec = ComposeSpecParser.parse(minimalJson())
+        assertNull(spec.clips[0].crop)
+        assertNull(spec.clips[0].rect)
+        val explicitNull = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0).put("crop", JSONObject.NULL)
+        }
+        assertNull(ComposeSpecParser.parse(explicitNull).clips[0].crop)
+    }
+
+    @Test
+    fun `crop and rect parse`() {
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("crop", rectJson(0.25, 0.1, 0.5, 0.8))
+                .put("rect", rectJson(0.0, 0.0, 1.0, 0.5))
+        }
+        val clip = ComposeSpecParser.parse(json).clips[0]
+        assertEquals(0.25f, clip.crop!!.x, 1e-6f)
+        assertEquals(0.1f, clip.crop!!.y, 1e-6f)
+        assertEquals(0.5f, clip.crop!!.w, 1e-6f)
+        assertEquals(0.8f, clip.crop!!.h, 1e-6f)
+        assertEquals(0.5f, clip.rect!!.h, 1e-6f)
+    }
+
+    @Test
+    fun `a rectangle with no area is rejected with its own path`() {
+        expectInvalid("clips[0].crop.w") {
+            getJSONArray("clips").getJSONObject(0).put("crop", rectJson(0.0, 0.0, 0.0, 1.0))
+        }
+        expectInvalid("clips[0].crop.h") {
+            getJSONArray("clips").getJSONObject(0).put("crop", rectJson(0.0, 0.0, 1.0, -0.5))
+        }
+        expectInvalid("clips[0].rect.h") {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(0.0, 0.0, 1.0, 0.0))
+        }
+    }
+
+    @Test
+    fun `a width that is not a number fails on the same path as one that is missing`() {
+        expectInvalid("clips[0].crop.w") {
+            getJSONArray("clips").getJSONObject(0).put("crop", rectJson(0.0, 0.0, 1.0, 1.0).apply { remove("w") })
+        }
+        expectInvalid("clips[0].rect.h") {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(0.0, 0.0, 1.0, 1.0).put("h", "tall"))
+        }
+    }
+
+    @Test
+    fun `an origin that is missing or unreadable is a value, not a shape`() {
+        // The same line the overlay centres are on: x and y take their default and are clamped,
+        // like cx and cy, while w and h are the shape and fail like wPx.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("crop", rectJson(0.0, 0.0, 0.5, 0.5).apply { remove("x") }.put("y", "down"))
+        }
+        val crop = ComposeSpecParser.parse(json).clips[0].crop!!
+        assertEquals(0f, crop.x, 1e-6f)
+        assertEquals(0f, crop.y, 1e-6f)
+        assertEquals(0.5f, crop.w, 1e-6f)
+    }
+
+    @Test
+    fun `a crop that is not an object at all means the whole frame`() {
+        // optJSONObject answers null for a number as well as for a missing key, and both mean the
+        // same thing to the renderer. The iOS reader shrugs at this one on purpose too.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0).put("crop", 0.5)
+        }
+        assertNull(ComposeSpecParser.parse(json).clips[0].crop)
+    }
+
+    @Test
+    fun `a rectangle hanging off the frame is clamped back inside it`() {
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("crop", rectJson(-0.2, 0.6, 3.0, 0.9))
+                .put("rect", rectJson(0.75, 0.0, 0.5, 1.0))
+        }
+        val clip = ComposeSpecParser.parse(json).clips[0]
+        assertEquals(0f, clip.crop!!.x, 1e-6f)
+        assertEquals(1f, clip.crop!!.w, 1e-6f)
+        // y stood, so the height is cut to the room it left rather than the other way round.
+        assertEquals(0.6f, clip.crop!!.y, 1e-6f)
+        assertEquals(0.4f, clip.crop!!.h, 1e-6f)
+        assertEquals(0.75f, clip.rect!!.x, 1e-6f)
+        assertEquals(0.25f, clip.rect!!.w, 1e-6f)
+    }
+
+    private fun rectJson(x: Double, y: Double, w: Double, h: Double) =
+        JSONObject().put("x", x).put("y", y).put("w", w).put("h", h)
+
+    /* ------------------------------------------------------------------------------------- */
+
+    private fun trackClipJson(key: String) = JSONObject()
+        .put("key", key)
+        .put("uri", "file:///$key.mp4")
+        .put("inMs", 0)
+        .put("outMs", 1_000)
+        .put("speed", 1)
+        .put("volume", 1)
+        .put("muted", false)
+        .put("fit", "cover")
+
+    private fun trackJson(id: String, vararg keys: String): JSONObject {
+        val clips = org.json.JSONArray()
+        for (key in keys) clips.put(trackClipJson(key))
+        return JSONObject()
+            .put("id", id)
+            .put("clips", clips)
+            .put("startMs", 500)
+            .put("z", 1)
+            .put("opacity", 0.8)
+    }
+
+    private fun withTracks(vararg tracks: JSONObject) = minimalJson().apply {
+        val array = org.json.JSONArray()
+        for (track in tracks) array.put(track)
+        put("tracks", array)
+    }
+
+    @Test
+    fun `a spec with no tracks carries no layers at all`() {
+        // Absence is the fast path itself: the renderer asks this list once and, finding it empty,
+        // builds the composition it built before layers existed. An empty array says the same.
+        assertTrue(ComposeSpecParser.parse(minimalJson()).tracks.isEmpty())
+        assertTrue(ComposeSpecParser.parse(withTracks()).tracks.isEmpty())
+    }
+
+    @Test
+    fun `a track parses with its clips and its own layer values`() {
+        val spec = ComposeSpecParser.parse(withTracks(trackJson("pip", "b")))
+        assertEquals(1, spec.tracks.size)
+        val track = spec.tracks[0]
+        assertEquals("pip", track.id)
+        assertEquals(1, track.clips.size)
+        assertEquals("b", track.clips[0].key)
+        assertEquals(Fit.COVER, track.clips[0].fit)
+        assertEquals(500L, track.startMs)
+        assertEquals(1, track.z)
+        assertEquals(0.8f, track.opacity, 1e-6f)
+    }
+
+    @Test
+    fun `a clip on a track reports the path of the track it is on`() {
+        expectInvalid("tracks[0].clips[1].outMs") {
+            val track = trackJson("pip", "b", "c")
+            track.getJSONArray("clips").getJSONObject(1).put("outMs", 0)
+            put("tracks", org.json.JSONArray().put(track))
+        }
+    }
+
+    @Test
+    fun `a track with no clips is rejected and the error names it`() {
+        val json = withTracks(trackJson("pip", "b").put("clips", org.json.JSONArray()))
+        try {
+            ComposeSpecParser.parse(json)
+            fail("expected invalid_spec:tracks[0].clips")
+        } catch (e: SpecException) {
+            assertEquals("tracks[0].clips", e.path)
+            // An index names nothing the caller can look up: the manifest knows its layers by id.
+            assertTrue(e.message!!.contains("'pip'"))
+        }
+    }
+
+    @Test
+    fun `a track without an id is rejected`() {
+        expectInvalid("tracks[0].id") {
+            put("tracks", org.json.JSONArray().put(trackJson("pip", "b").apply { remove("id") }))
+        }
+    }
+
+    @Test
+    fun `more layers than the decoder budget are rejected rather than truncated`() {
+        // The cap counts the base track, so as many extra layers as the cap allows in total is
+        // always one too many.
+        val tracks = org.json.JSONArray()
+        repeat(ComposeSpecParser.MAX_VIDEO_TRACKS) { i -> tracks.put(trackJson("t$i", "b")) }
+        expectInvalid("tracks") { put("tracks", tracks) }
+    }
+
+    @Test
+    fun `a track's own values are clamped rather than rejected`() {
+        val json = withTracks(
+            trackJson("pip", "b").put("startMs", -400).put("opacity", 3).put("z", -2),
+        )
+        val track = ComposeSpecParser.parse(json).tracks[0]
+        assertEquals(0L, track.startMs)
+        assertEquals(1f, track.opacity, 1e-6f)
+        assertEquals(0, track.z)
+    }
+
+    @Test
+    fun `a track start too large to become microseconds is clamped here`() {
+        // The planner multiplies every millisecond it is handed by a thousand. Unclamped, this one
+        // wraps round to a negative microsecond, and the clamp waiting downstream then puts the
+        // layer at the START of the post rather than past its end.
+        val json = withTracks(trackJson("pip", "b").put("startMs", Long.MAX_VALUE))
+        val track = ComposeSpecParser.parse(json).tracks[0]
+        assertEquals(ComposeSpecParser.MAX_TIMELINE_MS, track.startMs)
+        assertTrue(track.startMs * 1000L > 0L)
+    }
+
     /* ------------------------------------------------------------------------------------- */
 
     @Test

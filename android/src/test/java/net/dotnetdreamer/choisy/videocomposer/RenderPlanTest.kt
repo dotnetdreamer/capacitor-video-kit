@@ -24,7 +24,18 @@ class RenderPlanTest {
         volume: Float = 1f,
         muted: Boolean = false,
         uri: String = "file:///$key.mp4",
-    ) = Clip(key, uri, inMs, outMs, speed, volume, muted, Fit.CONTAIN)
+        fit: Fit = Fit.CONTAIN,
+        crop: Rect? = null,
+        rect: Rect? = null,
+    ) = Clip(key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect)
+
+    private fun track(
+        clips: List<Clip>,
+        id: String = "pip",
+        startMs: Long = 0,
+        z: Int = 1,
+        opacity: Float = 1f,
+    ) = Track(id, clips, startMs, z, opacity)
 
     private fun spec(
         clips: List<Clip>,
@@ -32,6 +43,7 @@ class RenderPlanTest {
         overlays: List<Overlay> = emptyList(),
         filter: List<FilterOp> = emptyList(),
         posterAtMs: Long = 0,
+        tracks: List<Track> = emptyList(),
     ) = ComposeSpec(
         jobId = "job",
         pendingPostId = "post",
@@ -41,6 +53,7 @@ class RenderPlanTest {
         overlays = overlays,
         audio = audio,
         posterAtMs = posterAtMs,
+        tracks = tracks,
     )
 
     private fun probe(durationMs: Long, hasAudio: Boolean = true) =
@@ -57,6 +70,36 @@ class RenderPlanTest {
         assertEquals(0L, plan.prefixOutUs[0])
         assertEquals(2_000_000L, plan.prefixOutUs[1])
         assertEquals(5_000_000L, plan.totalUs)
+    }
+
+    @Test
+    fun `a base shorter than a millisecond is not padded past what was planned`() {
+        // One millisecond of source at the fastest speed plans 250 us of output. A floor of a whole
+        // millisecond on the total would claim three quarters of a millisecond that no clip fills,
+        // and every layer is cut to the total and every trailing gap measured from it.
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 1, speed = 4f))),
+            mapOf("file:///a.mp4" to probe(1)),
+        )
+        assertEquals(250L, plan.clips[0].outDurUs)
+        assertEquals(250L, plan.totalUs)
+    }
+
+    @Test
+    fun `a sped up clip is planned at the length media3 will actually give it`() {
+        // 2 ms of source at 3x is 666.67 us of output. Media3 FLOORS that, in
+        // SpeedProviderUtil.getDurationAfterSpeedProviderApplied, so the plan has to floor it too:
+        // rounding to 667 claims a microsecond the item does not have, and the alpha gate is timed
+        // off the plan. One microsecond is one whole compositor frame's worth of disagreement,
+        // because the gap that follows puts its first blank frame on its own first microsecond and
+        // media3's gap bitmap is opaque black. This speed is deliberately one where rounding and
+        // flooring differ; at 0.25x they agree and the bug hides.
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 2, speed = 3f))),
+            mapOf("file:///a.mp4" to probe(2)),
+        )
+        assertEquals(666L, plan.clips[0].outDurUs)
+        assertEquals(666L, plan.totalUs)
     }
 
     @Test
@@ -163,6 +206,375 @@ class RenderPlanTest {
         )
         assertEquals(0.8f, plan.overlays[0].anchorX, 1e-6f)
         assertEquals(-0.8f, plan.overlays[0].anchorY, 1e-6f)
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
+    private val output = Output(720, 1280, 30, 4_000_000, 128_000)
+
+    /** A square source against the 9:16 output, which is the case where every fit shows its hand. */
+    private fun window(
+        fit: Fit = Fit.CONTAIN,
+        crop: Rect? = null,
+        rect: Rect? = null,
+        sourceW: Int = 1_000,
+        sourceH: Int = 1_000,
+    ) = RenderPlan.sourceWindow(clip("a", fit = fit, crop = crop, rect = rect), output, sourceW, sourceH)
+
+    private fun assertRect(x: Float, y: Float, w: Float, h: Float, actual: Rect) {
+        assertEquals("x", x, actual.x, 1e-5f)
+        assertEquals("y", y, actual.y, 1e-5f)
+        assertEquals("w", w, actual.w, 1e-5f)
+        assertEquals("h", h, actual.h, 1e-5f)
+    }
+
+    @Test
+    fun `only a clip that asks for a crop or a rect is reframed`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a"),
+                    clip("b", crop = Rect(0.25f, 0.25f, 0.5f, 0.5f)),
+                    clip("c", rect = Rect(0f, 0f, 1f, 0.5f)),
+                ),
+            ),
+            emptyMap(),
+        )
+        assertFalse(plan.clips[0].reframed)
+        assertTrue(plan.clips[1].reframed)
+        assertTrue(plan.clips[2].reframed)
+    }
+
+    @Test
+    fun `with no crop and no rect the window is what contain and cover always meant`() {
+        // Contain: the output frame reaches past the top and bottom of the source, and what it
+        // reaches is nothing at all - which is exactly where the black bars come from.
+        assertRect(0f, -0.3888889f, 1f, 1.7777778f, window())
+        // Cover: the frame stops inside the source, and the sides it stops short of are the crop.
+        assertRect(0.21875f, 0f, 0.5625f, 1f, window(fit = Fit.COVER))
+    }
+
+    @Test
+    fun `the fit measures the cropped picture and not the original`() {
+        // Half of a square is still square, so this letterboxes like the whole frame would - but
+        // against the crop, so the window is half as wide and the bars are half as deep.
+        assertRect(0.25f, 0.0555556f, 0.5f, 0.8888889f, window(crop = Rect(0.25f, 0.25f, 0.5f, 0.5f)))
+    }
+
+    @Test
+    fun `a rect fits the picture within itself rather than within the frame`() {
+        // The top half of a 9:16 frame is 720x640, so a square source lands 640x640 inside it with
+        // pillarboxing of its own, and the bottom half of the output is off the source entirely.
+        assertRect(-0.0625f, 0f, 1.125f, 2f, window(rect = Rect(0f, 0f, 1f, 0.5f)))
+        // Cover fills that same half and loses the top and bottom of the source instead.
+        assertRect(0f, 0.0555556f, 1f, 1.7777778f, window(fit = Fit.COVER, rect = Rect(0f, 0f, 1f, 0.5f)))
+    }
+
+    @Test
+    fun `a rect in the bottom right corner puts the source in the bottom right corner`() {
+        // A 9:16 source into a 9:16 quarter-frame: no bars anywhere, so the window is purely the
+        // output frame seen from the source - twice its size, with the source at the far corner.
+        assertRect(
+            -1f, -1f, 2f, 2f,
+            window(rect = Rect(0.5f, 0.5f, 0.5f, 0.5f), sourceW = 360, sourceH = 640),
+        )
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
+    @Test
+    fun `a spec with no layers plans the single-sequence composition`() {
+        val plan = RenderPlan.build(spec(listOf(clip("a"))), mapOf("file:///a.mp4" to probe(2_000)))
+        assertTrue(plan.tracks.isEmpty())
+        assertTrue(plan.singleSequence)
+        // The base track's clips are drawn into the output frame, which is what every clip did
+        // before layers existed and is the whole of what "absent means exactly today" buys.
+        assertEquals(720, plan.clips[0].frame.width)
+        assertEquals(1280, plan.clips[0].frame.height)
+        assertFalse(plan.clips[0].reframed)
+    }
+
+    @Test
+    fun `a layer's clips are laid end to end from its own start time`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 10_000)),
+                tracks = listOf(
+                    track(
+                        listOf(clip("b", outMs = 2_000), clip("c", outMs = 3_000)),
+                        startMs = 4_000,
+                    ),
+                ),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(10_000),
+                "file:///b.mp4" to probe(2_000),
+                "file:///c.mp4" to probe(3_000),
+            ),
+        )
+        val layer = plan.tracks[0]
+        assertEquals(2, layer.clips.size)
+        // A second sequence, so Transformer's own percentage is an average of two and the renderer
+        // has to read the frame timestamps instead.
+        assertFalse(plan.singleSequence)
+        // `startMs` DELAYS the layer, so its first clip begins at four seconds and plays from its
+        // own first frame. Laying it out from zero and hiding it until four would put the fourth
+        // second of the clip on screen at the moment the customer expects its first.
+        assertEquals(4_000_000L, layer.startUs)
+        assertEquals(4_000_000L, layer.placements[0].startUs)
+        assertEquals(6_000_000L, layer.placements[0].endUs)
+        assertEquals(6_000_000L, layer.placements[1].startUs)
+        assertEquals(9_000_000L, layer.placements[1].endUs)
+        assertEquals(9_000_000L, layer.endUs)
+        // The second before the base ends is what the trailing gap in the layer's sequence covers.
+        assertEquals(1_000_000L, plan.totalUs - layer.endUs)
+    }
+
+    @Test
+    fun `a layer that starts late is still cut at the base track's end`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 10_000)),
+                tracks = listOf(track(listOf(clip("b", outMs = 5_000)), startMs = 8_000)),
+            ),
+            mapOf("file:///a.mp4" to probe(10_000), "file:///b.mp4" to probe(5_000)),
+        )
+        val layer = plan.tracks[0]
+        // Two seconds of room left, so five seconds of clip become two. The delay eats into the
+        // layer exactly as it does on iOS, where the room is measured from the same cursor.
+        assertEquals(1, layer.clips.size)
+        assertEquals(2_000_000L, layer.clips[0].outDurUs)
+        assertEquals(8_000_000L, layer.placements[0].startUs)
+        assertEquals(10_000_000L, layer.endUs)
+        // Nothing left over, so the sequence needs no trailing gap.
+        assertEquals(0L, plan.totalUs - layer.endUs)
+    }
+
+    @Test
+    fun `a layer that starts after the base has ended is dropped`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 3_000)),
+                tracks = listOf(track(listOf(clip("b", outMs = 2_000)), startMs = 5_000)),
+            ),
+            mapOf("file:///a.mp4" to probe(3_000), "file:///b.mp4" to probe(2_000)),
+        )
+        // A layer with no room shows nothing anywhere, so it buys a decoder and a compositor input
+        // for nothing. Dropping it puts the render back on the single-sequence path it would have
+        // taken had the manifest never mentioned the layer.
+        assertTrue(plan.tracks.isEmpty())
+        assertTrue(plan.singleSequence)
+    }
+
+    @Test
+    fun `a layer is hidden before it starts and after it ends`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 10_000)),
+                tracks = listOf(
+                    track(
+                        listOf(clip("b", outMs = 3_000), clip("c", outMs = 2_000)),
+                        startMs = 2_000,
+                    ),
+                ),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(10_000),
+                "file:///b.mp4" to probe(3_000),
+                "file:///c.mp4" to probe(2_000),
+            ),
+        )
+        val layer = plan.tracks[0]
+        val hidden = RenderPlan.PlannedTrack.HIDDEN
+        // Nothing before the first clip: the base shows through, and the black frames of the gap
+        // that carries the delay are hidden by the same answer.
+        assertEquals(hidden, layer.visibleIndexAt(0L))
+        assertEquals(hidden, layer.visibleIndexAt(1_999_999L))
+        assertEquals(0, layer.visibleIndexAt(2_000_000L))
+        assertEquals(0, layer.visibleIndexAt(4_999_999L))
+        // The clips follow one another with no instant belonging to both.
+        assertEquals(1, layer.visibleIndexAt(5_000_000L))
+        assertEquals(1, layer.visibleIndexAt(6_999_999L))
+        // And nothing after the last clip, whatever Media3 is still holding on that input.
+        assertEquals(7_000_000L, layer.endUs)
+        assertEquals(hidden, layer.visibleIndexAt(7_000_000L))
+        assertEquals(hidden, layer.visibleIndexAt(9_999_999L))
+    }
+
+    @Test
+    fun `a layer is cut to the base track's length`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 3_000)),
+                tracks = listOf(track(listOf(clip("b", outMs = 5_000), clip("c", outMs = 5_000)))),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(3_000),
+                "file:///b.mp4" to probe(5_000),
+                "file:///c.mp4" to probe(5_000),
+            ),
+        )
+        val layer = plan.tracks[0]
+        // The second clip never starts, and the first loses the two seconds it would have run past
+        // the base - the base is what the post's length is measured by.
+        assertEquals(1, layer.clips.size)
+        assertEquals(3_000_000L, layer.clips[0].outDurUs)
+        assertEquals(3_000_000L, layer.clips[0].outUs - layer.clips[0].inUs)
+        assertEquals(3_000_000L, layer.placements[0].endUs)
+    }
+
+    @Test
+    fun `a layer clip with under a millisecond of source left to show is dropped, not overrun`() {
+        // A base that does not land on a whole millisecond, which is what a speed change makes of
+        // one: 1000 ms at 3x is 333_333 us. The layer's first clip then leaves 333 us of room, and
+        // at the slowest speed the shortest item this engine emits - one millisecond of source -
+        // would occupy four milliseconds of the output and end 3_667 us past the base.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 1_000, speed = 3f)),
+                tracks = listOf(
+                    track(listOf(clip("b", outMs = 333), clip("c", outMs = 2_000, speed = 0.25f))),
+                ),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(1_000),
+                "file:///b.mp4" to probe(1_000),
+                "file:///c.mp4" to probe(2_000),
+            ),
+        )
+        assertEquals(333_333L, plan.totalUs)
+        val layer = plan.tracks[0]
+        assertEquals(1, layer.clips.size)
+        assertEquals(333_000L, layer.endUs)
+        // The whole point: the layer sequence is the compositor's primary input, so an end past the
+        // base is a post longer than the base, and the trailing gap that would pad it back would
+        // have a negative duration.
+        assertTrue(layer.endUs <= plan.totalUs)
+        assertTrue(plan.totalUs - layer.endUs > 0L)
+    }
+
+    @Test
+    fun `a layer clip that exactly fills the room left is still kept`() {
+        // 4_000 us of room and a quarter-speed clip: one millisecond of source stretches to exactly
+        // the room available, so the refusal above must not take this clip as well.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 1_000)),
+                tracks = listOf(
+                    track(listOf(clip("b", outMs = 996), clip("c", outMs = 2_000, speed = 0.25f))),
+                ),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(1_000),
+                "file:///b.mp4" to probe(1_000),
+                "file:///c.mp4" to probe(2_000),
+            ),
+        )
+        val layer = plan.tracks[0]
+        assertEquals(2, layer.clips.size)
+        assertEquals(1_000L, layer.clips[1].outUs - layer.clips[1].inUs)
+        assertEquals(4_000L, layer.clips[1].outDurUs)
+        assertEquals(1_000_000L, layer.endUs)
+        assertEquals(plan.totalUs, layer.endUs)
+    }
+
+    @Test
+    fun `a layer clip is drawn at the size of its rectangle and anchored at its centre`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    track(listOf(clip("b", fit = Fit.COVER, rect = Rect(0f, 0.5f, 1f, 0.5f)))),
+                ),
+            ),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000)),
+        )
+        val layer = plan.tracks[0]
+        // The bottom half of a 9:16 frame is 720 x 640, and its centre is halfway down the frame,
+        // which is -0.5 once the axis is flipped to point up.
+        assertEquals(720, layer.clips[0].frame.width)
+        assertEquals(640, layer.clips[0].frame.height)
+        assertEquals(0f, layer.placements[0].anchorX, 1e-6f)
+        assertEquals(-0.5f, layer.placements[0].anchorY, 1e-6f)
+        // The rectangle has become the frame, so it is gone from the clip: a fit measures the frame
+        // it is drawn in, and leaving the rectangle on would place the picture inside it twice.
+        assertNull(layer.clips[0].clip.rect)
+        assertFalse(layer.clips[0].reframed)
+    }
+
+    @Test
+    fun `a layer clip keeps its crop and measures it against the layer's own frame`() {
+        // The picture-in-picture preset: a square in OUTPUT pixels, 0.36 of the frame's width, in
+        // the top-left corner. Both sides come out at 259 px, which is what makes it a square.
+        val pip = Rect(0.04f, 0.0225f, 0.36f, 0.2025f)
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    track(
+                        listOf(clip("b", fit = Fit.COVER, crop = Rect(0.25f, 0.25f, 0.5f, 0.5f), rect = pip)),
+                    ),
+                ),
+            ),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000)),
+        )
+        val placed = plan.tracks[0].clips[0]
+        assertEquals(259, placed.frame.width)
+        assertEquals(259, placed.frame.height)
+        assertTrue(placed.reframed)
+        assertEquals(0.25f, placed.clip.crop!!.x, 1e-6f)
+        // Anchored at the centre of the square, which is its inset plus half its side.
+        assertEquals(2f * (0.04f + 0.18f) - 1f, plan.tracks[0].placements[0].anchorX, 1e-6f)
+        assertEquals(1f - 2f * (0.0225f + 0.10125f), plan.tracks[0].placements[0].anchorY, 1e-6f)
+    }
+
+    @Test
+    fun `a layer's sound follows the same rules as the base track's`() {
+        val loud = RenderPlan.build(
+            spec(listOf(clip("a")), tracks = listOf(track(listOf(clip("b", volume = 0.5f))))),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000)),
+        )
+        assertTrue(loud.tracks[0].hasAudio)
+        assertEquals(0.5f, loud.tracks[0].clips[0].gain, 1e-6f)
+
+        val silent = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                audio = Audio(true, 1f, null, emptyList()),
+                tracks = listOf(track(listOf(clip("b")))),
+            ),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000)),
+        )
+        // The spec-level mute reaches a layer's clips exactly as it reaches the base track's.
+        assertFalse(silent.tracks[0].hasAudio)
+        assertTrue(silent.tracks[0].clips[0].removeAudio)
+    }
+
+    @Test
+    fun `layers are ordered bottom to top by z`() {
+        // The parser allows one extra layer today; the ordering is worth pinning here, where two
+        // can still be handed over, because it is the rule and not the cap that decides what is
+        // drawn over what.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    track(listOf(clip("b")), id = "high", z = 2),
+                    track(listOf(clip("c")), id = "low", z = 1),
+                ),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(2_000),
+                "file:///b.mp4" to probe(2_000),
+                "file:///c.mp4" to probe(2_000),
+            ),
+        )
+        assertEquals("low", plan.tracks[0].id)
+        assertEquals("high", plan.tracks[1].id)
+        // The plan says bottom to top and CompositionBuilder registers the sequences in reverse,
+        // because Media3 blends its compositor inputs from the LAST registered to the first. The
+        // last entry here is therefore the first sequence in the composition.
+        assertEquals("high", plan.tracks.last().id)
     }
 
     /* ------------------------------------------------------------------------------------- */

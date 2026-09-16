@@ -20,6 +20,15 @@ import type { PluginListenerHandle } from '@capacitor/core';
 /** How a source frame is fitted into the output rectangle when the aspect ratios differ. */
 export type ComposeFit = 'contain' | 'cover';
 
+/** A rectangle in normalised coordinates: 0..1, TOP-LEFT origin, y down - the same system
+    ComposeOverlay.cx/cy already uses. */
+export interface ComposeRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 /**
  * One segment of the output timeline. Split and duplicate are expressed as two entries pointing at
  * the same `uri` with different `inMs`/`outMs`; reorder is simply the array order.
@@ -40,6 +49,49 @@ export interface ComposeClip {
   /** Drops this clip's audio entirely, whatever `volume` says. */
   muted: boolean;
   fit: ComposeFit;
+  /**
+   * The part of the ORIENTED source frame to keep, as a fraction of it. Absent is the whole frame,
+   * which is what every spec written before this field meant. Applied BEFORE `fit`, so `fit`
+   * measures the cropped picture, not the original.
+   */
+  crop?: ComposeRect;
+  /**
+   * Where the cropped picture is drawn on the output frame. Absent is the whole frame, and `fit`
+   * then letterboxes exactly as today. Present, `fit` applies WITHIN this rectangle: the rectangle
+   * is the "frame" as far as contain and cover are concerned.
+   *
+   * The order every engine has to agree on is: orient the source frame, CROP it to `crop`, fit the
+   * result into `rect` with `fit`, then the colour matrix, then the overlays. Absent crop and absent
+   * rect together are exactly the old path, and each engine is expected to take that path unchanged
+   * rather than fold the new maths into the old - checked once when the plan is built, never per
+   * frame.
+   */
+  rect?: ComposeRect;
+}
+
+/**
+ * One layer of video. Its own clips are a flat SEQUENCE, exactly like [ComposeSpec.clips]: they
+ * play one after another and never overlap EACH OTHER. Overlap happens BETWEEN tracks, and that is
+ * the whole reason tracks exist rather than a start time on the clip - one track maps 1:1 onto an
+ * `EditedMediaItemSequence` on Android and onto one `AVMutableCompositionTrack` on iOS, and both of
+ * those hold items that do not overlap. Packing overlapping clips into sequences would otherwise
+ * have to happen inside each engine, where two manifests that look the same to a customer could
+ * pack differently and quietly disagree about which clip fixes the output's length.
+ *
+ * A layer's clips are placed by their own [ComposeClip.rect], which is how split screen and
+ * picture in picture are expressed: no new geometry, the layout presets simply write rectangles.
+ */
+export interface ComposeTrack {
+  /** Stable id from the manifest; echoed on a failure alongside `clipKey`. */
+  id: string;
+  /** A flat SEQUENCE like [ComposeSpec.clips]: these never overlap EACH OTHER. */
+  clips: ComposeClip[];
+  /** Where this track's first clip lands on the OUTPUT timeline. Default 0. */
+  startMs?: number;
+  /** Higher draws later, on top. The base track is 0. Ties break on array order. */
+  z: number;
+  /** 0..1 over the whole track. Default 1. */
+  opacity?: number;
 }
 
 export interface ComposeOutput {
@@ -129,7 +181,24 @@ export interface ComposeSpec {
   jobId: string;
   /** Selects the job folder the output and any scratch files are written to. */
   pendingPostId: string;
+  /**
+   * The BASE track. It always starts at 0 and ITS length is the output's length: a track in
+   * [ComposeSpec.tracks] running past it is CUT, and one ending early leaves the base showing
+   * underneath.
+   */
   clips: ComposeClip[];
+  /**
+   * Extra video layers drawn over `clips`, bottom to top by `z`. Absent or empty is exactly today,
+   * and every engine is expected to decide that ONCE when it builds its plan rather than per frame
+   * - the same discipline `crop` and `rect` ask for. At most `MAX_VIDEO_TRACKS` layers including
+   * the base, so at most one entry here for now; a spec with more is rejected. That cap is a
+   * hardware decoder budget rather than a matter of taste - a mid-range phone decodes two video
+   * streams at once and the feed behind the editor may already hold some.
+   *
+   * A secondary track's clips contribute audio exactly as base clips do, through their own
+   * `volume`/`muted` and the spec-level `originalMuted`/`originalVolume`.
+   */
+  tracks?: ComposeTrack[];
   output: ComposeOutput;
   /** Ordered; empty means "no colour work at all". */
   filter: FilterOp[];

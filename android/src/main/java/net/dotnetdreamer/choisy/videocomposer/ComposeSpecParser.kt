@@ -18,6 +18,13 @@ object ComposeSpecParser {
     /** The renderer draws one blended quad per overlay per frame, so the count is bounded. */
     const val MAX_OVERLAYS = 30
 
+    /**
+     * How many video layers may be on screen at once, the BASE TRACK INCLUDED - so two means the
+     * base plus one entry in `tracks`. A decoder budget rather than a matter of taste: a mid-range
+     * phone decodes two video streams at once, and the feed behind the editor may hold one already.
+     */
+    const val MAX_VIDEO_TRACKS = 2
+
     private const val PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 
     fun parse(json: JSONObject): ComposeSpec {
@@ -27,7 +34,20 @@ object ComposeSpecParser {
         val clipsJson = json.optJSONArray("clips") ?: throw SpecException("clips")
         if (clipsJson.length() == 0) throw SpecException("clips")
         val clips = (0 until clipsJson.length()).map { i ->
-            parseClip(clipsJson.optJSONObject(i) ?: throw SpecException("clips[$i]"), i)
+            parseClip(clipsJson.optJSONObject(i) ?: throw SpecException("clips[$i]"), "clips[$i]")
+        }
+
+        val tracksJson = json.optJSONArray("tracks") ?: JSONArray()
+        // Refused rather than truncated: a caller asking for three layers believes it is getting
+        // three, and a post silently missing one of them is not the post it asked to make.
+        if (tracksJson.length() > MAX_VIDEO_TRACKS - 1) {
+            throw SpecException(
+                "tracks",
+                "invalid_spec:tracks at most ${MAX_VIDEO_TRACKS - 1} extra video track",
+            )
+        }
+        val tracks = (0 until tracksJson.length()).map { i ->
+            parseTrack(tracksJson.optJSONObject(i) ?: throw SpecException("tracks[$i]"), i)
         }
 
         val output = parseOutput(json.optJSONObject("output") ?: throw SpecException("output"))
@@ -54,16 +74,24 @@ object ComposeSpecParser {
             overlays = overlays,
             audio = audio,
             posterAtMs = json.optLong("posterAtMs", 0L).coerceAtLeast(0L),
+            tracks = tracks,
         )
     }
 
-    private fun parseClip(o: JSONObject, i: Int): Clip {
-        val key = o.optString("key").takeIf { it.isNotEmpty() } ?: throw SpecException("clips[$i].key")
-        val uri = o.optString("uri").takeIf { it.isNotEmpty() } ?: throw SpecException("clips[$i].uri")
+    /**
+     * Takes its JSON path rather than an index because the same reader serves the base track and
+     * every extra one: a clip on the second layer is the same kind of thing as a clip on the first,
+     * carrying the same trim, speed, sound and framing, and the ONLY difference between the layers
+     * is which rectangle of the frame their clips are drawn in. One reader is also one set of error
+     * paths, which is one fewer thing for the two native parsers to disagree about.
+     */
+    private fun parseClip(o: JSONObject, path: String): Clip {
+        val key = o.optString("key").takeIf { it.isNotEmpty() } ?: throw SpecException("$path.key")
+        val uri = o.optString("uri").takeIf { it.isNotEmpty() } ?: throw SpecException("$path.uri")
         val inMs = o.optLong("inMs", -1L)
-        if (inMs < 0L) throw SpecException("clips[$i].inMs")
+        if (inMs < 0L) throw SpecException("$path.inMs")
         val outMs = o.optLong("outMs", -1L)
-        if (outMs <= inMs) throw SpecException("clips[$i].outMs")
+        if (outMs <= inMs) throw SpecException("$path.outMs")
         return Clip(
             key = key,
             uri = uri,
@@ -73,7 +101,79 @@ object ComposeSpecParser {
             volume = o.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
             muted = o.optBoolean("muted", false),
             fit = if (o.optString("fit", "contain") == "cover") Fit.COVER else Fit.CONTAIN,
+            crop = o.rectOrNull("crop", "$path.crop"),
+            rect = o.rectOrNull("rect", "$path.rect"),
         )
+    }
+
+    /**
+     * The shape errors are the track's own; everything else is a value and is clamped, on the same
+     * line the rest of the file draws. A track with no clips is a shape error rather than an empty
+     * layer that renders nothing, because JS drops an empty track before it builds the spec, so one
+     * arriving here means the caller lost a clip on the way.
+     */
+    private fun parseTrack(o: JSONObject, i: Int): Track {
+        val id = o.optString("id").takeIf { it.isNotEmpty() } ?: throw SpecException("tracks[$i].id")
+        val clipsJson = o.optJSONArray("clips")
+        if (clipsJson == null || clipsJson.length() == 0) {
+            // The id goes in the message because the index alone names nothing the caller can look
+            // up: the manifest knows its layers by id, and the id is what failures echo back.
+            throw SpecException(
+                "tracks[$i].clips",
+                "invalid_spec:tracks[$i].clips track '$id' has no clips",
+            )
+        }
+        val clips = (0 until clipsJson.length()).map { j ->
+            parseClip(
+                clipsJson.optJSONObject(j) ?: throw SpecException("tracks[$i].clips[$j]"),
+                "tracks[$i].clips[$j]",
+            )
+        }
+        return Track(
+            id = id,
+            clips = clips,
+            startMs = o.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
+            z = o.optInt("z", i + 1).coerceAtLeast(0),
+            opacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+        )
+    }
+
+    /**
+     * Absent stays absent. Every engine's fast path tests for null - a clip that asks for neither
+     * field has to take exactly the code it took before the fields existed - so a missing rectangle
+     * must NOT quietly become a full-frame one here, however much that would simplify what follows.
+     *
+     * `optJSONObject` answers null for a key that is missing, for one explicitly set to null and
+     * for one holding a number or a string, and every one of those means the same thing to the
+     * renderer: the whole frame. That is the one rectangle failure deliberately left as a shrug
+     * rather than an error, and the iOS reader shrugs at it on purpose too.
+     */
+    private fun JSONObject.rectOrNull(key: String, path: String): Rect? =
+        optJSONObject(key)?.let { parseRect(it, path) }
+
+    /**
+     * The split this file is built on, applied to a rectangle: a rectangle with no area is a shape
+     * error and fails loudly, one that hangs off the edge of the frame is an out-of-range value and
+     * is clamped back inside it.
+     *
+     * Which side of the line each number falls on follows the rest of the file rather than being
+     * invented here. `x` and `y` are values like an overlay's `cx`: missing, or unreadable as a
+     * number, takes the default and is clamped. `w` and `h` are the shape, like an overlay's `wPx`:
+     * every non-numeric reading collapses to the same 0 that fails the test below, so "there is no
+     * width" and "the width is not a number" report the same path, which is one error path fewer
+     * for the two parsers to disagree about.
+     */
+    private fun parseRect(o: JSONObject, path: String): Rect {
+        val x = o.finite("x", 0.0).coerceIn(0f, 1f)
+        val y = o.finite("y", 0.0).coerceIn(0f, 1f)
+        val w = o.finite("w", 0.0)
+        if (w <= 0f) throw SpecException("$path.w")
+        val h = o.finite("h", 0.0)
+        if (h <= 0f) throw SpecException("$path.h")
+        // The origin first, then each side against whatever room the origin left, so a rectangle
+        // that overhangs the right edge keeps its position and loses the overhang rather than
+        // sliding back inwards - reversing that would silently move a crop the customer placed.
+        return Rect(x = x, y = y, w = w.coerceAtMost(1f - x), h = h.coerceAtMost(1f - y))
     }
 
     private fun parseOutput(o: JSONObject): Output {
@@ -119,7 +219,7 @@ object ComposeSpecParser {
         val hPx = o.optInt("hPx", 0)
         if (wPx <= 0) throw SpecException("overlays[$i].wPx")
         if (hPx <= 0) throw SpecException("overlays[$i].hPx")
-        val startMs = o.optLong("startMs", 0L).coerceAtLeast(0L)
+        val startMs = o.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS)
         val endMs = o.optLong("endMs", 0L)
         if (endMs <= startMs) throw SpecException("overlays[$i].endMs")
         return Overlay(
@@ -147,7 +247,7 @@ object ComposeSpecParser {
             if (outMs <= inMs) throw SpecException("audio.music.outMs")
             Music(
                 uri = uri,
-                startMs = musicJson.optLong("startMs", 0L).coerceAtLeast(0L),
+                startMs = musicJson.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
                 inMs = inMs,
                 outMs = outMs,
                 volume = musicJson.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
@@ -165,7 +265,7 @@ object ComposeSpecParser {
             if (durationMs <= 0L) throw SpecException("audio.voiceover[$i].durationMs")
             Voiceover(
                 uri = uri,
-                startMs = v.optLong("startMs", 0L).coerceAtLeast(0L),
+                startMs = v.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
                 durationMs = durationMs,
                 volume = v.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
             )
@@ -181,6 +281,19 @@ object ComposeSpecParser {
     private fun JSONObject.nonEmptyString(key: String): String =
         optString(key).takeIf { it.isNotEmpty() } ?: throw SpecException(key)
 
+    /**
+     * A number that cannot poison the geometry. `optDouble` already falls back for a missing key
+     * and for anything it cannot read as a double; this also folds in the two readings that survive
+     * that and would still ruin a matrix - a NaN, and a double so large it becomes an infinity once
+     * it is a float. Either one silently blackens a whole clip instead of failing, which is the one
+     * outcome worth spending a branch to avoid.
+     */
+    private fun JSONObject.finite(key: String, fallback: Double): Float {
+        val v = optDouble(key, fallback)
+        val f = if (v.isNaN()) fallback.toFloat() else v.toFloat()
+        return if (f.isInfinite()) fallback.toFloat() else f
+    }
+
     private fun JSONObject.amount(i: Int): Float {
         if (!has("amount")) throw SpecException("filter[$i].amount")
         return optDouble("amount", 1.0).toFloat()
@@ -188,4 +301,14 @@ object ComposeSpecParser {
 
     const val MIN_SPEED = 0.25f
     const val MAX_SPEED = 4.0f
+
+    /**
+     * The largest millisecond this parser will hand on, which is the largest one that still becomes
+     * a microsecond. [RenderPlan] works in microseconds and multiplies every millisecond it is given
+     * by a thousand; a hand-built spec naming a start above this would wrap that multiplication
+     * round to a negative number, and a clamp downstream would then land somewhere meaningless
+     * instead of at the end of the post. Clamped here because this is where every other bound in
+     * the file lives, and because a value out of range is clamped rather than refused.
+     */
+    const val MAX_TIMELINE_MS = Long.MAX_VALUE / 1000L
 }

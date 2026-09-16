@@ -12,12 +12,17 @@ import Foundation
 ///
 /// The check ORDER is load bearing. The tests compare message strings literally, so a spec that is
 /// wrong in two places has to name the same field on both platforms. Android's order is: `jobId`,
-/// `pendingPostId`, the `clips` array, each clip, `output`, each filter op, the `overlays` count,
-/// each overlay, `audio.music`, each voiceover, `posterAtMs`. `output` sitting in the middle of that
-/// is why `OutputDTO` decodes leniently and why everything after it holds its first error instead of
-/// throwing it (see `heldError`).
+/// `pendingPostId`, the `clips` array, each clip, the `tracks` count, each track and its own clips,
+/// `output`, each filter op, the `overlays` count, each overlay, `audio.music`, each voiceover,
+/// `posterAtMs`. `output` sitting in the middle of that is why `OutputDTO` decodes leniently and why
+/// everything after it holds its first error instead of throwing it (see `heldError`).
 enum ComposeSpecParser {
     static let maxOverlays = 30
+    /// `MAX_VIDEO_TRACKS` from the manifest, the BASE track INCLUDED, so at most one entry in
+    /// `tracks`. It is a hardware decoder budget rather than a matter of taste - a mid-range phone
+    /// decodes two video streams at once and the feed behind the editor may already hold one - so a
+    /// spec asking for more is refused here rather than quietly truncated to what will play.
+    static let maxVideoTracks = 2
     static let minSpeed = 0.25
     static let maxSpeed = 4.0
     static let pngDataURLPrefix = "data:image/png;base64,"
@@ -59,18 +64,19 @@ enum ComposeSpecParser {
         // could run first. This is the point in Android's order where those errors surface.
         if let held = d.heldError { throw held }
 
-        let clips = d.clips.map { c in
-            ComposeClip(key: c.key,
-                        uri: c.uri,
-                        inMs: c.inMs,
-                        outMs: c.outMs,
-                        speed: clamp(c.speed, minSpeed, maxSpeed),
-                        volume: clamp01(c.volume),
-                        muted: c.muted,
-                        // Only the exact string "cover" selects cover. A typo, or "COVER", silently
-                        // renders contain, exactly as Android's `== "cover"` test does. Rejecting it
-                        // would fail specs the Android build accepts.
-                        fit: c.fit == Fit.cover.rawValue ? .cover : .contain)
+        let clips = d.clips.map(clip)
+
+        // `map` on the OPTIONAL, so a spec that carried no `tracks` key still carries none here.
+        // Absence has to survive the parser intact: it is what the builder tests to keep the
+        // single-layer path a single-layer edit has always taken.
+        let tracks = d.tracks.map { list in
+            list.map { t in
+                ComposeTrack(id: t.id,
+                             clips: t.clips.map(clip),
+                             startMs: t.startMs,
+                             z: t.z,
+                             opacity: clamp01(t.opacity))
+            }
         }
 
         // The even rounding is Kotlin's `width and 1.inv()`. It runs AFTER the `> 0` test, because
@@ -120,11 +126,32 @@ enum ComposeSpecParser {
         return ComposeSpec(jobId: d.jobId,
                            pendingPostId: d.pendingPostId,
                            clips: clips,
+                           tracks: tracks,
                            output: output,
                            filter: d.filter,
                            overlays: overlays,
                            audio: audio,
                            posterAtMs: d.posterAtMs)
+    }
+
+    /// One decoded clip with its clamps applied. Shared by the base track and every extra layer,
+    /// because a clip on the second layer is the same kind of thing as one on the first: the day
+    /// the two are read differently is the day one half of a split screen renders differently from
+    /// the other.
+    private static func clip(_ c: ClipDTO) -> ComposeClip {
+        ComposeClip(key: c.key,
+                    uri: c.uri,
+                    inMs: c.inMs,
+                    outMs: c.outMs,
+                    speed: clamp(c.speed, minSpeed, maxSpeed),
+                    volume: clamp01(c.volume),
+                    muted: c.muted,
+                    // Only the exact string "cover" selects cover. A typo, or "COVER", silently
+                    // renders contain, exactly as Android's `== "cover"` test does. Rejecting it
+                    // would fail specs the Android build accepts.
+                    fit: c.fit == Fit.cover.rawValue ? .cover : .contain,
+                    crop: clampRect(c.crop),
+                    rect: clampRect(c.rect))
     }
 }
 
@@ -135,6 +162,27 @@ enum ComposeSpecParser {
 /// only the second line of defence, but it is the one that keeps a NaN out of a `CMTime`.
 private func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 private func clamp01(_ v: Double) -> Double { clamp(v, 0, 1) }
+
+/// Pulls a decoded rectangle into the unit square. `w` and `h` were already rejected if they were
+/// not positive, which is the split this parser draws everywhere: a shape error is thrown, a value
+/// that is merely out of range is clamped.
+///
+/// The order is x and y first, then w and h against whatever room is left, so a rectangle that
+/// overhangs the right edge keeps its position and loses its overhang rather than sliding back
+/// inwards. Reversing it would silently move a crop the customer placed.
+///
+/// An ABSENT rectangle stays absent. The renderer tests these two optionals for nil to decide
+/// whether a clip needs the new geometry at all, so substituting a 0,0,1,1 here would put every
+/// spec ever written onto the reframing path for no reason.
+private func clampRect(_ r: RectDTO?) -> ComposeRect? {
+    guard let r else { return nil }
+    let x = clamp01(r.x)
+    let y = clamp01(r.y)
+    // A degenerate x of exactly 1 leaves no room and takes w to 0. That is a rectangle with no
+    // picture in it rather than an error, and `Placement` already answers a zero-sized source with
+    // a black frame, which is the same thing both engines do for a clip that contributes nothing.
+    return ComposeRect(x: x, y: y, w: min(r.w, 1 - x), h: min(r.h, 1 - y))
+}
 
 // MARK: - org.json-lenient readers
 
@@ -191,6 +239,25 @@ private extension KeyedDecodingContainer {
         guard contains(key) else { return false }
         return (try? decodeNil(forKey: key)) == false
     }
+
+    /// `crop` and `rect` are the same shape with the same failures, so they share one reader.
+    /// `name` is the field's own name and is spliced in front of the leaf path the rectangle threw,
+    /// which is how `w` becomes `crop.w` before the clip loop turns it into `clips[0].crop.w`.
+    ///
+    /// Absent, or explicitly null, is nil and stays nil all the way to the renderer. So is a value
+    /// that is present but not an object at all: Android's `optJSONObject` returns null for a
+    /// number or a string there, and a null rectangle means the whole frame, so this is the one
+    /// rectangle failure that is deliberately not an error.
+    func rect(_ key: Key, _ name: String) throws -> RectDTO? {
+        guard has(key) else { return nil }
+        do {
+            return try decode(RectDTO.self, forKey: key)
+        } catch let e as SpecError {
+            throw SpecError("\(name)\(e.path.isEmpty ? "" : ".\(e.path)")")
+        } catch {
+            return nil
+        }
+    }
 }
 
 // MARK: - Wire DTOs
@@ -201,6 +268,9 @@ private struct ComposeSpecDTO: Decodable {
     let jobId: String
     let pendingPostId: String
     let clips: [ClipDTO]
+    /// nil for a spec with no `tracks` key, which is not the same thing as an empty array and is
+    /// carried all the way to `ComposeSpec.tracks` as itself.
+    let tracks: [TrackDTO]?
     let output: OutputDTO?
     let filter: [FilterOp]
     let overlays: [OverlayDTO]
@@ -213,7 +283,7 @@ private struct ComposeSpecDTO: Decodable {
     let heldError: SpecError?
 
     private enum K: String, CodingKey {
-        case jobId, pendingPostId, clips, output, filter, overlays, audio, posterAtMs
+        case jobId, pendingPostId, clips, tracks, output, filter, overlays, audio, posterAtMs
     }
 
     init(from decoder: Decoder) throws {
@@ -246,6 +316,36 @@ private struct ComposeSpecDTO: Decodable {
             }
         }
         clips = decodedClips
+
+        // Read between `clips` and `output`, where it sits on the wire, and thrown at once rather
+        // than held back: a layer's clips are the same kind of thing as the base track's, so a bad
+        // one earns the same treatment as a bad base clip.
+        //
+        // A `tracks` that is present but is not an array at all reads as ABSENT, which is what
+        // Android's `optJSONArray` answers for it. Absent is a legal spec here, unlike `clips`, so
+        // there is nothing to report and nothing a caller could act on.
+        var decodedTracks: [TrackDTO]?
+        if var trackArray = try? c.nestedUnkeyedContainer(forKey: .tracks) {
+            // The COUNT before a single track is parsed, exactly as the overlays' cap is, so a spec
+            // sending three layers whose first is also broken reports the cap and not the layer.
+            // The cap counts the base track, which is why it is one fewer here.
+            if (trackArray.count ?? 0) > ComposeSpecParser.maxVideoTracks - 1 {
+                throw SpecError("tracks")
+            }
+            var decoded: [TrackDTO] = []
+            while !trackArray.isAtEnd {
+                let i = trackArray.currentIndex
+                do {
+                    decoded.append(try trackArray.decode(TrackDTO.self))
+                } catch let e as SpecError {
+                    throw SpecError("tracks[\(i)]\(e.path.isEmpty ? "" : ".\(e.path)")")
+                } catch {
+                    throw SpecError("tracks[\(i)]")
+                }
+            }
+            decodedTracks = decoded
+        }
+        tracks = decodedTracks
 
         // nil also covers "present but not an object". `validate` turns it into `output`.
         output = try? c.decode(OutputDTO.self, forKey: .output)
@@ -322,8 +422,13 @@ private struct ClipDTO: Decodable {
     let volume: Double
     let muted: Bool
     let fit: String
+    /// Raw, not yet clamped: `validate` does that, in the same pass that clamps speed and volume.
+    let crop: RectDTO?
+    let rect: RectDTO?
 
-    private enum K: String, CodingKey { case key, uri, inMs, outMs, speed, volume, muted, fit }
+    private enum K: String, CodingKey {
+        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)   // an element that is not an object throws here
@@ -342,6 +447,89 @@ private struct ClipDTO: Decodable {
         volume = c.double(.volume, 1)
         muted = c.flag(.muted, false)
         fit = c.string(.fit)
+        // Last, and in wire order, so that a clip which is wrong in both an old field and a new one
+        // still reports the old field. Nothing before this line has changed meaning.
+        crop = try c.rect(.crop, "crop")
+        rect = try c.rect(.rect, "rect")
+    }
+}
+
+/// `ComposeClip.crop` and `ComposeClip.rect` on the wire. Normalised 0...1, TOP-LEFT origin, y down.
+///
+/// It throws the leaf path only (`w`, `h`), because a rectangle cannot see which field it hangs off
+/// any more than a clip can see its own index; the container's `rect` reader splices the name in.
+private struct RectDTO: Decodable {
+    let x: Double
+    let y: Double
+    let w: Double
+    let h: Double
+
+    private enum K: String, CodingKey { case x, y, w, h }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        // `double` reads through `number`, which answers nil for a missing key, a null, a string and
+        // for NaN or an infinity alike, so the 0 fallback is what every non-finite value collapses
+        // to. For x and y that 0 is the sane default and is clamped anyway; for w and h it fails the
+        // test below, which is how "the rectangle has no size" and "the rectangle is not a number"
+        // end up reporting the same field, exactly as `wPx` does for an overlay.
+        x = c.double(.x, 0)
+        y = c.double(.y, 0)
+        w = c.double(.w, 0)
+        if w <= 0 { throw SpecError("w") }
+        h = c.double(.h, 0)
+        if h <= 0 { throw SpecError("h") }
+    }
+}
+
+/// `ComposeTrack` on the wire. Its clips decode exactly as the base track's do and throw the same
+/// leaf paths, which this splices an index into before the container splices the layer's own: a bad
+/// clip on a layer reads `tracks[0].clips[1].outMs`.
+private struct TrackDTO: Decodable {
+    let id: String
+    let clips: [ClipDTO]
+    let startMs: Int64
+    let z: Int
+    let opacity: Double
+
+    private enum K: String, CodingKey { case id, clips, startMs, z, opacity }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        id = c.string(.id)
+        if id.isEmpty { throw SpecError("id") }
+
+        // Missing, not an array, and empty all report the bare `clips` path, exactly as the base
+        // track's do. An empty layer draws nothing and the editor drops it rather than carrying it
+        // around, so one arriving here is a manifest that was already wrong.
+        guard var array = try? c.nestedUnkeyedContainer(forKey: .clips), (array.count ?? 0) > 0 else {
+            throw SpecError("clips")
+        }
+        var decoded: [ClipDTO] = []
+        while !array.isAtEnd {
+            let i = array.currentIndex
+            do {
+                decoded.append(try array.decode(ClipDTO.self))
+            } catch let e as SpecError {
+                throw SpecError("clips[\(i)]\(e.path.isEmpty ? "" : ".\(e.path)")")
+            } catch {
+                throw SpecError("clips[\(i)]")
+            }
+        }
+        clips = decoded
+
+        // Clamped to zero rather than rejected, which is not this file's instinct for a timeline
+        // that has been got wrong but IS what Android does, and parity beats instinct here: this
+        // parser exists to throw the exact error Android throws for the same payload, and an error
+        // Android never throws is a spec one phone posts and the other refuses.
+        startMs = max(0, c.long(.startMs, 0))
+
+        // Clamped, in this file's usual direction for a value that is merely out of range. Zero is
+        // the base track's own z and a tie breaks on spec order with the base first, so a negative
+        // one lands the layer immediately above the base rather than underneath it, where nothing
+        // may go: the base is the bottom of the frame.
+        z = max(0, c.int(.z, 0))
+        opacity = c.double(.opacity, 1)
     }
 }
 

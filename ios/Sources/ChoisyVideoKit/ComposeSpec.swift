@@ -13,6 +13,20 @@ import Foundation
 /// How a source frame is fitted into the output rectangle when the aspect ratios differ.
 enum Fit: String, Sendable { case contain, cover }
 
+/// A rectangle in normalised coordinates: 0...1 with a TOP-LEFT origin and y pointing DOWN, which
+/// is the web's system and the one `ComposeOverlay.cx/cy` already uses. Core Image is y-UP, so
+/// `Placement` is the one place these get flipped, exactly as `OverlayBitmap` is for an overlay.
+///
+/// The parser guarantees `w > 0`, `h > 0` and `x + w <= 1`, `y + h <= 1`, so a consumer never has to
+/// range check one. Doubles rather than CGFloat because everything on the wire is a Double here and
+/// the conversion belongs at the one point of use.
+struct ComposeRect: Sendable {
+    let x: Double
+    let y: Double
+    let w: Double
+    let h: Double
+}
+
 struct ComposeClip: Sendable {
     /// The SEGMENT id from the edit manifest, not the host clip key. It is echoed back verbatim as
     /// `clipKey` on a failure and JS maps it back to its own clip with `hostKeyForSegment`.
@@ -24,6 +38,44 @@ struct ComposeClip: Sendable {
     let volume: Double         // already clamped 0...1
     let muted: Bool
     let fit: Fit
+    /// The part of the ORIENTED source frame to keep, as a fraction of it. Applied BEFORE `fit`, so
+    /// `fit` measures the cropped picture and not the original.
+    ///
+    /// nil is the whole frame, which is what every spec written before this field meant. It stays
+    /// nil rather than being filled in with a 0,0,1,1 default on the way through the parser: nil is
+    /// exactly what the compositor's fast path tests for, and a default written here would quietly
+    /// take every one of those specs off it.
+    let crop: ComposeRect?
+    /// Where the cropped picture is drawn on the OUTPUT frame. nil is the whole frame and `fit`
+    /// then letterboxes as it always has; present, `fit` applies WITHIN this rectangle, which is
+    /// the "frame" as far as contain and cover are concerned. nil for the same reason as `crop`.
+    let rect: ComposeRect?
+}
+
+/// One extra layer of video over `ComposeSpec.clips`, drawn in its clips' own rectangles.
+///
+/// Its clips are a flat SEQUENCE like the base track's: they play one after another and never
+/// overlap EACH OTHER. Overlap happens BETWEEN tracks, which is the whole reason a track exists
+/// rather than a start time on the clip - one track maps exactly onto one
+/// `AVMutableCompositionTrack`, and a composition track holds segments that do not overlap, so any
+/// other reading would have to be packed into several tracks in here and the packing is precisely
+/// the thing two engines could quietly disagree about.
+///
+/// Where a layer sits on the frame is not a property of the track: it is each clip's own `rect`,
+/// which this engine already draws. A layout preset is a pair of rectangles and nothing more.
+struct ComposeTrack: Sendable {
+    /// The layer's id from the manifest. Nothing in the render reads it; it is carried and checked
+    /// so that a spec which cannot name its own layers fails at the parser rather than later.
+    let id: String
+    /// Never empty: the parser rejects a layer with nothing on it.
+    let clips: [ComposeClip]
+    /// Where this layer's FIRST clip lands on the OUTPUT timeline. Before that instant the layer
+    /// contributes nothing at all - not a black frame, nothing - and the base shows through.
+    let startMs: Int64
+    /// Higher draws later, so on top. The base track is 0 and a tie breaks on spec order.
+    let z: Int
+    /// 0...1 over the whole layer, already clamped, multiplied into whatever each clip carries.
+    let opacity: Double
 }
 
 struct ComposeOutput: Sendable {
@@ -96,7 +148,18 @@ struct ComposeAudio: Sendable {
 struct ComposeSpec: Sendable {
     let jobId: String
     let pendingPostId: String
+    /// The BASE track. It starts at 0 and ITS length is the output's length.
     let clips: [ComposeClip]
+    /// Extra layers drawn over `clips`, bottom to top by `z`. One running past the base is CUT, and
+    /// one ending early leaves the base showing underneath.
+    ///
+    /// nil is a spec with no `tracks` key at all, which is every spec written before this feature
+    /// and every spec a single-layer edit still sends. It stays nil rather than becoming an empty
+    /// array for the same reason `ComposeClip.crop` stays nil: the builder asks this ONCE to decide
+    /// whether it has two timelines to merge, and a default written here would put every spec ever
+    /// sent onto the merging path. An empty array means the same thing and takes the same path; the
+    /// two are told apart only because the wire tells them apart.
+    let tracks: [ComposeTrack]?
     let output: ComposeOutput
     /// A bare array, exactly as `definitions.ts` declares it. There is no wrapper object with an
     /// `ops` key; one would fail to decode every spec the app actually sends.
