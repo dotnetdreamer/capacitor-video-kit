@@ -41,9 +41,14 @@ export interface RasterContext {
  * A layer drawn to a transparent PNG.
  *
  * `wPx`/`hPx` are the size the layer covers on the OUTPUT frame. The PNG itself may be smaller -
- * a full-frame effect is drawn at half resolution to keep the bridge payload and the native bitmap
- * budget down - and the native side scales it up to `wPx x hPx`. The preview sizes the image by
+ * an effect made of gradients or grain is drawn at half resolution to keep the bridge payload and
+ * the native bitmap budget down, and a layer pinched past the bitmap cap is drawn smaller still -
+ * and the native side scales it up to `wPx x hPx`. The preview sizes the image by
  * `wPx / output.width` of its own width, so it does the same.
+ *
+ * These are the size of the ARTWORK, not of the canvas it happened to be drawn on: a sticker or an
+ * emoji has its empty margin trimmed off both sides of each axis and `wPx`/`hPx` shrink with it, so
+ * the selection box the editor draws is the picture the customer sees.
  */
 export interface RasterisedOverlay {
   /** `data:image/png;base64,...` */

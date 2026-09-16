@@ -214,6 +214,14 @@ export interface ThumbnailsOptions {
   timesMs: number[];
   /** Longest edge of the produced JPEG. */
   maxHeight: number;
+  /**
+   * Cuts the frame that is actually at each time instead of the nearest KEYFRAME. Off by default,
+   * because it costs what it is worth: a keyframe seek is a jump, while a precise one decodes every
+   * frame from the keyframe before the time asked for. Cameras write a keyframe every one or two
+   * seconds, so without this a filmstrip at one frame per second shows each frame once or twice
+   * over, and with it a whole strip costs roughly one decode of the clip.
+   */
+  precise?: boolean;
 }
 
 export interface ThumbnailsResult {

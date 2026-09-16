@@ -37,6 +37,15 @@ object JobFolders {
      */
     const val DONE_TTL_MS = 24L * 60 * 60 * 1000
 
+    /**
+     * A folder with no marker at all is swept after this long. The marker is written when a post is
+     * created, so an unmarked folder is either a post still waiting behind a Retry button - kept for
+     * a week, far longer than any retry anyone comes back to - or the leftovers of an editor render
+     * whose app was killed before it could clean up after itself, which would otherwise sit on the
+     * customer's phone for good.
+     */
+    const val ORPHAN_TTL_MS = 7L * 24 * 60 * 60 * 1000
+
     fun root(ctx: Context): File = File(ctx.filesDir, "pending-posts")
 
     fun dir(ctx: Context, pendingPostId: String): File = File(root(ctx), safeSegment(pendingPostId))
@@ -293,13 +302,31 @@ object JobFolders {
     fun sweep(ctx: Context, now: Long) {
         root(ctx).listFiles()?.forEach { folder ->
             if (!folder.isDirectory) return@forEach
-            val marker = File(folder, ".done")
-            if (marker.exists() && now - marker.lastModified() > DONE_TTL_MS) {
+            if (isSweepable(folder, now)) {
                 if (!folder.deleteRecursively()) Log.w(TAG, "sweep could not delete ${folder.path}")
             }
         }
         sweepCache(thumbsCache(ctx), now)
         sweepCache(voiceCache(ctx), now)
+    }
+
+    /**
+     * A finished post's folder goes a day after it finished; an unmarked one only after a week, and
+     * the age counts from the newest file in it, so a folder someone is still adding to is never
+     * swept out from under them.
+     */
+    fun isSweepable(folder: File, now: Long): Boolean {
+        val marker = File(folder, ".done")
+        if (marker.exists()) return now - marker.lastModified() > DONE_TTL_MS
+        return now - newestModified(folder) > ORPHAN_TTL_MS
+    }
+
+    private fun newestModified(file: File): Long {
+        val children = file.listFiles()
+        if (children.isNullOrEmpty()) return file.lastModified()
+        return children.maxOf { child ->
+            maxOf(child.lastModified(), if (child.isDirectory) newestModified(child) else 0L)
+        }
     }
 
     private fun sweepCache(dir: File, now: Long) {

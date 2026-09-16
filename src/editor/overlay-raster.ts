@@ -18,7 +18,7 @@ import {
   type TextEffect,
   type TextOverlay,
 } from './edit-manifest';
-import { drawEffect } from './effects';
+import { drawEffect, effectRasterScale } from './effects';
 import type { RasterContext, RasterisedOverlay, TextStyleSpec } from './raster-context';
 
 export interface TextOverlayStyle {
@@ -623,14 +623,18 @@ async function rasteriseEmoji(emoji: string, scale: number, ctx: RasterContext):
   g.fillStyle = '#ffffff';
   g.fillText(emoji, side / 2 - (ink.right - ink.left) / 2, side / 2 + (ink.ascent - ink.descent) / 2);
 
-  return { png: toPng(canvas), wPx: side, hPx: side };
+  // The square box is deliberately larger than the glyph, and no two emoji fill it the same way, so
+  // what the layer ends up being is whatever was actually drawn.
+  return trimToInk(canvas, g, side, side);
 }
 
 async function rasteriseSticker(assetId: string, scale: number, ctx: RasterContext): Promise<RasterisedOverlay> {
   const url = ctx.stickerUrl(assetId);
   const image = await loadImage(url);
   const width = ctx.output.width * OVERLAY_BASE.sticker * scale;
-  return drawImageLayer(image, width, width / (intrinsicAspect(image, url) ?? 1), ctx);
+  // A sticker asset is drawn inside its own canvas with air around it, and that air is the layer's
+  // box until it is taken off.
+  return drawImageLayer(image, width, width / (intrinsicAspect(image, url) ?? 1), ctx, true);
 }
 
 async function rasteriseImage(overlay: ImageOverlay, ctx: RasterContext): Promise<RasterisedOverlay> {
@@ -638,22 +642,35 @@ async function rasteriseImage(overlay: ImageOverlay, ctx: RasterContext): Promis
   const image = await loadImage(url);
   const width = ctx.output.width * OVERLAY_BASE.image * layerScale(overlay.scale);
   const aspect = intrinsicAspect(image, url) ?? (overlay.aspect > 0 && Number.isFinite(overlay.aspect) ? overlay.aspect : 1);
-  return drawImageLayer(image, width, width / aspect, ctx);
+  // Not trimmed: a photo's frame is the photo, and a customer who has a picture with transparent
+  // edges put it there on purpose - cropping it would silently change the picture they chose.
+  return drawImageLayer(image, width, width / aspect, ctx, false);
 }
 
 /**
- * Effects are drawn at half the output resolution: they are soft by nature (gradients, glows,
- * grain that is meant to be coarse), and a full-frame PNG at full size would quadruple what crosses
- * the bridge and what the native side has to hold. `wPx`/`hPx` are the full frame. The layer's
- * opacity is its strength and is applied where the bitmap is placed, not baked in here.
+ * How big an effect's bitmap is drawn is the effect's own business: the soft looks (gradients,
+ * glows, grain that is meant to be coarse) come at half the output resolution, because a full-frame
+ * PNG at full size would quadruple what crosses the bridge and what the native side has to hold for
+ * nothing anyone can see, while the ones made of line art - frames, sprocket holes, a neon tube,
+ * the VHS lettering - are drawn at full size, because doubling those up leaves a visibly soft edge.
+ * See [effectRasterScale]. Either way `wPx`/`hPx` are the full frame, so the native side and the
+ * preview stretch whatever they are given back over the whole picture. The layer's opacity is its
+ * strength and is applied where the bitmap is placed, not baked in here.
  */
 function rasteriseEffect(effectId: string, ctx: RasterContext): RasterisedOverlay {
-  const { canvas, g } = createCanvas(ctx.output.width / 2, ctx.output.height / 2);
+  const detail = effectRasterScale(effectId);
+  const { canvas, g } = createCanvas(ctx.output.width * detail, ctx.output.height * detail);
   drawEffect(g, effectId, canvas.width, canvas.height);
   return { png: toPng(canvas), wPx: ctx.output.width, hPx: ctx.output.height };
 }
 
-function drawImageLayer(image: HTMLImageElement, width: number, height: number, ctx: RasterContext): RasterisedOverlay {
+function drawImageLayer(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+  ctx: RasterContext,
+  trim: boolean,
+): RasterisedOverlay {
   const wPx = Math.max(1, Math.round(width));
   const hPx = Math.max(1, Math.round(height));
   const k = bitmapRatio(wPx, hPx, ctx);
@@ -661,7 +678,7 @@ function drawImageLayer(image: HTMLImageElement, width: number, height: number, 
   g.imageSmoothingEnabled = true;
   g.imageSmoothingQuality = 'high';
   g.drawImage(image, 0, 0, canvas.width, canvas.height);
-  return { png: toPng(canvas), wPx, hPx };
+  return trim ? trimToInk(canvas, g, wPx, hPx) : { png: toPng(canvas), wPx, hPx };
 }
 
 /**
@@ -750,6 +767,119 @@ function toPng(canvas: HTMLCanvasElement): string {
 function bitmapRatio(width: number, height: number, ctx: RasterContext): number {
   const cap = Math.max(ctx.output.width, ctx.output.height) * MAX_BITMAP_SIDE_RATIO;
   return Math.min(1, cap / Math.max(1, width, height));
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Trimming                                                                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * Rows or columns read in one `getImageData` call. One call per line would be thousands of calls on
+ * a sticker pinched up large, and the whole bitmap in one call would allocate tens of megabytes on
+ * a phone; a strip is neither.
+ */
+const TRIM_SCAN_STRIP = 32;
+
+/**
+ * Takes the empty margin off a layer's bitmap and shrinks `wPx`/`hPx` with it, so the box the editor
+ * draws a selection around and the render places is the artwork rather than the file it came in.
+ *
+ * The crop is the SAME on both sides of each axis - the smaller of the two margins - because a
+ * layer is anchored by its centre (`cx`/`cy`): taking more off one side than the other would slide
+ * the artwork across the frame and put the render somewhere the preview never showed. Ink is any
+ * pixel that is not fully transparent, so a glow, a drop shadow or an anti-aliased edge counts and
+ * is kept whole.
+ *
+ * Falls back to the untrimmed bitmap whenever there is nothing to gain, whenever nothing was drawn
+ * at all (an empty layer still needs a box to hit-test), and whenever the pixels cannot be read -
+ * `getImageData` throws on a canvas an image from another origin has tainted.
+ */
+function trimToInk(
+  canvas: HTMLCanvasElement,
+  g: CanvasRenderingContext2D,
+  wPx: number,
+  hPx: number,
+): RasterisedOverlay {
+  const width = canvas.width;
+  const height = canvas.height;
+  const margin = emptyMargin(g, width, height);
+  if (!margin) return { png: toPng(canvas), wPx, hPx };
+
+  const kept = createCanvas(width - margin.x * 2, height - margin.y * 2);
+  // Whole pixels both ways, so this is a copy and not a resample: nothing is softened by the trim.
+  kept.g.drawImage(canvas, -margin.x, -margin.y);
+  canvas.width = 0;
+  canvas.height = 0;
+  // Measured before the PNG is taken, because taking it releases the canvas's pixels and with them
+  // its width and height.
+  const trimmed = {
+    wPx: Math.max(1, Math.round((wPx * kept.canvas.width) / width)),
+    hPx: Math.max(1, Math.round((hPx * kept.canvas.height) / height)),
+  };
+  return { png: toPng(kept.canvas), ...trimmed };
+}
+
+/**
+ * How many fully transparent pixels each axis can lose from BOTH of its edges, or null when there
+ * is nothing worth cropping. Reading stops at the first row or column with ink, so the work is
+ * proportional to the margin being removed and not to the bitmap.
+ */
+function emptyMargin(g: CanvasRenderingContext2D, width: number, height: number): { x: number; y: number } | null {
+  try {
+    const top = emptyLines(g, width, height, false, true);
+    // Nothing was drawn: there is no centre to keep and no artwork to tighten around.
+    if (top >= height) return null;
+    const bottom = emptyLines(g, width, height, false, false);
+    const left = emptyLines(g, width, height, true, true);
+    const right = emptyLines(g, width, height, true, false);
+    const x = Math.min(left, right);
+    const y = Math.min(top, bottom);
+    return x >= 1 || y >= 1 ? { x, y } : null;
+  } catch {
+    // A tainted canvas cannot be read back. The layer is still perfectly good, just not tightened.
+    return null;
+  }
+}
+
+/**
+ * The count of fully transparent lines at one edge: columns when `vertical`, rows otherwise, from
+ * the left/top when `leading` and from the right/bottom when not. Returns the whole side when every
+ * line is empty.
+ */
+function emptyLines(
+  g: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  vertical: boolean,
+  leading: boolean,
+): number {
+  const lines = vertical ? width : height;
+  const across = vertical ? height : width;
+  let empty = 0;
+  while (empty < lines) {
+    const take = Math.min(TRIM_SCAN_STRIP, lines - empty);
+    const at = leading ? empty : lines - empty - take;
+    const strip = vertical ? g.getImageData(at, 0, take, height) : g.getImageData(0, at, width, take);
+    const data = strip.data;
+    for (let i = 0; i < take; i++) {
+      // Inwards from the edge being measured, which is the far end of the strip when trailing.
+      const line = leading ? i : take - 1 - i;
+      // A row's pixels are next to each other; a column's are one row apart.
+      const first = vertical ? line : line * width;
+      const step = vertical ? take : 1;
+      if (hasInk(data, first, step, across)) return empty;
+      empty++;
+    }
+  }
+  return lines;
+}
+
+/** Whether any of `count` pixels, starting at `first` and `step` pixels apart, is not transparent. */
+function hasInk(data: Uint8ClampedArray, first: number, step: number, count: number): boolean {
+  for (let i = 0, at = first * 4 + 3; i < count; i++, at += step * 4) {
+    if (data[at] !== 0) return true;
+  }
+  return false;
 }
 
 let scratch: CanvasRenderingContext2D | null = null;

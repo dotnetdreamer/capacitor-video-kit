@@ -28,7 +28,21 @@ type Drawer = (g: CanvasRenderingContext2D, w: number, h: number, random: () => 
 
 type Stops = ReadonlyArray<readonly [number, string]>;
 
+/**
+ * How much of the output frame's resolution a full-frame effect actually needs.
+ *
+ * `soft` is a gradient, a glow or grain: nothing in it has an edge, so it is drawn at half the
+ * output size and stretched back up natively, which quarters both what crosses the bridge and what
+ * the render has to hold for no difference anyone can see. `line` is the opposite - a frame's edge,
+ * a sprocket hole, a neon tube, a crosshair, lettering - where doubling a half-size bitmap up leaves
+ * a visibly soft edge in the preview and in the posted video, so those are drawn at full size and
+ * pay for it in bytes.
+ */
+type EffectDetail = 'soft' | 'line';
+
 interface EffectDefinition extends EffectPreset {
+  /** Defaults to `soft`; see [EffectDetail]. */
+  detail?: EffectDetail;
   draw: Drawer;
 }
 
@@ -136,6 +150,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'scratches',
     label: 'Scratches',
     category: 'film',
+    detail: 'line',
     draw: (g, w, h, random) => {
       dust(g, w, h, random, 90, 7);
       scratches(g, w, h, random, 6, 0.55);
@@ -145,6 +160,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'vhs',
     label: 'VHS',
     category: 'film',
+    detail: 'line',
     draw: (g, w, h, random) => {
       const m = Math.min(w, h);
       g.fillStyle = 'rgba(60,20,110,0.08)';
@@ -210,6 +226,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'cinema',
     label: 'Cinema',
     category: 'film',
+    detail: 'line',
     draw: (g, w, h) => {
       const bar = Math.round(h * CINEMA_BAR);
       g.fillStyle = '#000000';
@@ -380,6 +397,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'polaroid',
     label: 'Polaroid',
     category: 'frame',
+    detail: 'line',
     draw: (g, w, h) => {
       const side = w * 0.065;
       const bottom = h * 0.16;
@@ -410,6 +428,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'film-strip',
     label: 'Film strip',
     category: 'frame',
+    detail: 'line',
     draw: (g, w, h) => {
       const band = w * 0.12;
       const holeW = band * 0.42;
@@ -439,6 +458,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'rounded',
     label: 'Rounded',
     category: 'frame',
+    detail: 'line',
     draw: (g, w, h) => {
       const m = Math.min(w, h);
       const t = m * 0.06;
@@ -453,6 +473,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'neon',
     label: 'Neon',
     category: 'frame',
+    detail: 'line',
     draw: (g, w, h) => {
       const m = Math.min(w, h);
       const inset = m * 0.075;
@@ -497,6 +518,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'hearts',
     label: 'Hearts',
     category: 'frame',
+    detail: 'line',
     draw: (g, w, h) => {
       const m = Math.min(w, h);
       // [x, y] as fractions of the frame, size as a fraction of its shorter side, tilt in degrees.
@@ -519,6 +541,7 @@ const EFFECTS: EffectDefinition[] = [
     id: 'viewfinder',
     label: 'Viewfinder',
     category: 'frame',
+    detail: 'line',
     draw: (g, w, h) => {
       const m = Math.min(w, h);
       const inset = m * 0.08;
@@ -591,6 +614,16 @@ export const EFFECT_PRESETS: EffectPreset[] = EFFECTS.map(({ id, label, category
 export function effectPreset(id: string): EffectPreset | null {
   const effect = BY_ID.get(id);
   return effect ? { id: effect.id, label: effect.label, category: effect.category } : null;
+}
+
+/**
+ * The fraction of the output frame this effect's bitmap is drawn at: 1 for line art, 0.5 for the
+ * soft looks (see [EffectDetail]). Kept here rather than in the rasteriser because it is a property
+ * of the drawing, and the effect a newer build added is not one this one can judge - an unknown id
+ * gets the cheap size, which is also what it would have got before this existed.
+ */
+export function effectRasterScale(effectId: string): number {
+  return BY_ID.get(effectId)?.detail === 'line' ? 1 : 0.5;
 }
 
 /**

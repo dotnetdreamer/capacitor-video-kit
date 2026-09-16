@@ -73,8 +73,17 @@ object Thumbnailer {
      * One JPEG per requested time, in order. The contract promises the arrays line up, so a time
      * that yields no frame reuses a neighbour rather than shortening the result - a filmstrip with
      * a repeated tile reads as a still moment; one with a missing tile reads as a bug.
+     *
+     * @param precise cuts the frame at each time rather than the nearest keyframe; see [frameOption]
+     *   for what that costs and why it is the caller's decision.
      */
-    fun thumbnails(ctx: Context, uri: String, timesMs: List<Long>, maxHeight: Int): List<String> {
+    fun thumbnails(
+        ctx: Context,
+        uri: String,
+        timesMs: List<Long>,
+        maxHeight: Int,
+        precise: Boolean = false,
+    ): List<String> {
         if (timesMs.isEmpty()) return emptyList()
         val height = maxHeight.coerceIn(16, 1080)
         val cacheDir = JobFolders.thumbsCache(ctx).apply { mkdirs() }
@@ -86,12 +95,12 @@ object Thumbnailer {
             try {
                 retriever.open(ctx, uri)
                 for (timeMs in timesMs) {
-                    val file = File(cacheDir, "$sourceKey-$timeMs-$height.jpg")
+                    val file = File(cacheDir, cacheName(sourceKey, timeMs, height, precise))
                     if (file.exists() && file.length() > 0L) {
                         out += Uri.fromFile(file).toString()
                         continue
                     }
-                    val frame = frameAt(retriever, timeMs, height)
+                    val frame = frameAt(retriever, timeMs, height, precise)
                     if (frame == null) {
                         out += null
                         continue
@@ -119,36 +128,70 @@ object Thumbnailer {
         }
     }
 
-    private fun frameAt(retriever: MediaMetadataRetriever, timeMs: Long, maxHeight: Int): Bitmap? {
+    private fun frameAt(
+        retriever: MediaMetadataRetriever,
+        timeMs: Long,
+        maxHeight: Int,
+        precise: Boolean,
+    ): Bitmap? {
         val timeUs = timeMs * 1000L
         return try {
-            if (Build.VERSION.SDK_INT >= 27) {
-                // Scales during decode, so a 4K source never materialises a full-size bitmap.
-                retriever.getScaledFrameAtTime(
-                    timeUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    maxHeight * 2,
-                    maxHeight,
-                )
-            } else {
-                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    ?.let { full ->
-                        val scale = maxHeight.toFloat() / full.height.toFloat()
-                        val scaled = Bitmap.createScaledBitmap(
-                            full,
-                            (full.width * scale).toInt().coerceAtLeast(1),
-                            maxHeight,
-                            true,
-                        )
-                        if (scaled !== full) full.recycle()
-                        scaled
-                    }
-            }
+            val frame = grab(retriever, timeUs, maxHeight, frameOption(precise))
+            // A precise seek is the one that can come back with nothing - past the last frame, or
+            // where the container's index is not good enough to decode forward from. The keyframe
+            // it would have landed on is a better answer than a gap the caller has to paper over.
+            if (frame == null && precise) grab(retriever, timeUs, maxHeight, frameOption(false)) else frame
         } catch (e: Exception) {
             Log.w(TAG, "no frame at ${timeMs}ms: ${e.message}")
             null
         }
     }
+
+    private fun grab(
+        retriever: MediaMetadataRetriever,
+        timeUs: Long,
+        maxHeight: Int,
+        option: Int,
+    ): Bitmap? =
+        if (Build.VERSION.SDK_INT >= 27) {
+            // Scales during decode, so a 4K source never materialises a full-size bitmap.
+            retriever.getScaledFrameAtTime(timeUs, option, maxHeight * 2, maxHeight)
+        } else {
+            retriever.getFrameAtTime(timeUs, option)?.let { full ->
+                val scale = maxHeight.toFloat() / full.height.toFloat()
+                val scaled = Bitmap.createScaledBitmap(
+                    full,
+                    (full.width * scale).toInt().coerceAtLeast(1),
+                    maxHeight,
+                    true,
+                )
+                if (scaled !== full) full.recycle()
+                scaled
+            }
+        }
+
+    /**
+     * Which frame a seek settles on.
+     *
+     * CLOSEST_SYNC is a jump straight to a keyframe and costs one decode, but cameras write a
+     * keyframe only every one or two seconds, so several nearby times all land on the same picture -
+     * a filmstrip at one frame per second then shows each frame twice over. CLOSEST decodes every
+     * frame from that keyframe up to the time asked for instead, so one seek costs as many decodes
+     * as there are frames since the last keyframe: about thirty on a 30fps clip with a one-second
+     * keyframe interval. Cutting a whole strip precisely therefore costs roughly one decode of the
+     * clip, which is why it is the caller's choice and not the default.
+     */
+    internal fun frameOption(precise: Boolean): Int =
+        if (precise) MediaMetadataRetriever.OPTION_CLOSEST else MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+
+    /**
+     * Where one frame is cached. Precise frames are kept under their own name because they are a
+     * different picture at the same time - a strip asked for precisely must not be served the
+     * keyframes a previous request left behind, or the other way round - and the default name is
+     * left exactly as it was, so the tiles already on disk are still found.
+     */
+    internal fun cacheName(sourceKey: String, timeMs: Long, maxHeight: Int, precise: Boolean): String =
+        "$sourceKey-$timeMs-$maxHeight${if (precise) "-p" else ""}.jpg"
 
     /** Replaces nulls with the nearest neighbour, and falls back to a 1x1 black tile. */
     private fun fillGaps(uris: List<String?>, cacheDir: File): List<String> {

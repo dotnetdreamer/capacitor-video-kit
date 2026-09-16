@@ -56,7 +56,7 @@ object CompositionBuilder {
     ): Composition {
         val output = plan.spec.output
 
-        val clipItems = plan.clips.map { editedClip(it, output) }
+        val clipItems = plan.clips.map { editedClip(it, output, plan.colorMatrix) }
         val videoSequence = if (plan.videoSeqHasAudio) {
             EditedMediaItemSequence.withAudioAndVideoFrom(clipItems)
         } else {
@@ -76,9 +76,9 @@ object CompositionBuilder {
             output.height,
             Presentation.LAYOUT_SCALE_TO_FIT,
         )
-        // Colour before overlays: the overlays were rasterised in final colours and must not be
-        // filtered along with the video.
-        compositionEffects += ColorMatrixEffect(plan.colorMatrix ?: ColorMatrix.IDENTITY, progressTap)
+        // The colour itself is applied per clip (see editedClip); this identity pass is only the
+        // progress tap, and it sits before the overlays like the colour did.
+        compositionEffects += ColorMatrixEffect(ColorMatrix.IDENTITY, progressTap)
         overlays.chunked(OVERLAYS_PER_EFFECT).forEach { chunk ->
             compositionEffects += OverlayEffect(ImmutableList.copyOf(chunk))
         }
@@ -129,7 +129,7 @@ object CompositionBuilder {
 
     /* ---------------------------------------------------------------------------------------- */
 
-    private fun editedClip(planned: RenderPlan.PlannedClip, output: Output): EditedMediaItem {
+    private fun editedClip(planned: RenderPlan.PlannedClip, output: Output, colorMatrix: ColorMatrix?): EditedMediaItem {
         val clip = planned.clip
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(clip.uri))
@@ -148,7 +148,12 @@ object CompositionBuilder {
                 listOf(GainProcessor(RampGainProvider(level = planned.gain)))
             }
 
-        val videoEffects: List<Effect> = listOf(
+        // The colour goes on the picture BEFORE Presentation letterboxes it. Applied to the finished
+        // frame, a filter's tint or fade coloured the black bars of every clip that is not 9:16 -
+        // brown bars under "Golden", grey ones under a fade - which the customer never asked for.
+        // A colour matrix commutes with Presentation's scaling, so the picture itself is unchanged.
+        val videoEffects: List<Effect> = listOfNotNull(
+            colorMatrix?.let { ColorMatrixEffect(it, progressTap = null) },
             Presentation.createForWidthAndHeight(output.width, output.height, layoutFor(clip.fit)),
         )
 

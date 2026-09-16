@@ -665,10 +665,13 @@ class VideoComposerPlugin : Plugin() {
             times += timesArray.optLong(i, 0L).coerceAtLeast(0L)
         }
         val maxHeight = call.getInt("maxHeight") ?: 160
+        // Off unless asked for: a precise seek decodes forward from the previous keyframe, which is
+        // worth paying for a short filmstrip and not for anything else (see [Thumbnailer.frameOption]).
+        val precise = call.getBoolean("precise", false) ?: false
 
         pluginScope.launch {
             try {
-                val uris = Thumbnailer.thumbnails(context.applicationContext, uri, times, maxHeight)
+                val uris = Thumbnailer.thumbnails(context.applicationContext, uri, times, maxHeight, precise)
                 val out = com.getcapacitor.JSArray()
                 uris.forEach { out.put(it) }
                 call.resolve(JSObject().put("uris", out))
