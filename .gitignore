@@ -3,3 +3,9 @@ node_modules/
 android/build/
 android/.gradle/
 .DS_Store
+
+# SwiftPM build output. `swift build` and `xcodebuild` both drop these next to Package.swift
+# when the package is resolved on its own; the app's CapApp-SPM is what pins versions for a build.
+.build/
+.swiftpm/
+Package.resolved
