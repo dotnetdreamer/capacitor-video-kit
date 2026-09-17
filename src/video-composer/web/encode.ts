@@ -1,285 +1,332 @@
+import { AudioBufferSource, BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality, WebMOutputFormat, type AudioCodec, type VideoCodec } from 'mediabunny';
+
 import type { ComposeOutput } from '../definitions';
 
 import type { MixedAudio } from './audio';
 import type { WebRenderSupport } from './capabilities';
-import { Mp4Writer } from './mp4';
 
 /**
- * WebCodecs on one side, the MP4 writer on the other.
+ * Turning finished frames into a file, by whichever of the two routes this browser has.
  *
- * The encoder is asynchronous and unbounded: `encode()` returns immediately and the encoded chunk
- * turns up in a callback whenever the platform gets round to it. Left alone, a render that can draw
- * frames faster than the encoder takes them - which is every render on a desktop - queues the whole
- * video in the encoder's input and runs the tab out of memory around the thirty-second mark. So
- * every frame goes through `awaitRoom`, which is the whole of the backpressure story.
+ * The muxing is Mediabunny's. It was written by hand here first - about seven hundred lines of
+ * ISO/IEC 14496-12 boxes - and that was the wrong call: a container is a large, fiddly, well
+ * specified thing that someone else already maintains, tests against real players and keeps current
+ * as codecs move. Mediabunny is zero-dependency and does the one job, so what is left in this file
+ * is the part that is actually ours: which engine to use, how audio is fed in, and the pacing the
+ * fallback needs.
  *
- * Audio is encoded in one pass at the end rather than interleaved with the picture. The mix is
- * already a flat array of samples by then, the AAC encoder is hundreds of times faster than real
- * time, and doing it separately keeps the frame loop - the part that takes minutes - free of a
- * second queue to watch.
+ * Both sinks are driven the same way - the render loop draws a frame and says when it belongs - so
+ * `render.ts` has no idea which one it has.
  */
 
-/** Frames the encoder may hold before the renderer waits. A handful is enough to keep it busy. */
-const MAX_QUEUED_FRAMES = 6;
+/** What the render loop pushes frames into. */
+export interface FrameSink {
+  /**
+   * The canvas AS IT IS NOW, at `timestampUs` on the output timeline. The caller has already drawn
+   * it; both sinks read the canvas they were opened with.
+   */
+  addFrame(timestampUs: number, durationUs: number): Promise<void>;
+  /** The finished file. Called once. */
+  finish(): Promise<SinkResult>;
+  /** Releases the encoder, on every path including a failed one. */
+  close(): Promise<void>;
+}
 
-/** One AAC access unit. The encoder wants 1024 samples per channel and will buffer to get them. */
-const AUDIO_CHUNK_FRAMES = 1024;
+export interface SinkResult {
+  blob: Blob;
+  hasAudio: boolean;
+  mimeType: string;
+}
 
-/** A keyframe every two seconds: what makes the finished video seekable without bloating it. */
-const KEYFRAME_SECONDS = 2;
+export interface SinkOptions {
+  output: ComposeOutput;
+  support: WebRenderSupport;
+  canvas: HTMLCanvasElement;
+  /** Everything audible, already mixed to the plan's exact length, or null for a silent post. */
+  mix: MixedAudio | null;
+  signal: AbortSignal;
+}
+
+/** Opens whichever sink this browser earned in `capabilities.ts`. */
+export async function openSink(options: SinkOptions): Promise<FrameSink> {
+  if (options.support.engine === 'recorder') return await RecorderSink.open(options);
+  return await MediabunnySink.open(options);
+}
+
+/** A second of audio per push, so the encoder is fed steadily rather than in one lump. */
+const AUDIO_CHUNK_SECONDS = 1;
+
+/* -------------------------------------------------------------------------------------------- */
+/* WebCodecs, through Mediabunny                                                                  */
+/* -------------------------------------------------------------------------------------------- */
+
+class MediabunnySink implements FrameSink {
+  private constructor(
+    private readonly output: Output,
+    private readonly video: CanvasSource,
+    private readonly audio: AudioBufferSource | null,
+    private readonly mix: MixedAudio | null,
+    private readonly mimeType: string,
+    private finished = false,
+  ) {}
+
+  static async open({ output, support, canvas, mix }: SinkOptions): Promise<MediabunnySink> {
+    const mp4 = support.container === 'mp4';
+    const file = new Output({
+      // `in-memory` fast start puts the index at the FRONT of the file, so the finished video starts
+      // playing before it has finished downloading. The target is memory anyway, so it costs nothing
+      // but the arithmetic.
+      format: mp4 ? new Mp4OutputFormat({ fastStart: 'in-memory' }) : new WebMOutputFormat(),
+      target: new BufferTarget(),
+    });
+
+    const video = new CanvasSource(canvas, {
+      codec: support.videoCodec as VideoCodec,
+      // The OBJECT form, and it matters: a bare number is a qualitative 0-to-1 level, so passing the
+      // bitrate straight in reads as a quality of six million and resolves to a quantizer of zero,
+      // which the encoder then refuses outright. The flow computes this bitrate (D2) and it is a
+      // bitrate.
+      quality: new Quality({ bitrate: output.videoBitrate }),
+      // Two seconds, which is what makes the finished video seekable without bloating it.
+      keyFrameInterval: 2,
+    });
+    file.addVideoTrack(video);
+
+    let audio: AudioBufferSource | null = null;
+    if (mix && support.audioCodec) {
+      audio = new AudioBufferSource({
+        codec: support.audioCodec as AudioCodec,
+        quality: new Quality({ bitrate: output.audioBitrate }),
+      });
+      file.addAudioTrack(audio);
+    }
+
+    await file.start();
+    return new MediabunnySink(file, video, audio, mix, mp4 ? 'video/mp4' : 'video/webm');
+  }
+
+  async addFrame(timestampUs: number, durationUs: number): Promise<void> {
+    // Awaited, and that is the whole of the backpressure story: the promise resolves when the
+    // encoder is ready for more, so a desktop that draws faster than it encodes cannot queue the
+    // entire video into memory.
+    await this.video.add(timestampUs / 1_000_000, durationUs / 1_000_000);
+  }
+
+  async finish(): Promise<SinkResult> {
+    const hasAudio = await this.addAudio();
+    await this.output.finalize();
+    this.finished = true;
+    const buffer = (this.output.target as BufferTarget).buffer;
+    if (!buffer) throw new Error('the muxer produced no file');
+    return { blob: new Blob([buffer], { type: this.mimeType }), hasAudio, mimeType: this.mimeType };
+  }
+
+  async close(): Promise<void> {
+    if (this.finished) return;
+    try {
+      await this.output.cancel();
+    } catch {
+      /* Already finalized, or never started. */
+    }
+  }
+
+  /**
+   * Feeds the mix in, a second at a time.
+   *
+   * A failure here does NOT fail the render. The picture is the post; losing the sound to a browser
+   * whose AAC encoder refused a perfectly ordinary configuration is bad, and losing the whole video
+   * to it is worse, so the failure is swallowed and the video is muxed silently. `hasAudio` on the
+   * result says which happened.
+   */
+  private async addAudio(): Promise<boolean> {
+    const mix = this.mix;
+    const audio = this.audio;
+    if (!mix || !audio) return false;
+    try {
+      const chunk = Math.round(AUDIO_CHUNK_SECONDS * mix.sampleRate);
+      for (let at = 0; at < mix.length; at += chunk) {
+        const frames = Math.min(chunk, mix.length - at);
+        const buffer = new AudioBuffer({
+          length: frames,
+          numberOfChannels: mix.channels.length,
+          sampleRate: mix.sampleRate,
+        });
+        for (let channel = 0; channel < mix.channels.length; channel++) {
+          // `slice`, not `subarray`: `copyToChannel` reads the whole view it is given, and a view
+          // over the mix would hand it the rest of the track as well.
+          buffer.copyToChannel((mix.channels[channel] ?? EMPTY).slice(at, at + frames), channel);
+        }
+        await audio.add(buffer);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
 
 const EMPTY = new Float32Array(0);
 
-export class Encoder {
-  private readonly writer = new Mp4Writer();
-  private readonly encoder: VideoEncoder;
-  private videoTrack = -1;
-  private frames = 0;
-  private failure: Error | null = null;
+/* -------------------------------------------------------------------------------------------- */
+/* MediaRecorder, for a browser with no WebCodecs                                                 */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The fallback, and it is honest about what it costs.
+ *
+ * `MediaRecorder` timestamps what it records by the WALL CLOCK, so a video can only be recorded at
+ * the speed it plays: a thirty-second post takes thirty seconds. There is no way around that - it is
+ * what the API is - and it is the reason this is the second choice rather than the first.
+ *
+ * Frames are pushed rather than sampled where the browser allows it. `captureStream(0)` hands back a
+ * track that captures only when asked, so the render draws a frame, waits until that frame's moment
+ * has actually arrived, and then asks. A browser without `requestFrame` gets `captureStream(fps)`
+ * and samples the canvas on its own; the pacing is the same either way, because the pacing is what
+ * makes the timing right.
+ */
+class RecorderSink implements FrameSink {
+  private chunks: Blob[] = [];
+  private startedAt = 0;
 
   private constructor(
-    private readonly output: ComposeOutput,
-    private readonly support: WebRenderSupport,
-  ) {
-    this.encoder = new VideoEncoder({
-      output: (chunk, metadata) => this.onVideoChunk(chunk, metadata),
-      error: error => {
-        // Remembered rather than thrown: this callback is not on any caller's stack, and a throw
-        // here would be an unhandled rejection with no job attached to it. The next frame, or
-        // `finish`, reports it where someone is listening.
-        this.failure ??= error instanceof Error ? error : new Error(String(error));
-      },
+    private readonly recorder: MediaRecorder,
+    private readonly track: CanvasCaptureMediaStreamTrack | null,
+    private readonly audio: { context: AudioContext; source: AudioBufferSourceNode } | null,
+    private readonly signal: AbortSignal,
+    private readonly hasAudio: boolean,
+  ) {}
+
+  static async open({ output, support, canvas, mix, signal }: SinkOptions): Promise<RecorderSink> {
+    const capture = canvas as HTMLCanvasElement & {
+      captureStream(frameRate?: number): MediaStream;
+    };
+    if (typeof capture.captureStream !== 'function') {
+      throw new Error('this browser cannot capture a canvas');
+    }
+
+    const manual = supportsRequestFrame(capture);
+    const stream = capture.captureStream(manual ? 0 : output.fps);
+    const track = manual ? ((stream.getVideoTracks()[0] ?? null) as CanvasCaptureMediaStreamTrack | null) : null;
+
+    const audio = mix ? attachAudio(stream, mix) : null;
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: support.recorderMimeType,
+      videoBitsPerSecond: output.videoBitrate,
+      audioBitsPerSecond: output.audioBitrate,
     });
-  }
-
-  static async start(output: ComposeOutput, support: WebRenderSupport): Promise<Encoder> {
-    const encoder = new Encoder(output, support);
-    encoder.encoder.configure({
-      codec: support.videoCodec,
-      width: output.width,
-      height: output.height,
-      bitrate: output.videoBitrate,
-      framerate: output.fps,
-      avc: { format: 'avc' },
-      // Quality over latency: nothing is watching this stream, and the realtime mode trades picture
-      // for a deadline that does not exist here.
-      latencyMode: 'quality',
-      ...(support.preferHardware ? { hardwareAcceleration: 'prefer-hardware' as HardwareAcceleration } : {}),
+    const sink = new RecorderSink(recorder, track, audio, signal, audio !== null);
+    recorder.addEventListener('dataavailable', event => {
+      if (event.data.size > 0) sink.chunks.push(event.data);
     });
-    return encoder;
+
+    // A timeslice, so a render that goes wrong still has most of itself rather than nothing.
+    recorder.start(1000);
+    if (audio) {
+      await audio.context.resume().catch(() => undefined);
+      audio.source.start();
+    }
+    sink.startedAt = performance.now();
+    return sink;
   }
 
-  /**
-   * One finished frame. `timestampUs` is its place on the OUTPUT timeline.
-   *
-   * The `VideoFrame` is closed on every path including the throwing one: it holds a GPU buffer, and
-   * a handful of unclosed ones is enough for the platform to stop handing out new ones - which
-   * shows up as a render that stalls rather than one that fails.
-   */
-  async addFrame(canvas: CanvasImageSource, timestampUs: number, durationUs: number): Promise<void> {
-    this.throwIfFailed();
-    await this.awaitRoom();
-
-    const keyFrame = this.frames % Math.max(1, Math.round(this.output.fps * KEYFRAME_SECONDS)) === 0;
-    const frame = new VideoFrame(canvas, {
-      timestamp: Math.round(timestampUs),
-      duration: Math.round(durationUs),
-    });
-    try {
-      this.encoder.encode(frame, { keyFrame });
-    } finally {
-      frame.close();
-    }
-    this.frames++;
+  async addFrame(timestampUs: number): Promise<void> {
+    // The whole of the fallback's timing: hold the drawn frame on screen until its own moment
+    // arrives, then let the recorder have it.
+    const dueAt = this.startedAt + timestampUs / 1000;
+    const wait = dueAt - performance.now();
+    if (wait > 0) await sleep(wait, this.signal);
+    this.track?.requestFrame();
   }
 
-  /**
-   * Encodes the mix, flushes the encoder and writes the file.
-   *
-   * A mix that will not encode does NOT fail the render. The picture is the post; losing the sound
-   * to a browser whose AAC encoder refused a perfectly ordinary configuration is bad, and losing
-   * the whole video to it is worse, so that failure is swallowed here and the video is muxed
-   * silently. The `hasAudio` on the result says which happened.
-   */
-  async finish(mix: MixedAudio | null): Promise<{ blob: Blob; hasAudio: boolean }> {
-    this.throwIfFailed();
-    await this.encoder.flush();
-    this.throwIfFailed();
-
-    let hasAudio = false;
-    if (mix && this.support.audioCodec) {
-      try {
-        await this.encodeAudio(mix);
-        hasAudio = true;
-      } catch {
-        hasAudio = false;
-      }
-    }
-
-    if (this.videoTrack < 0 || this.writer.sampleCount(this.videoTrack) === 0) {
-      throw new Error('the encoder produced no frames');
-    }
-    return { blob: this.writer.finalize(), hasAudio };
-  }
-
-  close(): void {
-    try {
-      if (this.encoder.state !== 'closed') this.encoder.close();
-    } catch {
-      /* Already closed, or never configured. */
-    }
-  }
-
-  /* ------------------------------------------------------------------------------------------ */
-
-  private onVideoChunk(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): void {
-    if (this.videoTrack < 0) {
-      const description = metadata?.decoderConfig?.description;
-      if (!description) {
-        // Without `avcC` there is no sample description, and a track without one is a file no
-        // player will open. It cannot be synthesised the way an AAC config can - it carries the
-        // encoder's own SPS and PPS.
-        this.failure ??= new Error('the encoder did not describe its own output');
+  async finish(): Promise<SinkResult> {
+    // One frame interval of grace, so the last frame is inside the recording rather than on its edge.
+    await sleep(80, this.signal);
+    await new Promise<void>(resolve => {
+      if (this.recorder.state === 'inactive') {
+        resolve();
         return;
       }
-      this.videoTrack = this.writer.addVideoTrack({
-        width: this.output.width,
-        height: this.output.height,
-        description: bytesOf(description),
-        bitrate: this.output.videoBitrate,
-      });
-    }
-    const data = new Uint8Array(chunk.byteLength);
-    chunk.copyTo(data);
-    this.writer.addSample(this.videoTrack, {
-      data,
-      timestampUs: chunk.timestamp,
-      durationUs: chunk.duration ?? Math.round(1_000_000 / this.output.fps),
-      isSync: chunk.type === 'key',
-    });
-  }
-
-  private async encodeAudio(mix: MixedAudio): Promise<void> {
-    let failure: Error | null = null;
-    const pending: { chunk: EncodedAudioChunk; description: Uint8Array<ArrayBuffer> | null }[] = [];
-
-    const encoder = new AudioEncoder({
-      output: (chunk, metadata) => {
-        const description = metadata?.decoderConfig?.description;
-        pending.push({ chunk, description: description ? bytesOf(description) : null });
-      },
-      error: error => {
-        failure ??= error instanceof Error ? error : new Error(String(error));
-      },
-    });
-
-    const channels = mix.channels.length;
-    encoder.configure({
-      codec: this.support.audioCodec,
-      sampleRate: mix.sampleRate,
-      numberOfChannels: channels,
-      bitrate: this.output.audioBitrate,
-    });
-
-    // `f32-planar` is the one format every implementation accepts, and it is what the mix already
-    // is - channel after channel, with no weaving to undo.
-    for (let at = 0; at < mix.length; at += AUDIO_CHUNK_FRAMES) {
-      if (failure) throw failure;
-      const count = Math.min(AUDIO_CHUNK_FRAMES, mix.length - at);
-      const planar = new Float32Array(count * channels);
-      for (let channel = 0; channel < channels; channel++) {
-        planar.set((mix.channels[channel] ?? EMPTY).subarray(at, at + count), channel * count);
-      }
-      const data = new AudioData({
-        format: 'f32-planar',
-        sampleRate: mix.sampleRate,
-        numberOfFrames: count,
-        numberOfChannels: channels,
-        timestamp: Math.round((at / mix.sampleRate) * 1_000_000),
-        data: planar,
-      });
+      this.recorder.addEventListener('stop', () => resolve(), { once: true });
       try {
-        encoder.encode(data);
-      } finally {
-        data.close();
+        this.recorder.stop();
+      } catch {
+        resolve();
       }
-      if (encoder.encodeQueueSize > 32) await tick();
-    }
-
-    await encoder.flush();
-    encoder.close();
-    if (failure) throw failure;
-    if (pending.length === 0) throw new Error('the AAC encoder produced nothing');
-
-    // The description arrives with the first chunk on every browser that sends one at all; the
-    // fallback is what keeps a browser that sends none from costing the post its sound.
-    const described = pending.find(entry => entry.description)?.description;
-    const track = this.writer.addAudioTrack({
-      sampleRate: mix.sampleRate,
-      channels,
-      description: described ?? audioSpecificConfig(mix.sampleRate, channels),
-      bitrate: this.output.audioBitrate,
     });
+    this.stopAudio();
 
-    for (const entry of pending) {
-      const data = new Uint8Array(entry.chunk.byteLength);
-      entry.chunk.copyTo(data);
-      this.writer.addSample(track, {
-        data,
-        timestampUs: entry.chunk.timestamp,
-        durationUs: entry.chunk.duration ?? Math.round((AUDIO_CHUNK_FRAMES / mix.sampleRate) * 1_000_000),
-        isSync: true,
-      });
-    }
+    const mimeType = this.recorder.mimeType || 'video/webm';
+    const blob = new Blob(this.chunks, { type: mimeType });
+    if (blob.size === 0) throw new Error('the recorder captured nothing');
+    return { blob, hasAudio: this.hasAudio, mimeType };
   }
 
-  /** Waits until the encoder has room, so the renderer cannot outrun it into the heap. */
-  private async awaitRoom(): Promise<void> {
-    while (this.encoder.encodeQueueSize > MAX_QUEUED_FRAMES && !this.failure) {
-      await new Promise<void>(resolve => {
-        const done = (): void => {
-          this.encoder.removeEventListener('dequeue', done);
-          clearTimeout(timer);
-          resolve();
-        };
-        // The event is the fast path; the timeout is the one that matters, because a browser that
-        // does not fire `dequeue` would otherwise stall the render for good.
-        const timer = setTimeout(done, 20);
-        this.encoder.addEventListener('dequeue', done);
-      });
+  async close(): Promise<void> {
+    try {
+      if (this.recorder.state !== 'inactive') this.recorder.stop();
+    } catch {
+      /* Already stopped. */
     }
+    this.stopAudio();
   }
 
-  private throwIfFailed(): void {
-    if (this.failure) throw this.failure;
+  private stopAudio(): void {
+    if (!this.audio) return;
+    try {
+      this.audio.source.stop();
+    } catch {
+      /* Already stopped, or never started. */
+    }
+    void this.audio.context.close().catch(() => undefined);
   }
 }
 
 /**
- * The two-byte AudioSpecificConfig for AAC-LC, for a browser whose encoder does not hand one over.
+ * Puts the mix on the recorder's stream.
  *
- * Five bits of object type (2, AAC-LC), four of sampling frequency index, four of channel
- * configuration and three of a GASpecificConfig that is all zeroes for this profile. At 48 kHz
- * stereo it comes out as the familiar `11 90`.
+ * A real `AudioContext` rather than an offline one, because the recorder records in real time and
+ * needs a live graph to record from. It may start suspended - every browser requires a gesture for
+ * audio - which is why `resume()` is awaited before the source is started; a render always follows
+ * a tap, so the gesture is there.
  */
-export function audioSpecificConfig(sampleRate: number, channels: number): Uint8Array<ArrayBuffer> {
-  const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
-  const index = Math.max(0, rates.indexOf(sampleRate));
-  const objectType = 2;
-  const first = (objectType << 3) | (index >> 1);
-  const second = ((index & 1) << 7) | ((channels & 0x0f) << 3);
-  return new Uint8Array([first & 0xff, second & 0xff]);
-}
-
-/** A copy backed by a plain `ArrayBuffer`, which is the only kind a `Blob` will take. */
-function bytesOf(source: AllowSharedBufferSource): Uint8Array<ArrayBuffer> {
-  if (ArrayBuffer.isView(source)) {
-    const view = source as ArrayBufferView;
-    return new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
+function attachAudio(stream: MediaStream, mix: MixedAudio): { context: AudioContext; source: AudioBufferSourceNode } | null {
+  try {
+    const context = new AudioContext({ sampleRate: mix.sampleRate });
+    const buffer = context.createBuffer(mix.channels.length, mix.length, mix.sampleRate);
+    for (let channel = 0; channel < mix.channels.length; channel++) {
+      buffer.copyToChannel(mix.channels[channel] ?? EMPTY, channel);
+    }
+    const destination = context.createMediaStreamDestination();
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(destination);
+    for (const track of destination.stream.getAudioTracks()) stream.addTrack(track);
+    return { context, source };
+  } catch {
+    // A silent video beats no video, and this is the fallback engine already.
+    return null;
   }
-  return new Uint8Array((source as ArrayBuffer).slice(0));
 }
 
-function tick(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, 0));
+function supportsRequestFrame(canvas: HTMLCanvasElement & { captureStream?: unknown }): boolean {
+  const ctor = (globalThis as { CanvasCaptureMediaStreamTrack?: { prototype: object } }).CanvasCaptureMediaStreamTrack;
+  return typeof ctor?.prototype === 'object' && 'requestFrame' in ctor.prototype;
+}
+
+/** Waits, unless the render is cancelled first - in which case the loop's own check picks it up. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }

@@ -1,4 +1,5 @@
 import { describe, resolve } from '../../web-runtime/files';
+import { holdPageOpen } from '../../web-runtime/leave-guard';
 import type { PublishError, PublishFailureCode } from '../definitions';
 
 import { errorMessage, lookupDownloadId, NetworkError, parseCreatedPost, parseDownloadId, postJson, uploadFile } from './http';
@@ -74,6 +75,9 @@ export async function run(pendingPostId: string, emit: PublishEmitter): Promise<
   const controller = new AbortController();
   running.set(pendingPostId, controller);
   liveBytes.set(pendingPostId, new Map());
+  // An upload stops with the tab, so the customer is asked before the tab goes. It resumes on the
+  // next page load either way - see `resumeAll` - but a post half sent is worth a question.
+  const release = holdPageOpen(`uploading ${pendingPostId}`);
 
   try {
     await withLock(`choisy-publish-${pendingPostId}`, async () => {
@@ -96,6 +100,7 @@ export async function run(pendingPostId: string, emit: PublishEmitter): Promise<
       });
     }
   } finally {
+    release();
     running.delete(pendingPostId);
     liveBytes.delete(pendingPostId);
     lastTick.delete(pendingPostId);

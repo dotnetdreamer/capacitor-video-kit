@@ -14,12 +14,23 @@
   min-height: 0;
 }
 
+/*
+ * Four columns is the phone's. From a tablet up the grid takes as many columns as the width the
+ * sheet allows: four columns of a 190px sheet each hold one 64px thumbnail with 60px of black
+ * either side of it, which reads as a grid that failed to load rather than one with four effects.
+ */
 .fx__grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   column-gap: 4px;
   row-gap: 14px;
   padding: 14px 8px 16px;
+}
+
+@media (min-width: 700px) {
+  .fx__grid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
 }
 
 /*

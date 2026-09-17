@@ -28,6 +28,12 @@ export type HitKind =
 /** A finger that is down but not yet a drag: it may still become a tap, a long press or a scroll. */
 export interface Press {
   pointerId: number;
+  /**
+   * Which of the three input kinds this is. A mouse is the one that changes what a sideways drag
+   * means: a finger or a pen gets the browser's own `pan-x` scroll with its momentum, and a mouse
+   * gets nothing at all, so a mouse drag has to be read as a scrub by hand.
+   */
+  pointerType: string;
   kind: HitKind;
   id: string | null;
   x0: number;
@@ -128,6 +134,17 @@ export interface LayerReorderDrag extends DragBase {
   row: HTMLElement | null;
 }
 
+/**
+ * A mouse dragging the timeline along, which is the one gesture the browser does not give us: a
+ * finger's sideways swipe is a native `pan-x` scroll with a fling on the end of it, and a mouse
+ * pressed on a scroller and moved does nothing whatsoever. Everything about it - where it may
+ * start, when it ends, what it seeks - is the same as that native scroll; only the pixels have to
+ * be moved by hand.
+ */
+export interface ScrubDrag extends DragBase {
+  kind: 'scrub';
+}
+
 export interface LanesScrollDrag extends DragBase {
   kind: 'lanes';
   laneY0: number;
@@ -145,7 +162,8 @@ export type TimelineDrag =
   | VoiceDrag
   | ClipReorderDrag
   | LayerReorderDrag
-  | LanesScrollDrag;
+  | LanesScrollDrag
+  | ScrubDrag;
 
 /**
  * The music's left handle trims the START of what is heard: the track's in point and its place on

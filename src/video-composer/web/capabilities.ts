@@ -1,3 +1,5 @@
+import { getFirstEncodableAudioCodec, getFirstEncodableVideoCodec, Quality } from 'mediabunny';
+
 import type { CapabilitiesResult } from '../definitions';
 
 /**
@@ -6,38 +8,60 @@ import type { CapabilitiesResult } from '../definitions';
  * `capabilities()` is the one call in the composer's contract that answers instead of throwing, and
  * on the web it is the call that earns its keep: a host uses it to decide whether to offer editing
  * at all, and the honest answer differs between a Chrome on Android from this year and a WebView on
- * a tablet from four years ago. Everything here is a real probe - `VideoEncoder.isConfigSupported`
- * negotiates with the platform's encoder rather than reading a user agent string.
+ * a tablet from four years ago. Everything here is a real probe - Mediabunny's codec checks
+ * negotiate with the platform's own encoder rather than reading a user agent string.
+ *
+ * There are TWO engines, and which one a page gets is decided here:
+ *
+ * - `webcodecs` is the real one. Mediabunny drives `VideoEncoder` and writes the container, so the
+ *   output is an MP4 with H.264 and AAC - the same kind of file both native engines produce.
+ * - `recorder` is the fallback for a browser with no WebCodecs at all. `MediaRecorder` over a canvas
+ *   stream still produces a video, at the cost of running in real time and of landing in whatever
+ *   container that browser records in, usually WebM. It is a worse answer than the first one and a
+ *   much better answer than "not here".
+ *
+ * Only a browser with neither gets `supported: false`, and then `compose()` fails with `unsupported`
+ * rather than pretending.
  *
  * The answers are cached because they cannot change while the page is open and because the probe
  * itself allocates an encoder on some platforms.
  */
 
+export type RenderEngine = 'webcodecs' | 'recorder' | 'none';
+
 /** What the render actually runs on once a browser has been asked. */
 export interface WebRenderSupport {
   supported: boolean;
+  engine: RenderEngine;
   /** Why not, in a sentence a developer can act on. Empty when `supported`. */
   reason: string;
-  /** The AVC codec string the encoder agreed to, e.g. `avc1.42002a`. */
+  /** Mediabunny's codec name - `avc`, `vp9`, `vp8`, `av1` - or the recorder's, from its mime type. */
   videoCodec: string;
-  /** `mp4a.40.2` when AAC encoding is available, empty when the output has to be silent. */
+  /** `aac` or `opus`, or empty when the output has to be silent. */
   audioCodec: string;
-  /** Whether the encoder wants hardware. Left off the config entirely when false. */
-  preferHardware: boolean;
+  /** `mp4` or `webm`: what the finished file will be. */
+  container: 'mp4' | 'webm';
+  /** The exact type `MediaRecorder` was asked for. Empty on the WebCodecs engine. */
+  recorderMimeType: string;
 }
 
 /**
- * The AVC profiles to offer, best first.
+ * The codecs to offer, best first.
  *
- * High profile first because it is what every phone decoder made this decade prefers and what gives
- * the most picture for a bitrate; baseline last because it is the one thing that is certain to be
- * there. Level 4.0 and above throughout: 720x1280 is 3600 macroblocks, which is exactly level 3.1's
- * ceiling, and asking for the level right on the boundary is how an encoder comes to refuse a
- * config that would have worked one step up.
+ * AVC first, always: it is what both native engines produce, what every phone decodes in hardware
+ * and what the upload endpoint has been fed since before this package existed. The rest are there so
+ * a browser that can encode something - Firefox before it shipped an H.264 encoder, say - still gets
+ * a video rather than a refusal, and the container follows the codec because VP9 in MP4 is a
+ * combination too much of the world still refuses to play.
  */
-const AVC_CODECS = ['avc1.640028', 'avc1.4d0028', 'avc1.42002a', 'avc1.42001f'];
+const VIDEO_CODECS = ['avc', 'vp9', 'vp8', 'av1'] as const;
+const AUDIO_CODECS = ['aac', 'opus'] as const;
 
-const AAC_CODEC = 'mp4a.40.2';
+/**
+ * Containers to ask `MediaRecorder` for, best first. MP4 leads for the same reason AVC does; a
+ * browser with `MediaRecorder` and no WebCodecs answers to one of the WebM entries in practice.
+ */
+const RECORDER_TYPES = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
 
 let cached: Promise<WebRenderSupport> | null = null;
 
@@ -66,7 +90,13 @@ export async function webCapabilities(): Promise<CapabilitiesResult> {
   }
   result.videoCodec = support.videoCodec;
   result.audioCodec = support.audioCodec || 'none';
-  result.container = 'mp4';
+  result.container = support.container;
+  // A host that only renders does not need to know which engine ran, but one deciding whether to let
+  // someone edit a two-minute post very much does: the recorder takes the video's own length in
+  // wall-clock time, and nothing can make it faster.
+  if (support.engine === 'recorder') {
+    result.reason = 'Rendering through MediaRecorder, which runs in real time.';
+  }
   return result;
 }
 
@@ -79,86 +109,88 @@ export function canRecordVoice(): boolean {
   return typeof MediaRecorder !== 'undefined' && typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getUserMedia === 'function';
 }
 
+/** The first type this browser's `MediaRecorder` will record, or empty for one that has none. */
+export function recorderMimeType(): string {
+  if (typeof MediaRecorder === 'undefined') return '';
+  return RECORDER_TYPES.find(type => MediaRecorder.isTypeSupported(type)) ?? '';
+}
+
 /* -------------------------------------------------------------------------------------------- */
 
 async function probe(width: number, height: number, fps: number): Promise<WebRenderSupport> {
-  const none = (reason: string): WebRenderSupport => ({
-    supported: false,
-    reason,
-    videoCodec: '',
-    audioCodec: '',
-    preferHardware: false,
-  });
-
-  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
-    // The honest sentence, and the one a host can act on: there is no second renderer hiding behind
-    // this, and a browser without WebCodecs cannot encode a video however the page is written.
-    return none('This browser has no WebCodecs video encoder.');
-  }
-  if (typeof OffscreenCanvas === 'undefined' && typeof document === 'undefined') {
+  if (typeof document === 'undefined') {
     return none('This page has no canvas to draw frames on.');
   }
 
-  const video = await firstSupportedVideo(width, height, fps);
-  if (!video) {
-    return none(`No H.264 encoder here would take ${width}x${height} at ${fps} fps.`);
+  const webcodecs = await probeWebCodecs(width, height, fps);
+  if (webcodecs) return webcodecs;
+
+  const mimeType = recorderMimeType();
+  if (mimeType) {
+    return {
+      supported: true,
+      engine: 'recorder',
+      reason: '',
+      videoCodec: codecsOf(mimeType) || 'unknown',
+      audioCodec: mimeType.includes('mp4a') ? 'aac' : 'opus',
+      container: mimeType.startsWith('video/mp4') ? 'mp4' : 'webm',
+      recorderMimeType: mimeType,
+    };
   }
 
+  return none('This browser has neither a WebCodecs encoder nor a usable MediaRecorder.');
+}
+
+async function probeWebCodecs(width: number, height: number, fps: number): Promise<WebRenderSupport | null> {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') return null;
+  // The frame rate is not part of what makes a codec usable - the encoder is configured with it
+  // later, and no browser refuses a codec over it - so it is taken and not passed on.
+  void fps;
+  try {
+    const video = await getFirstEncodableVideoCodec([...VIDEO_CODECS], {
+      width,
+      height,
+      // The probe is about whether the codec works at all, not about the bitrate the flow computed;
+      // a quality level keeps this from failing over a number the caller has not chosen yet.
+      quality: new Quality('high'),
+    });
+    if (!video) return null;
+    const audio = await getFirstEncodableAudioCodec([...AUDIO_CODECS], {
+      numberOfChannels: 2,
+      sampleRate: 48_000,
+    });
+    return {
+      supported: true,
+      engine: 'webcodecs',
+      reason: '',
+      videoCodec: video,
+      audioCodec: audio ?? '',
+      // AVC belongs in MP4 and the others belong in WebM. VP9 in an MP4 is legal and is still the
+      // wrong file to hand an upload endpoint that has only ever seen H.264.
+      container: video === 'avc' ? 'mp4' : 'webm',
+      recorderMimeType: '',
+    };
+  } catch {
+    // A browser that throws out of the probe rather than answering has said the same thing an answer
+    // of `null` would have, and the recorder fallback is what happens next either way.
+    return null;
+  }
+}
+
+function none(reason: string): WebRenderSupport {
   return {
-    supported: true,
-    reason: '',
-    videoCodec: video.codec,
-    audioCodec: await aacCodec(),
-    preferHardware: video.preferHardware,
+    supported: false,
+    engine: 'none',
+    reason,
+    videoCodec: '',
+    audioCodec: '',
+    container: 'mp4',
+    recorderMimeType: '',
   };
 }
 
-/**
- * The first profile the encoder agrees to, hardware asked for first.
- *
- * Hardware first because a phone encoding 1280-tall frames in software takes several times as long
- * and warms up enough to be throttled; no preference second because a desktop browser without a
- * hardware encoder answers `false` to `prefer-hardware` outright rather than falling back on its
- * own.
- */
-async function firstSupportedVideo(width: number, height: number, fps: number): Promise<{ codec: string; preferHardware: boolean } | null> {
-  for (const preferHardware of [true, false]) {
-    for (const codec of AVC_CODECS) {
-      const config: VideoEncoderConfig = {
-        codec,
-        width,
-        height,
-        framerate: fps,
-        // `avc` format, not `annexb`: it is the length-prefixed form an MP4 sample track holds, and
-        // it is what makes the encoder hand back the `avcC` box the muxer needs as its description.
-        avc: { format: 'avc' },
-        ...(preferHardware ? { hardwareAcceleration: 'prefer-hardware' as HardwareAcceleration } : {}),
-      };
-      try {
-        const answer = await VideoEncoder.isConfigSupported(config);
-        if (answer.supported) return { codec, preferHardware };
-      } catch {
-        // A browser that rejects rather than answering `{supported: false}` - which older Safari
-        // does for a codec string it cannot parse - is a no for this codec and says nothing about
-        // the next one.
-      }
-    }
-  }
-  return null;
-}
-
-/** `mp4a.40.2` when AAC encoding is available, or an empty string for a browser without it. */
-async function aacCodec(): Promise<string> {
-  if (typeof AudioEncoder === 'undefined') return '';
-  try {
-    const answer = await AudioEncoder.isConfigSupported({
-      codec: AAC_CODEC,
-      sampleRate: 48_000,
-      numberOfChannels: 2,
-      bitrate: 128_000,
-    });
-    return answer.supported ? AAC_CODEC : '';
-  } catch {
-    return '';
-  }
+/** `avc1.42E01E,mp4a.40.2` out of `video/mp4;codecs=avc1.42E01E,mp4a.40.2`. */
+function codecsOf(mimeType: string): string {
+  const match = /codecs=([^;]+)/.exec(mimeType);
+  return match?.[1]?.replace(/"/g, '') ?? '';
 }

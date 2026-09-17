@@ -1,9 +1,13 @@
 /*
  * The preview fills whatever box the shell gives it. The frame inside is always exactly 9:16: as
- * tall as the box allows, but never so wide that it runs under the shell's Back and Next circles
- * (44px, 12px in from each side, so 56px on each side plus a little air). A size container is what
- * lets one width rule honour both limits and keep the ratio - `height: 100%` with a `max-width`
- * would squash the frame instead the moment the width limit wins.
+ * tall as the box allows, but never so wide that it runs under the shell's Back and Next circles.
+ * A size container is what lets one width rule honour both limits and keep the ratio -
+ * `height: 100%` with a `max-width` would squash the frame instead the moment the width limit wins.
+ *
+ * How much room the circles need is `--ve-stage-gutter`, declared in `ve-tokens.css`: 128px on a
+ * phone (44px each, 12px in from each side, and air), where they hang over the picture's top
+ * corners, and more from a tablet up, where there is room to stand them beside it. The fallback is
+ * the phone's, so a `ve-preview` used outside `ve-editor` still draws a frame that clears them.
  */
 :host {
   position: relative;
@@ -18,7 +22,7 @@
  */
 .pv__stage {
   position: relative;
-  width: min(calc(100cqw - 128px), calc(100cqh * 9 / 16));
+  width: min(calc(100cqw - var(--ve-stage-gutter, 128px)), calc(100cqh * 9 / 16));
   aspect-ratio: 9 / 16;
   margin: 0 auto;
   /* Every touch on the stage is ours: drags, pinches and taps. The browser must not scroll or zoom. */

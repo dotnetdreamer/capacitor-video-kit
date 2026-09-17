@@ -28,8 +28,13 @@ export const MIX_CHANNELS = 2;
 
 export interface MixedAudio {
   sampleRate: number;
-  /** One `Float32Array` per channel, all the same length. */
-  channels: Float32Array[];
+  /**
+   * One array per channel, all the same length.
+   *
+   * Explicitly backed by an `ArrayBuffer` rather than by `ArrayBufferLike`: `copyToChannel` will
+   * not take a view that might be over a `SharedArrayBuffer`, and the mix goes straight into one.
+   */
+  channels: Float32Array<ArrayBuffer>[];
   length: number;
 }
 

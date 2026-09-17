@@ -31,6 +31,7 @@ import {
   type LayerReorderDrag,
   type MusicDrag,
   type Press,
+  type ScrubDrag,
   type TimelineDrag,
   type TrimDrag,
   type VoiceDrag,
@@ -83,6 +84,25 @@ const FOLLOW_LEAD_MS = 50;
 const LANE_PITCH_COMPACT = 40;
 /** How far the rail of lifted thumbnails slides per frame while the finger holds at an edge. */
 const REORDER_RAIL_PX = 6;
+
+/*
+ * The mouse's three numbers.
+ *
+ * A wheel reports its delta in one of three units and says which in `deltaMode`; the constants are
+ * the DOM's own (0 pixels, 1 lines, 2 pages), written out because `WheelEvent` is not a global in
+ * the hydrate build. A "line" is taken as 16px, which is what every browser that still reports
+ * lines means by it.
+ */
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
+const WHEEL_LINE_PX = 16;
+/**
+ * How hard a zoom wheel bites: the zoom is multiplied by `e^(-delta / this)`, so one ordinary notch
+ * of about 100 moves it by a factor of 1.7 and a trackpad's much smaller deltas move it smoothly.
+ * Exponential rather than additive because zoom is a ratio - a step that feels right at 6 pixels
+ * per second is imperceptible at 320.
+ */
+const WHEEL_ZOOM_DIVISOR = 180;
 
 interface SegmentView {
   id: string;
@@ -249,6 +269,13 @@ export class VeTimeline {
    * finger lifts.
    */
   private readonly holdWidth = signal(0);
+
+  /**
+   * A mouse is dragging the timeline along. Only the cursor turns on it, and it is a signal rather
+   * than a field because the cursor is drawn by a class on `.tl`, which the vdom owns: a class
+   * added by hand would be wiped by the next repaint, and a scrub repaints constantly.
+   */
+  private readonly scrubbing = signal(false);
 
   private readonly pad = computed(() => this.viewportWidth.value / 2);
   private readonly totalPx = computed(() => (this.ctx.store.totalMs.value / 1000) * this.ctx.store.pps.value);
@@ -783,6 +810,9 @@ export class VeTimeline {
     on('touchmove', this.onTouchMove, { passive: false }, tl);
     on('touchend', this.onTouchEnd, passive, tl);
     on('touchcancel', this.onTouchEnd, passive, tl);
+    // Not passive: a plain wheel is the timeline's own scroll and must not also scroll the page,
+    // and a ctrl wheel would otherwise zoom the whole WebView, which this layout does not survive.
+    on('wheel', this.onWheel, { passive: false });
     on('pointerdown', this.onPointerDown, passive);
     on('pointermove', this.onPointerMove, passive);
     on('pointerup', this.onPointerUp, passive);
@@ -1070,6 +1100,61 @@ export class VeTimeline {
   }
 
   /* ========================================================================================= */
+  /* Wheel and trackpad                                                                        */
+  /* ========================================================================================= */
+
+  /**
+   * What a mouse has instead of a swipe and a pinch.
+   *
+   * A finger gets both from the browser: the content is `touch-action: pan-x`, so a sideways swipe
+   * is a native scroll with a fling on the end of it, and two fingers are a pinch this component
+   * reads as a zoom. A mouse gets neither - a vertical wheel over a scroller that only scrolls
+   * sideways is left to the browser's own guess about what was meant, and a pinch has no mouse at
+   * all - so both are answered here. Ctrl is the zoom modifier every timeline uses, and it is also
+   * what a trackpad pinch sends whether or not a key is down; Cmd is the same gesture from a Mac
+   * keyboard.
+   */
+  private readonly onWheel = (event: WheelEvent): void => {
+    if (event.cancelable) event.preventDefault();
+    if (this.drag || this.pinch) return;
+    const store = this.ctx.store;
+    this.stopLaneInertia();
+
+    const unit = event.deltaMode === DOM_DELTA_LINE ? WHEEL_LINE_PX : event.deltaMode === DOM_DELTA_PAGE ? this.viewportWidth.value : 1;
+
+    if (event.ctrlKey || event.metaKey) {
+      /*
+       * Any scrub still in flight is committed first. The effect that re-centres the content at the
+       * new zoom stands aside for as long as a scroll of the customer's own is live, so without
+       * this the timeline would keep the pixels it had and the picture under the line would stop
+       * agreeing with the clock beside it. Committed, that effect puts the playhead back under the
+       * centre line at the new scale - which is what makes the zoom happen around the line rather
+       * than around the start of the video.
+       */
+      this.endUserScroll();
+      const pps = clamp(store.pps.value * Math.exp((-event.deltaY * unit) / WHEEL_ZOOM_DIVISOR), MIN_PPS, MAX_PPS);
+      if (Math.abs(pps - store.pps.value) > 0.01) store.pps.value = pps;
+      return;
+    }
+
+    // A trackpad reports a sideways swipe as deltaX; a wheel has only deltaY, and the one direction
+    // a timeline goes in is along itself. Whichever axis was pushed harder is the one that is meant.
+    const delta = (Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY) * unit;
+    if (!delta) return;
+
+    // From here it is the same scroll a finger makes, and it seeks through the same path: the write
+    // below fires `scroll`, which seeks for as long as a scroll of the customer's own is live.
+    this.userScrollActive = true;
+    if (store.playing.value) {
+      store.pause();
+      this.scrollLaneTo((store.playheadMs.value / 1000) * store.pps.value, true);
+    }
+    const el = this.scroller();
+    this.scrollLaneTo(clamp(el.scrollLeft + delta, 0, Math.max(0, el.scrollWidth - el.clientWidth)), true);
+    this.armSettle();
+  };
+
+  /* ========================================================================================= */
   /* Pinch zoom                                                                                */
   /* ========================================================================================= */
 
@@ -1135,6 +1220,7 @@ export class VeTimeline {
 
     const press: Press = {
       pointerId: event.pointerId,
+      pointerType: event.pointerType,
       kind,
       id,
       x0: event.clientX,
@@ -1143,7 +1229,9 @@ export class VeTimeline {
       y: event.clientY,
       inLanes: !!target?.closest('.tl__lanes-view'),
       // The fling is still running a hair before this finger landed, and landing is what stopped it.
-      consumed: this.userScrollActive && performance.now() - this.flingAt < FLING_STOP_MS,
+      // Never true of a mouse: a compositor fling is something a FINGER stops by touching the
+      // screen, and a click a moment after a wheel is a click rather than a brake.
+      consumed: event.pointerType !== 'mouse' && this.userScrollActive && performance.now() - this.flingAt < FLING_STOP_MS,
       timer: null,
     };
     const canLift = (kind === 'clip' && store.slots.value.length > 1) || (kind === 'layer' && store.layerCount.value > 1);
@@ -1184,6 +1272,11 @@ export class VeTimeline {
       this.startBodyDrag(press);
     } else if (vertical && press.inLanes) {
       this.startLanesScroll(press, event);
+    } else if (!vertical && press.pointerType === 'mouse') {
+      // Sideways, from a mouse, on something that is not a selected item: the timeline itself is
+      // being pulled along. A finger never reaches here - the browser has already claimed a
+      // horizontal swipe as its own `pan-x` scroll and said so with a pointercancel.
+      this.startScrub(press);
     }
   };
 
@@ -1296,6 +1389,7 @@ export class VeTimeline {
 
   private beginDrag(drag: TimelineDrag): void {
     this.drag = drag;
+    this.scrubbing.value = drag.kind === 'scrub';
     this.blockTouchScroll = true;
     try {
       this.scroller().setPointerCapture(drag.pointerId);
@@ -1387,6 +1481,30 @@ export class VeTimeline {
       };
       this.beginDrag(drag);
     }
+  }
+
+  /**
+   * The mouse's answer to a finger's swipe. From where the button went down rather than from where
+   * the slop was crossed, so the timeline catches those first pixels up instead of lagging them,
+   * and the playback it interrupts stops exactly the way a touch stops it.
+   */
+  private startScrub(press: Press): void {
+    const store = this.ctx.store;
+    this.userScrollActive = true;
+    this.clearSettle();
+    if (store.playing.value) {
+      store.pause();
+      // The frame loop runs a few ms ahead of the player's last write; line the content up with the
+      // frame playback actually stopped on before the mouse starts moving it.
+      this.scrollLaneTo((store.playheadMs.value / 1000) * store.pps.value, true);
+    }
+    this.beginDrag({
+      ...this.dragBase(press.pointerId, press.x0, press.y0),
+      x: press.x,
+      y: press.y,
+      moved: true,
+      kind: 'scrub',
+    });
   }
 
   private startLanesScroll(press: Press, event: PointerEvent): void {
@@ -1510,7 +1628,27 @@ export class VeTimeline {
       case 'lanes':
         this.setLaneY(drag.laneY0 - (drag.y - drag.y0), drag.maxY);
         return false;
+      case 'scrub':
+        this.applyScrub(drag);
+        return false;
     }
+  }
+
+  /**
+   * One frame of a mouse pulling the timeline along: the content moves the way the mouse did, and
+   * scrolling the timeline is the same thing as seeking it.
+   *
+   * The seek is made here rather than left to the `scroll` listener, which stands down for as long
+   * as a drag is live - it has to, because a trim's edge auto-scroll is a scroll that is
+   * emphatically not a seek. Recomputed from where the button went down and the scroll position it
+   * had then, never from the last frame's, so a clamp at either end of the video cannot accumulate.
+   */
+  private applyScrub(drag: ScrubDrag): void {
+    const store = this.ctx.store;
+    const el = this.scroller();
+    const x = clamp(drag.scroll0 - (drag.x - drag.x0), 0, Math.max(0, el.scrollWidth - el.clientWidth));
+    this.scrollLaneTo(x, true);
+    store.seek((x / store.pps.value) * 1000);
   }
 
   /** How far the finger has carried the drag along the timeline, output ms (auto-scroll included). */
@@ -1719,11 +1857,12 @@ export class VeTimeline {
       cancelAnimationFrame(this.tickRaf);
       this.tickRaf = 0;
       // The finger's last position may not have been applied yet.
-      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice')) {
+      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')) {
         this.applyDrag(drag, false);
       }
     }
     this.drag = null;
+    this.scrubbing.value = false;
     this.blockTouchScroll = false;
     const el = this.scroller();
     // The element is taken out of the document before `disconnectedCallback` runs, so a teardown in
@@ -1895,7 +2034,11 @@ export class VeTimeline {
 
       return (
         <Host>
-          <div class={{ 'tl': true, 'tl--compact': compact, 'tl--reordering': reorder !== null }} key="tl" ref={this.keepTl}>
+          <div
+            class={{ 'tl': true, 'tl--compact': compact, 'tl--reordering': reorder !== null, 'tl--scrubbing': this.scrubbing.value }}
+            key="tl"
+            ref={this.keepTl}
+          >
             {/* One native horizontal scroller for every row, so they can never drift apart. */}
             <div class="tl__scroller" key="scroller" ref={this.keepScroller}>
               <div class="tl__content" key="content" ref={this.keepContent} style={{ width: `${this.contentWidth.value}px` }}>
