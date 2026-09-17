@@ -1,0 +1,143 @@
+/*
+ * The rules every sheet in the editor repeats, written once.
+ *
+ * A shadow root cannot inherit a rule, only a custom property, so this is not a theme file: it is
+ * shared source, and each component that wants it lists it ahead of its own stylesheet.
+ *
+ *   styleUrls: ['../sheet-common.css', 've-crop-sheet.css']
+ *
+ * Nothing here is themed at this level. Every colour is read as `var(--ve-x, fallback)` at the point
+ * of use, the way the whole package does it, so a host application overriding a token from outside
+ * `ve-editor` still wins.
+ *
+ * `ve-sheet` itself includes this file too, for the tab strip: the text sheet draws a second strip
+ * inside its own panel, and the two have to be the same strip rather than two that look alike
+ * today. The frame rules at the top of this file are true of `ve-sheet` as well, except the one that
+ * sizes the frame, which simply matches nothing inside it.
+ */
+
+/*
+ * A sheet is a column: the frame, and anything the sheet puts beside it. Only the sticker sheet
+ * does, with its category bar under the frame, which is also why the direction is set rather than
+ * left to the one child.
+ *
+ * `min-height: 0` is the load bearing one. Without it a flex item refuses to shrink below its
+ * content, so a sheet with a long grid in it grows past the height the shell handed it and pushes
+ * the video off the screen instead of scrolling inside itself.
+ */
+:host {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * The frame takes the height the shell gave the sheet. A sheet whose body is one long scroller with
+ * no height of its own - stickers, effects - overrides this with `flex: 1 1 0` on a class it puts on
+ * the frame, so the frame cannot be sized by its content.
+ *
+ * Inside `ve-sheet`'s own shadow root this matches nothing: there is no sheet inside a sheet.
+ */
+ve-sheet {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * A sheet's own content, inside the frame's scrolling body: centred in whatever height the shell
+ * gave the sheet, and still scrollable when the screen is too short to centre anything. Padding and
+ * the gap between rows are each sheet's own, because no two of them agree on either.
+ *
+ * The horizontal clip is for the sliders. A knob's hit area is 48px square and hangs a few pixels
+ * past the side padding at both ends, and without this the body becomes a sideways scroller that
+ * moves under the finger during a drag. Two declarations rather than one: a browser that does not
+ * know `clip` keeps `hidden`, and `clip` is what stops the box being a scroll container at all.
+ */
+.sheet__content {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+/*
+ * The tab strip, in the frame's head and in the text sheet's panel.
+ *
+ * Only the look is here. Where the strip sits is the two callers' own business: the frame's head
+ * gives it `flex: 1` so it takes the room between the "none" button and the tick, and the text
+ * sheet's panel gives it `flex: 0 0 auto` and a rule under it.
+ */
+.sheet__tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+/* A visible scrollbar in a 44px strip would sit on top of the underline. */
+.sheet__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: form controls do not
+ * inherit the page's font, and no reset stylesheet reaches in here to make them. Left out, every tab
+ * label in the editor is set in the platform's own UI font while the sheet around it is not.
+ */
+.sheet__tab {
+  position: relative;
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sheet__tab--on {
+  color: var(--ve-text, #fff);
+}
+
+/* The underline is inset from the tab's own padding, so it marks the word rather than the hit area. */
+.sheet__tab--on::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ve-text, #fff);
+}
+
+/*
+ * "Apply to all clips", on the speed and volume sheets. A quiet text button rather than a filled
+ * one: it changes every clip at once, so it must not read as the obvious next tap. The space above
+ * it belongs to the sheet, which is why there is no margin here - the two sheets sit it at
+ * different distances from the control above.
+ */
+.sheet__apply-all {
+  align-self: center;
+  height: 44px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The only press feedback it has, since there is no fill to darken. */
+.sheet__apply-all:active {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}

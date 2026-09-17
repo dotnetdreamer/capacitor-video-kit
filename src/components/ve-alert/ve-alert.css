@@ -1,0 +1,154 @@
+/*
+ * `fixed` rather than `absolute`, so the dialog covers the whole editor whatever the sheet, the
+ * toolbar or the stage it was opened from is laid out inside. That holds only while nothing between
+ * this element and the viewport carries a `transform`, a `filter` or a `will-change`, any of which
+ * makes itself the containing block for a fixed child. The toolbar's menu catcher is fixed for the
+ * same reason and the shell's stylesheet already says so.
+ *
+ * The lift is belt and braces: the shell renders this last, so it is over everything in paint order
+ * anyway, and a sheet that lifts itself cannot get in front of it.
+ */
+:host {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Off the notch and off the home indicator, which is what shifts the centre on a phone that has them. */
+  padding: calc(24px + var(--ve-safe-top, env(safe-area-inset-top, 0px))) 24px calc(24px + var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px)));
+  color: var(--ve-text, #fff);
+}
+
+/*
+ * Covers the editor and swallows every press aimed at it, which is most of what makes this modal at
+ * all. A press that lands here is a dismissal.
+ */
+.alert__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  animation: ve-alert-fade 200ms ease-out;
+}
+
+.alert__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(300px, 100%);
+  max-height: 100%;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  text-align: center;
+  animation: ve-alert-in 200ms ease-out;
+}
+
+/*
+ * Focused by hand on the way in, so that the question is read out before the answers are. Nothing
+ * here is reachable with a tab, and the ring a browser draws around a programmatically focused
+ * container reads as a selection the customer made.
+ */
+.alert__panel:focus {
+  outline: none;
+}
+
+/* Scrolls rather than pushing the buttons off a short screen, for a message longer than these two. */
+.alert__text {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px 20px 18px;
+}
+
+.alert__header {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.alert__message {
+  margin: 8px 0 0;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/*
+ * The hairlines are the gaps rather than borders: the row's own background shows through a one
+ * pixel gap above and between the buttons, so a long pair that wraps onto two lines is still ruled
+ * correctly, which a `border-left` on each button would not be.
+ */
+.alert__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  padding-top: 1px;
+  background: var(--ve-line, rgba(255, 255, 255, 0.1));
+  border-radius: 0 0 16px 16px;
+  overflow: hidden;
+}
+
+.alert__btn {
+  flex: 1 1 120px;
+  min-height: 48px;
+  padding: 0 12px;
+  border: 0;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  /* A button takes the platform's own font otherwise, and the dialog is part of the editor. */
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  /* No double tap zoom to wait out, which is a third of a second on the one button that is the point. */
+  touch-action: manipulation;
+}
+
+/*
+ * Red for the answer that cannot be undone, the way the platform's own alerts mark one. Ionic's
+ * `role: 'destructive'` painted nothing, so Discard and Keep editing arrived identical and the
+ * customer had to read both to tell them apart.
+ */
+.alert__btn--danger {
+  color: var(--ve-danger, #ff4d6a);
+}
+
+.alert__btn--quiet {
+  font-weight: 500;
+}
+
+.alert__btn:active {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.alert__btn:focus-visible {
+  outline: 2px solid var(--ve-accent, #a6ff2e);
+  outline-offset: -3px;
+}
+
+/*
+ * From slightly too large, which is the settle a phone's own alerts do. The backdrop fades on its
+ * own so that the editor is still visible through it as the panel arrives.
+ */
+@keyframes ve-alert-in {
+  from {
+    opacity: 0;
+    transform: scale(1.1);
+  }
+}
+
+@keyframes ve-alert-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/*
+ * A customer who has asked their phone to stop animating things gets the dialog already in place.
+ * It is a question that has to be answered before anything else happens, so it must not be missed.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .alert__backdrop,
+  .alert__panel {
+    animation: none;
+  }
+}

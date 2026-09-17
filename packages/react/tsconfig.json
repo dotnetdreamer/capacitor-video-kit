@@ -18,7 +18,20 @@
     "declarationMap": false,
     "sourceMap": false,
     "outDir": ".build",
-    "rootDir": "src"
+    "rootDir": "src",
+    /*
+     * The generated wrappers import their `Ve*CustomEvent` types from the bare package name, which
+     * the React output target hard codes and offers no option to point elsewhere. In this package
+     * the root is the Capacitor plugin and the editor lives on the `./ui` subpath, so that bare
+     * specifier resolves to `plugin/esm/plugin.d.ts`, which knows nothing about components. The
+     * first component with an `@Event()` is what made that visible. Mapping the bare name, and only
+     * the bare name, at the editor's own declarations puts the types where the generated code
+     * already looks; the `choisy-video-kit/dist/components` imports beside it are longer specifiers
+     * and still resolve through the exports map.
+     */
+    "paths": {
+      "choisy-video-kit": ["../../dist/types/index.d.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

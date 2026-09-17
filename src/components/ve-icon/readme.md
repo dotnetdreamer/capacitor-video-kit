@@ -27,6 +27,19 @@ its name - so an icon is hidden from the accessibility tree unless it is given a
 | `name` _(required)_ | `name`    | Which shape to draw. A name that is not in the map draws nothing, deliberately: `src/icons` has no fallback glyph, because a missing icon is a typo and an empty box is how it is noticed.                                                 | `"add" \| "arrow-down-circle-outline" \| "arrow-down-outline" \| "arrow-forward" \| "arrow-redo-outline" \| "arrow-undo-outline" \| "arrow-up-circle-outline" \| "arrow-up-outline" \| "ban-outline" \| "bookmark-outline" \| "chatbox-ellipses-outline" \| "checkmark" \| "chevron-back" \| "chevron-down" \| "close" \| "cloudy-outline" \| "color-fill-outline" \| "color-filter-outline" \| "color-palette-outline" \| "color-wand-outline" \| "contract-outline" \| "contrast-outline" \| "copy-outline" \| "create-outline" \| "crop-outline" \| "cut-outline" \| "duplicate-outline" \| "expand-outline" \| "grid-outline" \| "happy-outline" \| "link-outline" \| "mic" \| "mic-outline" \| "musical-note" \| "musical-note-outline" \| "musical-notes-outline" \| "options-outline" \| "pause" \| "pencil" \| "play" \| "play-skip-back-outline" \| "play-skip-forward-outline" \| "repeat-outline" \| "resize-outline" \| "scan-outline" \| "search-outline" \| "sparkles" \| "sparkles-outline" \| "speedometer-outline" \| "sunny-outline" \| "swap-horizontal-outline" \| "swap-vertical-outline" \| "text-outline" \| "thermometer-outline" \| "time-outline" \| "trash-outline" \| "volume-high" \| "volume-high-outline" \| "volume-mute"` | `undefined` |
 
 
+## Dependencies
+
+### Used by
+
+ - [ve-sheet](../ve-sheet)
+
+### Graph
+```mermaid
+graph TD;
+  ve-sheet --> ve-icon
+  style ve-icon fill:#f9f,stroke:#333,stroke-width:4px
+```
+
 ----------------------------------------------
 
 *Built with [StencilJS](https://stenciljs.com/)*

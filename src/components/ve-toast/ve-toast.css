@@ -1,0 +1,75 @@
+/*
+ * Placed against the stage, which is the positioned box the preview fills: 16px up from the bottom
+ * of the video, and over the round back and next buttons that sit in the same box. The shell is
+ * what makes that true by keeping this tag inside the stage, and any host that moves it gets the
+ * nearest positioned ancestor instead.
+ */
+:host {
+  /**
+   * @prop --ve-toast-bg: The pill behind the message
+   * @prop --ve-toast-color: The message itself
+   */
+  position: absolute;
+  right: 0;
+  bottom: 16px;
+  left: 0;
+  z-index: 6;
+
+  /*
+   * Load bearing. The pill covers the middle of the stage and most of what it says is an answer to
+   * a tap that landed there, so the next tap has to reach the video, a selection handle or the
+   * trash underneath rather than a box that is about to disappear on its own. The pill inherits it,
+   * which is why nothing in here takes a press.
+   */
+  pointer-events: none;
+}
+
+/*
+ * Centred with auto margins rather than `left: 50%` and a -50% shift. Shifted, the pill is an
+ * absolutely positioned box that only has the room to the RIGHT of its left edge to size itself
+ * into, which is half the stage, so "You can add up to 30 layers" broke into two lines however much
+ * room there really was. In normal flow inside a full width host the max-content width is measured
+ * against the whole stage and the auto margins put it in the middle.
+ */
+.pill {
+  /*
+   * The padding is inside the max-width, so the 24px of stage either side of a long message is
+   * really there. Nothing resets this inside a shadow root the way the app's global stylesheet did,
+   * and without it the pill is those 32px wider than it is told it may be.
+   */
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100% - 48px);
+  margin: 0 auto;
+  padding: 9px 16px;
+  border-radius: 999px;
+  /*
+   * A pair, and a dark one whatever the palette around it: the message is read against moving
+   * video, so the scrim is what makes it legible at all and overriding either half on its own is
+   * how a toast goes invisible. Neither is a `--ve-` token for that reason - a theme that repaints
+   * the editor's surfaces must not repaint this one by accident.
+   */
+  background: var(--ve-toast-bg, rgba(30, 30, 30, 0.92));
+  color: var(--ve-toast-color, #fff);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  animation: ve-toast-in 160ms ease-out;
+}
+
+@keyframes ve-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/*
+ * A customer who has asked their phone to stop animating things still gets every message and still
+ * gets it for the same length of time; it simply arrives rather than sliding up into place.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .pill {
+    animation: none;
+  }
+}

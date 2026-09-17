@@ -1,0 +1,148 @@
+/*
+ * The frame's own chrome. The tab strip is not here: it is in `sheet-common.css`, which this
+ * component includes ahead of this file, because the text sheet draws a second strip inside its own
+ * panel and the two are meant to be one strip.
+ */
+
+/*
+ * Deliberately without a single `!important`, and deliberately weak. Nine sheets style this element
+ * from outside - `flex: 1 1 auto` from `sheet-common.css`, `flex: 1 1 0` on the two grid sheets, and
+ * the sticker sheet taking the bottom padding away because its category bar carries the safe area
+ * instead - and an element selector in the sheet's own stylesheet beats `:host` here, which is what
+ * lets all of that work without the frame knowing about any of it.
+ */
+:host {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: 16px 16px 0 0;
+  background: var(--ve-sheet, #1c1c1e);
+  color: var(--ve-text, #fff);
+  /* The sheet is the bottom of the screen, so it is the thing the home indicator covers. */
+  padding-bottom: var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px));
+  /* Rounded corners cut nothing on their own: without this the head's hairline runs past them. */
+  overflow: hidden;
+}
+
+/* ----------------------------------------------------------------------------------- search */
+
+.sheet__search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 12px 4px 16px;
+}
+
+/*
+ * A `<label>` rather than a div, so the whole pill takes the focus into the field: on a phone the
+ * magnifying glass is a third of what the finger can aim at.
+ *
+ * The 20px font size is what draws the glyph, which is one em square.
+ */
+.sheet__search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 20px;
+}
+
+/*
+ * `appearance` and `font-family` are both named because this field is inside a shadow root, where no
+ * reset stylesheet reaches: a search input keeps WebKit's own rounded control look and the platform
+ * UI font otherwise, in the middle of a sheet that is neither.
+ *
+ * 16px is a hard floor, not a choice of size: a WebView zooms the whole page in when a field smaller
+ * than that takes focus, and the editor's layout does not survive being zoomed.
+ */
+.sheet__search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 16px;
+}
+
+.sheet__search input::placeholder {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+/* ------------------------------------------------------------------------------------- head */
+
+.sheet__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 52px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+/*
+ * 44px square, the smallest target a finger finds reliably, with the glyph drawn at 26px from the
+ * font size. `font-family` matters even here: the button has no text, but a grid box still reserves
+ * room from the font, and the platform's UI font is a different size at the same number.
+ */
+.sheet__icon-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 26px;
+}
+
+/* "None" is a way back rather than a thing to do, so it sits behind the tabs and the tick. */
+.sheet__icon-btn--dim {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+.sheet__divider {
+  width: 1px;
+  height: 24px;
+  background: var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+.sheet__title {
+  padding: 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/*
+ * The strip takes the room between the "none" button and the tick, and `min-width: 0` is what lets
+ * it scroll its own tabs rather than push the tick off the head. The look of a tab comes from
+ * `sheet-common.css`; this is only where it sits.
+ */
+.sheet__tabs {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------------------------- body */
+
+/*
+ * `overscroll-behavior: contain` stops a flick that reaches the end of the sheet from becoming a
+ * scroll of whatever is behind the editor, which on a phone reads as the whole page jumping.
+ */
+.sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

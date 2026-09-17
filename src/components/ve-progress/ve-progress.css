@@ -1,0 +1,84 @@
+:host {
+  /**
+   * @prop --ve-progress-track: The part of the bar that is not done yet
+   * @prop --ve-progress-fill: The part that is, and the whole of the stripe while the amount is unknown
+   */
+  display: block;
+  height: 4px;
+
+  /*
+   * Ionic's two names, `--background` and `--progress-background`, are generic enough that a host
+   * setting either one anywhere above the editor would have repainted this bar. These are not, and
+   * both fall through to the editor's own tokens, so the bar is already the right colours before
+   * anybody sets anything.
+   */
+  background: var(--ve-progress-track, var(--ve-raised, #2c2c2e));
+
+  /*
+   * The fill is clipped rather than sized to the corner: the render card rounds this element from
+   * outside, and the sweeping stripe has to stop at the same curve the track does.
+   */
+  overflow: hidden;
+}
+
+.fill {
+  width: 100%;
+  height: 100%;
+  background: var(--ve-progress-fill, var(--ve-accent, #a6ff2e));
+
+  /*
+   * Scaled rather than resized, so the whole of a step is one composited frame and no layout is
+   * done for it. `left` rather than the default centre, or the bar would grow from its middle in
+   * both directions.
+   */
+  transform: scaleX(var(--ve-progress-scale, 0));
+  transform-origin: left center;
+
+  /*
+   * Both engines emit only when the figure has moved a whole per cent, iOS every 250ms and Android
+   * every 500ms, so a render arrives as up to a hundred separate jumps. The transition is shorter
+   * than either interval: it carries the bar between two readings and is finished before the next
+   * one lands.
+   */
+  transition: transform 220ms linear;
+}
+
+.fill--busy {
+  /*
+   * A stripe of a fixed width, swept end to end. Its `transform` is the animation's, and this is
+   * the state it sits in when there is no animation running: see the reduced motion rule, which is
+   * the only way that happens.
+   */
+  width: 40%;
+  transform: none;
+  transition: none;
+  animation: ve-progress-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes ve-progress-sweep {
+  /* The stripe is 40% of the track, so 250% of its own width is the full length of it. */
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/*
+ * Someone who has asked their phone to stop animating things still has a render to wait for, so the
+ * stripe keeps its shape and stops moving, the way the spinner's arc keeps its crescent and stops
+ * turning. Parked in the middle rather than where the sweep starts: against the left edge a 40%
+ * stripe is indistinguishable from a bar that is 40% done, which is the one thing this state is
+ * saying it does not know.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .fill {
+    transition: none;
+  }
+
+  .fill--busy {
+    animation: none;
+    transform: translateX(75%);
+  }
+}

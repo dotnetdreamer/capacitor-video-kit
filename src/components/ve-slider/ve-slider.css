@@ -1,0 +1,147 @@
+/*
+ * One slider, drawn the way TikTok draws one: a thin grey bar, a white fill, a plain white knob and
+ * the value above it as text rather than in a teardrop.
+ *
+ * The Angular editor had three of these. The sheet slider's bar was 4px over a 24px knob and the
+ * Adjust and Filter sheets each drew theirs a pixel thinner, which nothing chose and nobody could
+ * see side by side, because no two of them are ever on screen at once. One control is worth that
+ * pixel; what a sheet does need to vary is exposed as a custom property instead.
+ */
+:host {
+  /**
+   * @prop --ve-slider-edge: How far the bar's ends sit inside the element, keeping the knob and the value above it inside a sheet's gutter
+   * @prop --ve-slider-track: The bar behind the fill
+   * @prop --ve-slider-fill: The travelled part of the bar, and what a sheet changes to theme the control
+   * @prop --ve-slider-knob: The knob
+   */
+  display: block;
+  min-width: 0;
+
+  /*
+   * The whole element takes the finger, not just the 4px bar, and `touch-action` is not inherited,
+   * so it belongs on the element the pointer listeners are bound to. Without it WebKit takes a drag
+   * that wanders a few pixels off the horizontal as a scroll of whatever is behind the sheet, and
+   * the knob stops dead half way through the gesture.
+   */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+
+  /* The knob carries the focus ring instead, because the element's own box is mostly empty room. */
+  outline: none;
+}
+
+/*
+ * 44px of finger, with 24px of room above it for the value to rise into: the value is 22px tall and
+ * sits on the top edge of a 24px knob centred in the row, so 24px is the whole of it and a couple
+ * of pixels to spare.
+ */
+.sl {
+  position: relative;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 68px;
+  padding: 24px var(--ve-slider-edge, 20px) 0;
+}
+
+/* Nothing rises above a slider with no value over it, so it does not reserve the room. */
+.sl--no-pin {
+  height: 44px;
+  padding-top: 0;
+}
+
+.sl__track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--ve-slider-track, var(--ve-raised, #2c2c2e));
+}
+
+/*
+ * White rather than `--ve-accent`, because that is what every slider in this editor draws and the
+ * accent is what marks a choice among several - a lit chip, a selected tab. A host that wants the
+ * two to agree sets `--ve-slider-fill: var(--ve-accent)`.
+ */
+.sl__fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: inherit;
+  background: var(--ve-slider-fill, #fff);
+}
+
+/*
+ * Centred on its position with negative margins rather than a translate. The knob is the element
+ * the value hangs off and the element the focus ring is drawn on, and a transform on it would round
+ * both to whatever half pixel the knob happens to sit at.
+ */
+.sl__knob {
+  position: absolute;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border-radius: 50%;
+  background: var(--ve-slider-knob, #fff);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+
+:host(:focus-visible) .sl__knob {
+  box-shadow:
+    0 1px 6px rgba(0, 0, 0, 0.45),
+    0 0 0 3px var(--ve-accent, #a6ff2e);
+}
+
+/*
+ * The value floats above the knob as plain text. `min-width` is what `--ve-slider-edge` is half of:
+ * as wide as the text needs but never narrower than this, so a two digit number and a three digit
+ * one do not move the readout around as the knob passes between them.
+ */
+.sl__pin {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  transform-origin: bottom center;
+  box-sizing: border-box;
+  min-width: 44px;
+  height: 22px;
+  padding: 0 4px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+
+/* `pin="press"`: the value is only there while the knob is held, and grows into place. */
+.sl--press .sl__pin {
+  opacity: 0;
+  transform: translateX(-50%) translateY(40%) scale(0.6);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.sl--press.sl--held .sl__pin {
+  opacity: 1;
+  transform: translateX(-50%);
+}
+
+/*
+ * A customer who has asked their phone to stop animating things still needs to see the value they
+ * are dragging, so it appears and disappears rather than growing.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .sl--press .sl__pin {
+    transition: none;
+  }
+}

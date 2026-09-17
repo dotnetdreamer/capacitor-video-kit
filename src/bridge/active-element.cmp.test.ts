@@ -8,8 +8,15 @@ import { activeElementDeep } from './active-element';
  * for is in the first assertion of the first test.
  */
 
-function shadowHost(tag: string, parent: Node = document.body, init: ShadowRootInit = { mode: 'open' }): { host: HTMLElement; root: ShadowRoot } {
-  const host = document.createElement(tag);
+/*
+ * The names read like the tree this helper walks in the editor, but the elements are deliberately
+ * not those components: a tag this package defines upgrades the moment it is created, and a Stencil
+ * component has attached its own shadow root before this function gets to. `attachShadow` then
+ * throws, which is what `ve-sheet` did here the day it was written. The prefix is what keeps these
+ * hosts plain elements as the rest of the editor arrives.
+ */
+function shadowHost(name: string, parent: Node = document.body, init: ShadowRootInit = { mode: 'open' }): { host: HTMLElement; root: ShadowRoot } {
+  const host = document.createElement(`stand-in-${name}`);
   parent.appendChild(host);
   return { host, root: host.attachShadow(init) };
 }
@@ -20,7 +27,7 @@ afterEach(() => {
 
 describe('activeElementDeep', () => {
   it('reaches the field inside a component, where document.activeElement stops at the host', () => {
-    const { host, root } = shadowHost('ve-text-sheet');
+    const { host, root } = shadowHost('text-sheet');
     const field = document.createElement('textarea');
     root.appendChild(field);
     field.focus();
@@ -30,9 +37,9 @@ describe('activeElementDeep', () => {
   });
 
   it('goes all the way down, however many components are nested', () => {
-    const outer = shadowHost('ve-editor');
-    const middle = shadowHost('ve-sticker-sheet', outer.root);
-    const inner = shadowHost('ve-sheet', middle.root);
+    const outer = shadowHost('editor');
+    const middle = shadowHost('sticker-sheet', outer.root);
+    const inner = shadowHost('sheet', middle.root);
     const search = document.createElement('input');
     inner.root.appendChild(search);
     search.focus();
@@ -42,7 +49,7 @@ describe('activeElementDeep', () => {
   });
 
   it('stops at a host that holds the focus itself', () => {
-    const { host, root } = shadowHost('ve-toolbar');
+    const { host, root } = shadowHost('toolbar');
     root.appendChild(document.createElement('button'));
     host.tabIndex = 0;
     host.focus();
@@ -51,7 +58,7 @@ describe('activeElementDeep', () => {
   });
 
   it('stops at the host of a closed root, which cannot be asked', () => {
-    const { host, root } = shadowHost('ve-closed', document.body, { mode: 'closed' });
+    const { host, root } = shadowHost('closed', document.body, { mode: 'closed' });
     const field = document.createElement('input');
     root.appendChild(field);
     field.focus();
@@ -61,7 +68,7 @@ describe('activeElementDeep', () => {
   });
 
   it('hands back the field itself, and not the host standing in for it', () => {
-    const { root } = shadowHost('ve-sticker-sheet');
+    const { root } = shadowHost('sticker-sheet');
     const search = document.createElement('input');
     root.appendChild(search);
     search.focus();
