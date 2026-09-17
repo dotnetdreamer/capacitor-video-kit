@@ -244,7 +244,7 @@ $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
 .\gradlew.bat :choisy-video-kit:compileDebugKotlin :choisy-video-kit:testDebugUnitTest
 ```
 
-82 JVM tests cover the parts that fail silently: the colour matrices against the CSS spec, the
+144 JVM tests cover the parts that fail silently: the colour matrices against the CSS spec, the
 timeline arithmetic (speed, clamping, music repetitions, voiceover gaps, overlay coordinates), the
 parsers' reject-versus-clamp boundary, the multipart wire format and the template substitution.
 
