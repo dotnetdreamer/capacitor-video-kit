@@ -96,13 +96,7 @@ enum Exporter: RenderEngine {
             // Unstructured on purpose, and therefore NOT cancelled when the render task is: the
             // sequence would otherwise keep the session alive past the export. Cancelled by hand on
             // both paths below.
-            let monitor = Task {
-                for await state in session.states(updateInterval: 0.25) {
-                    guard case .exporting(let progress) = state else { continue }  // .pending and .waiting carry no number
-                    let fraction = progress.fractionCompleted
-                    if fraction.isFinite { onProgress(min(1, max(0, fraction))) }
-                }
-            }
+            let monitor = progressMonitor(session, onProgress: onProgress)
 
             do {
                 // Cancelling the enclosing Task is what cancels the export: the back-deployed body
@@ -125,6 +119,59 @@ enum Exporter: RenderEngine {
                     continue
                 }
                 throw error
+            }
+        }
+    }
+
+    /// How often the export is asked where it has got to, in seconds, on both of the paths below.
+    private static let progressInterval: TimeInterval = 0.25
+
+    /// Progress is the one thing in this file that has no single spelling across the range of iOS
+    /// the package supports. `states(updateInterval:)` is the whole reason a floor above 18 was
+    /// ever written down, and it reports a `Progress` the session keeps up to date; underneath it
+    /// there is only the session's own `progress` property, read on a timer. Both paths deliver the
+    /// same fractions to the same callback, so nothing above this function knows which one ran.
+    private static func progressMonitor(_ session: AVAssetExportSession,
+                                        onProgress: @escaping @Sendable (Double) -> Void) -> Task<Void, Never> {
+        if #available(iOS 18.0, *) {
+            return Task {
+                for await state in session.states(updateInterval: progressInterval) {
+                    guard case .exporting(let progress) = state else { continue }  // .pending and .waiting carry no number
+                    let fraction = progress.fractionCompleted
+                    if fraction.isFinite { onProgress(min(1, max(0, fraction))) }
+                }
+            }
+        } else {
+            // An `else` rather than an early return, so that the compiler knows this line is
+            // reached only below 18 and the deprecated call below is not a warning in a host whose
+            // own deployment target is 18 or later.
+            return Task { await pollProgress(session, onProgress: onProgress) }
+        }
+    }
+
+    /// The pre iOS 18 half of the pair above.
+    ///
+    /// It is marked deprecated at the same version as the two properties it reads, which is what
+    /// keeps `status` and `progress` from warning on every build: a deprecated API used inside a
+    /// declaration deprecated in the same release is not a diagnostic. The loop ends itself at a
+    /// terminal status so that a caller who forgets to cancel it does not leave it spinning.
+    @available(iOS, deprecated: 18.0, message: "states(updateInterval:) carries the progress from iOS 18")
+    private static func pollProgress(_ session: AVAssetExportSession,
+                                     onProgress: @escaping @Sendable (Double) -> Void) async {
+        while !Task.isCancelled {
+            switch session.status {
+            case .completed, .failed, .cancelled:
+                return
+            case .exporting:
+                let fraction = Double(session.progress)
+                if fraction.isFinite { onProgress(min(1, max(0, fraction))) }
+            default:
+                break                                   // .unknown and .waiting carry no number
+            }
+            do {
+                try await Task.sleep(nanoseconds: UInt64(progressInterval * 1_000_000_000))
+            } catch {
+                return                                  // cancelled mid sleep, which is the normal exit
             }
         }
     }

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "ChoisyVideoKit",
-    platforms: [.iOS("18.0")],
+    platforms: [.iOS(.v16)],
     products: [
         .library(
             name: "ChoisyVideoKit",

@@ -123,16 +123,42 @@ actor VoiceRecorder {
 
     /// `.undetermined` prompts, `.denied` rejects without prompting.
     ///
-    /// The `AVAudioApplication` pair is the iOS 17 replacement; `AVAudioSession.recordPermission`
-    /// and its request are deprecated and would warn.
+    /// The `AVAudioApplication` pair is the iOS 17 replacement for the `AVAudioSession` one below
+    /// it. Both are here because the package's floor is under 17, and they answer the same three
+    /// cases, so nothing that calls this can tell which one ran.
     private func requestPermission() async throws {
-        switch AVAudioApplication.shared.recordPermission {
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .denied:
+                throw VoiceError.permissionDenied
+            case .undetermined:
+                if await AVAudioApplication.requestRecordPermission() == false {
+                    throw VoiceError.permissionDenied
+                }
+            default:
+                break
+            }
+        } else {
+            try await Self.requestLegacyPermission()
+        }
+    }
+
+    /// The pre iOS 17 half of the pair above.
+    ///
+    /// It is marked deprecated at the same version as the two members it uses, which is what keeps
+    /// them from warning on every build: a deprecated API used inside a declaration deprecated in
+    /// the same release is not a diagnostic.
+    @available(iOS, deprecated: 17.0, message: "AVAudioApplication carries the record permission from iOS 17")
+    private static func requestLegacyPermission() async throws {
+        let session = AVAudioSession.sharedInstance()
+        switch session.recordPermission {
         case .denied:
             throw VoiceError.permissionDenied
         case .undetermined:
-            if await AVAudioApplication.requestRecordPermission() == false {
-                throw VoiceError.permissionDenied
+            let granted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                session.requestRecordPermission { continuation.resume(returning: $0) }
             }
+            if !granted { throw VoiceError.permissionDenied }
         default:
             break
         }
