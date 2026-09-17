@@ -1,38 +1,72 @@
 {
   "name": "choisy-video-kit",
-  "version": "1.2.3",
-  "description": "Native video composition and native background publishing for Capacitor: edit and encode on the device, then upload in a way that survives the app being killed.",
-  "main": "dist/cjs/index.js",
-  "module": "dist/esm/index.js",
-  "types": "dist/esm/index.d.ts",
-  "sideEffects": false,
+  "version": "1.3.0",
+  "description": "Native video composition and native background publishing for Capacitor, and the editor that drives them as framework free web components: edit and encode on the device, then upload in a way that survives the app being killed.",
+  "license": "UNLICENSED",
+  "author": "Globaegis Limited FZE",
+  "private": true,
+  "main": "plugin/cjs/plugin.js",
+  "module": "plugin/esm/plugin.js",
+  "types": "plugin/esm/plugin.d.ts",
+  "collection": "dist/collection/collection-manifest.json",
+  "collection:main": "dist/collection/index.js",
+  "unpkg": "dist/choisy-video-kit/choisy-video-kit.esm.js",
+  "sideEffects": [
+    "dist/**",
+    "loader/**"
+  ],
   "exports": {
     ".": {
       "import": {
-        "types": "./dist/esm/index.d.ts",
-        "default": "./dist/esm/index.js"
+        "types": "./plugin/esm/plugin.d.ts",
+        "default": "./plugin/esm/plugin.js"
       },
       "require": {
-        "types": "./dist/cjs/index.d.ts",
-        "default": "./dist/cjs/index.js"
+        "types": "./plugin/cjs/plugin.d.ts",
+        "default": "./plugin/cjs/plugin.js"
       }
     },
     "./editor": {
       "import": {
-        "types": "./dist/esm/editor/index.d.ts",
-        "default": "./dist/esm/editor/index.js"
+        "types": "./plugin/esm/editor/index.d.ts",
+        "default": "./plugin/esm/editor/index.js"
       },
       "require": {
-        "types": "./dist/cjs/editor/index.d.ts",
-        "default": "./dist/cjs/editor/index.js"
+        "types": "./plugin/cjs/editor/index.d.ts",
+        "default": "./plugin/cjs/editor/index.js"
       }
+    },
+    "./ui": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs.js"
+    },
+    "./dist/components": {
+      "types": "./dist/components/index.d.ts",
+      "import": "./dist/components/index.js"
+    },
+    "./dist/components/*.js": {
+      "types": "./dist/components/*.d.ts",
+      "import": "./dist/components/*.js"
+    },
+    "./assets/*": "./dist/components/assets/*",
+    "./loader": {
+      "types": "./loader/index.d.ts",
+      "import": "./loader/index.mjs",
+      "require": "./loader/index.cjs.js"
     },
     "./package.json": "./package.json"
   },
-  "license": "UNLICENSED",
-  "private": true,
   "files": [
-    "dist/"
+    "plugin/",
+    "dist/",
+    "loader/",
+    "ios/Sources/",
+    "Package.swift",
+    "android/src/main/",
+    "android/build.gradle",
+    "android/proguard-rules.pro",
+    "!dist/collection/assets"
   ],
   "keywords": [
     "capacitor",
@@ -43,7 +77,9 @@
     "transformer",
     "upload",
     "background",
-    "workmanager"
+    "workmanager",
+    "stencil",
+    "web-components"
   ],
   "capacitor": {
     "ios": {
@@ -53,25 +89,58 @@
       "src": "android"
     }
   },
+  "workspaces": [
+    "packages/react",
+    "packages/vue",
+    "packages/angular"
+  ],
   "scripts": {
-    "build": "npm run clean && npm run build:esm && npm run build:cjs && node scripts/finish-build.mjs",
-    "build:esm": "tsc -p tsconfig.json",
-    "build:cjs": "tsc -p tsconfig.cjs.json",
-    "clean": "rimraf dist",
-    "prepare": "npm run build",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "npm run build:package && npm run build:wrappers",
+    "build:package": "npm run clean && npm run build:plugin && npm run build:ui && node scripts/module-type.mjs",
+    "build:plugin": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finish-build.mjs",
+    "build:ui": "stencil build",
+    "build:wrappers": "npm run build --workspace choisy-video-kit-react && npm run build --workspace choisy-video-kit-vue && npm run build --workspace choisy-video-kit-angular",
+    "clean": "rimraf plugin dist loader www .stencil src/components.d.ts",
+    "prepare": "npm run build:package",
+    "test": "stencil-test --prod",
+    "test:watch": "stencil-test --prod --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces",
+    "generate": "stencil generate",
+    "clean:all": "npm run clean && npm run clean --workspaces --if-present"
   },
   "devDependencies": {
     "@capacitor/core": "^8.0.2",
+    "@preact/signals-core": "^1.14.4",
+    "@stencil/angular-output-target": "^1.5.0",
+    "@stencil/core": "^4.45.0",
+    "@stencil/react-output-target": "^1.6.2",
+    "@stencil/vitest": "^1.15.1",
+    "@stencil/vue-output-target": "0.14.3",
+    "@types/node": "^22.13.5",
+    "@vitest/browser-playwright": "^4.0.0",
+    "choisy-video-kit": "file:.",
+    "playwright": "^1.52.0",
     "rimraf": "^6.0.1",
-    "typescript": "~5.9.0"
+    "typescript": "~5.9.3",
+    "vitest": "^4.0.0"
   },
   "peerDependencies": {
-    "@capacitor/core": ">=8.0.0"
+    "@capacitor/core": ">=8.0.0",
+    "@preact/signals-core": "^1.14.4",
+    "@stencil/core": "^4.45.0"
   },
   "peerDependenciesMeta": {
     "@capacitor/core": {
       "optional": true
+    },
+    "@preact/signals-core": {
+      "optional": true
+    },
+    "@stencil/core": {
+      "optional": true
     }
+  },
+  "engines": {
+    "node": ">=20.19.0"
   }
 }

@@ -1,0 +1,36 @@
+/*
+ * The editor's half of `src`, tests included: the options `npm run typecheck` runs over it, the
+ * file an editor resolves a component against, and the one Vite reads `jsx` and `jsxImportSource`
+ * from when it transforms a `.cmp.test.tsx`. A test file that is not covered here is transformed
+ * with esbuild's default JSX instead and every render fails with `Invalid vNode child undefined`.
+ * That is why this file sits in `src/` rather than at the repository root: the root
+ * `tsconfig.json` is the plugin's, it has no JSX settings at all, and Vite takes the nearest one.
+ *
+ * Stencil builds the editor with the root `tsconfig.stencil.json`, which is this file with the
+ * tests taken back out, because everything Stencil compiles is published in `dist/collection`.
+ *
+ * The four excluded paths are the Capacitor plugin, which the root `tsconfig.json` compiles into
+ * `plugin/` under its own rules. `editor/` is deliberately not among them: the contract is the one
+ * thing both halves share, and the components read it from `../editor` the way the proxies read it
+ * from `./editor`.
+ */
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    /* Stencil's decorators are the legacy TypeScript ones, not the TC39 standard ones. */
+    "experimentalDecorators": true,
+    /*
+     * The automatic JSX runtime, supported since @stencil/core 4.41.0, so no file needs an `h`
+     * import. That matters more than it sounds: `noUnusedLocals` in the base config plus Stencil's
+     * "always fail the build on a TypeScript error" turns a left over `h` import into a build
+     * failure whose message reads like a JSX runtime problem and is not one.
+     */
+    "jsx": "react-jsx",
+    "jsxImportSource": "@stencil/core",
+    "rootDir": "./",
+    "types": ["@stencil/vitest/globals"]
+  },
+  "include": ["."],
+  "exclude": ["plugin.ts", "video-composer", "post-publisher", "node_modules"]
+}

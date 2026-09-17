@@ -1,8 +1,13 @@
 {
-  /* What produces the published build, which is the only way anything consumes this plugin now that
-     it is its own repository and the app resolves it through node_modules. Keep the strictness here
-     at least as tight as the app's, or a type error would first appear in the consumer rather than
-     here. */
+  /* What produces the plugin half of the published build: the two Capacitor proxies, their
+     definitions and the editor contract the Swift and Kotlin engines are written against. The app
+     consumes exactly this, through `node_modules` and the exports map, so keep the strictness here
+     at least as tight as the app's or a type error would first appear in the consumer rather than
+     here.
+
+     The editor's components and its store are not here. They share this `src/` but they are a
+     different build with different rules: Stencil compiles them with JSX and its own decorators,
+     from `src/tsconfig.build.json`, and emits them into `dist/`. */
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -18,14 +23,26 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "declaration": true,
-    /* No maps, because `files` is `dist/` and the `src/` a map names is not in the tarball. Emitting
-       them anyway put 64 `.map` files and 64 `sourceMappingURL` comments in every consumer's
-       node_modules, each one pointing at a path that does not exist, which is how a debugger comes
-       to report a missing source instead of simply stepping through the shipped JavaScript. */
+    /* No maps, because `files` carries the emitted JavaScript and no `src/`, so a map names a path
+       the consumer does not have. Emitting them anyway put 64 `.map` files and 64
+       `sourceMappingURL` comments in every consumer's node_modules, each one pointing at a path
+       that does not exist, which is how a debugger comes to report a missing source instead of
+       simply stepping through the shipped JavaScript. */
     "declarationMap": false,
     "sourceMap": false,
     "rootDir": "src",
-    "outDir": "dist/esm"
+    /* Not `dist/`, which Stencil owns and empties on every build, and into which it writes an
+       `esm/` and a `cjs/` of its own. Two builds cannot share those two names. */
+    "outDir": "plugin/esm"
   },
-  "include": ["src/**/*.ts"]
+  /* Named one by one rather than taken as `src/**` minus the rest, because the two halves of this
+     package share `src/` and only these four paths are the plugin. Anything new that belongs in the
+     published plugin has to be added here, which is a better failure than a file silently joining
+     the wrong build. */
+  "include": [
+    "src/plugin.ts",
+    "src/video-composer/**/*.ts",
+    "src/post-publisher/**/*.ts",
+    "src/editor/**/*.ts"
+  ]
 }

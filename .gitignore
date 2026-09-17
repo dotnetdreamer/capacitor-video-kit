@@ -1,11 +1,36 @@
-dist/
 node_modules/
+
+# The two build outputs. `plugin/` is the Capacitor plugin's `tsc` pair, `dist/` and `loader/` are
+# Stencil's, and `dist/` also catches the three wrapper packages' own output.
+/plugin/
+dist/
+loader/
+www/
+.stencil/
+
+# Written by `stencil build`, every time, from the components themselves.
+src/components.d.ts
+
+# Written into the wrapper packages by stencil.config.ts. The wrappers are generated from the
+# components, so the only thing worth reviewing is the component that produced them.
+packages/*/src/generated/
+packages/react/.build/
+packages/angular/.angular/
+
+# Only written when a browser test fails.
+__screenshots__/
+.vitest-attachments/
+
 android/build/
 android/.gradle/
-.DS_Store
 
 # SwiftPM build output. `swift build` and `xcodebuild` both drop these next to Package.swift
 # when the package is resolved on its own; the app's CapApp-SPM is what pins versions for a build.
 .build/
 .swiftpm/
 Package.resolved
+
+*.log
+.DS_Store
+.idea/
+.vscode/

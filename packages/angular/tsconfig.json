@@ -1,0 +1,31 @@
+/*
+ * ng-packagr compiles this package, not plain `tsc`, because an Angular library has to be emitted
+ * in partial compilation mode for the consuming application's linker to finish the job.
+ *
+ * No declaration map, because ng-packagr publishes `dist/` and nothing else, so the `src/` that
+ * `index.d.ts.map` named never reaches a consumer and a debugger that followed it reported a
+ * missing source instead of stepping through the shipped bundle.
+ *
+ * `sourceMap` is off for the same reason and ng-packagr overrules it: it writes one map beside the
+ * FESM bundle whatever this says. That one is left alone because it does not dangle, having every
+ * source inlined in `sourcesContent`, so it is the only map in the three wrappers that a consumer
+ * can actually step through.
+ */
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "angularCompilerOptions": {
+    "compilationMode": "partial",
+    "strictTemplates": true
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,25 @@
+/*
+ * `module: esnext` and `moduleResolution: bundler` are both required rather than preferred: the
+ * generated wrappers import the custom elements through the core package's exports map, which
+ * older resolution modes do not read.
+ *
+ * `tsc` writes `.build` rather than `dist`, because it is the first half of the build: Rollup
+ * bundles what lands there into `dist`. `rollup.config.mjs` says why that step exists.
+ *
+ * No maps of either kind, because `files` is `dist/` and the sources a map names are `src/`, which
+ * is not in the tarball. A map to a file the consumer does not have is worse than no map: a
+ * debugger stops showing the shipped JavaScript and reports a missing source instead.
+ */
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "outDir": ".build",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}

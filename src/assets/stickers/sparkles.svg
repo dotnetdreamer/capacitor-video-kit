@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<g transform="translate(2.2 -0.7) scale(0.984)">
+<g transform="translate(6 10)"><g opacity="0.3"><path d="M206,122 Q233.2,264.8 376,292 Q233.2,319.2 206,462 Q178.8,319.2 36,292 Q178.8,264.8 206,122 Z" fill="#000" stroke="#000" stroke-width="42" stroke-linejoin="round"/><path d="M388,48 Q402.08,121.92 476,136 Q402.08,150.08 388,224 Q373.92,150.08 300,136 Q373.92,121.92 388,48 Z" fill="#000" stroke="#000" stroke-width="40" stroke-linejoin="round"/><path d="M398,334 Q407.28,382.72 456,392 Q407.28,401.28 398,450 Q388.72,401.28 340,392 Q388.72,382.72 398,334 Z" fill="#000" stroke="#000" stroke-width="40" stroke-linejoin="round"/></g></g>
+<g><path d="M206,122 Q233.2,264.8 376,292 Q233.2,319.2 206,462 Q178.8,319.2 36,292 Q178.8,264.8 206,122 Z" fill="#fff" stroke="#fff" stroke-width="42" stroke-linejoin="round"/><path d="M388,48 Q402.08,121.92 476,136 Q402.08,150.08 388,224 Q373.92,150.08 300,136 Q373.92,121.92 388,48 Z" fill="#fff" stroke="#fff" stroke-width="40" stroke-linejoin="round"/><path d="M398,334 Q407.28,382.72 456,392 Q407.28,401.28 398,450 Q388.72,401.28 340,392 Q388.72,382.72 398,334 Z" fill="#fff" stroke="#fff" stroke-width="40" stroke-linejoin="round"/></g>
+<g>
+<path d="M206,122 Q233.2,264.8 376,292 Q233.2,319.2 206,462 Q178.8,319.2 36,292 Q178.8,264.8 206,122 Z" fill="#ffd23f" stroke="#1d1230" stroke-width="16" stroke-linejoin="round"/>
+<path d="M388,48 Q402.08,121.92 476,136 Q402.08,150.08 388,224 Q373.92,150.08 300,136 Q373.92,121.92 388,48 Z" fill="#ffffff" stroke="#1d1230" stroke-width="14" stroke-linejoin="round"/>
+<path d="M398,334 Q407.28,382.72 456,392 Q407.28,401.28 398,450 Q388.72,401.28 340,392 Q388.72,382.72 398,334 Z" fill="#ff4f9a" stroke="#1d1230" stroke-width="14" stroke-linejoin="round"/>
+</g>
+</g>
+</svg>

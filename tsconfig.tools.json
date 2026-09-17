@@ -1,0 +1,16 @@
+/*
+ * The files that configure or extend the build rather than ship in it.
+ *
+ * They are a separate program because `src/tsconfig.json` is the one Stencil compiles the editor
+ * with: anything listed there is emitted, so a build helper included in it comes out as
+ * `dist/collection/build/*.js` in the published package. This one emits nothing and only checks
+ * types.
+ */
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["build", "stencil.config.ts", "vitest.config.ts"]
+}

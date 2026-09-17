@@ -1,0 +1,22 @@
+/*
+ * `module: esnext` and `moduleResolution: bundler` are both required rather than preferred: the
+ * generated wrappers import the custom elements through the core package's exports map, which
+ * older resolution modes do not read.
+ *
+ * No maps of either kind, because `files` is `dist/` and the sources a map names are `src/`, which
+ * is not in the tarball. All four of the maps this used to emit pointed at files no consumer
+ * received, which is how a debugger comes to report a missing source instead of stepping through
+ * the shipped JavaScript.
+ */
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,38 @@
+:host {
+  /**
+   * @prop --ve-spinner-size: Diameter of the arc, including its stroke
+   * @prop --ve-spinner-thickness: Width of the stroke
+   * @prop --ve-spinner-color: Colour of the lit part of the arc, defaulting to the inherited text colour
+   * @prop --ve-spinner-track: Colour of the unlit part, transparent by default so the arc reads as a crescent
+   * @prop --ve-spinner-duration: Time for one full turn
+   */
+  display: inline-block;
+  width: var(--ve-spinner-size, 28px);
+  height: var(--ve-spinner-size, 28px);
+}
+
+.arc {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border: var(--ve-spinner-thickness, 3px) solid var(--ve-spinner-track, transparent);
+  border-top-color: var(--ve-spinner-color, currentColor);
+  border-radius: 50%;
+  animation: ve-spinner-turn var(--ve-spinner-duration, 0.8s) linear infinite;
+}
+
+/*
+ * A customer who has asked their phone to stop animating things still needs to know the editor is
+ * working, so the arc keeps its shape and stops turning rather than disappearing.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .arc {
+    animation: none;
+  }
+}
+
+@keyframes ve-spinner-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -1,0 +1,36 @@
+/*
+ * What Stencil compiles: `src/tsconfig.json` with the tests taken out, and with every path spelled
+ * from the repository root.
+ *
+ * Both of those are forced rather than chosen. The tests have to come out because everything
+ * Stencil compiles is copied into `dist/collection`, which is published: left in,
+ * `asset-path.unit.test.js` and its seven siblings shipped to every consumer, importing `vitest`
+ * and `@vitest/browser`, which this package does not depend on and no consumer installs. They
+ * cannot simply be excluded from `src/tsconfig.json` instead, because Vite reads `jsx` and
+ * `jsxImportSource` for a `.cmp.test.tsx` from the nearest tsconfig that covers it, and a file no
+ * tsconfig covers is transformed with esbuild's default JSX factory, which fails every render with
+ * `Invalid vNode child undefined`.
+ *
+ * And this file is at the root rather than beside `src/tsconfig.json` because Stencil resolves a
+ * tsconfig's `include` and `exclude` against its own `rootDir` rather than against the directory
+ * the tsconfig is in. With them written relative to `src/`, as TypeScript itself reads them,
+ * Stencil warned that `include` should list `src`, compiled nothing at all, and then handed rollup
+ * the untranspiled TypeScript:
+ *
+ *   Rollup: Parse Error: src/editor/compose-spec.ts (1:12): Expected ',', got '{'
+ *
+ * `compilerOptions` are inherited, so the JSX and decorator settings are still declared once, in
+ * the file an editor and Vite read.
+ */
+{
+  "extends": "./src/tsconfig.json",
+  "include": ["src"],
+  "exclude": [
+    "src/plugin.ts",
+    "src/video-composer",
+    "src/post-publisher",
+    "node_modules",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
+  ]
+}

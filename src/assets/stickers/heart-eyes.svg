@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<g transform="translate(-13.1 -15.2) scale(1.039)">
+<g transform="translate(6 10)"><g opacity="0.3" transform="rotate(-6 256 256)"><path d="M256,52 C368.6692,52 460,143.3308 460,256 C460,368.6692 368.6692,460 256,460 C143.3308,460 52,368.6692 52,256 C52,143.3308 143.3308,52 256,52 Z" fill="#000" stroke="#000" stroke-width="42" stroke-linejoin="round"/></g></g>
+<g transform="rotate(-6 256 256)"><path d="M256,52 C368.6692,52 460,143.3308 460,256 C460,368.6692 368.6692,460 256,460 C143.3308,460 52,368.6692 52,256 C52,143.3308 143.3308,52 256,52 Z" fill="#fff" stroke="#fff" stroke-width="42" stroke-linejoin="round"/></g>
+<g transform="rotate(-6 256 256)">
+<path d="M256,52 C368.6692,52 460,143.3308 460,256 C460,368.6692 368.6692,460 256,460 C143.3308,460 52,368.6692 52,256 C52,143.3308 143.3308,52 256,52 Z" fill="#ffd23f" stroke="#1d1230" stroke-width="16" stroke-linejoin="round"/>
+<path d="M150,300 C166,410 346,410 362,300 C300,316 212,316 150,300 Z" fill="#5a1238" stroke="#1d1230" stroke-width="12" stroke-linejoin="round"/>
+<path d="M206,370 C226,344 286,344 306,370 C286,392 226,392 206,370 Z" fill="#ff8fc0"/>
+<path d="M172,256.7 C162.7,248.6 114,219.6 114,190.6 C114,166.2 129.1,153.5 144.2,153.5 C158.1,153.5 167.4,161.6 172,172 C176.6,161.6 185.9,153.5 199.8,153.5 C214.9,153.5 230,166.2 230,190.6 C230,219.6 181.3,248.6 172,256.7 Z" fill="#ff3b47" stroke="#1d1230" stroke-width="12" stroke-linejoin="round"/>
+<path d="M340,256.7 C330.7,248.6 282,219.6 282,190.6 C282,166.2 297.1,153.5 312.2,153.5 C326.1,153.5 335.4,161.6 340,172 C344.6,161.6 353.9,153.5 367.8,153.5 C382.9,153.5 398,166.2 398,190.6 C398,219.6 349.3,248.6 340,256.7 Z" fill="#ff3b47" stroke="#1d1230" stroke-width="12" stroke-linejoin="round"/>
+<ellipse cx="148" cy="184" rx="14" ry="9" fill="#fff" transform="rotate(-35 148 184)"/>
+<ellipse cx="316" cy="184" rx="14" ry="9" fill="#fff" transform="rotate(-35 316 184)"/>
+<ellipse cx="104" cy="300" rx="30" ry="18" fill="#ff8fc0"/><ellipse cx="408" cy="300" rx="30" ry="18" fill="#ff8fc0"/>
+</g>
+</g>
+</svg>

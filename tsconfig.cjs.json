@@ -1,10 +1,10 @@
 {
-  /* The CommonJS half of the dual build. Bundlers and Node ESM take `dist/esm`; this exists so a
-     `require('choisy-video-kit')` from an older toolchain still resolves to real JavaScript. */
+  /* The CommonJS half of the plugin build. Bundlers and Node ESM take `plugin/esm`; this exists so
+     a `require('choisy-video-kit')` from an older toolchain still resolves to real JavaScript. */
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "module": "CommonJS",
     "moduleResolution": "Node",
-    "outDir": "dist/cjs"
+    "outDir": "plugin/cjs"
   }
 }

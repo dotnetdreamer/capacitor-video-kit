@@ -35,6 +35,14 @@ const UNKNOWN_TRACK_END_MS = 3_600_000;
 /**
  * The one translation from an edit to something the native composer renders.
  *
+ * This file is not called `compose-spec.ts`, after the `ComposeSpec` it builds, and it must not be
+ * renamed to anything else ending in `spec`. Stencil's emitter drops every file whose emitted path
+ * contains the substring `spec.`, taking `compose-spec.js` with the real test files, and the module
+ * then never reaches the bundler as JavaScript at all. What the build says instead names the line
+ * rather than the cause:
+ *
+ *   Rollup: Parse Error: src/editor/compose-spec.ts (1:12): Expected ',', got '{'
+ *
  * Every number the preview used is carried across unchanged - trims, speeds, the resolved colour
  * ops, each layer's 0..1 centre, clockwise rotation, opacity and time window - and every layer is
  * rasterised here by [rasteriseOverlay], the same function that draws the preview's bitmaps, so the

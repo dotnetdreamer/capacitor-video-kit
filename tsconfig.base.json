@@ -1,0 +1,26 @@
+/*
+ * The options every package in the repo agrees on. Each package adds only what is true of itself:
+ * core adds Stencil's decorators and JSX, the three wrappers add their own framework's.
+ */
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "forceConsistentCasingInFileNames": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    /*
+     * The Vue output target type-imports vue-router inside its own runtime types, so a package that
+     * compiles the generated Vue wrapper without vue-router installed fails with a TS2307 pointing
+     * into a dependency rather than into its own source. Every consumer of the Vue wrapper hits the
+     * same thing, which is why the wrapper's readme says to set this too.
+     */
+    "skipLibCheck": true
+  }
+}
