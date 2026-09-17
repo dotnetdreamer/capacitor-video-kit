@@ -1,10 +1,12 @@
 import { setEditorDebug } from './debug';
 import type {
+  EditorInsets,
   EditorKeyboardHost,
   EditorMediaHost,
   EditorSource,
   PickedAudio,
   PickedImage,
+  ReleaseRequest,
   ResolvedEditorHost,
   ThumbnailRequest,
   VideoEditorHost,
@@ -45,6 +47,9 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       keyboard: platform?.keyboard ?? visualViewportKeyboard(),
       registerBackHandler: platform?.registerBackHandler ?? noBackHandler,
       confirm: platform?.confirm?.bind(platform) ?? null,
+      // Bound, because a host that implements these as methods of a class or an Angular service
+      // loses `this` the moment the editor holds the function on its own.
+      measureInsets: platform?.measureInsets?.bind(platform) ?? null,
       debug: platform?.debug ?? false,
     },
   };
@@ -93,22 +98,69 @@ export function visualViewportKeyboard(): EditorKeyboardHost {
 }
 
 /**
+ * The safe area as the page itself reports it, read back out of `env(safe-area-inset-*)` through a
+ * probe element, because CSS will apply those values but offers no way to ask for them.
+ *
+ * This is not what `resolveEditorHost` leaves behind for a host that supplied no `measureInsets`,
+ * and [ResolvedPlatformHost.measureInsets] says why: the editor's own padding already falls back to
+ * `env()`, so handing the same numbers back through JavaScript would only overwrite a host that set
+ * `--ve-safe-top` itself. It is here for the host that needs the measurement path anyway - one
+ * rendering the editor inside its own chrome, or one that has to pair the insets with a bar of its
+ * own - and as the shape a native implementation answers in:
+ *
+ * ```ts
+ * resolveEditorHost({ platform: { measureInsets: envSafeAreaInsets } });
+ * ```
+ */
+export async function envSafeAreaInsets(): Promise<EditorInsets> {
+  const parent = typeof document === 'undefined' ? null : (document.body ?? document.documentElement);
+  if (!parent) return { top: 0, bottom: 0 };
+
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:fixed;top:0;left:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
+    'padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)';
+  parent.appendChild(probe);
+  try {
+    const padding = getComputedStyle(probe);
+    return { top: cssPixels(padding.paddingTop), bottom: cssPixels(padding.paddingBottom) };
+  } finally {
+    probe.remove();
+  }
+}
+
+/** A length a browser resolved to nothing reads back as '' or 'auto', and an inset is never below 0. */
+function cssPixels(value: string): number {
+  const px = Number.parseFloat(value);
+  return Number.isFinite(px) && px > 0 ? px : 0;
+}
+
+/**
  * Pickers, probes and filmstrip frames done entirely in the page.
  *
  * Sources it hands back carry a blob URL and no `sourcePath`, because in a browser there is no
- * path: the file exists only for as long as the tab does. That is also why nothing here revokes a
- * URL it created - the manifest can still be pointing at it, and undo can bring back a segment
- * that was removed ten steps ago.
+ * path: the file exists only for as long as the tab does. Nothing here revokes such a URL while the
+ * edit is running - the manifest can still be pointing at it, and undo can bring back a segment
+ * that was removed ten steps ago - which is exactly what `release` is the one safe moment for.
  */
 export function browserMediaHost(): EditorMediaHost {
+  /*
+   * The object URLs this host minted, so `release` gives back what it took and nothing else. A
+   * source the application handed to the editor may be pointing at a blob URL the application still
+   * holds a reference to, and revoking that one empties whatever is playing it with no error.
+   */
+  const minted = new Set<string>();
+
   return {
     async pickVideo(): Promise<EditorSource | null> {
       const file = await pickFile('video/*');
       if (!file) return null;
+      const playbackUrl = URL.createObjectURL(file);
+      minted.add(playbackUrl);
       return {
         key: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         fileName: file.name,
-        playbackUrl: URL.createObjectURL(file),
+        playbackUrl,
       };
     },
 
@@ -139,6 +191,28 @@ export function browserMediaHost(): EditorMediaHost {
 
     thumbnails(request: ThumbnailRequest): Promise<string[]> {
       return canvasThumbnails(request);
+    },
+
+    /**
+     * Gives back the files behind the clips the edit dropped, which in a browser means revoking
+     * their object URLs: one of those holds a whole picked video in the tab for as long as the page
+     * lives, and nothing else ever hands that memory back.
+     *
+     * A URL a kept source still names is left alone. Two sources sharing one URL is the host's own
+     * doing rather than this host's, but it is the case both lists are here for and it costs a set.
+     */
+    release({ kept, dropped }: ReleaseRequest): void {
+      const held = new Set<string>();
+      for (const source of kept) {
+        if (source.playbackUrl) held.add(source.playbackUrl);
+      }
+      for (const source of dropped) {
+        const url = source.playbackUrl;
+        // `delete` answers whether this host minted it and retires it in the same breath, so a
+        // second release, or a source listed twice, revokes nothing twice.
+        if (!url || held.has(url) || !minted.delete(url)) continue;
+        URL.revokeObjectURL(url);
+      }
     },
   };
 }

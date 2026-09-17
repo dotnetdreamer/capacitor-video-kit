@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>choisy-video-kit harness</title>
+    <style>
+      /*
+       * Chrome only. Nothing here styles the component under test and nothing here declares a
+       * `--ve-` token: every component but `ve-editor` is written to stand up on the fallbacks in
+       * its own `var(--ve-bg, #000)` calls, and a harness that quietly supplied the palette would
+       * be the one place those fallbacks were never exercised. Mount `ve-editor` to see the tokens.
+       */
+      :root {
+        color-scheme: dark;
+        --chrome: #14161a;
+        --line: #2b2f37;
+        --ink: #e7e9ee;
+        --dim: #8b93a3;
+        --hot: #a6ff2e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #0b0c0f;
+        color: var(--ink);
+        font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        height: 100vh;
+      }
+      .bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: var(--chrome);
+        border-bottom: 1px solid var(--line);
+      }
+      .bar select,
+      .bar button {
+        font: inherit;
+        color: var(--ink);
+        background: #1d2128;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 9px;
+      }
+      .bar button:hover {
+        border-color: #4b525f;
+      }
+      .bar button:active {
+        background: #262c35;
+      }
+      .readout {
+        margin-left: auto;
+        color: var(--dim);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        white-space: pre;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        min-height: 0;
+      }
+      .room {
+        display: grid;
+        place-items: center;
+        overflow: auto;
+        padding: 16px;
+      }
+      /*
+       * The editor's own column on a 393px phone, which is the screen every one of these
+       * components was drawn for. A sheet is anchored to the bottom of it because that is where
+       * `ve-editor` puts one, and `overflow: hidden` is the clip a slide up needs.
+       *
+       * The width is the phone's and the height gives way on a shorter window, because the bottom
+       * of this box is where every sheet lives and a window that cut it off would hide the thing
+       * being worked on. Scaling the column to fit instead would mean a transform on it, and a
+       * transform makes an ancestor a containing block: the toolbar's `position: fixed` menu
+       * catcher would then be trapped inside the stage rather than covering the viewport.
+       */
+      .stage {
+        position: relative;
+        width: 393px;
+        height: min(852px, 100%);
+        background: #000;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+      }
+      .stage > * {
+        flex: 0 0 auto;
+      }
+      /* `?fill=1`, for the tags that are given the room rather than the bottom of it. */
+      .stage.fill > * {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      .log {
+        border-left: 1px solid var(--line);
+        background: var(--chrome);
+        overflow: auto;
+        padding: 8px 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+        padding: 2px 0;
+        border-bottom: 1px solid #1c2027;
+      }
+      .row b {
+        color: var(--hot);
+        font-weight: 600;
+        min-width: 74px;
+      }
+      .row span {
+        color: var(--dim);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .row i {
+        margin-left: auto;
+        color: #5d6573;
+        font-style: normal;
+      }
+      .row.bad b {
+        color: #ff6b6b;
+      }
+      .note {
+        color: var(--dim);
+        margin: auto;
+        padding: 24px;
+        max-width: 460px;
+        text-align: center;
+      }
+      .note code {
+        color: var(--hot);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="bar">
+      <select id="tags" title="The tag to mount"></select>
+      <button id="undo" title="Undo">undo</button>
+      <button id="redo" title="Redo">redo</button>
+      <button id="play" title="Play or pause">play</button>
+      <button id="reset" title="Put the fixture back">reset</button>
+      <button id="dump" title="Log the manifest to the console">manifest</button>
+      <output class="readout" id="readout"></output>
+    </header>
+    <div class="split">
+      <div class="room"><main class="stage" id="stage"></main></div>
+      <aside class="log" id="log"></aside>
+    </div>
+
+    <script type="module">
+      /*
+       * The development harness: one component, mounted on its own, over a real store.
+       *
+       * It is generic on purpose. Twenty one components are being ported into this package and each
+       * of them needs somewhere to be looked at; a harness with a line per component would be the
+       * one file every author had to edit. So the tag comes from the query string, `?tag=ve-slider`,
+       * anything else in the query string is set on the element as a property, and the fixture
+       * below is the same edit whichever tag is mounted.
+       *
+       * Everything a component is given arrives as `ctx`, the one DOM property `ve-editor` sets on
+       * its children. `ve-editor` itself takes `sources` and `manifest` instead and builds a store
+       * of its own; both are set here, because a property a component does not declare is inert.
+       */
+      import {
+        EditorMedia,
+        EditorStore,
+        OverlayBitmaps,
+        browserMediaHost,
+        installEditorFonts,
+        resolveEditorHost,
+        setEditorAssetPath,
+      } from './choisy-video-kit/index.esm.js';
+      /* Defines every tag in the build. The same bundle as the import above, so there is one copy
+         of the signal library and the store below is the one the components are watching. */
+      import './choisy-video-kit/choisy-video-kit.esm.js';
+
+      /* ===== The fixture ===================================================================== */
+
+      /*
+       * Two videos, three segments, a picture in picture, two layers and a music bed: the smallest
+       * edit that gives every sheet something of its own to show. Change it here.
+       *
+       * The clips are the two files MDN publishes for its own examples, because they are small,
+       * they are served with `access-control-allow-origin: *`, and they are the same two files on
+       * every machine. Point `playbackUrl` at a local file to work offline or to look at your own
+       * footage, and correct `durationMs` with it: the fixture's duration is what the timeline
+       * measures everything against, and a wrong one is a manifest that disagrees with the picture.
+       */
+      const SOURCES = [
+        {
+          key: 'clip-a',
+          fileName: 'flower.mp4',
+          playbackUrl: 'https://mdn.github.io/shared-assets/videos/flower.mp4',
+          /* Not part of `EditorSource`. A host may carry its own fields on these objects, and the
+             fixture's media host reads these two back rather than measuring the file. */
+          durationMs: 5055,
+          tint: '#1f6f52',
+        },
+        {
+          key: 'clip-b',
+          fileName: 'friday.mp4',
+          playbackUrl: 'https://mdn.github.io/shared-assets/videos/friday.mp4',
+          durationMs: 6166,
+          tint: '#4b3a8c',
+        },
+        /* The same file under a second key, which is what a host does when one clip is used twice.
+           It is here so the extra video layer has a source of its own. */
+        {
+          key: 'clip-c',
+          fileName: 'flower.mp4',
+          playbackUrl: 'https://mdn.github.io/shared-assets/videos/flower.mp4',
+          durationMs: 5055,
+          tint: '#8c5a2b',
+        },
+      ];
+
+      /*
+       * The extra layer's rectangle is the `pipTR` preset out of `editor/layout-presets.ts`, worked
+       * out by hand because the presets are not on the package's `ui` entry. It is written out so
+       * that `ve-layout-sheet` opens with a chip already lit, which is the state that has to
+       * survive a Swap.
+       */
+      const PIP_TOP_RIGHT = { x: 0.6, y: 0.0225, w: 0.36, h: 0.2025 };
+
+      const MANIFEST = {
+        version: 4,
+        clips: [
+          { id: 'seg-a', clipKey: 'clip-a', inMs: 400, outMs: 4600, speed: 1, volume: 1, muted: false, fit: 'cover' },
+          { id: 'seg-b', clipKey: 'clip-b', inMs: 0, outMs: 6166, speed: 1, volume: 0.8, muted: false, fit: 'cover' },
+        ],
+        videoTracks: [
+          {
+            id: 'track-1',
+            clips: [
+              {
+                id: 'seg-c',
+                clipKey: 'clip-c',
+                inMs: 0,
+                outMs: 4000,
+                speed: 1,
+                volume: 0,
+                muted: true,
+                rect: PIP_TOP_RIGHT,
+                fit: 'cover',
+              },
+            ],
+            startMs: 1500,
+            z: 1,
+            opacity: 1,
+          },
+        ],
+        filterId: 'none',
+        filterIntensity: 1,
+        adjust: { brightness: 0, contrast: 0, saturation: 0, warmth: 0, tint: 0, fade: 0 },
+        fit: 'cover',
+        originalMuted: false,
+        overlays: [
+          {
+            id: 'ov-text',
+            kind: 'text',
+            text: 'Hidden gem',
+            styleId: 'classic',
+            color: '#ffffff',
+            effect: 'plateSoft',
+            align: 'center',
+            cx: 0.5,
+            cy: 0.22,
+            scale: 1,
+            rotationDeg: 0,
+            opacity: 1,
+            startMs: 0,
+            endMs: 3200,
+          },
+          /* An `endMs` of 0 is "to the end of the post", which the lanes draw differently. */
+          {
+            id: 'ov-sticker',
+            kind: 'sticker',
+            emoji: null,
+            assetId: 'hidden-gem',
+            cx: 0.68,
+            cy: 0.7,
+            scale: 1,
+            rotationDeg: -8,
+            opacity: 1,
+            startMs: 1200,
+            endMs: 0,
+          },
+        ],
+        music: {
+          uri: 'https://mdn.github.io/shared-assets/audio/guitar.mp3',
+          fileName: 'guitar.mp3',
+          sourceDurationMs: 22883,
+          inMs: 0,
+          outMs: 0,
+          startMs: 0,
+          volume: 0.45,
+          loop: true,
+          fadeOutMs: 800,
+        },
+        voiceovers: [],
+      };
+
+      /** What is selected when nothing in the query string says otherwise. */
+      const DEFAULT_SELECTION = { kind: 'clip', id: 'seg-a' };
+
+      /** The tags, in the order the port builds them. The picker marks the ones not built yet. */
+      const TAGS = [
+        've-icon',
+        've-toast',
+        've-progress',
+        've-alert',
+        've-slider',
+        've-sheet',
+        've-opacity-sheet',
+        've-crop-sheet',
+        've-volume-sheet',
+        've-speed-sheet',
+        've-layout-sheet',
+        've-filter-sheet',
+        've-adjust-sheet',
+        've-effects-sheet',
+        've-sticker-sheet',
+        've-voiceover-sheet',
+        've-text-sheet',
+        've-toolbar',
+        've-preview',
+        've-timeline',
+        've-editor',
+        've-spinner',
+      ];
+
+      /** `EditorPanel`, mirrored from `state/editor.types.ts` so a sheet can open its own panel. */
+      const PANELS = [
+        'text',
+        'stickers',
+        'effects',
+        'filters',
+        'adjust',
+        'crop',
+        'layout',
+        'speed',
+        'volume',
+        'opacity',
+        'voiceover',
+      ];
+
+      /** Every event name the port allows, which is the whole of what the log listens for. */
+      const VE_EVENTS = [
+        'veChange',
+        'veLive',
+        'veConfirm',
+        'veDismiss',
+        'veTab',
+        'veNone',
+        'veSearch',
+        'veDone',
+        'veCancel',
+      ];
+
+      /* ===== The log ========================================================================= */
+
+      const logEl = document.getElementById('log');
+      let lastRow = null;
+      let lastKey = '';
+
+      /**
+       * One line per thing that happened, with repeats collapsed into a count. The collapse is the
+       * point: a slider is meant to fire one `veChange` and sixty `veLive`, and a row reading
+       * `veChange x60` is the mistake these components are most likely to ship.
+       */
+      function say(name, detail, bad) {
+        const text = detail === undefined ? '' : typeof detail === 'string' ? detail : safeJson(detail);
+        const key = name + text;
+        if (key === lastKey && lastRow) {
+          const n = Number(lastRow.dataset.n) + 1;
+          lastRow.dataset.n = String(n);
+          lastRow.lastElementChild.textContent = 'x' + n;
+          return;
+        }
+        const row = document.createElement('div');
+        row.className = bad ? 'row bad' : 'row';
+        row.dataset.n = '1';
+        row.append(el('b', name), el('span', text), el('i', ''));
+        logEl.prepend(row);
+        while (logEl.children.length > 200) logEl.lastElementChild.remove();
+        lastRow = row;
+        lastKey = key;
+      }
+
+      function el(tagName, text) {
+        const node = document.createElement(tagName);
+        node.textContent = text;
+        return node;
+      }
+
+      function safeJson(value) {
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
+
+      /* ===== The host ======================================================================== */
+
+      /*
+       * The pickers, the keyboard and the alert are the package's own browser defaults: a file
+       * input really does add a clip, and leaving `confirm` unset is what puts the package's own
+       * `ve-alert` on screen rather than the host's. `measureInsets` is absent for the same
+       * reason, a browser being exactly the case its `env()` fallback exists for.
+       */
+      const browserMedia = browserMediaHost();
+      const backHandlers = [];
+
+      const HOST = {
+        media: {
+          ...browserMedia,
+          /*
+           * The fixture answers for its own sources and the browser measures anything picked during
+           * the session. Measuring the fixture instead would put the timeline's whole geometry
+           * behind a network round trip and let it change with one.
+           */
+          probeDuration(source) {
+            const known = SOURCES.find((s) => s.key === source.key);
+            return known ? Promise.resolve(known.durationMs) : browserMedia.probeDuration(source);
+          },
+          thumbnails(request) {
+            return Promise.resolve(paintedFilmstrip(request));
+          },
+          voice: recorderVoiceHost(),
+        },
+        render: fakeRenderHost(),
+        platform: {
+          debug: true,
+          haptic: (kind) => say('haptic', kind),
+          registerBackHandler(handler) {
+            backHandlers.push(handler);
+            return () => {
+              const at = backHandlers.indexOf(handler);
+              if (at >= 0) backHandlers.splice(at, 1);
+            };
+          },
+        },
+      };
+
+      /*
+       * Filmstrip frames painted rather than decoded. A real seek would want the hardware decoder
+       * the preview is already holding, over the network, and would hand back three tiles of the
+       * same picture; a painted tile carries its own time and its clip's colour, so a strip that is
+       * out of order or off by a step says so at a glance.
+       */
+      function paintedFilmstrip({ source, timesMs, maxHeight }) {
+        const height = Math.min(maxHeight, 90);
+        const width = Math.round(height * (16 / 9));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        const tint = SOURCES.find((s) => s.key === source.key)?.tint ?? '#333333';
+        return timesMs.map((timeMs) => {
+          ctx.fillStyle = tint;
+          ctx.fillRect(0, 0, width, height);
+          ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+          ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '600 20px ui-sans-serif, system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText((timeMs / 1000).toFixed(1) + 's', width / 2, height / 2);
+          return canvas.toDataURL('image/jpeg', 0.7);
+        });
+      }
+
+      /**
+       * A real take, from the microphone the page may ask for on localhost. The duration is
+       * measured rather than read off the blob, because a WebM the browser wrote itself carries no
+       * duration in its header until something seeks it.
+       */
+      function recorderVoiceHost() {
+        let recorder = null;
+        let chunks = [];
+        let startedAt = 0;
+        return {
+          async start() {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            chunks = [];
+            recorder = new MediaRecorder(stream);
+            recorder.ondataavailable = (event) => chunks.push(event.data);
+            recorder.start();
+            startedAt = performance.now();
+          },
+          stop() {
+            const rec = recorder;
+            recorder = null;
+            if (!rec) return Promise.reject(new Error('Nothing is recording'));
+            return new Promise((resolve) => {
+              rec.onstop = () => {
+                for (const track of rec.stream.getTracks()) track.stop();
+                resolve({
+                  uri: URL.createObjectURL(new Blob(chunks, { type: rec.mimeType })),
+                  durationMs: Math.round(performance.now() - startedAt),
+                });
+              };
+              rec.stop();
+            });
+          },
+        };
+      }
+
+      /**
+       * A stand-in for the native encoder, which has no browser answer at all. It runs the progress
+       * bar for a second and a half, honours the abort signal the shell hands it, and gives back
+       * the first source as the finished video: enough to walk Next, and not a render.
+       */
+      function fakeRenderHost() {
+        const RENDER_MS = 1500;
+        return {
+          isSupported: () => Promise.resolve(true),
+          render(request) {
+            say('render', 'started');
+            return new Promise((resolve, reject) => {
+              const startedAt = performance.now();
+              const tick = () => {
+                if (request.signal.aborted) {
+                  say('render', 'aborted', true);
+                  reject(new DOMException('The render was aborted', 'AbortError'));
+                  return;
+                }
+                const progress = Math.min(1, (performance.now() - startedAt) / RENDER_MS);
+                request.onProgress(progress);
+                if (progress < 1) requestAnimationFrame(tick);
+                else resolve(request.sources[0]);
+              };
+              tick();
+            });
+          },
+        };
+      }
+
+      /* ===== The editor ====================================================================== */
+
+      /* The stickers and the text faces are copied to /assets by stencil.dev.config.ts. */
+      setEditorAssetPath('/');
+      installEditorFonts().catch((error) => say('fonts', String(error), true));
+
+      const host = resolveEditorHost(HOST);
+      const store = new EditorStore(host);
+      const media = new EditorMedia(store, host);
+      /*
+       * Built for its side effect, exactly as the shell builds it: it is the thing that gives every
+       * layer a bitmap. Without it the preview shows no text and no stickers and nothing says why.
+       */
+      const bitmaps = new OverlayBitmaps(store, host);
+
+      function loadFixture() {
+        const durations = new Map(SOURCES.map((source) => [source.key, source.durationMs]));
+        store.load(structuredClone(SOURCES), durations, structuredClone(MANIFEST));
+        for (const source of store.clips.value) void media.loadFilmstrip(source);
+      }
+      loadFixture();
+      say('fixture', SOURCES.length + ' sources, ' + MANIFEST.clips.length + ' segments');
+
+      /* For poking at the edit from the console, which is half of what this page is for. */
+      window.harness = { store, media, bitmaps, host, SOURCES, MANIFEST };
+
+      /* ===== Mounting ======================================================================== */
+
+      const params = new URLSearchParams(location.search);
+      const tag = params.get('tag');
+      const stage = document.getElementById('stage');
+
+      if (tag) {
+        mount(tag);
+      } else {
+        const note = el('p', 'Pick a tag above, or open ?tag=ve-slider. Anything else in the query string is set on the element as a property.');
+        note.className = 'note';
+        stage.append(note);
+      }
+
+      function mount(name) {
+        openScene(name);
+        const component = document.createElement(name);
+        component.ctx = { store, media };
+        /* `ve-editor` builds its own store out of these three and ignores `ctx`. */
+        component.sources = store.clips.value;
+        component.manifest = store.manifest.value;
+        component.host = HOST;
+        for (const [key, raw] of params) {
+          if (key === 'tag' || key === 'fill' || key === 'select' || key === 'panel') continue;
+          component[camel(key)] = parseValue(raw);
+        }
+        for (const event of VE_EVENTS) {
+          component.addEventListener(event, (e) => say(event, e.detail));
+        }
+        stage.classList.toggle('fill', params.get('fill') !== null);
+        stage.replaceChildren(component);
+
+        /*
+         * A tag nothing has defined is an ordinary unknown element: it lays out as nothing, throws
+         * nothing, and looks exactly like a component that renders nothing. Three seconds is long
+         * enough for the lazy bundle to have got to it.
+         */
+        Promise.race([
+          customElements.whenDefined(name),
+          new Promise((resolve) => setTimeout(() => resolve('missing'), 3000)),
+        ]).then((outcome) => {
+          if (outcome === 'missing') say(name, 'is not in this build yet', true);
+        });
+      }
+
+      /**
+       * What is selected and which panel is open when the component mounts.
+       *
+       * A sheet mounted with its own panel closed is a sheet that dismisses itself on its first
+       * effect, so a sheet tag opens its panel by default. The two spellings that do not match
+       * their tag, `stickers` and `filters`, are caught by comparing prefixes rather than by a
+       * second list to keep in step.
+       */
+      function openScene(name) {
+        const asked = params.get('select');
+        if (asked !== 'none') store.select(asked ? parseSelection(asked) : DEFAULT_SELECTION);
+
+        const wanted = params.get('panel') ?? guessPanel(name);
+        if (!wanted || wanted === 'none') return;
+        /* The volume sheet reads its target rather than the selection, and has none without this. */
+        const selection = store.selection.value;
+        if (wanted === 'volume' && selection && selection.kind !== 'overlay') store.openVolume(selection);
+        else store.openPanel(wanted);
+      }
+
+      function guessPanel(name) {
+        const word = name.replace(/^ve-/, '').replace(/-sheet$/, '');
+        return PANELS.find((panel) => panel.startsWith(word) || word.startsWith(panel)) ?? null;
+      }
+
+      function parseSelection(raw) {
+        const [kind, id] = raw.split(':');
+        return id ? { kind, id } : { kind };
+      }
+
+      /** `?none-label=Reset` sets `noneLabel`, which is how a dashed attribute would have read. */
+      function camel(name) {
+        return name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      }
+
+      /** Numbers, booleans, objects and arrays as themselves; anything else as the string it is. */
+      function parseValue(raw) {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return raw;
+        }
+      }
+
+      /* ===== The chrome ====================================================================== */
+
+      const tagsEl = document.getElementById('tags');
+      /* Without this the picker would name a tag that is not the one on the stage, which is none. */
+      if (!tag) {
+        const placeholder = el('option', 'pick a tag');
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        tagsEl.append(placeholder);
+      }
+      /* A tag that is not on the roster still belongs in the picker, or it would name another one. */
+      const names = tag && !TAGS.includes(tag) ? [tag, ...TAGS] : TAGS;
+      const tagOptions = names.map((name) => {
+        const option = el('option', name);
+        option.value = name;
+        option.selected = name === tag;
+        tagsEl.append(option);
+        return option;
+      });
+      tagsEl.addEventListener('change', () => {
+        params.set('tag', tagsEl.value);
+        location.search = String(params);
+      });
+      /* Marked once the bundle has had its chance, so the picker doubles as the port's progress. */
+      setTimeout(() => {
+        for (const option of tagOptions) {
+          if (!customElements.get(option.value)) option.textContent = option.value + ' (not built)';
+        }
+      }, 3000);
+
+      document.getElementById('undo').addEventListener('click', () => store.undo());
+      document.getElementById('redo').addEventListener('click', () => store.redo());
+      document.getElementById('play').addEventListener('click', () => store.togglePlay());
+      document.getElementById('reset').addEventListener('click', () => {
+        loadFixture();
+        say('fixture', 'reloaded');
+      });
+      document.getElementById('dump').addEventListener('click', () => {
+        console.log(store.manifest.value);
+        say('manifest', 'logged to the console');
+      });
+
+      /* Escape stands in for the Android back button, the only way to reach the editor's handler. */
+      addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape' || backHandlers.length === 0) return;
+        for (const handler of [...backHandlers].reverse()) {
+          if (handler()) {
+            say('back', 'consumed');
+            return;
+          }
+        }
+        say('back', 'not consumed');
+      });
+
+      /*
+       * The readout polls rather than subscribing. Reading `.value` outside an effect is untracked
+       * in @preact/signals-core, so the chrome can never re-enter a `commit()` that is halfway
+       * through, which is the one hazard this whole port is written around.
+       */
+      const readout = document.getElementById('readout');
+      let shown = '';
+      (function paint() {
+        const selection = store.selection.value;
+        const line = [
+          clock(store.playheadMs.value) + ' / ' + clock(store.totalMs.value),
+          store.playing.value ? 'playing' : 'paused',
+          'panel ' + (store.panel.value ?? '-'),
+          'sel ' + (selection ? selection.kind + (selection.id ? ':' + selection.id : '') : '-'),
+          store.canUndo.value ? 'undo' : '-',
+          store.canRedo.value ? 'redo' : '-',
+          store.dirty.value ? 'dirty' : 'clean',
+          tag === 've-editor' ? '(ve-editor has a store of its own, this readout is the harness)' : '',
+        ].join('  ');
+        if (line !== shown) readout.textContent = shown = line;
+        requestAnimationFrame(paint);
+      })();
+
+      function clock(ms) {
+        const total = Math.max(0, ms) / 1000;
+        return String(Math.floor(total / 60)).padStart(2, '0') + ':' + total.toFixed(1).padStart(4, '0');
+      }
+    </script>
+  </body>
+</html>

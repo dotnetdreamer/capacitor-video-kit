@@ -125,8 +125,15 @@ export interface PreviewVideoLayer {
  * dependency tree from silently breaking every repaint.
  */
 export class EditorStore {
-  /** Only for haptics. Everything else the store does is arithmetic over the manifest. */
-  constructor(private readonly host: ResolvedEditorHost) {}
+  /**
+   * The store itself only asks the host for haptics; everything else it does is arithmetic over the
+   * manifest. It is public because it is also how the components reach the host at all: the preview
+   * and the timeline need `platform.fileUrl` for a local file, the text sheet needs the keyboard
+   * stream, the voiceover sheet needs the recorder, and the shell needs `confirm`, the back handler
+   * and the inset measurement. Reaching them through the store they already hold is what keeps
+   * `@capacitor/core` out of every component in this package.
+   */
+  constructor(readonly host: ResolvedEditorHost) {}
 
   /* -- host clips -------------------------------------------------------------------------- */
 

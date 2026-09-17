@@ -19,6 +19,7 @@
 export type {
   ConfirmRequest,
   EditorCancelReason,
+  EditorInsets,
   EditorKeyboardHost,
   EditorMediaHost,
   EditorPlatformHost,
@@ -28,6 +29,7 @@ export type {
   HapticKind,
   PickedAudio,
   PickedImage,
+  ReleaseRequest,
   RenderFailureCode,
   RenderRequest,
   ResolvedEditorHost,
@@ -37,7 +39,7 @@ export type {
   VideoEditorResult,
 } from './host/host.types';
 export { RenderFailedError } from './host/host.types';
-export { browserMediaHost, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
+export { browserMediaHost, envSafeAreaInsets, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
 export { installEditorFonts } from './host/fonts';
 
 /* The editor's own state, for a host that wants to read the edit or drive it from outside. */
@@ -52,6 +54,7 @@ export type {
 } from './state/editor.types';
 export { EditorStore, type PreviewVideoLayer } from './state/editor-store';
 export { EditorMedia } from './state/editor-media';
+export type { EditorContext } from './bridge/editor-context';
 export { OverlayBitmaps } from './state/overlay-bitmap';
 export { createEditorRasterContext } from './state/editor-raster-context';
 export { computedWith } from './state/computed-with';

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { editorDebug, setEditorDebug } from './debug';
-import { resolveEditorHost } from './defaults';
-import type { EditorMediaHost, EditorSource } from './host.types';
+import { browserMediaHost, envSafeAreaInsets, resolveEditorHost } from './defaults';
+import type { EditorInsets, EditorMediaHost, EditorSource } from './host.types';
 
 const stubMedia: EditorMediaHost = {
   pickVideo: async () => null,
@@ -75,12 +75,41 @@ describe('resolveEditorHost', () => {
     expect(host.platform.confirm).not.toBeNull();
   });
 
+  it('measures no insets of its own, so the editor keeps the env() padding it already has', () => {
+    expect(resolveEditorHost().platform.measureInsets).toBeNull();
+  });
+
+  it('keeps a host measurement bound to the object it came off', async () => {
+    class NativePlatform {
+      private readonly bars: EditorInsets = { top: 47, bottom: 24 };
+      measureInsets(): Promise<EditorInsets> {
+        return Promise.resolve(this.bars);
+      }
+    }
+    const measure = resolveEditorHost({ platform: new NativePlatform() }).platform.measureInsets;
+
+    // Unbound, the call throws on `this` and the editor never learns what the bars cover.
+    await expect(measure?.()).resolves.toEqual({ top: 47, bottom: 24 });
+  });
+
   it('turns the package\'s console output on and off with the host that asked for it', () => {
     resolveEditorHost({ platform: { debug: true } });
     expect(editorDebug()).toBe(true);
 
     resolveEditorHost();
     expect(editorDebug()).toBe(false);
+  });
+});
+
+describe('envSafeAreaInsets', () => {
+  it('answers in numbers where the page resolves env() to nothing at all', async () => {
+    await expect(envSafeAreaInsets()).resolves.toEqual({ top: 0, bottom: 0 });
+  });
+
+  it('takes its probe back out of the document, whatever the reading was', async () => {
+    const before = document.body.children.length;
+    await envSafeAreaInsets();
+    expect(document.body.children.length).toBe(before);
   });
 });
 
@@ -100,3 +129,73 @@ describe('the browser media host', () => {
     expect(urls).toEqual([]);
   });
 });
+
+describe('the browser media host giving back what the edit dropped', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('revokes the object URL of a dropped clip it minted itself', async () => {
+    const media = browserMediaHost();
+    const dropped = await pickVideoFile(media, 'dropped.mp4');
+    const kept = await pickVideoFile(media, 'kept.mp4');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+
+    media.release?.({ kept: [kept], dropped: [dropped] });
+
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith(dropped.playbackUrl);
+  });
+
+  it('gives the same URL back once, so a second release costs nothing', async () => {
+    const media = browserMediaHost();
+    const dropped = await pickVideoFile(media, 'dropped.mp4');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+
+    media.release?.({ kept: [], dropped: [dropped] });
+    media.release?.({ kept: [], dropped: [dropped] });
+
+    expect(revoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds on to a URL a kept source still names', async () => {
+    const media = browserMediaHost();
+    const source = await pickVideoFile(media, 'twice.mp4');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+
+    // One picked file behind two keys is the case both lists are here for.
+    media.release?.({ kept: [{ ...source, key: 'second' }], dropped: [source] });
+
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it('leaves alone a URL the application handed in, because the page may still be playing it', () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+
+    browserMediaHost().release?.({
+      kept: [],
+      dropped: [{ key: 'a', fileName: 'a.mp4', playbackUrl: 'blob:https://example.test/theirs' }],
+    });
+
+    expect(revoke).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * One clip through the real picker, which is the only door into the URLs this host minted: it is a
+ * hidden `<input type="file">`, so the test plays the customer choosing a file in it.
+ */
+async function pickVideoFile(media: EditorMediaHost, fileName: string): Promise<EditorSource> {
+  const picked = media.pickVideo();
+  const inputs = Array.from(document.querySelectorAll('input'));
+  const input = inputs[inputs.length - 1] as HTMLInputElement;
+  Object.defineProperty(input, 'files', {
+    value: [new File(['video'], fileName, { type: 'video/mp4' })],
+    configurable: true,
+  });
+  input.dispatchEvent(new Event('change'));
+
+  const source = await picked;
+  if (!source) throw new Error(`the picker refused ${fileName}`);
+  return source;
+}

@@ -34,11 +34,13 @@ import { Script } from 'node:vm';
  * through fields this package controls, so no specifier a consumer writes has to change.
  *
  * This is the last step of `build:package`, so every directory it checks has just been written,
- * and it checks all three rather than only the ones it marks. `@stencil/vitest` runs its own
- * Stencil build before the tests, which rewrites `dist/` without ever reaching this script, so a
- * `npm pack` straight after `npm test` would otherwise publish the broken shape again. That is why
- * `prepare` rebuilds the package rather than trying to repair it. The renames below are safe to
- * repeat regardless.
+ * and it checks all three rather than only the ones it marks. Anything that runs `stencil build` by
+ * itself rewrites `dist/` without ever reaching this script and leaves exactly the broken shape
+ * above, which is why `prepare` rebuilds the package rather than trying to repair it, and why the
+ * test run builds through `stencil.test.config.ts` into a directory nothing publishes or reads.
+ * `npm test` used to be the way this happened in practice: it rewrote `dist/` on every run, and in
+ * a checkout an app is linked to that broke the app until the next full build. The renames below
+ * are safe to repeat regardless.
  */
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 

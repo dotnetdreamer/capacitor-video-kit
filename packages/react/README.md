@@ -2,8 +2,8 @@
 
 React bindings for the Choisy video editor.
 
-```
-npm install choisy-video-kit-react
+```sh
+npm install ./choisy-video-kit-1.3.0.tgz ./choisy-video-kit-react-1.3.0.tgz
 ```
 
 ```tsx
@@ -14,11 +14,22 @@ export function Busy() {
 }
 ```
 
-Peer dependencies are React 18 or 19 and the matching `react-dom`, plus `@preact/signals-core`,
-which the editor's store is built on. `choisy-video-kit` comes with the package rather than being
-installed alongside it, because the two are generated together and only ever match version for
-version. It and `@stencil/core`, which the component declarations name, are the only runtime
-dependencies.
+Both packages go in, in one command, and neither is on a registry yet, so both are paths: a tarball
+from `npm pack`, or the checkout itself.
+
+`choisy-video-kit` is a peer dependency pinned to the exact version of this package, because the two
+are generated together and only ever match version for version. It is also the one peer that has to
+be named. npm installs a missing peer by itself, which is how React 18 or 19, the matching
+`react-dom` and `@preact/signals-core`, which the editor's store is built on, arrive without being
+asked for, but it looks for every one of them on the registry, and this one is not there. The
+wrapper on its own ends in
+
+```
+npm error code E404
+npm error 404 Not Found - GET https://registry.npmjs.org/choisy-video-kit - Not found
+```
+
+`@stencil/core`, which the component declarations name, is the only package this one brings with it.
 
 The editor's stickers and fonts are not imported by any module, so nothing bundles them. Serve a copy
 of `node_modules/choisy-video-kit/dist/components/assets` and name it once at startup:

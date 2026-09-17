@@ -33,7 +33,23 @@
     "rootDir": "src",
     /* Not `dist/`, which Stencil owns and empties on every build, and into which it writes an
        `esm/` and a `cjs/` of its own. Two builds cannot share those two names. */
-    "outDir": "plugin/esm"
+    "outDir": "plugin/esm",
+    /* Where `@capacitor/core` is read from while this half is compiled, and the reason the
+       devDependency that provides it is installed under an alias rather than under its own name.
+
+       A consumer that links this repository rather than installing the tarball resolves bare
+       specifiers from inside it, so anything sitting in this package's `node_modules` shadows the
+       consumer's own copy. With `@capacitor/core` installed here under that name, the app bundled
+       two copies of it, from `node_modules/choisy-video-kit/node_modules/@capacitor/core` and from
+       its own, each with its own plugin registry. Installed as `capacitor-core-build` there is no
+       `@capacitor/core` in this tree for a consumer to find, and the mapping below is what keeps
+       the specifier in the source, and therefore in the emitted JavaScript, the real one.
+
+       Only the plugin half is mapped. The editor half must not import Capacitor at all, and the
+       TS2307 it would get without a mapping of its own is how that stays true. */
+    "paths": {
+      "@capacitor/core": ["./node_modules/capacitor-core-build"]
+    }
   },
   /* Named one by one rather than taken as `src/**` minus the rest, because the two halves of this
      package share `src/` and only these four paths are the plugin. Anything new that belongs in the

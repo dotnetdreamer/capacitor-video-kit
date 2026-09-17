@@ -61,6 +61,21 @@ export interface EditorMediaHost {
    */
   thumbnails(request: ThumbnailRequest): Promise<string[]>;
 
+  /**
+   * Takes back what the edit stopped using, once, immediately before the editor hands its result
+   * back. Never during the edit: a clip whose every segment was deleted stays in the store so that
+   * an undo can bring it back, and only the customer tapping Next settles which ones are gone.
+   *
+   * Both lists go over because what a source costs, and what two sources share, is knowledge the
+   * editor does not have - it never sees a file, only a key and a URL. In choisy the same gallery
+   * video picked twice is two keys and ONE path, so a path a kept source still reads must not be
+   * unlinked, and that check can only be made here.
+   *
+   * Absent, every dropped clip is held until the app is killed: up to 100 MB of recording each,
+   * and nothing anywhere reports it.
+   */
+  release?(request: ReleaseRequest): void;
+
   /** Absent means the voiceover sheet does not offer itself. */
   voice?: EditorVoiceHost;
 }
@@ -89,6 +104,13 @@ export interface ThumbnailRequest {
    * seeks per tile, and the editor only asks for it on short clips.
    */
   precise: boolean;
+}
+
+export interface ReleaseRequest {
+  /** Every source the result carries. Untouched by the host, including their files and URLs. */
+  kept: readonly EditorSource[];
+  /** The rest of what the editor was given, which nothing after this call can reach. */
+  dropped: readonly EditorSource[];
 }
 
 export interface EditorVoiceHost {
@@ -175,8 +197,37 @@ export interface EditorPlatformHost {
    */
   confirm?(request: ConfirmRequest): Promise<string | null>;
 
+  /**
+   * How much of the WebView the system bars actually cover, so the editor can keep its first and
+   * last rows out from under them. Defaults to absent, and the editor then pads with
+   * `env(safe-area-inset-*, 0px)`, which is the right answer in a browser and is live besides.
+   *
+   * A native WebView is the reason this exists, because there `env()` is wrong in both directions:
+   * it reads 0 at the bottom on Android phones laid out under a transparent navigation bar, so the
+   * toolbar goes under the system buttons, and it keeps reporting the notch at the top after the
+   * WebView has moved down below an opaque status bar, so a black band sits over the video. Which
+   * of the two the app is in changes while the editor is open - coming back from a system picker
+   * drops the launch's edge-to-edge flags - which is why this is a measurement the editor can take
+   * again rather than a number it is given once.
+   *
+   * In choisy it is `() => VideoComposer.systemInsets()`, which measures the overlap between the
+   * bars and the WebView rather than the bars themselves, so a WebView already sitting above them
+   * answers 0 and nothing is padded twice. The editor asks on its way in and again whenever the
+   * window changes size, and it remembers the answer per window height, so this may be a real
+   * round trip to the platform.
+   */
+  measureInsets?(): Promise<EditorInsets>;
+
   /** Guards the package's console output, the way `AppConstant.DEBUG` does in choisy. */
   debug?: boolean;
+}
+
+/** What the system bars cover, in CSS pixels of the WebView. Never negative. */
+export interface EditorInsets {
+  /** The status bar, or a notch the WebView is laid out under. */
+  top: number;
+  /** The navigation bar or the gesture pill. */
+  bottom: number;
 }
 
 export interface EditorKeyboardHost {
@@ -225,5 +276,14 @@ export interface ResolvedPlatformHost {
   keyboard: EditorKeyboardHost;
   registerBackHandler(handler: () => boolean): () => void;
   confirm: ((request: ConfirmRequest) => Promise<string | null>) | null;
+  /**
+   * Null rather than a browser measurement, and it is the one place the editor has to tell "nobody
+   * measured" from "measured 0". A measurement that arrives is written onto the element as
+   * `--ve-safe-top` and `--ve-safe-bottom`, which beats both the `env()` fallback in the editor's
+   * own CSS and whatever a host set those properties to itself. So a default that read `env()` back
+   * out of the page and handed it straight back would overwrite the host's value with a number the
+   * browser was already applying. `envSafeAreaInsets()` is that reading, for a host that wants it.
+   */
+  measureInsets: (() => Promise<EditorInsets>) | null;
   debug: boolean;
 }

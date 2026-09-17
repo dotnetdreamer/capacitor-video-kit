@@ -8,6 +8,10 @@ loader/
 www/
 .stencil/
 
+# What `npm test` builds into. It is a whole Stencil build, kept away from the published tree so
+# that a test run cannot leave `dist/` half written. See stencil.test.config.ts.
+.stencil-test-build/
+
 # Written by `stencil build`, every time, from the components themselves.
 src/components.d.ts
 

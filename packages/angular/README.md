@@ -2,8 +2,8 @@
 
 Angular bindings for the Choisy video editor, as standalone components.
 
-```
-npm install choisy-video-kit-angular
+```sh
+npm install ./choisy-video-kit-1.3.0.tgz ./choisy-video-kit-angular-1.3.0.tgz
 ```
 
 ```ts
@@ -18,7 +18,22 @@ import { VeSpinner } from 'choisy-video-kit-angular';
 export class BusyComponent {}
 ```
 
-Peer dependencies are Angular 19, 20, 21 or 22 and RxJS 7.8.
+Both packages go in, in one command, and neither is on a registry yet, so both are paths: a tarball
+from `npm pack`, or the checkout itself.
+
+The peers are Angular 19, 20, 21 or 22, RxJS 7.8, `@preact/signals-core`, which the editor's store is
+built on, and `choisy-video-kit` at the exact version of this package, because the two are generated
+together and only ever match version for version. That last one is why the core package has to be on
+the install line. npm installs a missing peer by itself, which is how Angular, RxJS and the signals
+arrive without being asked for, but it looks for every one of them on the registry, and this one is
+not there. The wrapper on its own ends in
+
+```
+npm error code E404
+npm error 404 Not Found - GET https://registry.npmjs.org/choisy-video-kit - Not found
+```
+
+`@stencil/core` and `tslib` are the two packages this one brings with it.
 
 The range says 19 to 22 because that is what has been built and run, not because 23 is expected to
 break. ng-packagr emits this package in partial compilation mode, which an application's Angular
@@ -50,12 +65,11 @@ emitted in partial compilation mode for the consuming application's linker to fi
 writes `dist/`, generates the published `package.json` there, and that directory is what gets
 published.
 
-`ng-package.json` lists `choisy-video-kit` and `@stencil/core` under
-`allowedNonPeerDependencies`. ng-packagr otherwise refuses to write the manifest, because it assumes
-a runtime dependency of an Angular library should be a peer dependency the application installs.
-That is the wrong shape here: the core
-package and this one are generated together and only ever match version for version, so a host that
-had to pick its own version of the core could pick a wrong one.
+`ng-package.json` lists `choisy-video-kit` and `@stencil/core` under `allowedNonPeerDependencies`.
+ng-packagr otherwise refuses to write the manifest, because it assumes a runtime dependency of an
+Angular library should be a peer dependency the application installs. `@stencil/core` is what still
+needs that exemption. `choisy-video-kit` is on the list from when it was a dependency here rather
+than a peer, and the entry does nothing now.
 
 Everything under `src/generated/` is written by `stencil.config.ts` on every build of the core
 package and is not in git. The only hand written file here is `src/index.ts`, which names what a host

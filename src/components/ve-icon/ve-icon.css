@@ -1,0 +1,32 @@
+:host {
+  /*
+   * One em square, so the parent's `font-size` is what sizes the glyph and an icon beside a label
+   * grows with it. Nothing here declares `transform` or `pointer-events`: the preview sets both on
+   * this element from outside, turning a handle's glyph back upright and letting the press through
+   * to the handle underneath, and the component has no opinion of its own to defend.
+   *
+   * `inline-block` rather than `inline`, because a transform does nothing to a non-replaced inline
+   * box and those handles would stay turned with the layer.
+   */
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+
+  /*
+   * Twenty seven of the shapes carry no fill of their own and would paint black without this. The
+   * stroked ones name `currentColor` in their own markup, so `stroke` is deliberately not set here:
+   * it would inherit into the solid glyphs and put a hairline around every one of them.
+   */
+  fill: currentColor;
+}
+
+/*
+ * The glyph fills the element exactly. As an inline box the SVG would sit on the text baseline and
+ * hang its last few pixels below the one em square, which is enough to put an icon off centre in a
+ * flex button that was told to centre it.
+ */
+svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}

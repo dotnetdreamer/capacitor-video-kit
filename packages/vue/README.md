@@ -2,8 +2,8 @@
 
 Vue bindings for the Choisy video editor.
 
-```
-npm install choisy-video-kit-vue
+```sh
+npm install ./choisy-video-kit-1.3.0.tgz ./choisy-video-kit-vue-1.3.0.tgz
 ```
 
 ```vue
@@ -16,7 +16,23 @@ import { VeSpinner } from 'choisy-video-kit-vue';
 </template>
 ```
 
-The peer dependency is Vue 3.4.38 or later.
+Both packages go in, in one command, and neither is on a registry yet, so both are paths: a tarball
+from `npm pack`, or the checkout itself.
+
+The peers are Vue 3.4.38 or later, `@preact/signals-core`, which the editor's store is built on, and
+`choisy-video-kit` at the exact version of this package, because the two are generated together and
+only ever match version for version. That last one is why the core package has to be on the install
+line. npm installs a missing peer by itself, which is how Vue and the signals arrive without being
+asked for, but it looks for every one of them on the registry, and this one is not there. The wrapper
+on its own ends in
+
+```
+npm error code E404
+npm error 404 Not Found - GET https://registry.npmjs.org/choisy-video-kit - Not found
+```
+
+`@stencil/core` and `@stencil/vue-output-target`, whose `defineContainer` the generated wrappers
+call, are the two packages this one brings with it.
 
 ## v-model
 

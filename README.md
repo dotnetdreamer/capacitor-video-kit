@@ -19,8 +19,81 @@ handed.
 | Platform | Composer | Publisher | Status |
 |---|---|---|---|
 | Android | Media3 Transformer 1.11.x | WorkManager + OkHttp | implemented, verified on device |
-| iOS | AVFoundation | background `URLSession` | stub - calls reject `unimplemented` |
+| iOS | AVFoundation | background `URLSession` | implemented, 6,567 lines of Swift, compiles for device; no device run recorded here |
 | Web | none | none | stub - `capabilities()` answers `supported: false` |
+
+> ### An iOS host has to be on iOS 16, and a new Capacitor 8 app is on 15
+>
+> `Package.swift` and `ChoisyVideoKit.podspec` both declare iOS 16, and both iOS templates
+> `@capacitor/cli` 8.5.0 unpacks, the SwiftPM one and the CocoaPods one, set
+> `IPHONEOS_DEPLOYMENT_TARGET = 15.0` in all four build configurations, the CocoaPods one adding
+> `platform :ios, '15.0'` to the Podfile as well. So a stock app stops on its first build until that
+> one version is made up, which is why this is the first thing here. Where it stops depends on the
+> package manager, and neither message names the line to change.
+>
+> **SwiftPM resolves the graph and then refuses to plan the build.** `xcodebuild` fetches
+> `capacitor-swift-pm`, lists `ChoisyVideoKit` under `Resolved source packages`, and fails before the
+> first `SwiftCompile`:
+>
+> ```
+> error: The package product 'ChoisyVideoKit' requires minimum platform version 16.0 for the iOS
+> platform, but this target supports 15.0 (in target 'CapApp-SPM' from project 'CapApp-SPM')
+> ```
+>
+> `CapApp-SPM` is the package `npx cap sync ios` generates, so the one file the message names is the
+> one file an edit does not survive.
+>
+> **CocoaPods stops earlier, at dependency analysis**, and names the pod rather than the platform:
+>
+> ```
+> [!] CocoaPods could not find compatible versions for pod "ChoisyVideoKit":
+>   In Podfile:
+>     ChoisyVideoKit (from `../../node_modules/choisy-video-kit`)
+>
+> Specs satisfying the `ChoisyVideoKit (from `../../node_modules/choisy-video-kit`)` dependency were
+> found, but they required a higher minimum deployment target.
+> ```
+>
+> Two files carry the deployment target on a SwiftPM host and only one of them is worth editing:
+>
+> 1. `ios/App/App.xcodeproj/project.pbxproj`: set **every** `IPHONEOS_DEPLOYMENT_TARGET` in it to
+>    `16.0` or higher. Xcode's target editor changes the target's copy and leaves the project level
+>    one behind, so check the file rather than the inspector.
+> 2. `ios/App/CapApp-SPM/Package.swift`: `platforms: [.iOS(.v16)]`.
+>
+> The second file is generated, says so on its third line, and `npx cap sync ios` writes it again
+> every time from the **first** `IPHONEOS_DEPLOYMENT_TARGET` string in the pbxproj, of which it reads
+> exactly two characters (`getMajoriOSVersion` in `@capacitor/cli`). So an edit made only there is
+> undone on the next sync without a word, and a pbxproj that still holds a `15.0` above the ones you
+> changed undoes it just as quietly. Edit the pbxproj properly and the generated file looks after
+> itself: this app's is 18 and every sync writes `.v18` back.
+>
+> A CocoaPods host edits the pbxproj the same way and `ios/App/Podfile` as well, to
+> `platform :ios, '16.0'`. That edit stays where it is put: `npx cap sync ios` rewrites the
+> `def capacitor_pods` block and the `require_relative` line of a Podfile and leaves every other line
+> alone. Editing only the Podfile is the trap, because nothing fails. `pod install` succeeds, the app
+> builds, and all that stands between the developer and an app that claims an iOS it cannot run on is
+> a linker warning:
+>
+> ```
+> ld: warning: building for iOS-15.0, but linking with dylib
+> '@rpath/ChoisyVideoKit.framework/ChoisyVideoKit' which was built for newer version 16.0
+> ```
+>
+> **Why 16 and not the 18 this package declared until it was measured.** `AVAssetExportSession`'s
+> `export(to:as:)` was the reason given for 18 and is not one: the SDK declares it available from
+> iOS 13 and back deploys the body, so it never held a floor anywhere. The two calls that genuinely
+> sit above 16 now have a second path beside them, chosen by `#available`: progress comes from
+> `states(updateInterval:)` on 18 and from the session's own `progress` below it, and the record
+> permission comes from `AVAudioApplication` on 17 and from `AVAudioSession` below it.
+>
+> **Why not 15, which would need nothing of the host at all.** What holds the floor at 16 is
+> `AVAssetImageGenerator.image(at:)` and `images(for:)` in `Thumbnailer.swift`, and the pre 16
+> spelling of the second one is a completion handler called once per frame that would have to be
+> bridged back into an `AsyncSequence` by hand. That is a rewrite of the filmstrip rather than a
+> guard around it, on a path nothing here can run, and it is not worth one version. Below 15 it is
+> not close: `AVAsset.load(_:)` and `loadTracks(withMediaType:)` are iOS 15 and are used in ten
+> places across the two files that build a composition.
 
 ## What is in here
 
@@ -40,14 +113,37 @@ preview.
 
 ## Install
 
+Nothing here is on a registry, so `npm install choisy-video-kit` resolves to nothing and the root
+manifest is `"private": true` to keep it that way until it is. There are two honest ways in.
+
+A sibling checkout, which is what Choisy itself uses:
+
 ```jsonc
-// package.json. Until this is published, a path to the sibling checkout
+// package.json in the host app
 "choisy-video-kit": "file:../../choisy-video-kit"
 ```
 
 `npm install` in this repository first, whose `prepare` script leaves a built package behind, then
 `npm install && npx cap sync` in the host app. The host needs nothing in its `tsconfig.json`: this
 package is resolved through `node_modules` and its exports map like any other dependency.
+
+It does need every bundler it runs to **keep the symlink**, which for an Angular host means
+`"preserveSymlinks": true` on the `build` target and on the `test` target, and for Vite means not
+turning `resolve.preserveSymlinks` off. A tool that resolves the real path instead looks for this
+package's own dependencies next to this checkout rather than next to the app, and
+`@capacitor/core` is the one it will not find: the error names a path inside this repository, which
+reads like a fault here and is not one.
+
+Or a tarball, which is what an app that is not next to this checkout gets and the only way to see
+what a published install would actually contain:
+
+```sh
+npm pack                                      # in this repository: choisy-video-kit-1.3.0.tgz
+npm install ../path/to/choisy-video-kit-1.3.0.tgz && npx cap sync   # in the host app
+```
+
+Either way the host is on the hook for the iOS deployment target above, and for `@capacitor/core`,
+which is an optional peer dependency and is not installed for you.
 
 One npm package registers both plugin classes: the Capacitor CLI scans every `.kt` under
 `android/src/main` and emits an entry per `@CapacitorPlugin` it finds.
@@ -217,13 +313,40 @@ version. The three wrapper packages hold no hand written component code at all: 
 writes their `src/generated/` directories on every build, which is why those directories are ignored
 by git.
 
-Each wrapper depends on `choisy-video-kit` at an exact version rather than a range, which is
-deliberate and is what `@ionic/react`, `@ionic/vue` and `@ionic/angular` all do with `@ionic/core`.
-A wrapper is generated from one particular build and hard codes that build's prop and event names as
-strings, so a range would let npm resolve a version whose components no longer match, and the
-wrapper would pass props that do not exist and miss ones that do, with no error anywhere. The price
-is that a release is four publishes in one go, this package first, and that a wrapper published
-without it does not install.
+Each wrapper names `choisy-video-kit` as a **peer** dependency at an exact version rather than as a
+dependency at a range, and both halves of that are deliberate.
+
+Exact, because a wrapper is generated from one particular build and hard codes that build's prop and
+event names as strings: a range would let npm resolve a version whose components no longer match,
+and the wrapper would pass props that do not exist and miss ones that do, with no error anywhere.
+That is what `@ionic/react`, `@ionic/vue` and `@ionic/angular` all do with `@ionic/core`.
+
+A peer, because a dependency is a version npm goes and fetches, and there is nowhere to fetch this
+from: with `"choisy-video-kit": "1.3.0"` in `dependencies`, installing a wrapper tarball into an app
+ended at `404 Not Found - GET https://registry.npmjs.org/choisy-video-kit`, whatever the app already
+had installed. A peer edge is satisfied by whatever is in the tree, so **the core package has to be
+installed with the wrapper or before it**, and then the version match is checked rather than
+fetched:
+
+```sh
+npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
+            ../choisy-video-kit/choisy-video-kit-react-1.3.0.tgz
+```
+
+The wrapper on its own still stops, because npm installs a missing peer by itself and there is
+nothing to install it from, but it stops naming the edge rather than an unexplained dependency:
+
+```
+npm warn Could not resolve dependency:
+npm warn peer choisy-video-kit@"1.3.0" from choisy-video-kit-react@1.3.0
+npm error 404 Not Found - GET https://registry.npmjs.org/choisy-video-kit
+```
+
+It is also the truthful edge for a package like this one. The wrapper and the app have to hold the
+same copy of the components, because a second copy registers the same custom element names against a
+registry that allows each exactly once. The price is that a release is four packs in one go, this
+package first, and that a wrapper installed on its own says so at install time rather than at
+runtime.
 
 ### Using a wrapper
 
@@ -355,6 +478,123 @@ viteStaticCopy({
 
 served alongside `setEditorAssetPath('/video-editor/')`.
 
+### What the host supplies
+
+`VideoEditorHost` is the whole of what passes between the editor and the application around it, and
+it is handed over once, as a plain property. The editor owns the edit: the manifest, the undo stack,
+every gesture, every sheet and every pixel. It owns no file, no picker, no encoder and no device
+measurement, because those differ between a Capacitor app, a React web app and a Vue web app, and a
+UI package that guessed at them would be wrong in two of the three.
+
+```ts
+import { resolveEditorHost } from 'choisy-video-kit/ui';
+
+const host = resolveEditorHost({
+  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, release, voice },
+  render: { isSupported, render },
+  platform: { fileUrl, haptic, keyboard, registerBackHandler, confirm, measureInsets, debug },
+});
+```
+
+Every field is optional, at every level. `resolveEditorHost()` fills in whatever is missing from the
+browser defaults, and a `ResolvedEditorHost` is what every other file in the package is written
+against, so nothing inside the editor asks whether the host has a thing before using it. A host that
+supplies nothing at all still gets a real editor: it opens a file, plays it, cuts a real filmstrip
+and hands back a real manifest, which is the right behaviour on the web rather than a degraded one.
+
+| What the host gives | What it is for | With nothing supplied |
+|---|---|---|
+| `media.pickVideo`, `pickImage`, `pickAudio` | Add a clip, an overlay photo, a track | a hidden `<input type="file">` |
+| `media.probeDuration` | How long a source runs | a throwaway `<video>` and a ten second timeout |
+| `media.thumbnails` | The timeline's filmstrip | one `<video>`, seeked to each time in turn, onto one canvas |
+| `media.release` | Give back what the edit dropped | the object URLs the default picker minted are revoked |
+| `media.voice` | Record a voiceover | the voiceover sheet does not offer itself |
+| `render` | Turn the edit into a file | Next hands back the manifest unrendered |
+| `platform.fileUrl` | A URL the WebView can load for a `file://` or `content://` path | the identity function |
+| `platform.haptic` | The buzz on a snap, a trim and a commit | nothing, which is what a phone with no motor does too |
+| `platform.keyboard` | The height the text sheet sits above | `visualViewport`, the only measurement a browser has |
+| `platform.registerBackHandler` | Android's back button, layer by layer | nothing is registered |
+| `platform.confirm` | Discard this edit? | the package's own alert |
+| `platform.measureInsets` | What the status and navigation bars cover | `env(safe-area-inset-*, 0px)` |
+| `platform.debug` | Whether the package says anything on the console | silence |
+
+**A picker resolves with null on a cancel and rejects on a real failure.** The editor shows a
+different thing for each, and a host that rejects on a cancel makes every picker look broken.
+
+**Three members stay null when the host supplied nothing, and the editor tests for null.** Not
+because there was nothing to write, but because in each case "nobody answered" means something no
+invented value could stand in for. `render` is null because there is no browser answer to "encode
+this", and the editor greys nothing for it. `confirm` is null so that the editor knows to present
+its own alert rather than the host's native one. `measureInsets` is null so that the editor pads
+with `env(safe-area-inset-*, 0px)` and writes nothing over it: a measurement that does arrive is set
+on the element as `--ve-safe-top` and `--ve-safe-bottom`, which beats both that fallback and
+whatever a host set those properties to itself, so handing back numbers read out of the page would
+overwrite a host's value with one the browser was already applying. `envSafeAreaInsets()` is that
+reading, exported for the host that wants the measurement path anyway.
+
+**`measureInsets` exists because `env()` cannot be trusted inside a native WebView, in either
+direction.** It reads 0 at the bottom on Android phones whose WebView is laid out under a
+transparent navigation bar, which puts the toolbar under the system buttons, and it keeps reporting
+the notch at the top after the WebView has moved down below an opaque status bar, which puts a black
+band over the video. Which of the two the app is in changes while the editor is open, because coming
+back from a system picker drops the launch's edge-to-edge flags. So the editor measures on its way
+in and again whenever the window changes size, and remembers the answer per window height. In choisy
+the implementation is `() => VideoComposer.systemInsets()`, already installed with this package,
+which measures the overlap between the bars and the WebView rather than the bars themselves, so a
+WebView that already sits above them answers 0 and nothing is padded twice.
+
+**`release` is the one absence that costs something and reports nothing.** It is called once,
+immediately before the editor hands its result back, with both lists: the sources the result carries
+and the ones the edit stopped using. Both, because what a source costs and what two sources share is
+knowledge the editor does not have, since it never sees a file. In choisy the same gallery video
+picked twice is two keys and one path, so a path a kept source still reads must not be unlinked, and
+that check can only be made in the host. Nothing is released during the edit: a clip whose every
+segment was deleted stays in the store so that an undo can bring it back, and only the customer
+tapping Next settles which ones are gone. Left unimplemented, every dropped clip is held until the
+app is killed, up to 100 MB of recording each. The browser default revokes the object URLs it minted
+itself, and leaves alone both a URL a kept source still names and any URL the application handed in.
+
+### Conventions every component holds to
+
+Five rules that are a line in every component, so that reading one file is enough to know the rest.
+
+**Only the outermost component declares the `--ve-*` tokens**, on its own `:host`, keeping choisy's
+own value as a `var()` fallback (`--ve-accent: var(--choisy-wasabi-lime, #a6ff2e)`). Every other
+component reads them with a fallback at each use site, `var(--ve-bg, #000)`. A component that
+declared a token on its own `:host` would beat the value inherited from above and no host could
+override anything, so a host themes the editor by setting the tokens on the editor element or
+anywhere above it, and custom properties are the one thing that still inherits through a shadow
+boundary.
+
+**There is no Sass and there is not going to be.** Every stylesheet is plain CSS, hand flattened,
+with no `&` and no native nesting. The reason is specifically `&--modifier`: renaming a `.scss` file
+to `.css` compiles clean and drops those rules without a word, and the rule that goes missing is
+always the one that only shows up on a device.
+
+**Every event is `ve` prefixed and no component declares a `<prop>Change` event.** `veChange` for a
+committed value, `veLive` for a value during a gesture, then `veConfirm`, `veDismiss`, `veTab`,
+`veNone`, `veSearch`, `veDone`, `veCancel`. This is not only naming: `build/vue-component-models.ts`
+fails the build when a component declares a prop `x` alongside an event `xChange` and
+`componentModels` in `stencil.config.ts` has not been told about it. Nothing inside the editor is
+`v-model` bound, so keeping the prefix means that shared config is never touched.
+
+**Reactive work splits three ways, never one.** Where the Angular editor wrote `effect()`, the
+answer here depends on what the render reads. If the render already reads every signal the work
+depends on, it is `componentDidRender()` behind a remembered signature, so an unrelated repaint does
+not replay it. If the work depends on a signal the render does not read, and the playhead is the
+usual one, it is a real `@preact/signals-core` effect created in `connectedCallback` and disposed in
+`disconnectedCallback`. If the body calls back into the store, it is `deferredEffect` from
+`src/bridge/`, which queues the body onto a microtask: a preact effect runs synchronously inside the
+`.value =` assignment that triggered it, which for the store is the middle of `commit()`, before the
+history entry has been pushed. Never in a constructor either way, because a preact effect runs its
+body immediately and Angular's did not.
+
+**A host defines one tag and gets the tree.** Under `dist-custom-elements` a component's generated
+`defineCustomElement` also defines every tag that component renders, transitively, because Stencil
+collects the string literals passed to `h()`. So there is no barrel to import and no registration
+list to keep in step. The price is one rule: a tag rendered through a variable is invisible to that
+analysis, so a component that picks a child by name renders the choices as literal tags in a switch.
+
 ### What is not here yet
 
 Every pixel. The working editor is 20,288 lines of Angular in
@@ -447,10 +687,11 @@ extension, so it is added to the emitted JavaScript afterwards.
 
 ### The wrappers resolve this package through a self link
 
-`packages/react`, `packages/vue` and `packages/angular` are npm workspaces and each depends on
+`packages/react`, `packages/vue` and `packages/angular` are npm workspaces and each names
 `choisy-video-kit` at an exact version. npm cannot satisfy that from the repository root, because
-the root is not itself a workspace, and it goes to the registry and gets a 404. So the root declares
-itself as a development dependency:
+the root is not itself a workspace, and it goes to the registry and gets a 404 - and npm installs a
+missing peer by itself, so making the edge a peer dependency does not avoid the trip. So the root
+declares itself as a development dependency:
 
 ```jsonc
 "devDependencies": { "choisy-video-kit": "file:." }
@@ -519,6 +760,55 @@ arrives; a 400 or a missing file is final.
 
 **Progress is bytes, not files**, capped at 95 until the post actually exists.
 
+### iOS
+
+**The two plugin classes are one SwiftPM target.** `Package.swift` declares `ChoisyVideoKit` and
+Capacitor registers each `@objc` class it finds separately, so `VideoComposerPlugin` and
+`PostPublisherPlugin` ship in one library and share `JobFolders`, `PublishStore` and the error
+mapping rather than repeating them.
+
+**CocoaPods gets a hand written podspec beside `Package.swift`.** `ChoisyVideoKit.podspec` declares
+the same single target, the same `ios/Sources/**` glob and the same iOS 16 floor, because a host that
+adds its project with `npx cap add ios --packagemanager CocoaPods` compiles exactly the Swift a
+SwiftPM host compiles. Three things in it are not choices. The name is one: the Capacitor CLI writes
+`pod 'ChoisyVideoKit', :path => ...` into the host's Podfile from the npm package name, uppercasing
+each dash separated word (`fixName` in `@capacitor/cli`), and CocoaPods then looks for a podspec of
+exactly that name at the package root, so `choisy-video-kit` can only ever be
+`ChoisyVideoKit.podspec`. The single `s.dependency 'Capacitor'` is another: `Package.swift` names the
+`Capacitor` and `Cordova` products separately, while the `Capacitor` pod already depends on
+`CapacitorCordova`, whose module name is `Cordova`. And the deployment target is the third, because
+two hosts of the same package disagreeing about what it runs on is a bug that only one of them sees.
+
+`files` in `package.json` decides whether a tarball install carries that podspec, the same way it
+decides `Package.swift`. Without the entry a CocoaPods host installs cleanly, `npx cap sync ios`
+writes the pod line, and `pod install` stops at `No podspec found`, naming a file the developer has
+no way to know should exist.
+
+**A render outlives the screen on iOS too, and for a second reason.** `JobRegistry` holds the jobs
+outside the plugin instance, the way Android's does, and it also takes a `UIApplication` background
+task assertion for the length of a render, so a customer who leaves the app mid encode gets the
+suspension window rather than an immediate kill. Backgrounding stops the work deliberately and
+reports `interrupted`: the registry writes the stop reason synchronously inside the notification,
+and `Exporter` asks for it before it retries anything.
+
+**The encoder is `AVAssetExportSession` with a preset ladder**, chosen on the longer edge, with one
+retry at a lower preset for the AVError family Android also retries. A preset picks its own bitrate,
+which is why `fileLengthLimit` and two guards after the fact stand in for the rate control the
+Android engine sets directly, and why `Exporter.swift` logs the delivered rate against the ladder
+the spec asked for: that number is the evidence for or against writing the `AVAssetWriter` engine
+the `RenderEngine` protocol exists to allow.
+
+**Progress has two implementations.** `states(updateInterval:)` from iOS 18, and the session's own
+`progress` polled on the same interval below it. Both feed the same callback, so nothing above them
+knows which ran.
+
+**The publisher is one background `URLSession`.** Uploads continue while the app is suspended and
+are handed back through `application(_:handleEventsForBackgroundURLSession:completionHandler:)`;
+`PublishStore` is what survives the process dying, and a fresh plugin instance replays whatever JS
+has not acknowledged. Job folders are rooted in Application Support rather than Caches, because the
+system purges Caches under pressure and a half purged job folder is a post that can never be
+retried, and every directory created there is marked excluded from backup.
+
 ## Failure codes
 
 Composer: `unreadable_input` (blame `clipKey`), `encoder`, `muxer`, `interrupted`, `cancelled`,
@@ -539,9 +829,25 @@ npm run clean      # every output of this package; `clean:all` takes the wrapper
 `npm run build` is `build:package` and then `build:wrappers`. `build:package` is the whole of what
 is published from here and is what `prepare` runs: clean, the plugin's two `tsc` passes,
 `finish-build.mjs`, `stencil build`, and `module-type.mjs` last so that it checks the finished tree.
-`prepare` rebuilds rather than repairs because `@stencil/vitest` runs its own Stencil build before
-the tests, which rewrites `dist/` without the renames, so a pack straight after a test run would
-otherwise publish the broken shape.
+
+**A test run writes nothing a consumer reads.** `stencil-test` builds the components before it hands
+them to Vitest, and that build is not `build:package`: it never reaches `module-type.mjs`, so run
+against the real config it left `dist/index.mjs` and `loader/index.mjs` deleted under their new
+names, the `./ui` and `./loader` conditions of the exports map pointing at nothing, and every
+emitted directory unmarked, which Node reads as CommonJS. In a checkout an app is linked to, which
+is how this package is developed, running its tests broke the app until the next full build. So
+`npm test` passes `--stencil-config stencil.test.config.ts`, which is the real config with its
+output targets replaced by one that writes to `.stencil-test-build/`. Nothing under `plugin/`,
+`dist/` or `loader/` is touched by a test run at all now, so no exit from one can leave them half
+written.
+
+**`@capacitor/core` is installed here under an alias**, as `capacitor-core-build`, and
+`tsconfig.json` maps the specifier onto it. Under its own name it sat in this package's
+`node_modules`, and a host that links this repository rather than installing the tarball resolves
+bare specifiers from inside it, so the app bundled two copies of Capacitor's core, each with its own
+plugin registry, one of them reached only from this package's code. The mapping covers the plugin
+half only: the editor half must not import Capacitor at all, and the `TS2307` it would get without a
+mapping of its own is what keeps that true.
 
 `stencil build` also writes `packages/*/src/generated/`, so the wrappers cannot be built first and
 their generated sources are not in git.
@@ -564,6 +870,25 @@ sh gradlew :choisy-video-kit:compileDebugKotlin :choisy-video-kit:testDebugUnitT
 timeline arithmetic (speed, clamping, music repetitions, voiceover gaps, overlay coordinates), the
 parsers' reject-versus-clamp boundary, the multipart wire format and the template substitution.
 `--rerun-tasks` is not optional: without it Gradle reports every task up to date and runs nothing.
+
+The iOS half is a Swift package and does build on its own, against the device SDK:
+
+```sh
+xcodebuild -scheme ChoisyVideoKit -destination 'generic/platform=iOS' \
+  -derivedDataPath /tmp/choisy-video-kit-build -skipMacroValidation build
+```
+
+The derived data path is not decoration, and neither is removing it first. Run a second time
+against the same one, that command prints `** BUILD SUCCEEDED **` in 44 lines having run **zero**
+`SwiftCompile` tasks, so it will report success for Swift it has never looked at. The same thing
+happens to the host app's own build, at 342 lines. A path of its own, removed first, is what makes
+the answer mean anything: a real run of this target is 27 `SwiftCompile` lines, and
+`grep -c '^SwiftCompile'` on the output is the cheapest way to know which kind of run you just had.
+
+Add `IPHONEOS_DEPLOYMENT_TARGET=18.0` to compile it the way a host on a later floor does, which is
+worth doing after touching anything behind `#available`: a deprecation that is invisible at 16 is a
+warning at 18, and an `if #available` written as an early return rather than an `else` is how one
+gets in.
 
 ### On a device
 
@@ -624,7 +949,7 @@ they are not reopened by accident.
     by that name whatever `files` says, so a consumer reading `node_modules/*/LICENSE` finds the
     terms rather than only the word UNLICENSED in a manifest
   - the Angular package's peer range is `^19 || ^20 || ^21 || ^22`, enumerated rather than left open
-    as `>=19`. `packages/angular/readme.md` has what was built and run to establish each of them
+    as `>=19`. `packages/angular/README.md` has what was built and run to establish each of them
 
 Generated files are the one place the repository's writing style does not apply. Stencil writes
 `src/components/*/readme.md` and `src/components.d.ts` itself, and the wrapper sources under

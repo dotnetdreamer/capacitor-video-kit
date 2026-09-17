@@ -12,5 +12,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["build", "stencil.config.ts", "vitest.config.ts"]
+  "include": ["build", "stencil.config.ts", "stencil.test.config.ts", "vitest.config.ts"]
 }
