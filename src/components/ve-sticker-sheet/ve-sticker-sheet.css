@@ -1,0 +1,247 @@
+/*
+ * The heights below are mirrored by the section placeholders in the component (the STICKER_* and
+ * EMOJI_* constants). Change one and change the other, or the category bar's jumps drift.
+ *
+ * The column itself - the frame with the category bar under it - comes from `sheet-common.css`,
+ * which this component includes ahead of this file.
+ */
+
+:host {
+  /*
+   * The emoji stack, named once for the grid and the bar. It is a custom property rather than a
+   * repeated font list because a shadow root inherits no reset: a `<button>` in here is set in the
+   * platform's own UI font unless a family is named on it, and the UI font draws the outline forms
+   * of a few of these characters rather than the colour ones.
+   */
+  --stk-emoji-font: 'Noto Color Emoji', 'Apple Color Emoji', sans-serif;
+}
+
+/*
+ * The category bar sits under the frame and carries the safe area itself, so the frame must not pad
+ * for it a second time. `flex: 1 1 0` rather than the shared `1 1 auto`, because the body here is
+ * one long grid: sized by its content, the frame would grow past the height the shell gave the
+ * sheet instead of scrolling inside it.
+ */
+.stk__frame {
+  flex: 1 1 0;
+  padding-bottom: 0;
+}
+
+.stk__content {
+  padding-bottom: 8px;
+}
+
+.stk__title {
+  margin: 0;
+  padding: 16px;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 20px;
+  color: var(--ve-text, #fff);
+}
+
+.stk__section {
+  /*
+   * Off-screen sections are skipped by layout and paint; see the component for why the placeholder
+   * height has to be exact, and why this padding is the one part of the section it leaves out.
+   */
+  content-visibility: auto;
+  padding-bottom: 8px;
+}
+
+.stk__heading {
+  box-sizing: border-box;
+  height: 40px;
+  margin: 0;
+  padding: 0 16px;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 40px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.stk__heading--emoji {
+  height: 36px;
+  line-height: 36px;
+}
+
+/* ---------------------------------------------------------------------------------- stickers */
+
+.stk__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 96px);
+  grid-auto-rows: 96px;
+  row-gap: 8px;
+  justify-content: space-evenly;
+}
+
+.stk__grid--results {
+  padding-top: 12px;
+}
+
+.stk__sticker {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 96px;
+  height: 96px;
+  padding: 6px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  transition: transform 120ms ease-out;
+  touch-action: manipulation;
+}
+
+.stk__sticker img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.stk__sticker:active {
+  transform: scale(0.94);
+}
+
+/* ------------------------------------------------------------------------------------- emoji */
+
+.stk__emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 44px);
+  grid-auto-rows: 44px;
+  row-gap: 4px;
+  justify-content: space-evenly;
+}
+
+.stk__emoji-grid--results {
+  padding-top: 12px;
+}
+
+.stk__emoji {
+  display: block;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: var(--stk-emoji-font);
+  font-size: 30px;
+  line-height: 44px;
+  text-align: center;
+  transition: transform 120ms ease-out;
+  touch-action: manipulation;
+}
+
+.stk__emoji:active {
+  background: var(--ve-raised, #2c2c2e);
+  transform: scale(0.94);
+}
+
+.stk__empty {
+  margin: 0;
+  padding: 40px 16px;
+  font-size: 14px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  text-align: center;
+}
+
+.stk__end {
+  height: 1px;
+}
+
+/* ------------------------------------------------------------------------------ category bar */
+
+.stk__bar {
+  position: relative;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  height: calc(48px + var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px)));
+  padding-bottom: var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+  background: var(--ve-sheet, #1c1c1e);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.stk__bar::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * At least as wide as the bar so a few categories spread out evenly, and wider when there are more
+ * than fit, so the bar scrolls sideways instead of squeezing the icons.
+ */
+.stk__bar-track {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  height: 100%;
+  padding: 0 8px;
+}
+
+.stk__cat {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 22px;
+  touch-action: manipulation;
+}
+
+/* The 40px dark circle behind the active category. */
+.stk__cat::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background-color 150ms ease-out;
+}
+
+.stk__cat > * {
+  position: relative;
+}
+
+.stk__cat-emoji {
+  font-family: var(--stk-emoji-font);
+  font-size: 22px;
+  line-height: 1;
+  /*
+   * Colour emoji cannot take a grey `color`, so the resting icons are desaturated instead - TikTok's
+   * bar is monochrome until a category is active.
+   */
+  filter: grayscale(1);
+  opacity: 0.7;
+  transition: opacity 150ms ease-out;
+}
+
+.stk__cat--on {
+  color: var(--ve-text, #fff);
+}
+
+.stk__cat--on::before {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.stk__cat--on .stk__cat-emoji {
+  filter: none;
+  opacity: 1;
+}

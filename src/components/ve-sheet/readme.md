@@ -110,6 +110,20 @@ Type: `Promise<void>`
 
 ## Dependencies
 
+### Used by
+
+ - [ve-adjust-sheet](../ve-adjust-sheet)
+ - [ve-crop-sheet](../ve-crop-sheet)
+ - [ve-effects-sheet](../ve-effects-sheet)
+ - [ve-filter-sheet](../ve-filter-sheet)
+ - [ve-layout-sheet](../ve-layout-sheet)
+ - [ve-opacity-sheet](../ve-opacity-sheet)
+ - [ve-speed-sheet](../ve-speed-sheet)
+ - [ve-sticker-sheet](../ve-sticker-sheet)
+ - [ve-text-sheet](../ve-text-sheet)
+ - [ve-voiceover-sheet](../ve-voiceover-sheet)
+ - [ve-volume-sheet](../ve-volume-sheet)
+
 ### Depends on
 
 - [ve-icon](../ve-icon)
@@ -118,6 +132,17 @@ Type: `Promise<void>`
 ```mermaid
 graph TD;
   ve-sheet --> ve-icon
+  ve-adjust-sheet --> ve-sheet
+  ve-crop-sheet --> ve-sheet
+  ve-effects-sheet --> ve-sheet
+  ve-filter-sheet --> ve-sheet
+  ve-layout-sheet --> ve-sheet
+  ve-opacity-sheet --> ve-sheet
+  ve-speed-sheet --> ve-sheet
+  ve-sticker-sheet --> ve-sheet
+  ve-text-sheet --> ve-sheet
+  ve-voiceover-sheet --> ve-sheet
+  ve-volume-sheet --> ve-sheet
   style ve-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

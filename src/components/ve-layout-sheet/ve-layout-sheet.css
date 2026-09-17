@@ -1,0 +1,155 @@
+/*
+ * The layout row, the opacity slider and the two actions, stacked down the frame's body. The column
+ * itself, and the frame taking the height the shell gave the sheet, come from `sheet-common.css`.
+ */
+
+.ls {
+  gap: 4px;
+  padding-block: 10px 12px;
+}
+
+/* -------------------------------------------------------------------------------------- presets */
+
+/*
+ * Seven of them, two more than the crop sheet's ratios fit on a 393px screen, so this row does
+ * scroll - but each chip is narrow enough that six are in view at once and the seventh announces
+ * itself at the edge, rather than the row being cut off mid-chip.
+ */
+.ls__presets {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ls__presets::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: no reset stylesheet
+ * reaches in here, so a control left alone is set in the platform's own UI font while the sheet
+ * around it is not.
+ */
+.ls__preset {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 54px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.ls__preset:active .ls__frame {
+  transform: scale(0.94);
+}
+
+/*
+ * The output's own 9:16, so a half of the frame looks like a half of the video and not like a half
+ * of some other shape - the whole point of drawing the layout rather than naming it.
+ */
+.ls__frame {
+  position: relative;
+  display: block;
+  width: 26px;
+  height: 46px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  overflow: hidden;
+  transition: transform 120ms ease;
+}
+
+.ls__box {
+  position: absolute;
+}
+
+.ls__box--base {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+/* The second video is the one being placed, so it is the one that stands out. */
+.ls__box--track {
+  background: var(--ve-accent, #a6ff2e);
+}
+
+.ls__label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ls__preset--on {
+  color: var(--ve-text, #fff);
+}
+
+.ls__preset--on .ls__frame {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+
+.ls__preset--on .ls__label {
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------------------- slider */
+
+/*
+ * The value above the knob is 44px wide at its narrowest and centred on the bar's end points, so at
+ * either end it hangs a couple of pixels past the 20px the bar already stands in from. Clipping it
+ * here keeps the sheet body from turning into a sideways scroller. Two declarations rather than one:
+ * a browser that does not know `clip` keeps `hidden`, and `clip` is what stops the box being a
+ * scroll container at all.
+ */
+ve-slider {
+  overflow-x: hidden;
+  overflow-x: clip;
+  padding: 0 20px;
+}
+
+/* -------------------------------------------------------------------------------------- actions */
+
+.ls__actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 20px;
+}
+
+.ls__action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* The glyph is one em square, so its size is the font size it is given. */
+.ls__action ve-icon {
+  font-size: 16px;
+}
+
+.ls__action:active {
+  transform: scale(0.96);
+}
+
+.ls__action--danger {
+  color: var(--ve-danger, #ff4d6a);
+}

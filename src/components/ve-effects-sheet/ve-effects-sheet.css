@@ -1,0 +1,107 @@
+/*
+ * The effects grid. The column `:host` is a flex box in is in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+/*
+ * The frame cannot be sized by its content here: the grid is forty cells long and has no height of
+ * its own, so the frame takes the height the shell gave the sheet and the grid scrolls inside it.
+ * A class rather than an element selector, because `sheet-common.css` already says
+ * `ve-sheet { flex: 1 1 auto }` and this has to beat it.
+ */
+.fx__frame {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.fx__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: 4px;
+  row-gap: 14px;
+  padding: 14px 8px 16px;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: form controls do not
+ * inherit the page's font and no reset stylesheet reaches in here, so every effect's name would be
+ * set in the platform's own UI font while the sheet around it is not.
+ */
+.fx__cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.fx__cell:active .fx__thumb {
+  transform: scale(0.94);
+}
+
+.fx__thumb {
+  position: relative;
+  display: block;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 14px;
+  /* Shows until the preview has been drawn, which is lazy and spread over frames. */
+  background: var(--ve-raised, #2c2c2e);
+  transition: transform 120ms ease-out;
+}
+
+/* The applied outline sits over the picture rather than around it, so selecting never shifts the grid. */
+.fx__thumb::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/*
+ * The canvas is the cell: what of the 9:16 frame goes into it - its middle, or the whole frame
+ * letterboxed - is drawn, because it depends on where the effect puts its marks.
+ *
+ * It has no `width` or `height` attribute in the markup. Those are its pixels, the component writes
+ * them once, and a repaint that rewrote either would clear the preview that is already on it.
+ */
+.fx__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.fx__label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fx__cell--on {
+  color: var(--ve-text, #fff);
+}
+
+.fx__cell--on .fx__thumb::after {
+  border-color: var(--ve-text, #fff);
+}
+
+.fx__empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 32px 16px;
+  font-size: 14px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  text-align: center;
+}

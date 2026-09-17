@@ -1,0 +1,12 @@
+/*
+ * One slider in the middle of the sheet. Everything that centres it is in `sheet-common.css`, which
+ * this file is listed after; the padding is here because the shared block deliberately leaves it to
+ * each sheet, and no two of the eleven agree on it.
+ *
+ * 20px at the sides is the sheet's gutter, which the slider's own edge inset is measured against.
+ * 10px top and bottom is only breathing room: the slider already reserves the 24px its value rises
+ * into, so the row is not as short as it looks.
+ */
+.sheet__content {
+  padding: 10px 20px;
+}

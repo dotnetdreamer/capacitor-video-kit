@@ -1,0 +1,134 @@
+/*
+ * The Adjust sheet: one slider for the property being tuned, and a row of six round property
+ * buttons under it.
+ *
+ * The block that makes this element a column, the one that sizes the frame inside it and the
+ * centred body all come from `sheet-common.css`, which this component lists ahead of this file.
+ * What is left here is this sheet's own: the room between its two rows, the neutral mark behind the
+ * slider, and the properties.
+ */
+
+.as {
+  gap: 14px;
+  padding-block: 8px 12px;
+}
+
+/* --------------------------------------------------------------------------------------- slider */
+
+/*
+ * 20px is the sheet's gutter, and `ve-slider` holds its bar another 20px inside that, which is far
+ * enough in that neither the knob nor the value above it leaves the screen at either end of the
+ * scale. This box is also what the neutral mark is placed against.
+ */
+.as__track {
+  position: relative;
+  padding: 0 20px;
+}
+
+/*
+ * The neutral point of a two sided scale. It sits behind the slider, so the knob covers it at 0 and
+ * the fill runs over its middle - hence the offset from the BOTTOM, which is where the bar is: the
+ * room above the bar belongs to the value that rises into it.
+ *
+ * 15px puts the middle of the 14px mark on the middle of the bar, which `ve-slider` leaves 22px up
+ * from its own bottom edge: a 68px row, of which the top 24px is the room the value rises into and
+ * the remaining 44px is the band of finger the bar is centred in.
+ */
+.as__zero {
+  position: absolute;
+  bottom: 15px;
+  left: calc(50% - 1px);
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+/* ----------------------------------------------------------------------------------- properties */
+
+/*
+ * All six properties are on screen at once, as TikTok's are: a row that scrolls sideways hid Fade
+ * half off the edge of a 393px screen and gave no sign there was more of it.
+ */
+.as__props {
+  display: flex;
+  padding: 0 6px;
+  overflow: hidden;
+}
+
+/*
+ * Each button takes a sixth of the row and no more; its label ellipsises rather than widening it.
+ *
+ * `font-family` is named because this is a `<button>` inside a shadow root: a form control takes the
+ * platform's own UI font rather than the page's, and no reset stylesheet reaches in here to stop it.
+ * Left out, all six labels are set in a different face from the sheet around them.
+ */
+.as__prop {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.as__prop:active .as__circle {
+  transform: scale(0.94);
+}
+
+.as__circle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-size: 22px;
+  transition: transform 120ms ease;
+}
+
+/* A property away from 0 keeps its dot, so a change made a while ago is still findable. */
+.as__dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--ve-sheet, #1c1c1e);
+  border-radius: 50%;
+  background: var(--ve-accent, #a6ff2e);
+}
+
+/*
+ * 11px so the longest of them ("Brightness", "Saturation") still fits a sixth of a 393px screen with
+ * daylight between it and its neighbour.
+ */
+.as__prop-label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.as__prop--on {
+  color: var(--ve-text, #fff);
+}
+
+.as__prop--on .as__circle {
+  box-shadow: inset 0 0 0 2px #fff;
+}
+
+.as__prop--on .as__prop-label {
+  font-weight: 700;
+}

@@ -1,0 +1,338 @@
+/*
+ * The shell gives this sheet `height: auto; max-height: 62%`: it is as tall as its rows (plus a
+ * panel or kept keyboard room), and the preview above gets whatever is left.
+ *
+ * The `:host` column and the frame's `flex: 1 1 auto` are `sheet-common.css`'s, which this file
+ * follows, so neither is repeated here.
+ *
+ * Every `<button>`, the field included, names `font-family: inherit`. A form control does not
+ * inherit the page's font by itself and no reset stylesheet reaches into a shadow root, so left out
+ * every label here would be set in the platform's own UI font while the sheet around it is not.
+ */
+
+/* --------------------------------------------------------------------------------- input row */
+
+.ts__input-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 6px 4px 16px;
+}
+
+/* 16px text so the WebView never zooms into the field; the heights must match FIELD_* in the class. */
+.ts__field {
+  display: block;
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  min-width: 0;
+  height: 40px;
+  max-height: 84px;
+  margin: 0 6px 0 0;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 10px;
+  outline: 0;
+  /* Named for the same reason as the font: WebKit draws its own inset field otherwise. */
+  appearance: none;
+  -webkit-appearance: none;
+  resize: none;
+  overflow-y: auto;
+  background: var(--ve-raised-2, #3a3a3c);
+  color: var(--ve-text, #fff);
+  caret-color: var(--ve-accent, #a6ff2e);
+  font: inherit;
+  font-size: 16px;
+  line-height: 22px;
+  /* The editor column turns selection off for its chrome; the field still needs it for editing. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.ts__field::placeholder {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+.ts__icon-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 28px;
+}
+
+.ts__icon-btn:active {
+  background: var(--ve-raised, #2c2c2e);
+}
+
+.ts__svg {
+  display: block;
+  width: 26px;
+  height: 26px;
+}
+
+.ts__icon-btn .ts__svg {
+  width: 28px;
+  height: 28px;
+}
+
+.ts__svg line {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* ------------------------------------------------------------------------------- style icons */
+
+.ts__tools {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  justify-items: center;
+  padding: 4px 8px 8px;
+}
+
+.ts__tool {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+}
+
+.ts__tool:active {
+  background: var(--ve-raised, #2c2c2e);
+}
+
+.ts__tool--on,
+.ts__tool--on:active {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.ts__glyph-font {
+  font-family: system-ui, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 25px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.ts__glyph-colour {
+  display: block;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: conic-gradient(#ff3b5c, #ff8a3d, #ffd23f, #a6ff2e, #2ee6a6, #3dc2ff, #3d6bff, #9b5cff, #ff5cc8, #ff3b5c);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.ts__glyph-box {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 25px;
+  height: 25px;
+  border: 2px solid #fff;
+  border-radius: 6px;
+  font-family: system-ui, Roboto, sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+/* Filled while the text sits on a plate, so the icon says what the preview shows. */
+.ts__glyph-box--on {
+  background: #fff;
+  color: #000;
+}
+
+/* TikTok's stroke icon: an outlined "A" hatched with slashes. */
+.ts__glyph-stroke {
+  font-family: system-ui, Roboto, sans-serif;
+  font-size: 27px;
+  font-weight: 900;
+  line-height: 1;
+  color: transparent;
+  -webkit-text-stroke: 1.4px #fff;
+  background: repeating-linear-gradient(135deg, #fff 0 1.4px, transparent 1.4px 4.2px);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+/* ------------------------------------------------------------------------------------- panel */
+
+.ts__panel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  /* Held at no height while the keyboard is still leaving (see `panelRoom`). */
+  overflow: hidden;
+  border-top: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+/*
+ * Where the frame's own tab strip sits when it is drawn down here instead. The look is
+ * `sheet-common.css`'s and is not repeated: this reads as one of the editor's sheets because it IS
+ * that strip, not because a second copy was kept in step with it.
+ */
+.ts__tabs {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+.ts__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 16px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* -------------------------------------------------------------------------------------- font */
+
+.ts__font-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* The border is always there, transparent until picked, so selecting never shifts the grid. */
+.ts__font-tile {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  height: 76px;
+  padding: 0 6px;
+  border: 3px solid transparent;
+  border-radius: 12px;
+  background: var(--ve-raised, #2c2c2e);
+  color: #fff;
+  font-family: inherit;
+  overflow: hidden;
+}
+
+.ts__font-tile:active {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.ts__font-tile--on {
+  border-color: #fff;
+}
+
+.ts__font-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 20px;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------------------------------ colour */
+
+.ts__colours {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  row-gap: 8px;
+  justify-items: center;
+}
+
+.ts__colour {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+}
+
+/* The faint inner ring keeps black visible on the dark sheet. */
+.ts__swatch {
+  display: block;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.ts__colour--on .ts__swatch {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 0 0 2px #000,
+    0 0 0 4px #fff;
+}
+
+/* ------------------------------------------------------------------------ background / stroke */
+
+.ts__effects {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.ts__effect {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* A grey wash rather than the flat sheet colour, so a shadow or a dark outline is actually visible. */
+.ts__effect-stage {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  height: 96px;
+  border: 3px solid transparent;
+  border-radius: 12px;
+  /* Measured from the border box, or the gradient repeats in seams under the transparent border. */
+  background: linear-gradient(160deg, #6a6a70 0%, #2c2c2e 100%) border-box;
+  overflow: hidden;
+}
+
+.ts__effect--on {
+  color: var(--ve-text, #fff);
+}
+
+.ts__effect--on .ts__effect-stage {
+  border-color: #fff;
+}
+
+.ts__effect-sample {
+  padding: 2px 10px;
+  border-radius: 8px;
+  font-size: 30px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.ts__effect-label {
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------------- keyboard */
+
+.ts__keyboard-room {
+  flex: 0 0 auto;
+}

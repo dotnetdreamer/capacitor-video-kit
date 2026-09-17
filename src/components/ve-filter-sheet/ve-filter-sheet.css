@@ -1,0 +1,173 @@
+/*
+ * The Filters sheet: a row of preset thumbnails under the frame's tabs, and the strength slider
+ * along the bottom.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+.fs {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ---------------------------------------------------------------------------------- strength */
+
+/*
+ * Pushed to the bottom of the sheet by the auto margin, so it is always in the same place whether or
+ * not a filter is on - and so the empty part of a sheet with no filter yet is below the thumbnails
+ * rather than a band between them and the tabs.
+ */
+.fs__strength {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  margin-top: auto;
+  padding: 0 16px 0 20px;
+}
+
+.fs__strength-label {
+  flex: 0 0 auto;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fs__strength-value {
+  flex: 0 0 30px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/*
+ * The slider's own gutter is taken away, because this row already has one: the knob is 24px wide and
+ * the 12px it hangs past each end of the bar lands in the gaps beside the word and the number. Left
+ * at its default the bar would start 20px in from a label that is already 12px away from it.
+ */
+.fs__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+/* ------------------------------------------------------------------------------------ thumbs */
+
+/*
+ * Positioned so a thumbnail's `offsetLeft` is measured from the row, for centring the chosen one.
+ * It takes only the height it needs, which puts the strip right under the tabs where TikTok has it.
+ */
+.fs__row {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.fs__row::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: form controls do not
+ * inherit the page's font, and no reset stylesheet reaches in here to make them. Left out, every
+ * preset's name is set in the platform's own UI font while the sheet around it is not.
+ */
+.fs__thumb {
+  display: flex;
+  flex: 0 0 84px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 84px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.fs__thumb:active .fs__frame {
+  transform: scale(0.96);
+}
+
+.fs__frame {
+  position: relative;
+  display: block;
+  width: 84px;
+  height: 84px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--ve-raised, #2c2c2e);
+  transition: transform 120ms ease;
+}
+
+/*
+ * The selection ring is drawn over the picture rather than as a border, so choosing a filter does
+ * not shrink the frame inside it.
+ */
+.fs__frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.fs__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+/*
+ * No frame to show yet (filmstrip still being cut, no poster): a colourful swatch still shows what
+ * each preset does to colour.
+ */
+.fs__img--fallback {
+  background: linear-gradient(135deg, #e0603c 0%, #f2c14e 35%, #4caf7a 65%, #3a78d8 100%);
+}
+
+.fs__tint {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.fs__label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fs__thumb--on {
+  color: var(--ve-text, #fff);
+}
+
+.fs__thumb--on .fs__frame::after {
+  border-color: #fff;
+}
+
+.fs__thumb--on .fs__label {
+  font-weight: 700;
+}

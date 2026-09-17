@@ -31,12 +31,24 @@ its name - so an icon is hidden from the accessibility tree unless it is given a
 
 ### Used by
 
+ - [ve-adjust-sheet](../ve-adjust-sheet)
+ - [ve-crop-sheet](../ve-crop-sheet)
+ - [ve-layout-sheet](../ve-layout-sheet)
  - [ve-sheet](../ve-sheet)
+ - [ve-sticker-sheet](../ve-sticker-sheet)
+ - [ve-text-sheet](../ve-text-sheet)
+ - [ve-volume-sheet](../ve-volume-sheet)
 
 ### Graph
 ```mermaid
 graph TD;
+  ve-adjust-sheet --> ve-icon
+  ve-crop-sheet --> ve-icon
+  ve-layout-sheet --> ve-icon
   ve-sheet --> ve-icon
+  ve-sticker-sheet --> ve-icon
+  ve-text-sheet --> ve-icon
+  ve-volume-sheet --> ve-icon
   style ve-icon fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

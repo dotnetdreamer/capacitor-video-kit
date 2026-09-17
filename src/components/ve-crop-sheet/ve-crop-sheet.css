@@ -1,0 +1,117 @@
+/*
+ * The crop sheet: five ratios in a row, and one line saying where the rest of a crop happens.
+ *
+ * The block that makes this element a column, the one that sizes the frame inside it and the
+ * centred body all come from `sheet-common.css`, which this component lists ahead of this file.
+ * What is left here is this sheet's own: the room between its two rows, and the ratios.
+ */
+
+.cs {
+  gap: 12px;
+  padding-block: 10px 12px;
+}
+
+/* --------------------------------------------------------------------------------------- ratios */
+
+/*
+ * All five fit on a 393px screen, so the row does not scroll: a ratio half off the edge is one the
+ * customer never finds, which is the same reason the Adjust sheet shows its six properties at once.
+ */
+.cs__ratios {
+  display: flex;
+  padding: 0 6px;
+  overflow: hidden;
+}
+
+/*
+ * A grid rather than a column of two, because the first row has to stay 44px tall whatever shape is
+ * in it: that is what keeps all five labels on one line while the boxes above them differ.
+ *
+ * `font-family` is named because this is a `<button>` inside a shadow root: a form control takes
+ * the platform's own UI font rather than the page's, and no reset stylesheet reaches in here to
+ * stop it. Left out, "9:16" under the box is set in a different face from the sheet around it.
+ */
+.cs__ratio {
+  display: grid;
+  grid-template-rows: 44px auto;
+  justify-items: center;
+  align-items: center;
+  align-content: center;
+  flex: 1 1 0;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.cs__ratio:active .cs__shape {
+  transform: scale(0.94);
+}
+
+.cs__ratio:disabled {
+  opacity: 0.4;
+}
+
+/*
+ * The box is sized in the component, in pixels, because a 16:9 box and a 9:16 box each have to be
+ * as big as they can be inside one 44px square and CSS cannot say that on its own: a box given both
+ * a width and a height ignores its `aspect-ratio`, and one axis left to a `max-` clamp comes out
+ * square in the other, because the clamp does not travel back through the ratio.
+ */
+.cs__shape {
+  box-sizing: border-box;
+  border: 2px solid currentColor;
+  border-radius: 4px;
+  transition: transform 120ms ease;
+}
+
+.cs__ratio-label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs__ratio--on {
+  color: var(--ve-text, #fff);
+}
+
+.cs__ratio--on .cs__shape {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+
+.cs__ratio--on .cs__ratio-label {
+  font-weight: 700;
+}
+
+/* ----------------------------------------------------------------------------------------- hint */
+
+/*
+ * The pan and the pinch happen on the preview, which is the one part of a crop tool nothing on
+ * screen announces. Said here once, quietly, rather than drawn over the picture being cropped.
+ */
+.cs__hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0 16px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.cs__hint ve-icon {
+  flex: 0 0 auto;
+  font-size: 14px;
+}

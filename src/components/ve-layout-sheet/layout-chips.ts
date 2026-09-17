@@ -1,0 +1,59 @@
+import { LAYOUT_PRESETS, sameRect, type EditRect, type LayoutPresetId } from '../../editor';
+import { orWhole } from '../../state/clip-framing';
+
+/**
+ * The layout row's DOM free half: the little diagrams it draws, and the question of which
+ * arrangement the two layers are in right now.
+ *
+ * It is a plain module rather than part of `ve-layout-sheet.tsx` because both answers are pure
+ * arithmetic over the presets, and both are the kind of arithmetic that goes wrong quietly: a
+ * diagram off by a factor of a hundred still draws something, and a match that misses leaves the
+ * row with no chip lit and nothing to say why. Here they can be tested without a document.
+ */
+
+/** A rectangle as PERCENTAGES of the little frame, which is what the diagram's CSS takes. */
+export interface ChipBox {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/** One preset as the row draws it: its two rectangles, in the frame's own coordinates. */
+export interface LayoutChip {
+  readonly id: LayoutPresetId;
+  readonly label: string;
+  readonly base: ChipBox;
+  readonly track: ChipBox;
+}
+
+/** A preset's rectangle as percentages. Absent is the whole frame, exactly as it is on the wire. */
+function percentOf(rect: EditRect | undefined): ChipBox {
+  const box = orWhole(rect);
+  return { x: box.x * 100, y: box.y * 100, w: box.w * 100, h: box.h * 100 };
+}
+
+/** The presets never change, so the diagrams are laid out once rather than per repaint. */
+export const LAYOUT_CHIPS: readonly LayoutChip[] = LAYOUT_PRESETS.map(preset => ({
+  id: preset.id,
+  label: preset.label,
+  base: percentOf(preset.base),
+  track: percentOf(preset.track),
+}));
+
+/**
+ * The preset a pair of rectangles is, or null for an arrangement none of them names - which a crop
+ * of one of the clips can leave behind, and which is a perfectly good state to be in.
+ *
+ * The two rectangles are matched either way round, because Swap exchanges the layers' clips and
+ * with them their rectangles: a top-and-bottom split with the videos the other way up is still a
+ * top-and-bottom split, and leaving no chip lit after a Swap would say the arrangement had been
+ * lost. The diagram then shows the pair the other way round from the frame, which is what the Swap
+ * button under it is for.
+ */
+export function matchLayoutPreset(baseRect: EditRect | null | undefined, trackRect: EditRect | null | undefined): LayoutPresetId | null {
+  const preset = LAYOUT_PRESETS.find(
+    candidate => (sameRect(candidate.base, baseRect) && sameRect(candidate.track, trackRect)) || (sameRect(candidate.base, trackRect) && sameRect(candidate.track, baseRect)),
+  );
+  return preset?.id ?? null;
+}

@@ -1,0 +1,213 @@
+/*
+ * The shell gives this host its height (a compact sheet) and makes it a flex box; the sheet frame
+ * fills it, and the recorder sits centred in the frame's body with the mute switch along the bottom.
+ * Both of those rules come from `sheet-common.css`, which this component includes ahead of this file.
+ *
+ * The body's content is not `.sheet__content`: that block centres a sheet's controls in whatever
+ * height is left, and here the switch has to be at the bottom of it whether or not there is a row of
+ * takes above it.
+ */
+.vo {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.vo__main {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  align-items: center;
+  /*
+   * Tight, because everything here plus the mute switch has to fit the 227px a compact sheet leaves
+   * under its head: with a take recorded, the switch used to sit below the fold of the sheet.
+   */
+  padding: 10px 16px 2px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------------------ record button */
+
+/* TikTok's shutter: a white ring with a red disc that closes to a rounded square while recording. */
+.vo__record {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 72px;
+  height: 72px;
+  padding: 0;
+  border: 4px solid var(--ve-text, #fff);
+  border-radius: 50%;
+  background: transparent;
+  /*
+   * Not inherited, and this is the element it is needed on: a WebView waits a third of a second on
+   * every tap of a button it might have to double-tap to zoom, and a third of a second is audible
+   * at the front of a take.
+   */
+  touch-action: manipulation;
+  transition:
+    transform 120ms ease-out,
+    opacity 160ms ease-out;
+}
+
+.vo__record:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.vo__record:disabled {
+  opacity: 0.35;
+}
+
+.vo__record-core {
+  width: 54px;
+  height: 54px;
+  border-radius: 27px;
+  background: var(--ve-danger, #ff4d6a);
+  /*
+   * Scaled rather than resized, so the morph is a compositor animation; the radius is set so it
+   * lands at about 6px once scaled.
+   */
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-radius 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.vo__record--live .vo__record-core {
+  border-radius: 12px;
+  transform: scale(0.5);
+}
+
+/* ------------------------------------------------------------------------------------- status */
+
+.vo__status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 22px;
+  margin: 8px 0 0;
+  color: var(--ve-text, #fff);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+  /* The clock counts in tenths, and proportional digits make the whole sentence twitch as it does. */
+  font-variant-numeric: tabular-nums;
+}
+
+.vo__dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ve-danger, #ff4d6a);
+  animation: vo-blink 1s ease-in-out infinite;
+}
+
+@keyframes vo-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.vo__hint {
+  margin: 0;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* -------------------------------------------------------------------------------------- takes */
+
+.vo__takes {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.vo__takes-count {
+  padding: 0 10px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-variant-numeric: tabular-nums;
+}
+
+.vo__takes-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+/*
+ * `font` is named because this is a `<button>` inside a shadow root: a form control does not inherit
+ * the page's font and no reset stylesheet reaches in here to make it, so the word would be set in
+ * the platform's own UI font beside a sheet that is not.
+ */
+.vo__delete {
+  height: 44px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-danger, #ff4d6a);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vo__delete:disabled {
+  opacity: 0.35;
+}
+
+/* ------------------------------------------------------------------------------- mute switch */
+
+/* The whole row is the switch, so the target is the full width rather than the small track. */
+.vo__mute {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  border-top: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+}
+
+.vo__mute-label {
+  min-width: 0;
+}
+
+.vo__switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--ve-raised-2, #3a3a3c);
+  transition: background-color 160ms ease-out;
+}
+
+.vo__switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 160ms ease-out;
+}
+
+.vo__switch--on {
+  background: var(--ve-accent, #a6ff2e);
+}
+
+.vo__switch--on .vo__switch-knob {
+  transform: translateX(18px);
+}

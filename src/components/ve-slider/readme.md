@@ -69,6 +69,29 @@ What it promises, which is what six sheets are written against:
 | `--ve-slider-track` | The bar behind the fill                                                                                        |
 
 
+## Dependencies
+
+### Used by
+
+ - [ve-adjust-sheet](../ve-adjust-sheet)
+ - [ve-filter-sheet](../ve-filter-sheet)
+ - [ve-layout-sheet](../ve-layout-sheet)
+ - [ve-opacity-sheet](../ve-opacity-sheet)
+ - [ve-speed-sheet](../ve-speed-sheet)
+ - [ve-volume-sheet](../ve-volume-sheet)
+
+### Graph
+```mermaid
+graph TD;
+  ve-adjust-sheet --> ve-slider
+  ve-filter-sheet --> ve-slider
+  ve-layout-sheet --> ve-slider
+  ve-opacity-sheet --> ve-slider
+  ve-speed-sheet --> ve-slider
+  ve-volume-sheet --> ve-slider
+  style ve-slider fill:#f9f,stroke:#333,stroke-width:4px
+```
+
 ----------------------------------------------
 
 *Built with [StencilJS](https://stenciljs.com/)*

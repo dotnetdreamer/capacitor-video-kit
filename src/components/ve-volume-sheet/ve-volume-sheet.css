@@ -1,0 +1,65 @@
+/*
+ * A mute button beside the slider, and the quiet "apply to all" under the pair.
+ *
+ * Everything that centres the block in the sheet is in `sheet-common.css`, which this file is
+ * listed after. 20px at the sides is the sheet's gutter, which the slider's own edge inset is
+ * measured against; 10px top and bottom is only breathing room, since the slider already reserves
+ * the 24px its value rises into.
+ */
+.sheet__content {
+  padding: 10px 20px;
+}
+
+/*
+ * Bottom-aligned so the button's centre lines up with the track: the slider carries room for its
+ * value label above the track, and the button has none.
+ */
+.vol__row {
+  display: flex;
+  align-items: flex-end;
+  gap: 20px;
+}
+
+.vol__mute {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  /*
+   * Named because this is a `<button>` inside a shadow root, where no reset stylesheet reaches: it
+   * holds an icon rather than a word, but a grid box still reserves its room from the font, and the
+   * platform's UI font is a different size at the same number.
+   */
+  font-family: inherit;
+  font-size: 22px;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.vol__mute:active {
+  transform: scale(0.94);
+}
+
+/* Muted is the button's on state, and it inverts rather than tints: there is no accent in a slider. */
+.vol__mute--on {
+  background: #fff;
+  color: #000;
+}
+
+/* A zero basis: the slider has no width of its own for the row to start from. */
+.vol__slider {
+  flex: 1 1 0;
+}
+
+/* The space above it belongs to the sheet, which is why `sheet-common.css` leaves the margin out. */
+.sheet__apply-all {
+  margin-top: 14px;
+}

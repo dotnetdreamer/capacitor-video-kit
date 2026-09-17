@@ -4,5 +4,10 @@
  * Everything under `./generated` is written by the repository's `stencil.config.ts` from the components
  * themselves, so it is never edited by hand. This file is the part a person chooses: it names what
  * a host is meant to reach for.
+ *
+ * A component that declares an `@Event()` belongs here rather than left out for being small. Its
+ * wrapper is the only thing that carries a `Ve*CustomEvent` type into the published declarations,
+ * and that import is where this package broke for a consumer for as long as nothing here exported
+ * one. `rollup.config.mjs` says what the break was and what catches it now.
  */
-export { VeSpinner } from './generated/components.js';
+export { VeAlert, VeIcon, VeProgress, VeSheet, VeSlider, VeSpinner, VeToast } from './generated/components.js';
