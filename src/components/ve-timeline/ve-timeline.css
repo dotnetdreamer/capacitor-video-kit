@@ -1,0 +1,522 @@
+/*
+ * TikTok's timeline on black: grey ruler, a filmstrip, flat colour lanes, and white for whatever is
+ * selected. Sizes are custom properties so compact mode is one override, and the add button and the
+ * reorder strip (which sit outside the scroller) line up with the track whatever the mode.
+ *
+ * Every colour is read with a fallback of its own rather than declared here. `ve-editor` owns the
+ * token block; a `:host` that declared these would beat the value inherited from it and no host
+ * application could change a lane's colour.
+ */
+:host {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: var(--ve-bg, #000);
+  color: var(--ve-text, #fff);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tl {
+  --ruler-h: 24px;
+  --track-top: 2px;
+  --track-h: 56px;
+  --track2-h: 40px;
+  --lane-h: 40px;
+  --lane-gap: 8px;
+
+  position: absolute;
+  inset: 0;
+}
+
+.tl--compact {
+  --ruler-h: 0px;
+  --track-top: 4px;
+  --track-h: 48px;
+  --lane-h: 36px;
+  --lane-gap: 4px;
+}
+
+/* -------------------------------------------------------------------------------- scroller */
+
+.tl__scroller {
+  position: absolute;
+  inset: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  scroll-behavior: auto;
+  scroll-snap-type: none;
+  scrollbar-width: none;
+}
+
+.tl__scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `pan-x`: horizontal swipes are the browser's own scroll (with its fling); vertical ones, and
+ * two-finger gestures, are refused by the browser and come to the component as pointer events.
+ */
+.tl__content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 100%;
+  height: 100%;
+  touch-action: pan-x;
+}
+
+/* ----------------------------------------------------------------------------------- ruler */
+
+.tl__ruler {
+  position: relative;
+  flex: 0 0 var(--ruler-h);
+}
+
+.tl__ruler-dots {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background-image: radial-gradient(circle at center, var(--ve-faint, rgba(255, 255, 255, 0.35)) 0 1.5px, transparent 2px);
+  background-repeat: repeat-x;
+  background-position: 0 0;
+  pointer-events: none;
+}
+
+.tl__ruler-label {
+  position: absolute;
+  top: 5px;
+  font-size: 12px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/* ----------------------------------------------------------------------------------- track */
+
+.tl__track {
+  position: relative;
+  flex: 0 0 var(--track-h);
+  margin-top: var(--track-top);
+}
+
+.tl--reordering .tl__track {
+  visibility: hidden;
+}
+
+.tl__mute {
+  position: absolute;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-top: -22px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #fff;
+  font-size: 24px;
+}
+
+.seg {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+
+.seg--selected {
+  z-index: 2;
+}
+
+/*
+ * Every segment is its own rounded card, not just the two ends: with the gap, that is what tells a
+ * split apart from a trim before anything is selected.
+ */
+.seg__frames {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #262628;
+}
+
+.seg__tile {
+  position: absolute;
+  top: 0;
+  width: var(--track-h);
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.seg__tile--empty {
+  background: #2c2c2e;
+  box-shadow: inset -1px 0 rgba(0, 0, 0, 0.35);
+}
+
+/* ---------------------------------------------------------------------- second video layer */
+
+/*
+ * Under the filmstrip and a lane's height, because the second video is a layer of the frame and
+ * not the spine of the post. Its segments are drawn by the same rules as the filmstrip's, so the
+ * two read as the same kind of thing at two sizes.
+ */
+.tl__track2 {
+  position: relative;
+  flex: 0 0 var(--track2-h);
+  margin-top: var(--lane-gap);
+}
+
+/* Square, like every filmstrip tile, which at this height means narrower ones. */
+.seg--extra .seg__tile {
+  width: var(--track2-h);
+}
+
+.seg__border {
+  position: absolute;
+  inset: 0;
+  border: 2px solid #fff;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.seg__chip {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #fff;
+  color: #000;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/*
+ * TikTok's trim handles: a 14px white bar just outside each edge with a dark grip line. The element
+ * itself is 44px wide for the finger - 16px further out than the bar and 14px in over the item.
+ *
+ * Placed against the ROW rather than against the item it belongs to - its `left` comes from the
+ * component - so one piece of arithmetic places a segment's, a layer's and a sound's alike. Above
+ * the selected item (z-index 2), or its white border would cover the grip.
+ */
+.handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  width: 44px;
+  touch-action: none;
+}
+
+.handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  background: #fff;
+}
+
+.handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 1px;
+  background: #1c1c1e;
+}
+
+.handle--in::before {
+  left: 16px;
+  border-radius: 4px 0 0 4px;
+}
+
+.handle--in::after {
+  left: 22px;
+}
+
+.handle--out::before {
+  left: 14px;
+  border-radius: 0 4px 4px 0;
+}
+
+.handle--out::after {
+  left: 20px;
+}
+
+/* ----------------------------------------------------------------------------------- lanes */
+
+/*
+ * `overflow: clip` rather than `hidden`: it does not make a scroll container, so the labels' sticky
+ * positioning still refers to the horizontal scroller. `hidden` is the fallback for old WebViews.
+ */
+.tl__lanes-view {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: var(--lane-gap);
+  overflow: hidden;
+  overflow: clip;
+}
+
+.tl__lanes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lane-gap);
+  padding-bottom: var(--lane-gap);
+  touch-action: pan-x;
+}
+
+.lane {
+  position: relative;
+  flex: 0 0 var(--lane-h);
+}
+
+/*
+ * Rows only animate while a layer is lifted. On the drop the rows swap places in the DOM in the
+ * same frame their offsets are cleared, and a transition then would slide them back from the wrong
+ * side.
+ */
+.tl__lanes--reordering .lane {
+  transition: transform 160ms ease;
+}
+
+.tl__lanes--reordering .lane--lifted {
+  transition: none;
+}
+
+.lane--lifted {
+  z-index: 3;
+  transform: translate3d(0, var(--lift, 0px), 0) !important;
+}
+
+.lane--lifted .item {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.6);
+  transform: scale(1.03);
+}
+
+.lane--lifted .item--selected {
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    0 8px 22px rgba(0, 0, 0, 0.6);
+}
+
+.item {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  outline: 0;
+  color: var(--ve-lane-ink, #2a0a33);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.item[data-kind='text'] {
+  background: var(--ve-lane-text, #f5a8ff);
+}
+
+.item[data-kind='sticker'] {
+  background: var(--ve-lane-sticker, #ffd66b);
+}
+
+.item[data-kind='image'] {
+  background: var(--ve-lane-image, #7cc4ff);
+}
+
+.item[data-kind='effect'] {
+  background: var(--ve-lane-effect, #b99bff);
+}
+
+.item--selected {
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px #fff;
+  touch-action: none;
+}
+
+.item--music {
+  background: var(--ve-lane-music, #0b8e87);
+  color: #fff;
+}
+
+.item--voice {
+  background: var(--ve-lane-voice, #ff9f5a);
+}
+
+.item--recording {
+  background: var(--ve-danger, #ff4d6a);
+  color: #fff;
+  pointer-events: none;
+}
+
+.item--add-sound {
+  background: var(--ve-raised, #2c2c2e);
+  color: #fff;
+  font-size: 14px;
+}
+
+/* Sticky, so a long layer keeps its label on screen while the rest of it is scrolled away. */
+.item__label {
+  position: sticky;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  max-width: 100%;
+  height: 100%;
+  /*
+   * The gutters shrink with the item - a percentage resolves against the item's own width - so a
+   * window only a few hundred milliseconds long still shows its glyph instead of two fat margins.
+   */
+  padding: 0 clamp(0px, 12%, 10px);
+  overflow: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.item__label ve-icon {
+  flex: 0 0 auto;
+  font-size: 16px;
+}
+
+.item__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item__emoji {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.item__sticker {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.item__thumb {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+/* -------------------------------------------------------------------------- fixed overlays */
+
+.tl__playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  z-index: 5;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: #fff;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.tl__playhead::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.tl__add {
+  position: absolute;
+  top: calc(var(--ruler-h) + var(--track-top) + (var(--track-h) - 44px) / 2);
+  right: 12px;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  outline: 0;
+  background: #fff;
+  color: #000;
+  font-size: 28px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+.tl__add:active {
+  transform: scale(0.94);
+}
+
+/* While a segment is lifted, the track becomes a row of square thumbnails the finger can carry. */
+.tl__reorder {
+  position: absolute;
+  top: calc(var(--ruler-h) + var(--track-top));
+  left: 0;
+  right: 0;
+  z-index: 4;
+  height: var(--track-h);
+  pointer-events: none;
+}
+
+.tl__reorder-rail {
+  position: absolute;
+  top: calc(50% - var(--size) / 2);
+  left: 0;
+  transform: translate3d(var(--ox, 0px), 0, 0);
+}
+
+.rtile {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--size);
+  height: var(--size);
+  overflow: hidden;
+  border-radius: 8px;
+  background: #2c2c2e;
+  transition: transform 160ms ease;
+}
+
+.rtile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.rtile--lifted {
+  top: calc(50% - var(--size) / 2);
+  z-index: 1;
+  box-shadow:
+    0 0 0 2px #fff,
+    0 10px 24px rgba(0, 0, 0, 0.6);
+  transform: translate3d(var(--lx, 0px), 0, 0) scale(1.05);
+  transition: none;
+}

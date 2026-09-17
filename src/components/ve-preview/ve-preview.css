@@ -1,0 +1,435 @@
+/*
+ * The preview fills whatever box the shell gives it. The frame inside is always exactly 9:16: as
+ * tall as the box allows, but never so wide that it runs under the shell's Back and Next circles
+ * (44px, 12px in from each side, so 56px on each side plus a little air). A size container is what
+ * lets one width rule honour both limits and keep the ratio - `height: 100%` with a `max-width`
+ * would squash the frame instead the moment the width limit wins.
+ */
+:host {
+  position: relative;
+  display: block;
+  height: 100%;
+  container-type: size;
+}
+
+/*
+ * The stage carries the size; the frame fills it and clips, while the selection chrome fills it and
+ * does not (a handle of a layer scaled past the frame's edge has to stay reachable).
+ */
+.pv__stage {
+  position: relative;
+  width: min(calc(100cqw - 128px), calc(100cqh * 9 / 16));
+  aspect-ratio: 9 / 16;
+  margin: 0 auto;
+  /* Every touch on the stage is ours: drags, pinches and taps. The browser must not scroll or zoom. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.pv__stage--full {
+  width: min(100cqw, calc(100cqh * 9 / 16));
+}
+
+/*
+ * Filled by its edges rather than by percentages, because the stage's own height comes from its
+ * aspect ratio and a percentage of that is not worth relying on.
+ */
+.pv__frame {
+  position: absolute;
+  inset: 0;
+  /*
+   * Layers and the placeholder size their text by `cqw` of the frame, as the rasteriser sizes it by
+   * the output width.
+   */
+  container-type: inline-size;
+  border-radius: 12px;
+  overflow: hidden;
+  /*
+   * Declared HERE and not only on the stage, because `touch-action` is not inherited: it is read off
+   * the element the touch actually starts on. Every child in this frame is `pointer-events: none`,
+   * so that element is always the frame itself, and `overflow: hidden` makes it a scroll container -
+   * which is exactly the kind of node WebKit will happily pan. A layer wider than the frame (text
+   * near its wrap limit is 86% of the width, and any scaled-up sticker) gives it something to pan
+   * sideways, so WebKit claimed horizontal drags and cancelled the pointer, while vertical drags had
+   * no overflow to act on and always worked. The stage's own `touch-action: none` was never
+   * consulted, and `preventDefault()` on pointerdown does not substitute for it on iOS.
+   */
+  touch-action: none;
+  background: var(--ve-bg, #000);
+}
+
+.pv__video {
+  position: absolute;
+  /*
+   * Placed by its top-left corner and its size rather than by `inset`, because a cropped clip is
+   * given the box the whole source frame occupies - which is bigger than the frame and hangs off
+   * its edges. The render writes all four numbers; these are what a clip with no framing gets.
+   */
+  left: 0;
+  top: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /*
+   * No background of its own: the frame's black shows through the bars of a clip that is not 9:16,
+   * and the CSS filter - which paints an element's background along with its picture - cannot fade
+   * or tint them. The render colours the picture before it letterboxes it, for the same reason.
+   */
+  background: transparent;
+  pointer-events: none;
+}
+
+/*
+ * The second layer's element outside its track's own window. It stays in the DOM - it is holding a
+ * decoder either way, and tearing it down would cost another load and another black flash the next
+ * time the playhead crossed the track's start - but `display: none` keeps it off the compositor
+ * while it waits. After `.pv__video`, which it has to beat on source order at equal specificity.
+ */
+.pv__video--idle {
+  display: none;
+}
+
+/*
+ * Sits directly over its own video and nowhere else in the stack: each one is the next sibling of a
+ * `.pv__video` and carries no z-index, so the tints, the overlay layers and the selection chrome -
+ * all later in the DOM inside a frame that is already a stacking context - keep painting above it.
+ * Those are drawn from store signals and stay correct during a hold, so they should not be covered.
+ *
+ * `display: none` rather than `opacity: 0` when off: an invisible canvas still costs a composited
+ * layer on every frame of playback, and this one is idle almost all of the time.
+ */
+.pv__hold {
+  position: absolute;
+  /*
+   * The same box as the video, written by the same signal: the canvas holds the raw frame of the
+   * outgoing clip, so it has to be cropped and placed exactly as the element it covers.
+   */
+  left: 0;
+  top: 0;
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /* Same reasoning as `.pv__video`: the frame's own black is what shows through the bars. */
+  background: transparent;
+  pointer-events: none;
+}
+
+/*
+ * The held frame, up. This is the rule the whole hold canvas exists for, and it is the one a Sass
+ * `&--on` would have taken with it into a file nothing compiles: without it every clip change
+ * flashes black again and nothing says why.
+ */
+.pv__hold--on {
+  display: block;
+}
+
+/* Over the PICTURE, not the frame, so a tint stops where the video does. */
+.pv__tints {
+  position: absolute;
+  pointer-events: none;
+}
+
+.pv__tint {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pv__effect {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: fill;
+  pointer-events: none;
+}
+
+.pv__layer {
+  position: absolute;
+  display: block;
+  height: auto;
+  /* A layer scaled up past the frame must not be capped at its container's width. */
+  max-width: none;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* ----------------------------------------------------------------------------- text placeholder */
+
+/*
+ * White rather than `--ve-text`, like the selection box and the handles below it: this chrome is
+ * drawn over the customer's own video, not over a surface a host themes, and it has to stay legible
+ * on whatever is behind it.
+ */
+.pv__placeholder {
+  position: absolute;
+  padding: 0.3em 0.6em;
+  border: 1.5px solid #fff;
+  color: #fff;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------------------------ selection */
+
+/*
+ * Same size and transform as the layer; the white line sits just outside it so it never covers a
+ * letter's edge. It is the stage's child, not the frame's, so a layer moved or scaled past the
+ * frame's edge keeps its handles - HANDLE_INSET_PX in overlay-gestures.ts mirrors the 4px offset.
+ */
+.pv__select {
+  position: absolute;
+  outline: 1.5px solid #fff;
+  outline-offset: 4px;
+  pointer-events: none;
+}
+
+/* The selected layer is not on screen at this playhead: shown as where it would be, not as itself. */
+.pv__select--ghost {
+  outline-style: dashed;
+  outline-color: rgba(255, 255, 255, 0.5);
+}
+
+.pv__handle {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  color: #000;
+  font-size: 14px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* The circle is small so it does not hide the layer; the finger target around it is not. */
+.pv__handle::before {
+  content: '';
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+}
+
+.pv__handle ve-icon {
+  pointer-events: none;
+}
+
+/*
+ * `--pv-shift` is what holds a handle on the preview when its corner of the layer has left the
+ * stage - see `handleSpot` for why it has to. It is a translation in the SAME turned space as the
+ * rest of the transform, so it simply follows the corner offset.
+ */
+.pv__handle--tl {
+  top: -4px;
+  left: -4px;
+  transform: translate(-50%, -50%) var(--pv-shift, translate(0, 0));
+}
+
+.pv__handle--tr {
+  top: -4px;
+  right: -4px;
+  transform: translate(50%, -50%) var(--pv-shift, translate(0, 0));
+}
+
+.pv__handle--br {
+  right: -4px;
+  bottom: -4px;
+  transform: translate(50%, 50%) var(--pv-shift, translate(0, 0));
+}
+
+/* ----------------------------------------------------------------------------------------- crop */
+
+/*
+ * The window the kept part of the source lands in. The huge spread on the shadow dims everything
+ * outside it right out to the frame's edges, which is where `overflow: hidden` stops it.
+ */
+.pv__crop {
+  position: absolute;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+  outline: 1px solid rgba(255, 255, 255, 0.9);
+  pointer-events: none;
+}
+
+/* Rule of thirds, as every crop tool draws it: two lines each way, hairline, inside the window. */
+.pv__crop::before,
+.pv__crop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pv__crop::before {
+  background:
+    linear-gradient(
+      to right,
+      transparent calc(33.333% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(33.333% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(33.333% + 0.5px),
+      transparent calc(33.333% + 0.5px)
+    ),
+    linear-gradient(
+      to right,
+      transparent calc(66.666% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(66.666% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(66.666% + 0.5px),
+      transparent calc(66.666% + 0.5px)
+    );
+}
+
+.pv__crop::after {
+  background:
+    linear-gradient(
+      to bottom,
+      transparent calc(33.333% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(33.333% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(33.333% + 0.5px),
+      transparent calc(33.333% + 0.5px)
+    ),
+    linear-gradient(
+      to bottom,
+      transparent calc(66.666% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(66.666% - 0.5px),
+      rgba(255, 255, 255, 0.35) calc(66.666% + 0.5px),
+      transparent calc(66.666% + 0.5px)
+    );
+}
+
+/*
+ * Thicker at the corners, the way a viewfinder is: they say which rectangle is being set without
+ * drawing a heavy box over the picture.
+ */
+.pv__crop-corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #fff;
+  pointer-events: none;
+}
+
+.pv__crop-corner--tl {
+  top: -1px;
+  left: -1px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.pv__crop-corner--tr {
+  top: -1px;
+  right: -1px;
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.pv__crop-corner--bl {
+  bottom: -1px;
+  left: -1px;
+  border-right: 0;
+  border-top: 0;
+}
+
+.pv__crop-corner--br {
+  bottom: -1px;
+  right: -1px;
+  border-left: 0;
+  border-top: 0;
+}
+
+/* --------------------------------------------------------------------------------------- guides */
+
+.pv__guide {
+  position: absolute;
+  background: var(--ve-accent, #a6ff2e);
+  pointer-events: none;
+}
+
+.pv__guide--x {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+
+.pv__guide--y {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+/* Long enough to cross the whole frame from any centre at any quarter turn; the frame clips it. */
+.pv__guide--turn {
+  width: 400%;
+  height: 1px;
+}
+
+/* ---------------------------------------------------------------------------------------- trash */
+
+/* Size and bottom offset mirror TRASH_SIZE_PX / TRASH_BOTTOM_PX in overlay-gestures.ts. */
+.pv__trash {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 22px;
+  transform: translateX(-50%);
+  transition:
+    transform 120ms ease-out,
+    background-color 120ms ease-out,
+    border-color 120ms ease-out;
+  pointer-events: none;
+  animation: pv-trash-in 140ms ease-out;
+}
+
+.pv__trash--hot {
+  border-color: var(--ve-danger, #ff4d6a);
+  background: var(--ve-danger, #ff4d6a);
+  transform: translateX(-50%) scale(1.18);
+}
+
+@keyframes pv-trash-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+}
+
+/* ------------------------------------------------------------------------------------ recording */
+
+.pv__rec {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--ve-danger, #ff4d6a);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}

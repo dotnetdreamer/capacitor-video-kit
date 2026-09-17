@@ -1,0 +1,200 @@
+import { clamp, type EditClip } from '../../editor';
+import { debugWarn } from '../../host/debug';
+import type { EditorSource } from '../../host/host.types';
+import type { EditorStore } from '../../state/editor-store';
+
+/**
+ * What the preview's `<video>` elements share.
+ *
+ * There are two of them now - the base track's and the one above it - and everything below is the
+ * part of playing a clip that does not depend on which of the two is doing it: where a clip's file
+ * is, what covers the element while it goes black, and how a clip's own sound reaches the speaker.
+ * The base element is still the clock and still owns the timeline; this is only the machinery both
+ * of them need, kept in one place so a fix made for one cannot miss the other.
+ */
+
+/** Closer than this to where the element already is, a seek is not worth a decode. */
+export const SEEK_EPSILON_S = 0.008;
+
+/**
+ * How long the held frame stays up when no presented-frame callback arrives to lower it.
+ *
+ * Only reached where `requestVideoFrameCallback` is missing, or where the element is paused and so
+ * presents nothing new. Two compositor frames at 60 Hz is enough to cover the repaint, and being a
+ * little late is invisible while being early puts the black back.
+ */
+const HOLD_FALLBACK_MS = 34;
+
+/**
+ * A transparent pixel for a clip with no frame to show yet. Android's WebView draws a grey
+ * placeholder with a play glyph over a `<video>` that has no poster at all, which would sit over the
+ * preview until the first frame decodes.
+ */
+export const BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/**
+ * Where a source's file is, as something this WebView can play.
+ *
+ * `playbackUrl` is already loadable by contract; anything else goes through the host, which is the
+ * one place in the package that knows how this app turns a path into a URL. A source with neither
+ * is a host that handed over nothing to play, and the element is pointed at the empty string rather
+ * than at the page itself, which is what a bare `src=""` resolves to.
+ */
+export function previewSrc(store: EditorStore, source: EditorSource): string {
+  if (source.playbackUrl) return source.playbackUrl;
+  if (source.sourcePath) return store.host.platform.fileUrl(source.sourcePath);
+  return '';
+}
+
+/**
+ * A paused WebView video can sit black until it is played; this is what shows instead - the
+ * filmstrip frame nearest where the segment is parked, else the clip's own thumbnail. Null when
+ * neither is there yet, which is what the poster is put back for once a filmstrip arrives.
+ */
+export function posterFor(store: EditorStore, source: EditorSource, sourceMs: number): string | null {
+  const strip = store.filmstrips.value.get(source.key);
+  if (strip?.urls.length) {
+    const frame = Math.floor(Math.max(0, sourceMs) / Math.max(1, strip.stepMs));
+    return strip.urls[Math.min(strip.urls.length - 1, frame)];
+  }
+  return source.thumbnailUrl ? store.host.platform.fileUrl(source.thumbnailUrl) : null;
+}
+
+/** Whether the post is silencing its clips' own sound: turned off outright, or a take being
+    recorded, when the phone's speaker would be recorded along with the customer's voice. */
+export function clipsSilenced(store: EditorStore): boolean {
+  return store.manifest.value.originalMuted || store.recordingFromMs.value !== null;
+}
+
+/** A clip's own sound on the element playing it. A second layer's clips get theirs the same way. */
+export function applyClipAudio(video: HTMLVideoElement, clip: EditClip, silenced: boolean): void {
+  const muted = silenced || clip.muted;
+  if (video.muted !== muted) video.muted = muted;
+  const volume = clamp(clip.volume, 0, 1);
+  if (video.volume !== volume) video.volume = volume;
+}
+
+/**
+ * `play()` rejects with AbortError whenever a src change interrupts it. That is the normal cost of
+ * swapping clips on one element, not a failure, so it is swallowed - the transport follows the
+ * element's own events either way.
+ */
+export function startPlayback(el: HTMLMediaElement): void {
+  el.play().catch((error: unknown) => {
+    if ((error as DOMException)?.name !== 'AbortError') debugWarn('[ve-preview] play failed', error);
+  });
+}
+
+/**
+ * The outgoing clip's last frame, held over a `<video>` while the element is pointed at the next
+ * source.
+ *
+ * Pointing a `<video>` at a new file tears its decode pipeline down, and WKWebView paints black
+ * through the whole load-seek chain - the `poster` attribute does not reliably cover it and is blank
+ * anyway for a clip whose filmstrip has not been cut yet. A bitmap cannot go black, costs no
+ * decoder, and holds the real frame at full resolution.
+ *
+ * One of these per element rather than one for the preview: the second layer loads its own sources
+ * and goes black in exactly the same way, and a hold that belonged to the player would have to be
+ * told which element it was covering on every call.
+ */
+export class VideoHold {
+  /** Cancels the pending reveal: a `requestVideoFrameCallback` handle, or a timer id behind it. */
+  private cancel: (() => void) | null = null;
+  private raised = false;
+  private destroyed = false;
+
+  /**
+   * @param safetyMs how long a raised hold may stay up with nothing coming to lower it; see [raise].
+   */
+  constructor(
+    private readonly video: HTMLVideoElement,
+    private readonly canvas: HTMLCanvasElement,
+    private readonly setHolding: (on: boolean) => void,
+    private readonly safetyMs: number,
+  ) {}
+
+  /**
+   * Copies the frame currently on screen into the hold canvas and shows it.
+   *
+   * Called immediately before a source change, which is the only thing that makes the element go
+   * black. `drawImage` from a `capacitor://` or remote video taints the canvas, but tainting only
+   * blocks readback and this canvas is never read, so a tainted one displays perfectly.
+   *
+   * A frame is only there to copy once `readyState` has one; before that (the very first clip of a
+   * session) there is nothing on screen to preserve and black is what the frame already shows, so
+   * the hold is skipped rather than raised over a blank canvas.
+   */
+  raise(): void {
+    if (this.destroyed) return;
+    const video = this.video;
+    if (video.readyState < 2 /* HAVE_CURRENT_DATA */ || !video.videoWidth || !video.videoHeight) {
+      return;
+    }
+    // Intrinsic size, so `object-fit: contain` letterboxes the canvas exactly as it letterboxes the
+    // video and the held frame does not jump a pixel when it appears.
+    if (this.canvas.width !== video.videoWidth) this.canvas.width = video.videoWidth;
+    if (this.canvas.height !== video.videoHeight) this.canvas.height = video.videoHeight;
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) return;
+    try {
+      ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
+    } catch {
+      // A frame that cannot be copied is not worth failing a clip change over; the old behaviour
+      // (black for the length of the load) is what happens, which is no worse than before.
+      return;
+    }
+    this.cancel?.();
+    this.raised = true;
+    this.setHolding(true);
+    // A hold that is never lowered is a frozen preview, which is worse than the flash it replaces.
+    // Nothing is expected to need this - the callers lower on the frame landing, on their own seek
+    // watchdog, or explicitly when a load fails - so it is a backstop against a path nobody thought
+    // of, sized by its owner to outlast every watchdog it has.
+    const safety = setTimeout(() => this.done(), this.safetyMs);
+    this.cancel = () => clearTimeout(safety);
+  }
+
+  /**
+   * Lowers the hold once the element has actually PAINTED a frame of the new source.
+   *
+   * `seeked` is too early: it fires when the seek is resolved, not when the frame is on screen, and
+   * lowering there puts the black back for a frame or two. `requestVideoFrameCallback` fires with a
+   * frame presented, which is exactly the moment the hold has stopped being needed. Where it does
+   * not exist the timer is a floor, not a guess: it only has to outlast one compositor frame.
+   */
+  lower(): void {
+    if (this.destroyed || !this.raised) return;
+    this.cancel?.();
+    const video = this.video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+      cancelVideoFrameCallback?: (handle: number) => void;
+    };
+    const done = () => this.done();
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      const handle = video.requestVideoFrameCallback(done);
+      // A paused element presents no new frames, so the callback may never come. The timer is the
+      // backstop for that case and for a load that failed outright.
+      const timer = setTimeout(done, HOLD_FALLBACK_MS);
+      this.cancel = () => {
+        clearTimeout(timer);
+        video.cancelVideoFrameCallback?.(handle);
+      };
+      return;
+    }
+    const timer = setTimeout(done, HOLD_FALLBACK_MS);
+    this.cancel = () => clearTimeout(timer);
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+    this.cancel?.();
+    this.cancel = null;
+  }
+
+  private done(): void {
+    this.cancel = null;
+    this.raised = false;
+    this.setHolding(false);
+  }
+}
