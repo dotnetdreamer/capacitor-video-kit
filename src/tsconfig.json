@@ -9,10 +9,10 @@
  * Stencil builds the editor with the root `tsconfig.stencil.json`, which is this file with the
  * tests taken back out, because everything Stencil compiles is published in `dist/collection`.
  *
- * The four excluded paths are the Capacitor plugin, which the root `tsconfig.json` compiles into
- * `plugin/` under its own rules. `editor/` is deliberately not among them: the contract is the one
- * thing both halves share, and the components read it from `../editor` the way the proxies read it
- * from `./editor`.
+ * The excluded paths are the Capacitor plugin and the storage its web implementations run on, which
+ * the root `tsconfig.json` compiles into `plugin/` under its own rules. `editor/` is deliberately
+ * not among them: the contract is the one thing both halves share, and the components read it from
+ * `../editor` the way the proxies read it from `./editor`.
  */
 {
   "extends": "../tsconfig.base.json",
@@ -32,5 +32,5 @@
     "types": ["@stencil/vitest/globals"]
   },
   "include": ["."],
-  "exclude": ["plugin.ts", "video-composer", "post-publisher", "node_modules"]
+  "exclude": ["plugin.ts", "video-composer", "post-publisher", "web-runtime", "node_modules"]
 }

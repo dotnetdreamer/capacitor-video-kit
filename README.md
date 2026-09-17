@@ -472,8 +472,9 @@ found along the bottom, so that claim is checked rather than asserted.
 
 There is no `host` object at all, which is the other thing this page is for. The editor then runs on
 the browser defaults: the pickers are file inputs, the durations come from a throwaway `<video>`,
-the filmstrip is cut with a canvas, and Next hands the manifest back unrendered, because encoding a
-video is the one thing a browser has no answer for. Everything else in the editor is the editor.
+the filmstrip is cut with a canvas, and Next hands the manifest back unrendered, because the editor
+is handed no `render` host and does not go looking for one. A page that wants the browser to encode
+gives it one, exactly as a Capacitor app does - see [Web](#web).
 
 Both imports come out of `dist/components` on purpose. `choisy-video-kit/ui` is the same code
 compiled a second time for bundlers, so a page that took the element from one and
@@ -632,8 +633,9 @@ A host installing this package from a checkout rather than a tarball also needs
 ### A Capacitor app, where the native engines do the rendering
 
 Everything above is the same. What changes is that `host` is no longer left out, because on a phone
-there is a real answer to every question the browser defaults were guessing at, and one of them,
-the render, the browser has no answer to at all.
+there is a real answer to every question the browser defaults were guessing at - including the
+render, which the defaults leave null. The wiring below is the same wiring a plain web page uses
+with the web implementations; only the pickers differ.
 
 ```ts
 import { Capacitor } from '@capacitor/core';
@@ -897,7 +899,9 @@ different thing for each, and a host that rejects on a cancel makes every picker
 
 **Three members stay null when the host supplied nothing, and the editor tests for null.** Not
 because there was nothing to write, but because in each case "nobody answered" means something no
-invented value could stand in for. `render` is null because there is no browser answer to "encode
+invented value could stand in for. `render` is null because the editor is given one rather than
+finding one: the web engine lives behind `VideoComposer`, and wiring a plugin into the editor is the
+host's call, not this file's. There is no default answer to "encode
 this", and the editor greys nothing for it. `confirm` is null so that the editor knows to present
 its own alert rather than the host's native one. `measureInsets` is null so that the editor pads
 with `env(safe-area-inset-*, 0px)` and writes nothing over it: a measurement that does arrive is set
@@ -1199,6 +1203,67 @@ has not acknowledged. Job folders are rooted in Application Support rather than 
 system purges Caches under pressure and a half purged job folder is a post that can never be
 retried, and every directory created there is marked excluded from backup.
 
+### Web
+
+Both plugins have a real web implementation. They used to be six lines of `unavailable()` each, on
+the reasoning that a second renderer is a second thing to keep in sync - and that reasoning is why
+the web engine is built the way it is rather than why it does not exist. Nothing in
+`src/video-composer/web/` decides anything the native engines decide: the plan, the geometry, the
+colour matrix and the audio layout are ports of `RenderPlan.kt` and `ColorMatrix.kt`, the spec is
+checked with the same refusals as `ComposeSpecParser`, and every one of those is a pure module with
+a unit test rather than a shader nobody can assert on.
+
+**A `<video>` element is the decoder, not `VideoDecoder`.** WebCodecs decodes elementary streams, so
+using it would mean demuxing whatever container the customer picked - MP4 from an iPhone, WebM from
+a screen recorder, MOV, 3GP - before a single frame came out. A `<video>` already holds every
+demuxer and decoder the platform has, applies rotation metadata and copes with variable frame rates.
+The cost is that it is driven by seeking, which is slower; the benefit is that it is right for every
+format the browser can play, and that stepping the output timeline frame by frame makes the render
+deterministic - a slow phone produces the same file as a desktop, just later.
+
+**The MP4 is written here.** `VideoEncoder` is an encoder, not a muxer, so `web/mp4.ts` writes the
+ISO base media boxes itself - about as much of 14496-12 and -14 as one progressive MP4 needs, and no
+dependency and no WebAssembly. `moov` goes first, which costs one extra pass to learn its own
+length and is what lets the finished video start playing before it has finished downloading. Encoded
+chunks are kept as separate arrays and the file is a `Blob` over the list, so a minute of video never
+needs one contiguous allocation. `render.cmp.test.ts` hands what it writes back to the browser's own
+demuxer, because a container only this package can read is not a container.
+
+**Two canvases.** A WebGL2 canvas draws the video, because the one thing a 2D canvas cannot do is the
+colour matrix - `ctx.filter` takes CSS filter functions, not a 4x5 matrix. A 2D canvas then puts the
+overlays on it, because rotating a bitmap about its centre at an opacity is three lines there. The
+matrix is applied to the sampled texel and to nothing else, so a tint or a fade does not colour the
+letterbox bars - the same rule, and the same reason, as on the phone.
+
+**Pitch is preserved by hand.** `playbackRate` resamples, so a 2x clip would come back an octave up.
+`web/time-stretch.ts` is overlap-add with a correlation search, which is the only way a browser gets
+what Media3 and AVFoundation get from the platform.
+
+**The render does not survive the page, and the result does.** A browser has no foreground service
+and no WorkManager: a tab closed mid-render stops rendering, and a job left behind comes back as
+`interrupted`. But the finished video's bytes and the job record go into IndexedDB as they are
+produced, so `getState` after a reload answers with the render rather than with `job_not_found` -
+which is more than the native plugins promise, and is the most a browser can honestly offer.
+
+**The publisher stages its files.** Natively an upload names a path in an app-private folder; in a
+browser it names a `blob:` URL, which dies with the document. So `publish()` copies the bytes into
+IndexedDB before it queues anything, and the record names the copy - otherwise a record that survived
+a reload would come back pointing at nothing. Everything else is the native behaviour unchanged: an
+upload with an id is never sent again, a file that was mid-flight is looked up by its guid first, the
+create step is idempotent on `postId`, and the retry ladder is the same 30/60/120 seconds. A Web Lock
+keeps two tabs off one post.
+
+**`capabilities()` is the call that earns its keep here.** It probes rather than guesses -
+`VideoEncoder.isConfigSupported` negotiates with the platform's own encoder - and a browser without
+WebCodecs gets a `supported: false` with a sentence saying so, and a `compose()` that fails with
+`unsupported` rather than pretending. Every other error keeps its native code, so a host written
+against a phone needs no second set of branches.
+
+**Reaching it.** The web implementations load through `registerPlugin`, so a plain web host that
+wants them installs `@capacitor/core` - an optional peer, and the same `VideoComposer` object a
+Capacitor app uses. The editor itself still needs none of that: `choisy-video-kit/ui` is the editor,
+`choisy-video-kit` is the plugin, and a host that only edits reaches the first one.
+
 ## Failure codes
 
 Composer: `unreadable_input` (blame `clipKey`), `encoder`, `muxer`, `interrupted`, `cancelled`,
@@ -1211,8 +1276,9 @@ Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancel
 ```sh
 npm install        # `prepare` builds the package, so a linked host has something to resolve
 npm run build      # the package, then the three wrapper packages
-npm test           # 103 tests: vitest in a mock DOM, and Playwright Chromium for the components
-npm run typecheck  # the plugin, the editor, the build helpers and all three wrappers
+npm test           # 531 tests: vitest in a mock DOM, and Playwright Chromium for the components,
+                   # the web engines and the MP4 the muxer writes
+npm run typecheck  # the plugin, its own tests, the editor, the build helpers and the wrappers
 npm run clean      # every output of this package; `clean:all` takes the wrappers with it
 ```
 

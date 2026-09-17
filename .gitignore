@@ -25,6 +25,22 @@ packages/angular/.angular/
 __screenshots__/
 .vitest-attachments/
 
+# JavaScript emitted BESIDE a TypeScript source, which nothing in this repository wants and every
+# build here is configured not to produce. It turns up anyway when a `tsc -p` is pointed at a config
+# it cannot parse: TypeScript reports the parse error, falls back to compiling the working directory
+# with default options, and leaves a `.js` next to all six hundred sources. Those files then shadow
+# their own sources - Vitest resolves `./thing` to the stale `thing.js` - so the symptom is a suite
+# that fails in modules nobody touched. Ignoring them keeps that accident out of a commit; `git
+# clean -n` is how to find them.
+src/**/*.js
+src/**/*.js.map
+build/**/*.js
+packages/*/src/*.js
+
+# The packed tarballs. `npm pack` writes them here and a consumer installs them from a path; they
+# are a build output like any other and a new one lands on every version.
+*.tgz
+
 android/build/
 android/.gradle/
 

@@ -106,7 +106,7 @@
     "prepare": "npm run build:package",
     "test": "stencil-test --prod --stencil-config stencil.test.config.ts",
     "test:watch": "stencil-test --prod --watch --stencil-config stencil.test.config.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.plugin-tests.json && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces",
     "generate": "stencil generate",
     "clean:all": "npm run clean && npm run clean --workspaces --if-present"
   },

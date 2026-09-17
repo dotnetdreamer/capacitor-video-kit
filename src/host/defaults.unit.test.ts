@@ -26,7 +26,7 @@ describe('resolveEditorHost', () => {
     expect(host.platform.debug).toBe(false);
   });
 
-  it('leaves the render null, because a browser has no answer for "encode this"', () => {
+  it('leaves the render null, because a render is supplied rather than found', () => {
     expect(resolveEditorHost().render).toBeNull();
     expect(resolveEditorHost({ media: stubMedia }).render).toBeNull();
   });

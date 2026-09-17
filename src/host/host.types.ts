@@ -261,8 +261,12 @@ export interface VideoEditorResult {
  * A host with every optional part filled in, which is what the editor's own code is written
  * against. `resolveEditorHost()` is the only thing that builds one.
  *
- * `render` stays nullable because there is no browser answer to "encode this": the editor greys
- * nothing and simply hands the manifest back unrendered when it is null.
+ * `render` stays nullable because a render is something a host SUPPLIES rather than something this
+ * file can find. It is null by default on every platform, the web included - the package does have a
+ * browser engine now, behind `VideoComposer`, and reaching for it from here would pull the plugin
+ * half into the editor half, which is the one dependency this package does not have. A host wires
+ * it in the same two lines on a phone and in a page. Null, the editor greys nothing and simply hands
+ * the manifest back unrendered.
  */
 export interface ResolvedEditorHost {
   media: EditorMediaHost;

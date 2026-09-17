@@ -1,0 +1,16 @@
+{
+  /* The plugin half's own tests: the root `tsconfig.json` with them added back and nothing emitted.
+
+     The root config excludes the test files because it EMITS - `files` ships `plugin/`, and a test
+     compiled into it would be installed into every consumer's node_modules. Excluding them there
+     and stopping would leave them unchecked by `npm run typecheck`, which is where a broken test is
+     cheapest to find, so they are checked here instead.
+
+     The exclusions are restated rather than emptied: an empty list would also drop TypeScript's own
+     default, which is what keeps `node_modules` out of the program. */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "exclude": ["node_modules"]
+}

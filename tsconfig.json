@@ -52,13 +52,18 @@
     }
   },
   /* Named one by one rather than taken as `src/**` minus the rest, because the two halves of this
-     package share `src/` and only these four paths are the plugin. Anything new that belongs in the
+     package share `src/` and only these five paths are the plugin. Anything new that belongs in the
      published plugin has to be added here, which is a better failure than a file silently joining
      the wrong build. */
   "include": [
     "src/plugin.ts",
     "src/video-composer/**/*.ts",
     "src/post-publisher/**/*.ts",
-    "src/editor/**/*.ts"
-  ]
+    "src/editor/**/*.ts",
+    "src/web-runtime/**/*.ts"
+  ],
+  /* The tests beside those sources are not the published plugin. They are compiled by
+     `tsconfig.plugin-tests.json`, which is this file with them added back and no emit, so a test
+     file is still typechecked without landing in `plugin/` for a consumer to install. */
+  "exclude": ["src/**/*.test.ts"]
 }

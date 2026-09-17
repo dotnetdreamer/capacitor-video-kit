@@ -5,8 +5,9 @@
  * There is no host object here at all. The editor then runs on the browser defaults in
  * `host/defaults.ts`, which is a real editor rather than a degraded one: the pickers are file
  * inputs, the filmstrip is cut with a `<video>` and a canvas, and Next hands back the manifest
- * unrendered, because encoding a video is the one thing a browser has no answer for. A Capacitor
- * application sets `editor.host` as well, and the README has that half.
+ * unrendered - because this page supplies no `render` host, not because a browser cannot encode.
+ * It can: `VideoComposer` has a web implementation that renders and muxes a real MP4. Wiring it in
+ * is the same two lines here as in a Capacitor application, and the README has that half.
  */
 
 /* One tag. Under `dist-custom-elements` this call defines every tag `ve-editor` renders, and the
