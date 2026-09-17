@@ -1,6 +1,6 @@
 import { registerPlugin } from '@capacitor/core';
 
-import type { VideoComposerPlugin } from './definitions';
+import type { VideoComposerPlugin } from './plugin';
 
 /**
  * The web implementation is loaded lazily and only ever used in a browser: on a device the bridge
@@ -11,3 +11,4 @@ export const VideoComposer = registerPlugin<VideoComposerPlugin>('VideoComposer'
 });
 
 export * from './definitions';
+export * from './plugin';

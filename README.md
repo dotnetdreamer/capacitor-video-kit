@@ -35,6 +35,64 @@ Gradle versions come from the host's `android/variables.gradle` (`kotlin_version
 `workManagerVersion`, `okhttpVersion`, `kotlinxCoroutinesVersion`), with the plugin's own pins as a
 fallback.
 
+### Entry points
+
+The app compiles this package from source, which is what the `paths` entry above buys: a change to
+the native contract is a type error in the app immediately rather than after a publish. Everyone
+else resolves the built package through its exports map, and there are exactly two ways in.
+
+| Specifier | What it is |
+|---|---|
+| `choisy-video-kit` | Both plugin proxies, their definitions and the editor core. Needs `@capacitor/core` installed |
+| `choisy-video-kit/editor` | The editor core on its own, reaching no `registerPlugin` call and no Capacitor at all |
+
+The root specifier imports `@capacitor/core` statically, so in a tree without it the import does not
+resolve: Node says `ERR_MODULE_NOT_FOUND: @capacitor/core` and a bundler says the same in its own
+words, and neither message names this package. Nothing in here can improve on that, because a static
+import fails while the module graph is being linked, before any of this package's code runs; the
+only way to catch it would be to make `VideoComposer` a promise, which is a worse package than a
+documented requirement. So it is documented, here and in `src/index.ts`: **if you are not in a
+Capacitor app, import `choisy-video-kit/editor`.**
+
+Both resolve under Node ESM, under Vite and under TypeScript's `bundler`, `node16` and `nodenext`
+resolution, and both carry declarations. Nothing else is reachable: `choisy-video-kit/src/...` is not
+an entry point, and Node answers it with `ERR_PACKAGE_PATH_NOT_EXPORTED` rather than handing out raw
+TypeScript that only this repository's toolchain can compile.
+
+`@capacitor/core` is an optional peer dependency for the same reason. A Capacitor app always has it
+and nothing changes there, but npm installs a non-optional peer for every consumer, so left
+mandatory it put a native bridge into the `node_modules` of every web host that only ever reaches
+`choisy-video-kit/editor`.
+
+`choisy-video-kit/editor` reaches no Capacitor type either, and that is what
+`src/video-composer/plugin.ts` exists for. The editor names `ComposeSpec` and `FilterOp`, which live
+in `src/video-composer/definitions.ts`, so that file is part of the subpath's declarations; the
+`VideoComposerPlugin` interface is the only thing in the composer's contract that names
+`PluginListenerHandle`, so it sits in its own file instead. Left where it was, a single `import type`
+became `TS2307: Cannot find module '@capacitor/core'` inside the `node_modules` of every web host
+that compiles without `skipLibCheck`. The package's public surface is unchanged: `plugin.ts` is
+re-exported from `src/video-composer/index.ts` and from `src/index.ts`, so `VideoComposerPlugin` is
+imported from `choisy-video-kit` exactly as before.
+
+### What `npm pack` carries
+
+`files` is `dist/` and nothing else, so a packed tarball is the JavaScript half only: no `src/`, no
+`android/`, no `ios/`, no `Package.swift`.
+
+Neither consumer loses anything by that, because neither reaches this package through a tarball.
+The app installs it as `file:capacitor-plugins/video-kit`, which npm resolves to a **symlink** at
+`node_modules/choisy-video-kit` pointing back into this directory, and `files` has no say over what
+is visible through a symlink: `npx cap sync` reads `android/` and `ios/` straight out of the working
+tree, and the app's TypeScript reads `src/` through the `paths` entry above, which is a repository
+path and never touches `node_modules`. The other consumer is `@choisy/video-editor`, which vendors
+`npm pack` of this package and bundles it into its own tarball; that reaches `choisy-video-kit/editor`
+and nothing native, and before this narrowing it shipped 900 kB of Kotlin, Swift and TypeScript
+source into every React, Vue and Angular application that installed the editor.
+
+The consequence to know about: a tarball of this package is **not installable by a native app**. If
+one ever needs to be, put `android/src/main/`, `android/build.gradle`, `ios/Sources` and
+`Package.swift` back into `files` and give the editor a web-only tarball instead.
+
 ## Use
 
 ```ts
@@ -52,11 +110,12 @@ const { jobId } = await VideoComposer.compose(spec);
 const state = await VideoComposer.getState({ jobId });
 ```
 
-Full contracts: `src/video-composer/definitions.ts` and `src/post-publisher/definitions.ts`.
+Full contracts: `src/video-composer/definitions.ts` plus `src/video-composer/plugin.ts`, and
+`src/post-publisher/definitions.ts`.
 
 ## Editor core
 
-`src/editor/` is the framework-free half of editing — what `web.ts` is to the plugins. An editor UI
+`src/editor/` is the framework-free half of editing, what `web.ts` is to the plugins. An editor UI
 in any framework builds an `EditManifest` and hands it to `toComposeSpec`:
 
 ```ts
@@ -86,6 +145,11 @@ await VideoComposer.compose(spec);
 There is deliberately no UI here. An editor screen belongs to the host and its framework; this
 package holds only what an editor needs in order to agree with the native render. Choisy's Angular
 editor lives in the app at `src/app/modules/video-editor/`.
+
+A host that wants only the editing half imports `choisy-video-kit/editor` instead. Nothing on that
+path registers a plugin or imports `@capacitor/core` at runtime, so a web build that will never run
+natively carries no Capacitor code: Vite tree-shakes an import of one constant from it down to
+0.11 kB. `@choisy/video-editor`, the web components port of the editor screen, is its first consumer.
 
 ## The parts worth knowing about
 
@@ -156,6 +220,19 @@ Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancel
 each with `phase`, an optional `httpStatus`, and `retryable`.
 
 ## Build and test
+
+The web half:
+
+```sh
+npm run build      # dist/esm and dist/cjs, each with declarations, source maps and a module-type marker
+npm run typecheck
+```
+
+The sources keep extensionless relative imports because the app's Karma build resolves them through
+webpack, which will not map a `./thing.js` specifier back to `./thing.ts`. `scripts/finish-build.mjs`
+adds the extensions to the emitted ESM afterwards, where Node is the one that needs them.
+
+The native half:
 
 ```powershell
 cd choisy-mobile/android

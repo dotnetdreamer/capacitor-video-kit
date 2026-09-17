@@ -12,3 +12,12 @@ export * from './raster-context';
 export * from './compose-spec';
 export * from './overlay-raster';
 export * from './effects';
+
+/**
+ * `toComposeSpec` returns a `ComposeSpec` and `resolveFilterOps` returns `FilterOp[]`, and both
+ * types are declared next to the plugin that consumes them rather than here. A consumer reaching
+ * this entry point on its own cannot name a type it has no way to import, and TypeScript refuses to
+ * emit declarations that would need one, so the two names travel with the contract that returns
+ * them.
+ */
+export type { ComposeSpec, FilterOp } from '../video-composer/definitions';

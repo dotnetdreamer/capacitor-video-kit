@@ -1,0 +1,30 @@
+{
+  /* The app compiles this plugin from source through a tsconfig path mapping, so this file exists
+     only to produce the published build. Keep the strictness here at least as tight as the app's,
+     or a type error would first appear in the consumer rather than here. */
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    /* No maps, because `files` is `dist/` and the `src/` a map names is not in the tarball. Emitting
+       them anyway put 64 `.map` files and 64 `sourceMappingURL` comments in every consumer's
+       node_modules, each one pointing at a path that does not exist, which is how a debugger comes
+       to report a missing source instead of simply stepping through the shipped JavaScript. */
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": "src",
+    "outDir": "dist/esm"
+  },
+  "include": ["src/**/*.ts"]
+}

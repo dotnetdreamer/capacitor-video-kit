@@ -12,9 +12,9 @@ import type {
   SystemInsetsResult,
   ThumbnailsOptions,
   ThumbnailsResult,
-  VideoComposerPlugin,
   VoiceRecordingResult,
 } from './definitions';
+import type { VideoComposerPlugin } from './plugin';
 
 /**
  * Deliberately empty. The whole point of this plugin is that composition happens natively, so the
