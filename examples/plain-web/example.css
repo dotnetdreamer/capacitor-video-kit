@@ -1,0 +1,99 @@
+/*
+ * The page around the editor, which is all this file is. Nothing here styles anything inside
+ * `ve-editor`: it is in a shadow root and the way in is the `--ve-*` custom properties, one of
+ * which is set below to show that it works.
+ */
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #0b0c0f;
+  color: #e7e9ee;
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  display: grid;
+  grid-template-rows: 1fr auto;
+}
+
+/*
+ * The editor fills whatever it is given and is written for a phone, so on a desktop it gets a
+ * phone's column rather than the whole window.
+ *
+ * No transform, no filter and no `will-change` on this element. The toolbar's menu is caught by a
+ * `position: fixed` backdrop inside a shadow root below here, and any of the three would make this
+ * box that backdrop's containing block and trap it inside the column.
+ */
+.stage {
+  position: relative;
+  width: min(100vw, 420px);
+  height: 100%;
+  margin: 0 auto;
+  overflow: hidden;
+  background: #000;
+
+  /* A host themes the editor by setting its tokens from outside. This one is the whole palette. */
+  --ve-accent: #a6ff2e;
+}
+
+.stage ve-editor {
+  display: block;
+  height: 100%;
+}
+
+.result {
+  position: fixed;
+  inset: 0;
+  /* The editor's own layers carry a z-index, and this covers the whole page rather than sharing it. */
+  z-index: 1;
+  overflow: auto;
+  padding: 24px;
+  background: #0b0c0f;
+}
+
+.result__title {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.result__note {
+  margin: 0 0 16px;
+  color: #8b93a3;
+}
+
+.result__json {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid #2b2f37;
+  border-radius: 8px;
+  background: #14161a;
+  color: #c8cedb;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.result__again {
+  font: inherit;
+  color: #0b0c0f;
+  background: #a6ff2e;
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 20px;
+  cursor: pointer;
+}
+
+.report {
+  padding: 8px 12px;
+  border-top: 1px solid #2b2f37;
+  background: #14161a;
+  color: #8b93a3;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.report.bad {
+  color: #ff6b6b;
+}

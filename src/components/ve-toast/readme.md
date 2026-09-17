@@ -40,6 +40,19 @@ inside it comes and goes. The comment on the `Host` below says what that buys.
 | `--ve-toast-color` | The message itself          |
 
 
+## Dependencies
+
+### Used by
+
+ - [ve-editor](../ve-editor)
+
+### Graph
+```mermaid
+graph TD;
+  ve-editor --> ve-toast
+  style ve-toast fill:#f9f,stroke:#333,stroke-width:4px
+```
+
 ----------------------------------------------
 
 *Built with [StencilJS](https://stenciljs.com/)*

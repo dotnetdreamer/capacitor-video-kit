@@ -1,0 +1,228 @@
+/*
+ * TikTok's tool row: dark rounded tiles on black, a white outline icon over a short white label.
+ *
+ * The host is the Sound menu's anchor and must not clip it: the menu rises out of the top of the
+ * toolbar over the timeline. Its z-index lifts the menu (and the tap catcher behind it) over the
+ * timeline and the stage's Back and Next, and stays under the shell's render overlay, which is 20.
+ *
+ * Nothing here may gain a `transform`, a `filter` or a `will-change`. Any of the three makes this
+ * element a containing block for fixed positioning, and the menu's tap catcher below is
+ * `position: fixed` precisely so that it covers the whole editor rather than the toolbar: trapped
+ * inside this box, a tap on the preview would land on the preview with the menu still open.
+ */
+:host {
+  position: relative;
+  z-index: 10;
+  display: block;
+  padding: 8px 0 calc(var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px)) + 8px);
+  background: var(--ve-bg, #000);
+  color: var(--ve-text, #fff);
+}
+
+.tb {
+  display: flex;
+  align-items: center;
+}
+
+/* Only the scroller clips; the host stays overflow: visible for the menu. */
+.tb__scroller {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.tb__scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * A max-content block with auto margins sits centred while it fits and starts at the left edge,
+ * scrollable, once it does not: TikTok's short rows (Add text, Captions) sit in the middle. The
+ * side padding lives here rather than on the scroller because a scroll container's end padding is
+ * not reliably part of what it scrolls on older WebViews.
+ */
+.tb__track {
+  display: flex;
+  gap: 8px;
+  width: max-content;
+  margin: 0 auto;
+  padding: 0 10px;
+}
+
+/* Next to the collapse tile the usual tile gap is the spacing, not the row's edge padding. */
+.tile--collapse + .tb__scroller .tb__track {
+  padding-left: 8px;
+}
+
+/*
+ * A short row beside the collapse tile is centred on the SCREEN, as TikTok's Add text and Captions
+ * row is, not in the space the collapse tile leaves: the right padding mirrors the collapse tile
+ * (10px edge + 56px tile + 8px gap) so the auto margins balance around the middle.
+ */
+.tb--balanced .tb__track {
+  padding-right: 74px;
+}
+
+/* ------------------------------------------------------------------------------------- tiles */
+
+.tile {
+  position: relative;
+  display: flex;
+  flex: 0 0 72px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 72px;
+  height: 80px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--ve-surface, #1e1e1e);
+  color: var(--ve-text, #fff);
+  font: inherit;
+  /* Lets the row pan sideways from a tile while dropping the double-tap-zoom wait on the tap. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color 90ms ease-out,
+    opacity 120ms ease-out;
+}
+
+.tile:active:not(.tile--dim),
+.tile--pressed {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+/* Inset, because the scroller clips anything drawn outside the tile. */
+.tile:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+}
+
+.tile--collapse {
+  flex-basis: 56px;
+  width: 56px;
+  margin-left: 10px;
+}
+
+.tile__icon {
+  flex: 0 0 auto;
+  font-size: 26px;
+}
+
+.tile__label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tile--dim {
+  opacity: 0.4;
+}
+
+.tile--on .tile__icon {
+  color: var(--ve-accent, #a6ff2e);
+}
+
+.tile__soon {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 3px;
+  border: 1px solid var(--ve-accent, #a6ff2e);
+  border-radius: 4px;
+  color: var(--ve-accent, #a6ff2e);
+  font-size: 7px;
+  font-weight: 800;
+  line-height: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* -------------------------------------------------------------------------------- sound menu */
+
+/*
+ * Fixed so it covers the whole editor, not just the toolbar; it stays in this host's stacking
+ * context, under the menu and over everything the host is above.
+ */
+.tb__catcher {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  background: transparent;
+}
+
+.tb__menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 10px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  width: 200px;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  transform-origin: bottom left;
+  animation: tb-menu-in 150ms ease-out;
+}
+
+.tb__menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 500;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tb__menu-item ve-icon {
+  flex: 0 0 auto;
+  font-size: 24px;
+}
+
+.tb__menu-item span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tb__menu-item + .tb__menu-item {
+  border-top: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+.tb__menu-item:active {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.tb__menu-item:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+}
+
+@keyframes tb-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+}

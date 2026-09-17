@@ -102,6 +102,7 @@
     "build:wrappers": "npm run build --workspace choisy-video-kit-react && npm run build --workspace choisy-video-kit-vue && npm run build --workspace choisy-video-kit-angular",
     "clean": "rimraf plugin dist loader www .stencil .stencil-test-build src/components.d.ts",
     "dev": "stencil build --dev --watch --serve --config stencil.dev.config.ts",
+    "example": "node examples/plain-web/serve.mjs",
     "prepare": "npm run build:package",
     "test": "stencil-test --prod --stencil-config stencil.test.config.ts",
     "test:watch": "stencil-test --prod --watch --stencil-config stencil.test.config.ts",

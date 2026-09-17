@@ -31,6 +31,10 @@ ever drawn at all.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -40,6 +44,7 @@ ever drawn at all.
 graph TD;
   ve-effects-sheet --> ve-sheet
   ve-sheet --> ve-icon
+  ve-editor --> ve-effects-sheet
   style ve-effects-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

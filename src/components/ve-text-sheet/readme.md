@@ -31,6 +31,10 @@ same strip the frame's head draws and not one that merely looks like it.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -42,6 +46,7 @@ graph TD;
   ve-text-sheet --> ve-sheet
   ve-text-sheet --> ve-icon
   ve-sheet --> ve-icon
+  ve-editor --> ve-text-sheet
   style ve-text-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

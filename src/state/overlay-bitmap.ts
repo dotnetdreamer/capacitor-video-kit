@@ -1,4 +1,4 @@
-import { computed, effect, untracked } from '@preact/signals-core';
+import { computed } from '@preact/signals-core';
 import {
   overlayRasterKey,
   rasteriseOverlay,
@@ -70,17 +70,25 @@ export class OverlayBitmaps {
   ) {
     this.rasterContext = createEditorRasterContext(host);
 
-    this.stopWatching = effect(() => {
-      this.overlays.value;
-      // The pass reads the manifest and the bitmaps itself; tracking them here would have every
-      // bitmap it writes wake the effect again.
-      //
-      // A signal effect runs the moment the layers change, where the Angular original waited for
-      // the next change detection pass and coalesced a burst of writes into one run. Running more
-      // often costs nothing here: `schedule()` either starts the one pass or marks that another is
-      // wanted, and the pass itself is what does the work.
-      untracked(() => this.schedule());
-    });
+    /*
+     * `subscribe` rather than an `effect` whose body opens with a bare `this.overlays.value;`.
+     * The two are the same thing - signals-core implements `subscribe` as an effect that reads the
+     * value and calls back outside the tracking context - but a read written as its own statement
+     * is a property access whose result nothing uses, and the production minifier deletes it. That
+     * leaves an effect subscribed to nothing: it runs once when it is made and never again, no
+     * layer is ever drawn, and the preview shows the video with its text, stickers and effects
+     * missing while every test over the unminified build passes. Here the value is an argument, so
+     * there is nothing to delete.
+     *
+     * The pass reads the manifest and the bitmaps itself; tracking them here would have every
+     * bitmap it writes wake this again.
+     *
+     * It runs the moment the layers change, where the Angular original waited for the next change
+     * detection pass and coalesced a burst of writes into one run. Running more often costs nothing
+     * here: `schedule()` either starts the one pass or marks that another is wanted, and the pass
+     * itself is what does the work.
+     */
+    this.stopWatching = this.overlays.subscribe(() => this.schedule());
   }
 
   /**

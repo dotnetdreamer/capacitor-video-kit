@@ -23,6 +23,10 @@ a vignette's strength should be offered "Undo Strength" and not "Undo Opacity".
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -34,6 +38,7 @@ graph TD;
   ve-opacity-sheet --> ve-sheet
   ve-opacity-sheet --> ve-slider
   ve-sheet --> ve-icon
+  ve-editor --> ve-opacity-sheet
   style ve-opacity-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

@@ -26,6 +26,10 @@ The scrolling element belongs to the frame and is inside its shadow root, so thi
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -37,6 +41,7 @@ graph TD;
   ve-sticker-sheet --> ve-sheet
   ve-sticker-sheet --> ve-icon
   ve-sheet --> ve-icon
+  ve-editor --> ve-sticker-sheet
   style ve-sticker-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

@@ -38,6 +38,10 @@ anything.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-icon](../ve-icon)
@@ -46,6 +50,7 @@ anything.
 ```mermaid
 graph TD;
   ve-timeline --> ve-icon
+  ve-editor --> ve-timeline
   style ve-timeline fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

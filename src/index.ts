@@ -4,11 +4,43 @@
  * It is a subpath rather than the package root because the root is the Capacitor plugin, which a
  * React or Vue host never wants and which imports `@capacitor/core` statically. Nothing here does.
  *
- * Components are deliberately not exported from here either. A host reaches them through the
- * wrapper for its own framework, or through `choisy-video-kit/loader` when it wants a script tag
- * and no build step. What belongs here is the rest of the public surface: the host interface the
- * editor is handed, the types a caller needs to read a result, and the two functions that have to
- * run before the editor renders.
+ * The editor is ONE element. A host places `<ve-editor>`, sets four properties on it and listens
+ * for two events; everything else in this package is something that element renders.
+ *
+ * ```ts
+ * import { installEditorFonts, setEditorAssetPath } from 'choisy-video-kit/ui';
+ * import { defineCustomElement } from 'choisy-video-kit/dist/components/ve-editor.js';
+ *
+ * defineCustomElement();                 // ve-editor, and with it the other twenty tags
+ * setEditorAssetPath('/video-editor/');  // where this package's `assets` directory is served
+ * void installEditorFonts();             // the faces the render burns into the finished video
+ *
+ * const editor = document.createElement('ve-editor');
+ * editor.sources = clips;                // the sources the step before left
+ * editor.manifest = previousEdit;        // optional, when stepping back into an edit
+ * editor.maxSources = 10;
+ * editor.host = { media, render, platform };
+ * editor.addEventListener('veDone', (event) => post(event.detail));
+ * editor.addEventListener('veCancel', () => back());
+ * document.body.append(editor);
+ * ```
+ *
+ * Defining that one tag is all the registration there is: under `dist-custom-elements` a
+ * component's generated `defineCustomElement` also defines every tag it renders, transitively. A
+ * React, Vue or Angular host uses the wrapper for its framework instead, and a page with no build
+ * step uses `choisy-video-kit/loader`.
+ *
+ * The component classes themselves are deliberately not exported from here, because those three
+ * doors are what a host actually uses and a fourth one that needs `@stencil/core` at the call site
+ * is not a door. The element's own property and event types are here all the same, through the
+ * generated `components.d.ts` at the bottom of this file.
+ *
+ * What else belongs here: the host interface the editor is handed, the types a caller needs to read
+ * a result, the editor's own state for a host that wants to drive it from outside, the catalogues
+ * the sheets are built from, and the two functions that have to run before the editor renders. The
+ * manifest itself - `EditManifest` and the edit operations over it - is the contract the Swift and
+ * Kotlin engines are written against, so it lives at `choisy-video-kit` and `choisy-video-kit/editor`
+ * rather than here.
  */
 
 

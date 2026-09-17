@@ -44,6 +44,19 @@ a question with two buttons, and the answer goes back to whoever asked through `
 | `veDismiss` | The `role` of the button that was pressed, or null for a dismissal: a press on the backdrop or the escape key. The editor's back press is the third way out and does not come through here - the shell settles its own question directly, the way it used to dismiss the Ionic alert.  Null is an answer rather than an error. Both callers read it as "neither of those": stay in the editor, keep the edits, post nothing. | `CustomEvent<null \| string>` |
 
 
+## Dependencies
+
+### Used by
+
+ - [ve-editor](../ve-editor)
+
+### Graph
+```mermaid
+graph TD;
+  ve-editor --> ve-alert
+  style ve-alert fill:#f9f,stroke:#333,stroke-width:4px
+```
+
 ----------------------------------------------
 
 *Built with [StencilJS](https://stenciljs.com/)*

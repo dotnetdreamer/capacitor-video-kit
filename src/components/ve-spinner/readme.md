@@ -33,6 +33,19 @@ per size would put layout decisions inside the component.
 | `--ve-spinner-track`     | Colour of the unlit part, transparent by default so the arc reads as a crescent |
 
 
+## Dependencies
+
+### Used by
+
+ - [ve-editor](../ve-editor)
+
+### Graph
+```mermaid
+graph TD;
+  ve-editor --> ve-spinner
+  style ve-spinner fill:#f9f,stroke:#333,stroke-width:4px
+```
+
 ----------------------------------------------
 
 *Built with [StencilJS](https://stenciljs.com/)*

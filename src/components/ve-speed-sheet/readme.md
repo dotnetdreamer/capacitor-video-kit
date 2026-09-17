@@ -20,6 +20,10 @@ stretches the timeline, so the timeline above follows it live.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -31,6 +35,7 @@ graph TD;
   ve-speed-sheet --> ve-sheet
   ve-speed-sheet --> ve-slider
   ve-sheet --> ve-icon
+  ve-editor --> ve-speed-sheet
   style ve-speed-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

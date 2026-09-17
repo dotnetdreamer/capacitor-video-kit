@@ -280,9 +280,10 @@ await VideoComposer.compose(spec);
 | `rasteriseText`, `rasteriseArrow` | Canvas → PNG at output pixel scale, the caller's half of the overlay contract. |
 
 There is deliberately no UI in `src/editor/` itself. A host is free to build its own screen on the
-contract, and Choisy's shipping editor does exactly that, in Angular, at
-`choisy-mobile/src/app/modules/video-editor/`. The web components below are a second editor on the
-same contract rather than a replacement for it.
+contract, and Choisy's editor did exactly that, in Angular, at
+`choisy-mobile/src/app/modules/video-editor/`, until the components below replaced it. The contract
+is what both were written against, which is why replacing one editor with the other changed no
+manifest and no render.
 
 A host that wants only the editing half imports `choisy-video-kit/editor` instead. Nothing on that
 path registers a plugin or imports `@capacitor/core` at runtime, so a web build that will never run
@@ -293,13 +294,8 @@ import `../editor` relatively, which is what folding the two repositories into o
 ## The editor as web components
 
 The editor screen packaged so it can be dropped into a React, Vue or Angular application without
-carrying Angular, Ionic or Capacitor with it.
-
-The screen itself is not here yet. What is here is everything underneath it: the store and its undo
-history, the host interface an application implements, the bridge that drives Stencil's rendering
-from signals, the catalogues the sheets are built from, the icons and the bundled fonts. One
-component, `ve-spinner`, is real but trivial and exists so that the wrapper generation is exercised
-on every build. Read [what is not here yet](#what-is-not-here-yet) before planning around it.
+carrying Angular, Ionic or Capacitor with it. Twenty two custom elements, of which a host uses
+exactly one: `<ve-editor>` is the screen, and the other twenty one are what it is made of.
 
 | Package | What it is |
 |---|---|
@@ -348,76 +344,444 @@ registry that allows each exactly once. The price is that a release is four pack
 package first, and that a wrapper installed on its own says so at install time rather than at
 runtime.
 
-### Using a wrapper
+## The editor's whole public surface
 
-React:
+One element, four properties, two events.
 
-```tsx
-import { VeSpinner } from 'choisy-video-kit-react';
+```html
+<ve-editor></ve-editor>
+```
 
-export function Busy() {
-  return <VeSpinner label="Building your video" />;
+| Property | Type | Default | What it is |
+|---|---|---|---|
+| `sources` | `readonly EditorSource[]` | required | What the customer is editing. The editor hands these same objects back and never reads a field it did not put there, so a host can carry its own on them. |
+| `manifest` | `EditManifest` | a straight cut of `sources` | A previous edit of these same sources, when the customer is stepping back into one. |
+| `maxSources` | `number` | `10` | When Add stops offering itself. |
+| `host` | `VideoEditorHost` | the browser defaults | The door to the device: pickers, the encoder, the keyboard, the back button. Absent is a real editor, not a degraded one. |
+
+| Event | Detail | When |
+|---|---|---|
+| `veDone` | `VideoEditorResult` | The customer tapped Next and the render, if there was one, finished. |
+| `veCancel` | `EditorCancelReason`, `'back'` or `'exit'` | They left without a video. Two reasons because a host's own navigation has to tell a back press from a discard. |
+
+```ts
+interface VideoEditorResult {
+  /** The originals, in the order the customer left them and without the ones they removed. */
+  sources: EditorSource[];
+  manifest: EditManifest;
+  /** Absent when there was nothing to render. A single untouched clip is not re-encoded. */
+  stitched?: EditorSource;
 }
 ```
 
-Vue:
+All four properties are objects or numbers, so they are set as **DOM properties, not attributes**.
+Every framework wrapper here does that for you; a plain page writes `element.sources = [...]`.
+
+**That is the whole contract.** There is no imperative API, no `open()` that resolves with a result,
+no service to construct. The editor is an element: a host puts it on screen however it puts anything
+on screen, and takes it off when one of the two events arrives. What that buys is that the editor
+has no opinion at all about navigation, and navigation is the part every application does
+differently. Choisy opens it in an `ion-modal`, a React web application might route to it, and
+neither has to be talked out of it.
+
+The things a video editor needs that an element cannot do for itself are all in `host`, and the
+split is the same one every time: **the editor owns the edit, the application owns the device.** The
+manifest, the undo stack, every gesture, every sheet and every pixel are the package. Files,
+encoding, the upload afterwards and anything that reaches Capacitor are the application, because
+they are what differs between a native app and a web page, and a UI package that guessed at them
+would be wrong wherever it guessed.
+
+## Putting the editor on screen
+
+Four steps, and only the third one changes between frameworks.
+
+1. `setEditorAssetPath('/video-editor/')`, with a copy of the package's assets served there.
+2. `installEditorFonts()`, at startup, where a failure is loud.
+3. Define the tag, which is what a wrapper does for you and what a plain page does in one call.
+4. Set `sources` and listen for `veDone`.
+
+The two sections after the frameworks are the whole of what steps 1 and 2 are about, and both are
+worth reading before the first sticker 404s.
+
+### A plain page, no framework and no build step
+
+`examples/plain-web/` is this, checked in and runnable:
+
+```sh
+npm run build:package    # once, so dist/ exists
+npm run example
+```
+
+It prints `http://localhost:5173`, and that page is the editor, on two of MDN's example videos, with
+no application around it. Without the build first it says so and stops, naming the file it wanted:
+
+```
+/path/to/choisy-video-kit/dist/components/ve-editor.js is not there.
+Run "npm run build:package" in /path/to/choisy-video-kit first.
+```
+
+`serve.mjs` is a static server with no dependencies: it serves the example directory, `node_modules/`
+so that a bare specifier in the import map resolves to real files the way a bundler would resolve
+it, and the package's `dist/components/assets` at `/video-editor/assets/`.
+
+The page itself is three files. The import map, because there is no bundler to resolve a bare
+specifier:
+
+```html
+<script type="importmap">
+  {
+    "imports": {
+      "choisy-video-kit/": "/node_modules/choisy-video-kit/",
+      "@preact/signals-core": "/node_modules/@preact/signals-core/dist/signals-core.mjs"
+    }
+  }
+</script>
+<script type="module" src="./example.js"></script>
+```
+
+and then the whole integration, which is `example.js` with its comments taken out:
+
+```js
+import { defineCustomElement as defineVideoEditor } from 'choisy-video-kit/dist/components/ve-editor.js';
+import { installEditorFonts, setEditorAssetPath } from 'choisy-video-kit/dist/components/index.js';
+
+const SOURCES = [
+  { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: 'https://mdn.github.io/shared-assets/videos/flower.mp4' },
+  { key: 'clip-b', fileName: 'friday.mp4', playbackUrl: 'https://mdn.github.io/shared-assets/videos/friday.mp4' },
+];
+
+setEditorAssetPath('/video-editor/');
+installEditorFonts().catch((error) => report(String(error), true));
+
+defineVideoEditor();
+
+const editor = document.createElement('ve-editor');
+editor.sources = SOURCES;
+editor.maxSources = 10;
+editor.addEventListener('veDone', (event) => showResult(event.detail));
+editor.addEventListener('veCancel', (event) => showCancelled(event.detail));
+document.getElementById('stage').replaceChildren(editor);
+```
+
+`showResult` puts the manifest on the page and takes the editor off it, because one of those two
+events is the end of the screen and an editor left mounted is a video left playing.
+
+`defineVideoEditor()` is the only registration on the page and it defines all twenty two tags, for
+the reason in [conventions](#conventions-every-component-holds-to). The page prints how many it
+found along the bottom, so that claim is checked rather than asserted.
+
+There is no `host` object at all, which is the other thing this page is for. The editor then runs on
+the browser defaults: the pickers are file inputs, the durations come from a throwaway `<video>`,
+the filmstrip is cut with a canvas, and Next hands the manifest back unrendered, because encoding a
+video is the one thing a browser has no answer for. Everything else in the editor is the editor.
+
+Both imports come out of `dist/components` on purpose. `choisy-video-kit/ui` is the same code
+compiled a second time for bundlers, so a page that took the element from one and
+`setEditorAssetPath` from the other would download the editor twice. An import map also has no
+exports map to read, so it can only name real files: `choisy-video-kit/ui` is not a path that exists
+on disk, while `dist/components/index.js` is.
+
+The alternative to naming the element's own file is the lazy loader, which registers every tag at
+once and fetches each component's code only when that tag turns up in the page:
+
+```html
+<script type="importmap">
+  { "imports": { "@preact/signals-core": "/node_modules/@preact/signals-core/dist/signals-core.mjs" } }
+</script>
+<script type="module">
+  import { defineCustomElements } from '/node_modules/choisy-video-kit/loader/index.mjs';
+  import { installEditorFonts, setEditorAssetPath } from '/node_modules/choisy-video-kit/dist/choisy-video-kit/index.esm.js';
+
+  setEditorAssetPath('/video-editor/');
+  defineCustomElements();
+  void installEditorFonts();
+</script>
+```
+
+The import map does not go away, because the lazy build imports the signals library by name too, and
+nothing in this package can resolve a bare specifier for a browser. The second import is that same
+lazy bundle's own entry rather than `dist/components/index.js`, so the page still holds one copy of
+the editor and not two. A host with a bundler writes `from 'choisy-video-kit/loader'` and
+`from 'choisy-video-kit/ui'` and never sees either path.
+
+### React
+
+```sh
+npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
+            ../choisy-video-kit/choisy-video-kit-react-1.3.0.tgz
+```
+
+Once, wherever the application starts:
+
+```ts
+import { installEditorFonts, setEditorAssetPath } from 'choisy-video-kit/ui';
+
+setEditorAssetPath('/video-editor/');
+void installEditorFonts();
+```
+
+Then the editor is a component:
+
+```tsx
+import { VeEditor } from 'choisy-video-kit-react';
+import type { EditorSource, VideoEditorResult } from 'choisy-video-kit/ui';
+
+const SOURCES: EditorSource[] = [
+  { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: '/media/flower.mp4' },
+];
+
+export function EditorScreen({ onDone }: { onDone: (result: VideoEditorResult) => void }) {
+  return (
+    <VeEditor
+      sources={SOURCES}
+      maxSources={10}
+      onVeDone={(event) => onDone(event.detail)}
+      onVeCancel={() => history.back()}
+    />
+  );
+}
+```
+
+Nothing registers a custom element here, in any of the three frameworks. The generated wrapper holds
+the component's own `defineCustomElement` and calls it as the module is imported, and that one call
+defines the other twenty one tags. An event is a prop named `on` plus the event, capitalised, and
+what the handler is given is the `CustomEvent` itself, so **the result is `event.detail`**.
+
+### Vue
+
+```sh
+npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
+            ../choisy-video-kit/choisy-video-kit-vue-1.3.0.tgz
+```
 
 ```vue
 <script setup lang="ts">
-import { VeSpinner } from 'choisy-video-kit-vue';
+import { VeEditor } from 'choisy-video-kit-vue';
+import type { EditorSource, VideoEditorResult } from 'choisy-video-kit/ui';
+
+const sources: EditorSource[] = [
+  { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: '/media/flower.mp4' },
+];
+
+function onDone(event: CustomEvent<VideoEditorResult>) {
+  console.log(event.detail.manifest);
+}
 </script>
 
 <template>
-  <VeSpinner label="Building your video" />
+  <VeEditor :sources="sources" :max-sources="10" @veDone="onDone" />
 </template>
 ```
 
-Angular:
+A prop may be written either way, `:max-sources` or `:maxSources`; Vue camelises what it is given
+and the wrapper sets it on the element as a property, objects and arrays included. A listener is the
+event's own name, and again the handler is given the `CustomEvent`.
+
+`setEditorAssetPath` and `installEditorFonts` are the same two calls as in React, in `main.ts`.
+
+### Angular
+
+```sh
+npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
+            ../choisy-video-kit/choisy-video-kit-angular-1.3.0.tgz
+```
 
 ```ts
 import { Component } from '@angular/core';
-import { VeSpinner } from 'choisy-video-kit-angular';
+import { VeEditor } from 'choisy-video-kit-angular';
+import type { EditorSource, VideoEditorResult } from 'choisy-video-kit/ui';
 
 @Component({
-  selector: 'app-busy',
-  imports: [VeSpinner],
-  template: `<ve-spinner label="Building your video"></ve-spinner>`,
+  selector: 'app-editor-screen',
+  imports: [VeEditor],
+  template: `
+    <ve-editor
+      [sources]="sources"
+      [maxSources]="10"
+      (veDone)="onDone($event)"
+      (veCancel)="onCancel()"
+    ></ve-editor>
+  `,
 })
-export class BusyComponent {}
+export class EditorScreenComponent {
+  readonly sources: EditorSource[] = [
+    { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: '/media/flower.mp4' },
+  ];
+
+  onDone(event: CustomEvent<VideoEditorResult>): void {
+    console.log(event.detail.manifest);
+  }
+
+  onCancel(): void {}
+}
 ```
 
-Whichever wrapper, the stickers and fonts have to be served and named, because nothing imports them
-and so no bundler carries them:
+The wrapper is a standalone component, so it goes in `imports` and there is no
+`CUSTOM_ELEMENTS_SCHEMA` and no module. Inputs are camelCase, `[maxSources]`, and an output hands
+over the `CustomEvent`, so `$event` is the event and `$event.detail` is the result. Under
+`strictTemplates` a missing `[sources]` is a build error rather than an empty editor:
+
+```
+error NG8008: Required input 'sources' from component VeEditor must be specified.
+```
+
+A host installing this package from a checkout rather than a tarball also needs
+`"preserveSymlinks": true` on both the `build` and the `test` target, for the reason in
+[Install](#install).
+
+### A Capacitor app, where the native engines do the rendering
+
+Everything above is the same. What changes is that `host` is no longer left out, because on a phone
+there is a real answer to every question the browser defaults were guessing at, and one of them,
+the render, the browser has no answer to at all.
 
 ```ts
-import { setEditorAssetPath } from 'choisy-video-kit/ui';
+import { Capacitor } from '@capacitor/core';
+import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
+import { Keyboard } from '@capacitor/keyboard';
+import { VideoComposer } from 'choisy-video-kit';
+import type { VideoEditorHost } from 'choisy-video-kit/ui';
 
-setEditorAssetPath('/video-editor/');
+const host: VideoEditorHost = {
+  media: {
+    pickVideo,       // the app's own picker, resolving null on a cancel
+    pickImage,
+    pickAudio,
+    probeDuration: async (source) => (await VideoComposer.probe({ uri: source.sourcePath! })).durationMs,
+    thumbnails: async ({ source, timesMs, maxHeight, precise }) => {
+      const { uris } = await VideoComposer.thumbnails({
+        uri: source.sourcePath!,
+        timesMs: [...timesMs],
+        maxHeight,
+        precise,
+      });
+      // The composer writes files; the WebView needs URLs it is allowed to load.
+      return uris.map((uri) => Capacitor.convertFileSrc(uri));
+    },
+    release: ({ kept, dropped }) => discardRecordings(kept, dropped),
+    voice: {
+      start: () => VideoComposer.startVoiceRecording(),
+      stop: () => VideoComposer.stopVoiceRecording(),
+    },
+  },
+  render: nativeRenderHost,
+  platform: {
+    fileUrl: (uri) => (/^(https?:|blob:|data:)/i.test(uri) ? uri : Capacitor.convertFileSrc(uri)),
+    haptic: (kind) => {
+      switch (kind) {
+        case 'light':     void Haptics.impact({ style: ImpactStyle.Light }); break;
+        case 'medium':    void Haptics.impact({ style: ImpactStyle.Medium }); break;
+        case 'selection': void Haptics.selectionChanged(); break;
+        case 'success':   void Haptics.notification({ type: NotificationType.Success }); break;
+        case 'warning':   void Haptics.notification({ type: NotificationType.Warning }); break;
+      }
+    },
+    keyboard: {
+      subscribe: (listener) => {
+        const handles = [
+          Keyboard.addListener('keyboardWillShow', (info) => listener(info.keyboardHeight)),
+          Keyboard.addListener('keyboardWillHide', () => listener(0)),
+        ];
+        return () => void Promise.all(handles).then((all) => all.forEach((handle) => void handle.remove()));
+      },
+      show: () => void Keyboard.show(),
+    },
+    // 101 beats Ionic's own overlay handler at 100, so the editor closes its sheet before a modal
+    // decides the press was for it.
+    registerBackHandler: (handler) => {
+      // `ionic` here is Ionic's own Platform service, not the `platform` key this sits in.
+      const sub = ionic.backButton.subscribeWithPriority(101, (next) => {
+        if (!handler()) next();
+      });
+      return () => sub.unsubscribe();
+    },
+    confirm: (request) => presentNativeAlert(request),
+    measureInsets: () => VideoComposer.systemInsets(),
+    debug: !environment.production,
+  },
+};
 ```
 
-with a copy of `node_modules/choisy-video-kit/dist/components/assets` served at that path. One call
-covers every build, because the base is kept on a `Symbol.for` key on `globalThis` rather than in
-Stencil's runtime: a consumer holds more than one copy of this package's JavaScript, one per output,
-each with its own module scoped resources URL, so Stencil's own `setAssetPath` reaches only the copy
-it was imported from. `src/host/asset-path.ts` has the whole of it, and the two sections below have
-what a host has to call and what it has to serve.
-
-Without a framework, from `choisy-video-kit` itself. Nothing registers itself, so a consumer either
-registers one component at a time from the custom elements build:
+The renderer is the half that has to be written rather than wired, and it is about sixty lines. The
+editor has already made every layer's bitmap current before it calls this, so the work is
+`toComposeSpec` with the same raster context, then the job, then the result as one more
+`EditorSource`:
 
 ```ts
-import { defineCustomElement } from 'choisy-video-kit/dist/components/ve-spinner.js';
+import { MissingClipError, VideoComposer, toComposeSpec, type ComposeSpec } from 'choisy-video-kit';
+import {
+  RenderFailedError,
+  createEditorRasterContext,
+  resolveEditorHost,
+  type EditorRenderHost,
+} from 'choisy-video-kit/ui';
 
-defineCustomElement();
+/*
+ * The same context the preview draws its bitmaps with, or a layer comes out in one font on screen
+ * and another in the file. All it takes from the host is `fileUrl`, so it is built from the
+ * platform half alone rather than from the whole host, which names this renderer and would be
+ * circular.
+ */
+const rasterContext = createEditorRasterContext(resolveEditorHost({ platform }));
+
+const nativeRenderHost: EditorRenderHost = {
+  isSupported: async () =>
+    Capacitor.isNativePlatform() && (await VideoComposer.capabilities()).supported,
+
+  async render({ manifest, sources, onProgress, signal }) {
+    const uriByKey = new Map(sources.filter((s) => s.sourcePath).map((s) => [s.key, s.sourcePath!]));
+    const jobId = crypto.randomUUID();
+    const pendingPostId = crypto.randomUUID();
+
+    let spec: ComposeSpec;
+    try {
+      spec = await toComposeSpec(manifest, uriByKey, { jobId, pendingPostId }, rasterContext);
+    } catch (error) {
+      // Refused before any segment id was handed out, so this one already names the host's source.
+      if (error instanceof MissingClipError) {
+        throw new RenderFailedError('unreadable_input', error.message, error.clipKey);
+      }
+      throw new RenderFailedError('unknown', String(error));
+    }
+
+    signal.addEventListener('abort', () => void VideoComposer.cancel({ jobId }));
+    const result = await runJob(spec, onProgress);   // progress, completed and failed listeners
+    return { key: `edited-${jobId}`, fileName: 'edited.mp4', sourcePath: result.uri };
+  },
+};
 ```
 
-or registers everything through the lazy loader, which is the right answer for a script tag:
+Three things about that are worth more than the code around them.
 
-```ts
-import { defineCustomElements } from 'choisy-video-kit/loader';
+**Throw `RenderFailedError` with a code on the union, and map everything else onto `unknown`.** The
+editor shows a different sentence for each of `no_space`, `unreadable_input` and `unknown`, and a
+code it does not know reads as a blank apology. `instanceof` is the test, which is why it is a class
+and not a field on a plain `Error`.
 
-defineCustomElements();
-```
+**Honour the signal.** The editor aborts it when the customer leaves mid render, and an encode
+nobody is waiting for keeps the phone warm until it finishes.
+
+**Do not call `prepareJob` from here.** That call takes ownership of its inputs and MOVES them into
+the job folder, and the originals still belong to whatever step recorded or picked them: the
+customer can step back, watch them, remove one, and come forward again. The composer reads each
+source where it already is, and the job folder only ever holds the output. This is the clearest
+example of why rendering is the host's and not the package's: only the application knows who owns
+the file.
+
+### What is left in the application
+
+The editor replaced one function, `VideoEditorService.open(clips)`, and the parts of it that were
+never editing stayed where they were.
+
+| The old call | Where it lives now |
+|---|---|
+| `open(clips, manifest, maxClips)` | `<ve-editor [sources] [manifest] [maxSources]>`, placed in whatever the application shows a full screen step in |
+| the modal dismissing with `confirm` and data | `veDone`, with the same result object |
+| the modal dismissing with `back` | `veCancel` |
+| `VideoRenderService` | `host.render`, still in the application, still calling `VideoComposer` |
+| `discardUnusedClips` | `host.media.release`, still in the application, which is the only place that knows two keys can share one file |
+| `VideoComposer.systemInsets()` | `host.platform.measureInsets` |
+| the upload that follows | untouched. The editor hands back sources and a manifest and has no idea an upload exists |
 
 ### Two things a host has to call
 
@@ -440,6 +804,10 @@ directory is not served there.
 
 at startup, which is where it is cheap, rather than a finished video in the wrong face, which is
 where it is not.
+
+`ve-editor` calls it too, on its way in, and swallows the rejection into `platform.debug`. That is a
+safety net and not the call: by then the editor is on screen, there is nobody to tell, and a host
+that never called it would find out from a customer's video rather than from its own startup.
 
 `setEditorAssetPath(url)` says where the stickers and the fonts are served from. A root relative
 path, a page relative one and a whole URL all work; the first two are resolved against the
@@ -481,23 +849,23 @@ served alongside `setEditorAssetPath('/video-editor/')`.
 ### What the host supplies
 
 `VideoEditorHost` is the whole of what passes between the editor and the application around it, and
-it is handed over once, as a plain property. The editor owns the edit: the manifest, the undo stack,
+it is handed over once, as `editor.host`. The editor owns the edit: the manifest, the undo stack,
 every gesture, every sheet and every pixel. It owns no file, no picker, no encoder and no device
 measurement, because those differ between a Capacitor app, a React web app and a Vue web app, and a
 UI package that guessed at them would be wrong in two of the three.
 
 ```ts
-import { resolveEditorHost } from 'choisy-video-kit/ui';
-
-const host = resolveEditorHost({
+editor.host = {
   media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, release, voice },
   render: { isSupported, render },
   platform: { fileUrl, haptic, keyboard, registerBackHandler, confirm, measureInsets, debug },
-});
+};
 ```
 
-Every field is optional, at every level. `resolveEditorHost()` fills in whatever is missing from the
-browser defaults, and a `ResolvedEditorHost` is what every other file in the package is written
+Every field is optional, at every level, and so is the property itself. `ve-editor` fills in what is
+missing from the browser defaults with `resolveEditorHost()`, which is exported for a host that
+drives the store itself rather than rendering the element; a `ResolvedEditorHost` is what every
+other file in the package is written
 against, so nothing inside the editor asks whether the host has a thing before using it. A host that
 supplies nothing at all still gets a real editor: it opens a file, plays it, cuts a real filmstrip
 and hands back a real manifest, which is the right behaviour on the web rather than a degraded one.
@@ -517,6 +885,12 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 | `platform.confirm` | Discard this edit? | the package's own alert |
 | `platform.measureInsets` | What the status and navigation bars cover | `env(safe-area-inset-*, 0px)` |
 | `platform.debug` | Whether the package says anything on the console | silence |
+
+**The default filmstrip is blank for a clip served from another origin.** It draws each frame on a
+canvas, and a cross origin video taints that canvas, so `toDataURL` throws `SecurityError: Tainted
+canvases may not be exported` and the lane stays grey with nothing said. A file the customer picked
+is an object URL and is fine; a clip from a CDN is not. A host in that position supplies
+`media.thumbnails` of its own, which is what a Capacitor app does anyway.
 
 **A picker resolves with null on a cancel and rejects on a real failure.** The editor shows a
 different thing for each, and a host that rejects on a cancel makes every picker look broken.
@@ -554,17 +928,49 @@ tapping Next settles which ones are gone. Left unimplemented, every dropped clip
 app is killed, up to 100 MB of recording each. The browser default revokes the object URLs it minted
 itself, and leaves alone both a URL a kept source still names and any URL the application handed in.
 
+### Theming
+
+Twenty two custom properties, declared by `ve-editor` and read by everything under it. A host sets
+any of them on the editor element, or anywhere above it, and the change reaches every component:
+custom properties are the one thing that still inherits through a shadow boundary, which is why the
+editor is themed with them and not with a stylesheet.
+
+```css
+ve-editor {
+  --ve-accent: #ff5ea8;   /* a selected chip, a slider's fill, the render bar */
+  --ve-cta: #ff5ea8;      /* Next */
+  --ve-cta-text: #14040c;
+}
+```
+
+`src/components/ve-tokens.css` is the registry, with a line on each saying what it paints. In short:
+`--ve-bg`, `--ve-surface`, `--ve-sheet`, `--ve-raised` and `--ve-raised-2` are the five depths from
+the page up to a tile on a sheet; `--ve-line`, `--ve-text`, `--ve-dim` and `--ve-faint` are the
+hairline and the three strengths of ink; `--ve-accent`, `--ve-cta`, `--ve-cta-text` and
+`--ve-danger` are the four that carry meaning; seven `--ve-lane-*` give each kind of layer its own
+colour in the timeline, with `--ve-lane-ink` for the text on them; and `--ve-safe-top` and
+`--ve-safe-bottom` are the system bars, which the editor overwrites with the host's measurement when
+there is one.
+
+Three of them name a choisy variable before their own default, `--ve-accent: var(--choisy-wasabi-lime, #a6ff2e)`,
+so the application rebrands the editor by declaring its own palette further up the tree and every
+other host still gets a finished one with no setup at all.
+
+Nothing else is styleable from outside, and that is deliberate. Every component but the preview is
+in a shadow root, and the preview is scoped, so a host's selectors reach into neither; no component
+takes a `class` from the host or leaves a `::part` open. What a host can set is a token, which is a
+value with a name and a meaning, rather than a rule that depends on the shape of a tree that is free
+to change.
+
 ### Conventions every component holds to
 
 Five rules that are a line in every component, so that reading one file is enough to know the rest.
 
-**Only the outermost component declares the `--ve-*` tokens**, on its own `:host`, keeping choisy's
-own value as a `var()` fallback (`--ve-accent: var(--choisy-wasabi-lime, #a6ff2e)`). Every other
-component reads them with a fallback at each use site, `var(--ve-bg, #000)`. A component that
-declared a token on its own `:host` would beat the value inherited from above and no host could
-override anything, so a host themes the editor by setting the tokens on the editor element or
-anywhere above it, and custom properties are the one thing that still inherits through a shadow
-boundary.
+**Only `ve-editor` declares the `--ve-*` tokens**, and it does it by including `ve-tokens.css`.
+Every other component reads them with a fallback at each use site, `var(--ve-bg, #000)`, so it
+stands up on its own in the harness and inherits the palette in the editor. A component that
+declared a token on its own `:host` would beat the value inherited from above, and the host override
+in [Theming](#theming) would fail in silence.
 
 **There is no Sass and there is not going to be.** Every stylesheet is plain CSS, hand flattened,
 with no `&` and no native nesting. The reason is specifically `&--modifier`: renaming a `.scss` file
@@ -594,22 +1000,6 @@ body immediately and Angular's did not.
 collects the string literals passed to `h()`. So there is no barrel to import and no registration
 list to keep in step. The price is one rule: a tag rendered through a variable is invisible to that
 analysis, so a component that picks a child by name renders the choices as literal tags in a switch.
-
-### What is not here yet
-
-Every pixel. The working editor is 20,288 lines of Angular in
-`choisy-mobile/src/app/modules/video-editor`, it ships today, and none of its screen has moved.
-
-Specifically absent:
-
-  - every editor component: the shell, the preview, the timeline, the toolbar and the eleven sheets
-  - the gestures, the transport player, the follower video and the timeline geometry
-  - the replacements for the four Ionic controls the Angular editor uses: `ve-icon`, `ve-slider`,
-    `ve-progress` and the two alerts
-  - a dev harness page, so `stencil build --dev --watch --serve` has nothing to open
-
-`OverlayBitmaps` is ported but untested: rasterising a layer needs a canvas and an `Image`, so its
-tests belong in the browser project alongside the preview that drives it.
 
 ## Two builds in one package
 
@@ -954,4 +1344,5 @@ they are not reopened by accident.
 Generated files are the one place the repository's writing style does not apply. Stencil writes
 `src/components/*/readme.md` and `src/components.d.ts` itself, and the wrapper sources under
 `packages/*/src/generated/` are written from the components.
+
 

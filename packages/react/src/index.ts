@@ -9,5 +9,9 @@
  * wrapper is the only thing that carries a `Ve*CustomEvent` type into the published declarations,
  * and that import is where this package broke for a consumer for as long as nothing here exported
  * one. `rollup.config.mjs` says what the break was and what catches it now.
+ *
+ * `VeEditor` is the one that matters: it is the editor, and every other tag in this package is
+ * something it renders. The rest are here because they stand on their own, a spinner or an alert a
+ * host may want beside the editor rather than inside it.
  */
-export { VeAlert, VeIcon, VeProgress, VeSheet, VeSlider, VeSpinner, VeToast } from './generated/components.js';
+export { VeEditor, VeAlert, VeIcon, VeProgress, VeSheet, VeSlider, VeSpinner, VeToast } from './generated/components.js';

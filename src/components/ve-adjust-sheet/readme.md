@@ -29,6 +29,10 @@ pointed at, and the detent that ticks when one passes back through neutral.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -42,6 +46,7 @@ graph TD;
   ve-adjust-sheet --> ve-slider
   ve-adjust-sheet --> ve-icon
   ve-sheet --> ve-icon
+  ve-editor --> ve-adjust-sheet
   style ve-adjust-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

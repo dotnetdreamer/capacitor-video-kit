@@ -33,6 +33,10 @@ from being remembered between paints.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -44,6 +48,7 @@ graph TD;
   ve-crop-sheet --> ve-sheet
   ve-crop-sheet --> ve-icon
   ve-sheet --> ve-icon
+  ve-editor --> ve-crop-sheet
   style ve-crop-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

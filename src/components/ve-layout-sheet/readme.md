@@ -23,6 +23,10 @@ to the store as one undo step with the preview above showing the result.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -36,6 +40,7 @@ graph TD;
   ve-layout-sheet --> ve-slider
   ve-layout-sheet --> ve-icon
   ve-sheet --> ve-icon
+  ve-editor --> ve-layout-sheet
   style ve-layout-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

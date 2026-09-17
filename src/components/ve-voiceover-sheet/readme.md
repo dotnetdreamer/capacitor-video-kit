@@ -30,6 +30,10 @@ disconnected and reconnected, and that would end a take the customer is still sp
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -39,6 +43,7 @@ disconnected and reconnected, and that would end a take the customer is still sp
 graph TD;
   ve-voiceover-sheet --> ve-sheet
   ve-sheet --> ve-icon
+  ve-editor --> ve-voiceover-sheet
   style ve-voiceover-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

@@ -26,6 +26,10 @@ zero, and nothing in the manifest remembers where it came from.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -39,6 +43,7 @@ graph TD;
   ve-volume-sheet --> ve-icon
   ve-volume-sheet --> ve-slider
   ve-sheet --> ve-icon
+  ve-editor --> ve-volume-sheet
   style ve-volume-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

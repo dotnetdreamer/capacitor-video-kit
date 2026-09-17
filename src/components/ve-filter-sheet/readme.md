@@ -21,6 +21,10 @@ through each preset. A filter is the whole video's look, so this only ever chang
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-sheet](../ve-sheet)
@@ -32,6 +36,7 @@ graph TD;
   ve-filter-sheet --> ve-sheet
   ve-filter-sheet --> ve-slider
   ve-sheet --> ve-icon
+  ve-editor --> ve-filter-sheet
   style ve-filter-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

@@ -1,0 +1,272 @@
+/*
+ * TikTok's editor on pure black: the video is the subject and the chrome around it is quiet grey
+ * tiles. Every value is read from a `--ve-` token, and `ve-tokens.css` - which this component
+ * includes ahead of this file, and which nothing else includes - is where the tokens are declared.
+ * So the colours here can be read bare, with no fallback: inside this element they always resolve.
+ *
+ * Nothing in this file may carry a `transform`, a `filter` or a `will-change`. Any of the three
+ * makes its element the containing block for a fixed positioned descendant, and two of them are in
+ * this tree: the toolbar's menu catcher, which covers the viewport so the next tap anywhere closes
+ * the menu, and `ve-alert`, which covers the editor. Both would be laid out inside the column
+ * instead, and neither would throw. The one transform below is on a round button, which is a leaf.
+ */
+:host {
+  display: block;
+  height: 100%;
+  background: var(--ve-bg);
+  color: var(--ve-text);
+}
+
+/*
+ * The whole editor is one column that never scrolls: each row takes what it needs and the stage
+ * gets the rest, so opening a sheet or the keyboard only ever shrinks the video.
+ */
+.ve {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding-top: var(--ve-safe-top);
+  background: var(--ve-bg);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ve__loading {
+  display: grid;
+  place-items: center;
+  flex: 1;
+}
+
+/* ------------------------------------------------------------------------------------- stage */
+
+.ve__stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 120px;
+  padding: 6px 0 4px;
+}
+
+.ve__preview {
+  display: block;
+  height: 100%;
+}
+
+/*
+ * Back and Next hang over the video's top corners. The preview's own frame is kept clear of them
+ * by its width rule, which reserves 56px on each side, so the circles never cover picture.
+ */
+.ve__round {
+  position: absolute;
+  top: 10px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  font-size: 24px;
+}
+
+.ve__round:active {
+  transform: scale(0.94);
+}
+
+.ve__round--back {
+  left: 12px;
+  background: rgba(58, 58, 58, 0.85);
+  color: #fff;
+}
+
+.ve__round--next {
+  right: 12px;
+  background: var(--ve-cta);
+  color: var(--ve-cta-text);
+}
+
+.ve__round--next:disabled {
+  opacity: 0.5;
+}
+
+/* --------------------------------------------------------------------------------- transport */
+
+.ve__transport {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 52px;
+  padding: 0 12px 0 16px;
+}
+
+.ve__clock {
+  flex: 1 1 0;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.ve__clock-now {
+  color: var(--ve-text);
+}
+
+.ve__clock-total {
+  color: var(--ve-dim);
+}
+
+.ve__play {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-size: 34px;
+}
+
+.ve__transport-end {
+  display: flex;
+  flex: 1 1 0;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.ve__icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text);
+  font-size: 24px;
+}
+
+.ve__icon:disabled {
+  color: var(--ve-faint);
+}
+
+/* ---------------------------------------------------------------------------- timeline & tools */
+
+.ve__timeline {
+  display: block;
+  flex: 0 0 min(250px, 31vh);
+}
+
+.ve--compact .ve__timeline {
+  flex-basis: 96px;
+}
+
+.ve__toolbar {
+  display: block;
+  flex: 0 0 auto;
+}
+
+/*
+ * A compact sheet takes what its content needs and no more, so a short one (the filters strip) does
+ * not leave a black band under itself, and a tall one (the effects grid) still stops at 42% of the
+ * screen and scrolls inside.
+ */
+.ve__sheet {
+  display: flex;
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 180px;
+  max-height: min(340px, 42vh);
+}
+
+/*
+ * A sheet whose body is a scrolling grid has no content height of its own to take, so it asks for
+ * the whole compact height and scrolls inside it.
+ */
+.ve__sheet--grid {
+  height: min(340px, 42vh);
+}
+
+.ve__sheet--tall {
+  height: 78%;
+  /*
+   * Gives way rather than overflows when the keyboard shrinks the column (the sticker search): 78%
+   * of what is left plus the stage's minimum no longer fits, and the category bar went under the
+   * keys.
+   */
+  flex-shrink: 1;
+  min-height: 0;
+}
+
+/* The text sheet sizes itself to its content, which sits above the keyboard. */
+.ve__sheet--text {
+  height: auto;
+  max-height: 62%;
+}
+
+/* -------------------------------------------------------------------------------- fullscreen */
+
+.ve--fullscreen .ve__stage {
+  padding: 0;
+}
+
+.ve--fullscreen .ve__transport {
+  flex-basis: calc(56px + var(--ve-safe-bottom));
+  padding-bottom: var(--ve-safe-bottom);
+}
+
+/* ------------------------------------------------------------------------------------ render */
+
+.ve__render {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.ve__render-card {
+  width: 100%;
+  max-width: 320px;
+  padding: 22px;
+  border-radius: 18px;
+  background: var(--ve-sheet);
+  text-align: center;
+}
+
+/*
+ * Only the shape. `ve-progress` already reads `--ve-raised` for its track and `--ve-accent` for its
+ * fill, which is what the two Ionic custom properties here used to be set to by hand.
+ *
+ * A `:host` rule inside a shadow root loses to a rule from outside it, which is what lets this beat
+ * the component's own 4px, and the component clips its fill so the sweep stops at the same curve.
+ */
+.ve__render-card ve-progress {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.ve__render-title {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.ve__render-pct {
+  margin: 10px 0 4px;
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.ve__render-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ve-dim);
+}

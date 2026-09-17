@@ -39,6 +39,10 @@ where WKWebView composites them today.
 
 ## Dependencies
 
+### Used by
+
+ - [ve-editor](../ve-editor)
+
 ### Depends on
 
 - [ve-icon](../ve-icon)
@@ -47,6 +51,7 @@ where WKWebView composites them today.
 ```mermaid
 graph TD;
   ve-preview --> ve-icon
+  ve-editor --> ve-preview
   style ve-preview fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

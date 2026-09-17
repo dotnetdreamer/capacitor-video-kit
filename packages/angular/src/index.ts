@@ -11,5 +11,9 @@
  * does read it is ng-packagr's own declaration flattener, which looks for `./generated/proxies.d.ts`
  * and fails with "Could not resolve ./generated/proxies.js" if the extension is there. The Angular
  * output target writes its own proxies the same way.
+ *
+ * `VeEditor` is the editor. Every other tag in this package is something it renders, and the only
+ * other one named here is the spinner, which stands on its own beside the editor rather than
+ * inside it.
  */
-export { VeSpinner } from './generated/proxies';
+export { VeEditor, VeSpinner } from './generated/proxies';
