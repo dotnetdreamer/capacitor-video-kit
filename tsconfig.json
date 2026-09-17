@@ -1,7 +1,8 @@
 {
-  /* The app compiles this plugin from source through a tsconfig path mapping, so this file exists
-     only to produce the published build. Keep the strictness here at least as tight as the app's,
-     or a type error would first appear in the consumer rather than here. */
+  /* What produces the published build, which is the only way anything consumes this plugin now that
+     it is its own repository and the app resolves it through node_modules. Keep the strictness here
+     at least as tight as the app's, or a type error would first appear in the consumer rather than
+     here. */
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
