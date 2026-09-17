@@ -25,6 +25,16 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  /*
+   * The padding is INSIDE the height, which is the whole reason this is declared. Left to the
+   * default box, a column of `height: 100%` plus the status bar's inset is that much taller than the
+   * screen, and a column that never scrolls puts the overflow where nothing can reach it: on a
+   * device with a 59px inset the bottom 59px of the editor - the toolbar's labels, and a sheet's
+   * last row, which is Swap and Remove on the layout sheet - sat under the edge of the screen,
+   * clipped and untappable, while every inner rule that reserves the home indicator's strip did its
+   * job perfectly on a box that was already too long.
+   */
+  box-sizing: border-box;
   height: 100%;
   padding-top: var(--ve-safe-top);
   background: var(--ve-bg);
