@@ -24,6 +24,31 @@
   overflow: hidden;
 }
 
+/*
+ * ------------------------------------------------------------------------------- the width
+ *
+ * The three rows below each stop growing at `--ve-chrome-max` and centre. The sheet ITSELF stays
+ * full bleed, because that is what a bottom sheet is: what is capped is the content, so on a
+ * monitor the tabs and the tick are a hand's width apart rather than a screen's, and a volume
+ * slider is a control rather than a 2000px rule. On a phone the token is `none` and all three rows
+ * are exactly as wide as they always were.
+ *
+ * Every one of them needs `width` and `box-sizing` as well as the cap: an auto margin makes a flex
+ * item size itself to its content instead of stretching, so without the width the head would shrink
+ * to its buttons, and without the border box the side padding would push each row past the cap.
+ *
+ * Capping the BODY is what carries this to all eleven sheets at once - their content is slotted
+ * into it - so no sheet carries a width rule of its own.
+ */
+.sheet__search-row,
+.sheet__head,
+.sheet__body {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--ve-chrome-max, none);
+  margin-inline: auto;
+}
+
 /* ----------------------------------------------------------------------------------- search */
 
 .sheet__search-row {
@@ -105,6 +130,19 @@
   color: var(--ve-text, #fff);
   font-family: inherit;
   font-size: 26px;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sheet__icon-btn:hover {
+    color: var(--ve-accent, #a6ff2e);
+  }
+}
+
+.sheet__icon-btn:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -4px;
+  border-radius: 12px;
 }
 
 /* "None" is a way back rather than a thing to do, so it sits behind the tabs and the tick. */

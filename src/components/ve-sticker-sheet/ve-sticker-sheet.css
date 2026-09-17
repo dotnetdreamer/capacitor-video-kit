@@ -70,12 +70,27 @@
 
 /* ---------------------------------------------------------------------------------- stickers */
 
+/*
+ * Three columns spread evenly is the phone. From a tablet up the grid packs as many 96px columns as
+ * the width the sheet allows it will take, rather than spreading three of them over a monitor with
+ * a hand's width of black between each sticker.
+ */
 .stk__grid {
   display: grid;
   grid-template-columns: repeat(3, 96px);
   grid-auto-rows: 96px;
   row-gap: 8px;
   justify-content: space-evenly;
+}
+
+@media (min-width: 700px) {
+  .stk__grid {
+    grid-template-columns: repeat(auto-fill, 96px);
+  }
+
+  .stk__emoji-grid {
+    grid-template-columns: repeat(auto-fill, 44px);
+  }
 }
 
 .stk__grid--results {
@@ -174,6 +189,19 @@
 
 .stk__bar::-webkit-scrollbar {
   display: none;
+}
+
+/*
+ * The bar keeps its full width - it carries the sheet's own background and the hairline above it,
+ * and a capped one would leave both stopping in mid air with black either side. What is held to
+ * `--ve-chrome-max` is the room the icons are given, as side padding that grows with the screen.
+ * Inside the query the token is always a length; written unconditionally it would be `none` on a
+ * phone and the whole declaration would be thrown away.
+ */
+@media (min-width: 700px) {
+  .stk__bar {
+    padding-inline: max(0px, calc((100% - var(--ve-chrome-max)) / 2));
+  }
 }
 
 /*

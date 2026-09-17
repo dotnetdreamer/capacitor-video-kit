@@ -48,6 +48,10 @@ type LayerPlace = 'only' | 'top' | 'bottom' | 'middle';
 /** Named because closing the Sound menu puts the focus back on the tile that opened it. */
 const SOUND_TILE = 'sound';
 
+/** How close the Sound menu may come to either side of the toolbar, which is also where it opens
+ *  when the tile cannot be measured. It matches the tool row's own edge padding. */
+const MENU_EDGE_PX = 10;
+
 /**
  * TikTok's bottom tool row: dark rounded tiles that scroll sideways, and that turn into the tools for
  * whatever is selected - a clip, a layer, the music, a voiceover - with a chevron at the far left to
@@ -125,6 +129,7 @@ export class VeToolbar {
    */
   componentDidRender() {
     this.resetScroll();
+    this.anchorSoundMenu();
     this.focusFirstMenuItem();
   }
 
@@ -148,6 +153,32 @@ export class VeToolbar {
     this.scrolledFor = signature;
     const el = this.scrollerEl;
     if (el && el.scrollLeft !== 0) el.scrollLeft = 0;
+  }
+
+  /**
+   * Puts the Sound menu under the Sound tile.
+   *
+   * The menu is positioned against this host, and the tile is not: the row centres itself while it
+   * fits and scrolls sideways when it does not, so on anything wider than a phone the tile is
+   * hundreds of pixels from the host's left edge - which is where the menu used to open, with the
+   * button that opened it nowhere near it.
+   *
+   * A measurement rather than a CSS rule because no rule can see a scroll position. It runs on every
+   * render, which is what keeps the menu under the tile while the row is scrolled under it, and it
+   * writes nothing at all while the menu is closed, so the usual repaint costs one `if`.
+   */
+  private anchorSoundMenu(): void {
+    if (!this.ctx.store.soundMenuOpen.value) return;
+    const root = this.el.shadowRoot;
+    const tile = root?.querySelector<HTMLElement>(`[data-tile="${SOUND_TILE}"]`);
+    const menu = root?.querySelector<HTMLElement>('.tb__menu');
+    if (!tile || !menu) return;
+    // Left edges, both in this host's own coordinates, then held inside it so that a tile at the
+    // right hand end of a scrolled row does not hang the menu off the side of the editor.
+    const hostLeft = this.el.getBoundingClientRect().left;
+    const x = tile.getBoundingClientRect().left - hostLeft;
+    const max = this.el.clientWidth - menu.offsetWidth - MENU_EDGE_PX;
+    this.el.style.setProperty('--tb-menu-x', `${Math.round(Math.min(Math.max(MENU_EDGE_PX, x), Math.max(MENU_EDGE_PX, max)))}px`);
   }
 
   private focusFirstMenuItem(): void {

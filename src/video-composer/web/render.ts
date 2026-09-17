@@ -4,7 +4,7 @@ import type { ComposeFailureCode, ComposeRect, ComposeSpec } from '../definition
 
 import { mixdown } from './audio';
 import { renderSupport } from './capabilities';
-import { Encoder } from './encode';
+import { openSink, type FrameSink } from './encode';
 import { decodeImage, FrameReader, probeMedia } from './media';
 import { Painter, WHOLE_FRAME, type LayerDraw } from './painter';
 import { buildPlan, clipIndexAt, sourceTimeUs, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
@@ -14,9 +14,10 @@ import { buildPlan, clipIndexAt, sourceTimeUs, visibleIndexAt, type PlannedClip,
  *
  * The loop is the shape the whole web implementation is built around. The output is stepped at
  * exactly one frame interval; at each step every visible layer is asked for the source frame it
- * needs, the painter assembles them, the overlays go on, and the finished canvas goes to the
- * encoder. Nothing is scheduled against a clock and nothing depends on how fast the machine is: a
- * phone produces the same file as a desktop, just later.
+ * needs, the painter assembles them, the overlays go on, and the finished canvas goes to the sink.
+ * The loop itself is scheduled against nothing, so on the WebCodecs engine a phone produces the same
+ * file as a desktop, just later. The recorder engine is the exception and owns its own pacing - see
+ * `encode.ts` - because `MediaRecorder` timestamps by the wall clock and cannot be hurried.
  *
  * At most two decoders are open at once, which is the same budget `MAX_VIDEO_TRACKS` sets natively
  * and for the same reason - a mid-range phone has a handful of hardware decoders and the page
@@ -34,6 +35,8 @@ const FRAMES_TO = 0.98;
 /** What the finished render hands back to the plugin. */
 export interface RenderOutcome {
   blob: Blob;
+  /** `video/mp4`, or `video/webm` where that is all this browser would encode. */
+  mimeType: string;
   poster: Blob | null;
   durationMs: number;
   width: number;
@@ -71,16 +74,30 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
 
   const painter = new Painter(plan.output);
   painter.setColour(plan.colorMatrix, cssFor(spec.filter));
-  const encoder = await Encoder.start(plan.output, support);
   const layers = new LayerReaders();
   const overlays = new OverlayBitmaps();
+  // Opened last, and immediately before the loop: the recorder engine starts recording the moment
+  // it is opened, and every millisecond between that and the first frame is a millisecond of the
+  // finished video with nothing in it.
+  const sink = await guard(
+    () =>
+      openSink({
+        output: plan.output,
+        support,
+        canvas: painter.frame,
+        mix,
+        signal: options.signal,
+      }),
+    'encoder',
+  );
 
   try {
-    const poster = await drawEveryFrame(plan, painter, encoder, layers, overlays, options);
-    const { blob, hasAudio } = await guard(() => encoder.finish(mix), 'muxer');
+    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, options);
+    const { blob, hasAudio, mimeType } = await guard(() => sink.finish(), 'muxer');
     options.onProgress(1);
     return {
       blob,
+      mimeType,
       poster,
       durationMs: Math.round(plan.totalUs / 1000),
       width: plan.output.width,
@@ -94,7 +111,7 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
     layers.close();
     overlays.close();
     painter.dispose();
-    encoder.close();
+    await sink.close();
   }
 }
 
@@ -104,7 +121,14 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
  * One pass down the output timeline. Returns the poster, cut from the frame the spec asked for
  * rather than encoded a second time.
  */
-async function drawEveryFrame(plan: RenderPlan, painter: Painter, encoder: Encoder, layers: LayerReaders, overlays: OverlayBitmaps, options: RenderOptions): Promise<Blob | null> {
+async function drawEveryFrame(
+  plan: RenderPlan,
+  painter: Painter,
+  sink: FrameSink,
+  layers: LayerReaders,
+  overlays: OverlayBitmaps,
+  options: RenderOptions,
+): Promise<Blob | null> {
   const fps = plan.output.fps;
   const frameUs = 1_000_000 / fps;
   // CEIL, with the last frame shortened below - so the video ends exactly where the plan says and
@@ -173,7 +197,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, encoder: Encod
 
     // The last frame is only as long as there is timeline left for it.
     const holdUs = Math.max(1, Math.min(frameUs, plan.totalUs - atUs));
-    await guard(() => encoder.addFrame(painter.frame, atUs, holdUs), 'encoder');
+    await guard(() => sink.addFrame(atUs, holdUs), 'encoder');
 
     const progress = FRAMES_FROM + ((index + 1) / frames) * (FRAMES_TO - FRAMES_FROM);
     if (progress - reported >= PROGRESS_STEP) {

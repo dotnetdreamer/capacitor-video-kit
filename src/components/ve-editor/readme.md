@@ -59,6 +59,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 | ------------------- | ------------------------------------------------------------------------------------------- |
 | `--ve-accent`       | What marks the customer's own choice: a selected chip, a slider's fill, the render bar      |
 | `--ve-bg`           | The page behind the whole editor, and the letterbox around the video                        |
+| `--ve-chrome-max`   | How wide a row of chrome runs before it stops growing and centres itself                    |
 | `--ve-cta`          | The one button that moves forward, Next                                                     |
 | `--ve-cta-text`     | Text on that button, dark because the button is not                                         |
 | `--ve-danger`       | Delete, and recording                                                                       |
@@ -77,6 +78,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 | `--ve-safe-bottom`  | What the home indicator covers, replaced by a measurement once the host reports one         |
 | `--ve-safe-top`     | What the status bar covers, replaced by a measurement once the host reports one             |
 | `--ve-sheet`        | The background of an open sheet                                                             |
+| `--ve-stage-gutter` | What the preview keeps free either side of the video for Back and Next, together            |
 | `--ve-surface`      | The toolbar's own background, a step up from the page                                       |
 | `--ve-text`         | Text and glyphs at full strength                                                            |
 

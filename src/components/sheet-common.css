@@ -141,3 +141,34 @@ ve-sheet {
 .sheet__apply-all:active {
   color: var(--ve-dim, rgba(255, 255, 255, 0.6));
 }
+
+/* ------------------------------------------------------------------------------------- mouse */
+
+/*
+ * Guarded, like every hover rule in the package: a touch device told it hovers leaves the last tab
+ * tapped looking selected until another one is.
+ */
+@media (hover: hover) and (pointer: fine) {
+  .sheet__tab:not(.sheet__tab--on):hover,
+  .sheet__apply-all:hover {
+    color: var(--ve-text, #fff);
+  }
+}
+
+.sheet__tab,
+.sheet__apply-all {
+  cursor: pointer;
+}
+
+/* Inset: the strip scrolls sideways and clips anything drawn outside a tab. */
+.sheet__tab:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.sheet__apply-all:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+  border-radius: 10px;
+}

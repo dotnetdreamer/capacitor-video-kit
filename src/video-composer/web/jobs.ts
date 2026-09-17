@@ -1,5 +1,6 @@
 import { deleteFolder, describe, putFile, urlForFile } from '../../web-runtime/files';
 import { idbDelete, idbGet, idbPut, idbValues, JOBS_STORE } from '../../web-runtime/idb';
+import { holdPageOpen } from '../../web-runtime/leave-guard';
 import type { ComposeError, ComposeResult, ComposeSpec, JobState, JobStateName } from '../definitions';
 
 import { RenderFailure, renderSpec } from './render';
@@ -139,6 +140,9 @@ export async function sweepJobs(): Promise<void> {
 
 async function run(spec: ComposeSpec, job: LiveJob, emit: JobEmitter): Promise<void> {
   const { jobId, pendingPostId } = spec;
+  // A render does not survive the document, so the customer is asked before the document goes. This
+  // is the whole of what a page has in place of a foreground service - see `leave-guard.ts`.
+  const release = holdPageOpen(`rendering ${jobId}`);
   try {
     job.record.state = 'rendering';
     await save(job.record);
@@ -151,7 +155,11 @@ async function run(spec: ComposeSpec, job: LiveJob, emit: JobEmitter): Promise<v
       },
     });
 
-    const video = await putFile(pendingPostId, `${jobId}.mp4`, outcome.blob);
+    // Named after what was actually encoded rather than after what we hoped for: a browser that
+    // only had VP8 produced a WebM, and the publisher reads the extension off this path when it
+    // builds the upload's filename.
+    const extension = outcome.mimeType.includes('webm') ? 'webm' : 'mp4';
+    const video = await putFile(pendingPostId, `${jobId}.${extension}`, outcome.blob);
     const poster = outcome.poster ? await putFile(pendingPostId, `${jobId}-poster.jpg`, outcome.poster) : null;
 
     const result: ComposeResult = {
@@ -187,6 +195,7 @@ async function run(spec: ComposeSpec, job: LiveJob, emit: JobEmitter): Promise<v
     // The live entry goes, the record stays: `getState` reads the record, and holding the abort
     // controller and the spec after the job has ended would keep every source URL alive with them.
     live.delete(jobId);
+    release();
   }
 }
 

@@ -36,6 +36,8 @@
    * @prop --ve-lane-music: The timeline lane colour for music
    * @prop --ve-lane-voice: The timeline lane colour for a voiceover
    * @prop --ve-lane-ink: Text on a lane, dark because every lane colour is light
+   * @prop --ve-stage-gutter: What the preview keeps free either side of the video for Back and Next, together
+   * @prop --ve-chrome-max: How wide a row of chrome runs before it stops growing and centres itself
    * @prop --ve-safe-top: What the status bar covers, replaced by a measurement once the host reports one
    * @prop --ve-safe-bottom: What the home indicator covers, replaced by a measurement once the host reports one
    */
@@ -63,10 +65,55 @@
   --ve-lane-ink: #2a0a33;
 
   /*
+   * How the editor uses a screen bigger than a phone's, in two numbers. Every rule that answers to
+   * the size of the screen reads one of them, and no other stylesheet in the package carries a
+   * breakpoint for layout, so the question is settled here rather than in six files that would
+   * drift apart. The overrides are at the foot of this file.
+   *
+   * `--ve-stage-gutter` is what the preview keeps free either side of the video frame, TOGETHER,
+   * for the Back and Next circles. On a phone they hang over the picture's top corners, and 128px
+   * (two 44px buttons, 12px in from each edge, and air) is what keeps them off it. From a tablet up
+   * there is room to stand them beside the frame instead, which is what the wider value buys.
+   *
+   * `--ve-chrome-max` is how wide a row of chrome - the transport, a sheet's controls, a grid of
+   * tiles - may run before it stops growing and centres itself. `none` is the phone, where a row
+   * should use every pixel there is. A volume slider drawn across a 2000px monitor should not.
+   */
+  --ve-stage-gutter: 128px;
+  --ve-chrome-max: none;
+
+  /*
    * What the system bars cover. `env()` is the starting point rather than the answer: `ve-editor`
    * overwrites both with what the host measured, because Android reports these wrong in both
    * directions. A host that sets them itself keeps its own value until a measurement contradicts it.
    */
   --ve-safe-top: env(safe-area-inset-top, 0px);
   --ve-safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/*
+ * A tablet, and a phone on its side. The circles come off the picture and stand beside it, and the
+ * chrome stops growing well short of the screen's edge.
+ *
+ * A viewport query rather than a container query, for the reason the top of `ve-editor.css` gives
+ * about transforms: `container-type` carries `contain: layout`, which would make this element the
+ * containing block for every fixed positioned element under it - `ve-alert`, which covers the
+ * editor, and the toolbar's tap catcher, which covers the viewport. Both would be laid out inside
+ * the column instead, and neither would throw. The editor is a full screen element anyway, so the
+ * viewport is the box these queries are asking about.
+ *
+ * They are `:host` rules, so a host application that sets either token from outside still wins: a
+ * declaration in the outer tree beats `:host` whether or not there is a media query around it.
+ */
+@media (min-width: 700px) {
+  :host {
+    --ve-stage-gutter: 184px;
+    --ve-chrome-max: 640px;
+  }
+}
+
+@media (min-width: 1100px) {
+  :host {
+    --ve-chrome-max: 760px;
+  }
 }

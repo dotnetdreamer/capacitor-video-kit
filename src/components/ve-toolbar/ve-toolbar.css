@@ -19,9 +19,17 @@
   color: var(--ve-text, #fff);
 }
 
+/*
+ * The row stops growing at `--ve-chrome-max` and centres, which on a phone (`none`) is what it
+ * already did. It matters for a LONG row on a wide screen: the track inside centres itself while it
+ * fits, so without a cap the tools of a selected layer sit marooned in the middle of a monitor with
+ * a screen's width of black on either side, and a row too long to fit scrolls across all of it.
+ */
 .tb {
   display: flex;
   align-items: center;
+  max-width: var(--ve-chrome-max, none);
+  margin: 0 auto;
 }
 
 /* Only the scroller clips; the host stays overflow: visible for the menu. */
@@ -164,10 +172,16 @@
   background: transparent;
 }
 
+/*
+ * `--tb-menu-x` is written by the component from where the Sound tile actually is, because the tile
+ * moves: the row centres itself, so on a wide screen the tile is nowhere near this host's left edge
+ * and a menu pinned to it opened a screen's width away from the button that was pressed. The
+ * fallback is the phone's old position, and it is also what is used if the tile cannot be measured.
+ */
 .tb__menu {
   position: absolute;
   bottom: calc(100% + 8px);
-  left: 10px;
+  left: var(--tb-menu-x, 10px);
   z-index: 2;
   display: flex;
   flex-direction: column;
@@ -213,6 +227,32 @@
 
 .tb__menu-item:active {
   background: var(--ve-raised-2, #3a3a3c);
+}
+
+/* ------------------------------------------------------------------------------------- mouse */
+
+/*
+ * Only where a pointer can really hover. A touch device told it hovers leaves the last tile tapped
+ * lit up until another one is, which reads as a selection that will not clear.
+ */
+@media (hover: hover) and (pointer: fine) {
+  .tile:not(.tile--dim):hover {
+    background: var(--ve-raised, #2c2c2e);
+  }
+
+  .tb__menu-item:hover {
+    background: var(--ve-raised-2, #3a3a3c);
+  }
+}
+
+/* A tile is a button, and on a desktop a button says so before it is pressed. */
+.tile:not(.tile--dim),
+.tb__menu-item {
+  cursor: pointer;
+}
+
+.tile--dim {
+  cursor: default;
 }
 
 .tb__menu-item:focus-visible {

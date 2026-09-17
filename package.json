@@ -111,7 +111,6 @@
     "clean:all": "npm run clean && npm run clean --workspaces --if-present"
   },
   "devDependencies": {
-    "capacitor-core-build": "npm:@capacitor/core@^8.0.2",
     "@preact/signals-core": "^1.14.4",
     "@stencil/angular-output-target": "^1.5.0",
     "@stencil/core": "^4.45.0",
@@ -120,6 +119,7 @@
     "@stencil/vue-output-target": "0.14.3",
     "@types/node": "^22.13.5",
     "@vitest/browser-playwright": "^4.0.0",
+    "capacitor-core-build": "npm:@capacitor/core@^8.0.2",
     "choisy-video-kit": "file:.",
     "playwright": "^1.52.0",
     "rimraf": "^6.0.1",
@@ -144,5 +144,8 @@
   },
   "engines": {
     "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "mediabunny": "^1.58.0"
   }
 }

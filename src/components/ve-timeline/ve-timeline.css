@@ -520,3 +520,68 @@
   transform: translate3d(var(--lx, 0px), 0, 0) scale(1.05);
   transition: none;
 }
+
+/* ------------------------------------------------------------------------------------ mouse */
+
+/*
+ * What a mouse is told it can do here, which matters more on this component than on any other in
+ * the package: to a finger the timeline announces itself by moving under the swipe, and a mouse
+ * gets no such hint - the arrow sitting over a filmstrip says nothing about the fact that the whole
+ * thing can be pulled along, or that an edge can be taken hold of.
+ *
+ * All of it is behind `(pointer: fine)`. A cursor means nothing to a finger, and a hover state on a
+ * touch device stays lit on the last thing tapped until something else is, which reads as a
+ * selection that will not clear.
+ */
+@media (hover: hover) and (pointer: fine) {
+  /* The open hand over everything that scrolls, which is the whole of it. */
+  .tl__content {
+    cursor: grab;
+  }
+
+  /*
+   * And the closed one for as long as it is being pulled - named on each of the parts as well as on
+   * the content, because a rule on a descendant beats what it would otherwise inherit.
+   */
+  .tl--scrubbing .tl__content,
+  .tl--scrubbing .seg,
+  .tl--scrubbing .item,
+  .tl--scrubbing .handle {
+    cursor: grabbing;
+  }
+
+  /* An edge that can be pulled says which way it goes. */
+  .handle {
+    cursor: ew-resize;
+  }
+
+  .seg,
+  .item,
+  .tl__mute,
+  .tl__add {
+    cursor: pointer;
+  }
+
+  /* The add button is white, so the only way its hover can go is down. */
+  .tl__add:hover {
+    background: #e4e4e4;
+  }
+
+  .tl__mute:hover {
+    color: var(--ve-accent, #a6ff2e);
+  }
+
+  /*
+   * A lane lifts a little under the pointer, so it is clear the whole row is the target and not
+   * just its label. Not the selected one: it already carries a white border, and brightening the
+   * fill under it only makes that border harder to see.
+   */
+  .item:not(.item--selected):hover {
+    filter: brightness(1.14);
+  }
+
+  .item--add-sound:hover {
+    background: var(--ve-raised-2, #3a3a3c);
+    filter: none;
+  }
+}

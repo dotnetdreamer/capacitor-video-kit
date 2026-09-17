@@ -29,6 +29,16 @@ import { formatClock, shellLayout } from './shell-layout';
 const INSET_SETTLE_MS = 300;
 
 /**
+ * How far an arrow key moves the playhead, and how far it moves with Shift held.
+ *
+ * A third of a second is about what a careful scrub is worth at the zoom the timeline opens on, and
+ * two seconds is the step for crossing a clip rather than inspecting one. A keyboard is a desktop's
+ * only fine control: there is no equivalent of a finger dragging the timeline a few pixels.
+ */
+const NUDGE_MS = 333;
+const NUDGE_COARSE_MS = 2000;
+
+/**
  * The video editor, laid out the way TikTok's is, because that is the editor our customers already
  * know how to use: the video on top, a transport row, a timeline with a fixed centre playhead and
  * one lane per layer, and a row of tools at the bottom that turns into the tools for whatever is
@@ -181,6 +191,14 @@ export class VeEditor {
       void this.measureSystemBars();
       window.addEventListener('resize', this.onWindowResize);
     }
+
+    /*
+     * On the window rather than on this element, because the editor is a full screen element and
+     * the keys have to work with nothing inside it focused at all - which, on a desktop, is where
+     * the focus is almost all of the time. `onKeyDown` refuses every keystroke that belongs to
+     * something else.
+     */
+    window.addEventListener('keydown', this.onKeyDown);
   }
 
   componentWillLoad() {
@@ -215,6 +233,7 @@ export class VeEditor {
     this.unregisterBack?.();
     this.unregisterBack = null;
     window.removeEventListener('resize', this.onWindowResize);
+    window.removeEventListener('keydown', this.onKeyDown);
     if (this.measureTimer) clearTimeout(this.measureTimer);
     this.measureTimer = null;
 
@@ -348,6 +367,82 @@ export class VeEditor {
   };
 
   /* ========================================================================================= */
+  /* The keyboard                                                                              */
+  /* ========================================================================================= */
+
+  /**
+   * A desktop's transport. Space plays, the arrows move the playhead (further with Shift, to either
+   * end with Home and End), Cmd or Ctrl with Z undoes and adds Shift to redo, and Escape closes
+   * whatever is open.
+   *
+   * Three kinds of keystroke are refused rather than acted on, and each is a real collision rather
+   * than caution: one the browser is about to act on itself (Space on a focused button would both
+   * press it and toggle playback), one already answered further down the tree (the toolbar's own
+   * arrow key navigation, which says so by calling `preventDefault`), and one being typed into a
+   * field. Escape is the exception to the last: it is how a customer gets out of the text they are
+   * in the middle of, while every other key there belongs to the field.
+   */
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (this.destroyed || this.loading || this.rendering || event.defaultPrevented) return;
+    const focus = keyTarget(event);
+    if (isTextEntry(focus) && event.key !== 'Escape') return;
+
+    const store = this.store;
+    if (event.metaKey || event.ctrlKey) {
+      if (event.altKey || event.key.toLowerCase() !== 'z') return;
+      event.preventDefault();
+      // Locked while a voiceover take is running. The store refuses both anyway; this is only so
+      // the key does nothing rather than appearing to half undo a recording.
+      if (store.historyLocked.value) return;
+      if (event.shiftKey) store.redo();
+      else store.undo();
+      return;
+    }
+    if (event.altKey) return;
+
+    switch (event.key) {
+      // `Spacebar` is the name an older WebView gives the same key.
+      case ' ':
+      case 'Spacebar':
+        if (isPressable(focus)) return;
+        event.preventDefault();
+        store.togglePlay();
+        return;
+      case 'ArrowLeft':
+      case 'ArrowRight':
+        event.preventDefault();
+        this.nudge(event.key === 'ArrowLeft' ? -1 : 1, event.shiftKey ? NUDGE_COARSE_MS : NUDGE_MS);
+        return;
+      case 'Home':
+        event.preventDefault();
+        this.seekTo(0);
+        return;
+      case 'End':
+        event.preventDefault();
+        this.seekTo(store.totalMs.value);
+        return;
+      case 'Escape':
+        // Peels, exactly as the back button does, but never the last layer: closing what is open is
+        // what Escape means everywhere, and throwing away an edit is not.
+        if (this.peel()) event.preventDefault();
+        return;
+      default:
+        return;
+    }
+  };
+
+  private nudge(direction: number, step: number): void {
+    this.seekTo(this.store.playheadMs.value + direction * step);
+  }
+
+  /** Stops the player first, the way the timeline's own drags do: two things moving the playhead at
+   *  once leaves it flickering between them. `seek` clamps to the video at both ends. */
+  private seekTo(ms: number): void {
+    this.store.pause();
+    this.store.seek(ms);
+  }
+
+  /* ========================================================================================= */
   /* Leaving                                                                                   */
   /* ========================================================================================= */
 
@@ -361,7 +456,6 @@ export class VeEditor {
    * during a render must not take the screen away from under an encode.
    */
   private readonly onBack = (): boolean => {
-    const store = this.store;
     if (this.rendering || this.loading) return true;
 
     if (this.confirm.pending) {
@@ -376,6 +470,18 @@ export class VeEditor {
       return true;
     }
 
+    if (!this.peel()) void this.leave();
+    return true;
+  };
+
+  /**
+   * Closes the outermost thing that is open, and says whether there was one.
+   *
+   * Split out of [onBack] so that Escape can have the peeling without the leaving: the two presses
+   * mean the same thing while anything at all is open, and different things when nothing is.
+   */
+  private peel(): boolean {
+    const store = this.store;
     if (store.fullscreen.value) {
       store.fullscreen.value = false;
     } else if (store.textEdit.value) {
@@ -392,10 +498,10 @@ export class VeEditor {
     } else if (store.toolbarMode.value !== 'root') {
       store.toolbarMode.value = 'root';
     } else {
-      void this.leave();
+      return false;
     }
     return true;
-  };
+  }
 
   /** Leaving with changes asks first: the sources stay either way, the edits would not. */
   private async leave(): Promise<void> {
@@ -754,4 +860,32 @@ export class VeEditor {
       </div>
     );
   }
+}
+
+/**
+ * What the keystroke was actually aimed at.
+ *
+ * `event.target` is no use from a window listener: every key pressed anywhere inside the editor is
+ * retargeted to `ve-editor` itself on its way out of the shadow tree, so the answer would be the
+ * same element for the sticker search field as for nothing at all. The composed path is the tree
+ * before that retargeting.
+ */
+function keyTarget(event: KeyboardEvent): HTMLElement | null {
+  const first = event.composedPath()[0] ?? event.target;
+  return first instanceof HTMLElement ? first : null;
+}
+
+/** Something the keystroke is being typed into, where every key but Escape belongs to the field. */
+function isTextEntry(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  return el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
+}
+
+/**
+ * Something Space will press on its own. A click leaves the focus on the button it pressed, so
+ * without this the first Space after using any tool would both run that tool again and start
+ * playback.
+ */
+function isPressable(el: HTMLElement | null): boolean {
+  return !!el && (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button');
 }

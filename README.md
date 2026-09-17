@@ -1221,13 +1221,24 @@ The cost is that it is driven by seeking, which is slower; the benefit is that i
 format the browser can play, and that stepping the output timeline frame by frame makes the render
 deterministic - a slow phone produces the same file as a desktop, just later.
 
-**The MP4 is written here.** `VideoEncoder` is an encoder, not a muxer, so `web/mp4.ts` writes the
-ISO base media boxes itself - about as much of 14496-12 and -14 as one progressive MP4 needs, and no
-dependency and no WebAssembly. `moov` goes first, which costs one extra pass to learn its own
-length and is what lets the finished video start playing before it has finished downloading. Encoded
-chunks are kept as separate arrays and the file is a `Blob` over the list, so a minute of video never
-needs one contiguous allocation. `render.cmp.test.ts` hands what it writes back to the browser's own
+**The container is Mediabunny's.** `VideoEncoder` is an encoder, not a muxer, so something has to
+write the ISO boxes. That was seven hundred hand-written lines here first, and that was the wrong
+call: a container is a large, fiddly, well specified thing somebody else already maintains and tests
+against real players. [Mediabunny](https://mediabunny.dev) is zero-dependency, does that one job, and
+is the package's only runtime dependency. It is reached exclusively through `src/video-composer/web/`,
+which loads behind the lazy `import('./web')` inside `registerPlugin`, so an editor-only host never
+pulls it into a bundle. `render.cmp.test.ts` still hands the finished file back to the browser's own
 demuxer, because a container only this package can read is not a container.
+
+**There are two engines, and a browser without WebCodecs still renders.** The first is the real one:
+Mediabunny over `VideoEncoder`, producing MP4 with H.264 and AAC. The second is `MediaRecorder` over
+a canvas stream, for a browser with neither `VideoEncoder` nor an H.264 config it will take. It costs
+real time - `MediaRecorder` timestamps by the wall clock, so a thirty-second post takes thirty
+seconds - and it lands in whatever container that browser records in, usually WebM, which is why
+`capabilities()` reports the container and says when the slow engine is the one in play. Only a
+browser with neither gets `supported: false`. Both engines are exercised in the browser suite; the
+fallback's test hides WebCodecs to get at it, because otherwise the path that exists for browsers
+this suite never runs in would not be tested anywhere.
 
 **Two canvases.** A WebGL2 canvas draws the video, because the one thing a 2D canvas cannot do is the
 colour matrix - `ctx.filter` takes CSS filter functions, not a 4x5 matrix. A 2D canvas then puts the
@@ -1245,6 +1256,13 @@ and no WorkManager: a tab closed mid-render stops rendering, and a job left behi
 produced, so `getState` after a reload answers with the render rather than with `job_not_found` -
 which is more than the native plugins promise, and is the most a browser can honestly offer.
 
+**So the customer is asked before the tab goes.** `web-runtime/leave-guard.ts` holds a `beforeunload`
+listener for as long as a render or an upload is in flight, ref-counted so the two can overlap and so
+nothing is left asking about a tab with nothing running in it. Two browser rules shape it and both
+look like bugs otherwise: the wording is the browser's and a page cannot change it, and nothing is
+shown at all unless the customer has interacted with the page - which, after a tap on Next, they
+have.
+
 **The publisher stages its files.** Natively an upload names a path in an app-private folder; in a
 browser it names a `blob:` URL, which dies with the document. So `publish()` copies the bytes into
 IndexedDB before it queues anything, and the record names the copy - otherwise a record that survived
@@ -1254,10 +1272,11 @@ create step is idempotent on `postId`, and the retry ladder is the same 30/60/12
 keeps two tabs off one post.
 
 **`capabilities()` is the call that earns its keep here.** It probes rather than guesses -
-`VideoEncoder.isConfigSupported` negotiates with the platform's own encoder - and a browser without
-WebCodecs gets a `supported: false` with a sentence saying so, and a `compose()` that fails with
-`unsupported` rather than pretending. Every other error keeps its native code, so a host written
-against a phone needs no second set of branches.
+Mediabunny's codec checks negotiate with the platform's own encoder - and answers with the engine's
+real container and codec, so a host knows whether it is getting an MP4 or a WebM before it offers
+anything. A browser with no engine at all gets `supported: false` with a sentence saying why, and a
+`compose()` that fails with `unsupported` rather than pretending. Every other error keeps its native
+code, so a host written against a phone needs no second set of branches.
 
 **Reaching it.** The web implementations load through `registerPlugin`, so a plain web host that
 wants them installs `@capacitor/core` - an optional peer, and the same `VideoComposer` object a
@@ -1276,8 +1295,8 @@ Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancel
 ```sh
 npm install        # `prepare` builds the package, so a linked host has something to resolve
 npm run build      # the package, then the three wrapper packages
-npm test           # 531 tests: vitest in a mock DOM, and Playwright Chromium for the components,
-                   # the web engines and the MP4 the muxer writes
+npm test           # vitest in a mock DOM, and Playwright Chromium for the components, both web
+                   # render engines, and the file each of them produces
 npm run typecheck  # the plugin, its own tests, the editor, the build helpers and the wrappers
 npm run clean      # every output of this package; `clean:all` takes the wrappers with it
 ```

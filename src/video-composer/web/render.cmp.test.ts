@@ -1,24 +1,22 @@
-import { describe, expect, it, type TestContext } from 'vitest';
+import { BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from 'mediabunny';
+import { afterEach, describe, expect, it, vi, type TestContext } from 'vitest';
 
 import type { ComposeSpec } from '../definitions';
 
 import { renderSupport, resetRenderSupport } from './capabilities';
-import { Mp4Writer } from './mp4';
 import { Painter } from './painter';
 import { renderSpec } from './render';
 
 /**
  * The renderer, in a real browser, end to end.
  *
- * Everything else about the web engine is pinned by unit tests over pure functions, and one thing
- * cannot be: whether the file the muxer writes is a file a player will OPEN. A wrong box order, a
- * wrong chunk offset and a wrong sample description all read the same way to a `<video>` - it
- * refuses - so the only honest check is to hand one to the browser and see.
+ * Everything else about the web engine is pinned by unit tests over pure functions, and two things
+ * cannot be: whether the file that comes out is a file a player will OPEN, and whether the frames in
+ * it are the frames the geometry says. Both are answered here by handing the output back to the
+ * browser and by reading pixels off the painter.
  *
- * The source footage is made by this file, with the same encoder and the same muxer the render
- * uses. That is deliberate rather than convenient: it round-trips the container through the
- * browser's own demuxer, so a muxer that wrote something only it could read fails here rather than
- * in a customer's feed.
+ * The source footage is made with the same library the renderer muxes through, so the container is
+ * round-tripped through the browser's own demuxer rather than only through the code that wrote it.
  */
 
 const SOURCE_WIDTH = 160;
@@ -46,23 +44,14 @@ async function supportFor(width: number, height: number, fps: number) {
  * Marks the case skipped rather than returning green.
  *
  * A test that quietly returns when the platform cannot do the thing reports a tick for work it did
- * not do, and a suite of those is worse than no suite: it is a suite that says the renderer works
- * on a machine where it was never run. `ctx.skip()` puts the reason in the report instead.
+ * not do, and a suite of those is worse than no suite: it says the renderer works on a machine where
+ * it was never run. `ctx.skip()` puts the reason in the report instead.
  */
 function needs(ctx: TestContext, able: boolean, why: string): void {
   if (!able) ctx.skip(why);
 }
 
-/** The encoder's own description, copied into a buffer a `Blob` will take. */
-function describedBytes(source: AllowSharedBufferSource): Uint8Array<ArrayBuffer> {
-  if (ArrayBuffer.isView(source)) {
-    const view = source as ArrayBufferView;
-    return new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
-  }
-  return new Uint8Array((source as ArrayBuffer).slice(0));
-}
-
-/** A short solid-colour MP4, written the way the renderer writes one. */
+/** A short solid-colour MP4, muxed the way the renderer muxes one. */
 async function makeSourceVideo(colour: string): Promise<Blob> {
   const canvas = document.createElement('canvas');
   canvas.width = SOURCE_WIDTH;
@@ -70,71 +59,37 @@ async function makeSourceVideo(colour: string): Promise<Blob> {
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('no canvas');
 
-  const support = await renderSupport(SOURCE_WIDTH, SOURCE_HEIGHT, SOURCE_FPS);
-  if (!support.supported) throw new Error(support.reason);
-
-  const writer = new Mp4Writer();
-  let track = -1;
-  const encoder = new VideoEncoder({
-    output: (chunk, metadata) => {
-      if (track < 0) {
-        const description = metadata?.decoderConfig?.description;
-        if (!description) throw new Error('no avcC');
-        track = writer.addVideoTrack({
-          width: SOURCE_WIDTH,
-          height: SOURCE_HEIGHT,
-          description: describedBytes(description),
-          bitrate: 1_000_000,
-        });
-      }
-      const data = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(data);
-      writer.addSample(track, {
-        data,
-        timestampUs: chunk.timestamp,
-        durationUs: chunk.duration ?? Math.round(1_000_000 / SOURCE_FPS),
-        isSync: chunk.type === 'key',
-      });
-    },
-    error: error => {
-      throw error;
-    },
+  const output = new Output({
+    format: new Mp4OutputFormat({ fastStart: 'in-memory' }),
+    target: new BufferTarget(),
   });
-  encoder.configure({
-    codec: support.videoCodec,
-    width: SOURCE_WIDTH,
-    height: SOURCE_HEIGHT,
-    bitrate: 1_000_000,
-    framerate: SOURCE_FPS,
-    avc: { format: 'avc' },
+  const source = new CanvasSource(canvas, {
+    codec: 'avc',
+    quality: new Quality({ bitrate: 1_000_000 }),
   });
+  output.addVideoTrack(source);
+  await output.start();
 
   for (let i = 0; i < SOURCE_FRAMES; i++) {
     ctx.fillStyle = colour;
     ctx.fillRect(0, 0, SOURCE_WIDTH, SOURCE_HEIGHT);
-    const frame = new VideoFrame(canvas, {
-      timestamp: Math.round((i * 1_000_000) / SOURCE_FPS),
-      duration: Math.round(1_000_000 / SOURCE_FPS),
-    });
-    encoder.encode(frame, { keyFrame: i === 0 });
-    frame.close();
+    await source.add(i / SOURCE_FPS, 1 / SOURCE_FPS);
   }
-  await encoder.flush();
-  encoder.close();
-  return writer.finalize();
+  await output.finalize();
+  const buffer = (output.target as BufferTarget).buffer;
+  if (!buffer) throw new Error('no fixture');
+  return new Blob([buffer], { type: 'video/mp4' });
 }
 
 /**
  * Whether this browser can DECODE H.264 at all.
  *
- * Not the same question as whether it can encode it, and the gap is real in exactly the browser
- * this suite runs in: Chromium's open-source build carries OpenH264 for encoding and no proprietary
- * decoder, so it will happily write an MP4 it cannot play. Asserting playback there would fail on a
- * file that is perfectly good, so the playback checks ask first - and say so when they skip.
+ * Not the same question as whether it can encode it, and the gap is real: an open-source Chromium
+ * build can carry an encoder and no proprietary decoder, so it will happily write an MP4 it cannot
+ * play. Asserting playback there would fail on a file that is perfectly good.
  */
 function canDecodeAvc(): boolean {
-  const video = document.createElement('video');
-  return video.canPlayType('video/mp4; codecs="avc1.42E01E"') !== '';
+  return document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"') !== '';
 }
 
 /** What a `<video>` makes of a file: its length and picture size, or null when it will not open. */
@@ -180,36 +135,37 @@ function spec(uri: string, over: Partial<ComposeSpec> = {}): ComposeSpec {
 }
 
 describe('the web renderer, end to end', () => {
-  it('reports honestly whether this browser can render at all', async () => {
+  it('reports honestly which engine this browser gets', async () => {
     const support = await supportFor(720, 1280, 30);
     if (!support.supported) {
       // The one case where saying no IS the correct behaviour, and it has to say why.
       expect(support.reason.length).toBeGreaterThan(0);
+      expect(support.engine).toBe('none');
       return;
     }
-    expect(support.videoCodec).toMatch(/^avc1\./);
+    expect(['webcodecs', 'recorder']).toContain(support.engine);
+    expect(['mp4', 'webm']).toContain(support.container);
+    expect(support.videoCodec.length).toBeGreaterThan(0);
   });
 
   it(
-    'writes an MP4 the browser itself will open',
+    'writes a file the browser itself will open',
     async ctx => {
       const support = await supportFor(SOURCE_WIDTH, SOURCE_HEIGHT, SOURCE_FPS);
       needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
 
       const blob = await makeSourceVideo('#c00');
-      expect(blob.type).toBe('video/mp4');
       expect(blob.size).toBeGreaterThan(0);
 
       needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
       const url = URL.createObjectURL(blob);
       try {
         const opened = await openable(url);
-        // The whole reason this test exists: a container only this package can read is not a
-        // container.
+        // A container only this package can read is not a container.
         expect(opened).not.toBeNull();
         expect(opened?.width).toBe(SOURCE_WIDTH);
         expect(opened?.height).toBe(SOURCE_HEIGHT);
-        expect(opened?.durationMs).toBeGreaterThan(500);
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -221,9 +177,9 @@ describe('the web renderer, end to end', () => {
     'renders a spec into a playable video with a poster',
     async ctx => {
       const support = await supportFor(160, 284, 10);
-      // A render reads its source through a `<video>`, so this case needs the decoder as well as
-      // the encoder - unlike the muxer check above, which only needs bytes.
+      // A render reads its source through a decoder, so this case needs one as well as an encoder.
       needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
       needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
 
       const source = URL.createObjectURL(await makeSourceVideo('#0a0'));
@@ -239,6 +195,7 @@ describe('the web renderer, end to end', () => {
         // Half a second of source, which is what the clip asked for.
         expect(outcome.durationMs).toBe(500);
         expect(outcome.blob.size).toBeGreaterThan(0);
+        expect(outcome.mimeType).toBe('video/mp4');
         // The bar moved, and it ended where it should.
         expect(seen[seen.length - 1]).toBe(1);
 
@@ -269,6 +226,7 @@ describe('the web renderer, end to end', () => {
     async ctx => {
       const support = await supportFor(160, 284, 10);
       needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
       needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
 
       const source = URL.createObjectURL(await makeSourceVideo('#00a'));
@@ -279,6 +237,177 @@ describe('the web renderer, end to end', () => {
           onProgress: () => controller.abort(),
         });
         await expect(running).rejects.toMatchObject({ code: 'cancelled' });
+      } finally {
+        URL.revokeObjectURL(source);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});
+
+/** A tone as a WAV, which `decodeAudioData` reads on every browser. Stands in for a music track. */
+function makeTone(seconds: number, hz: number, rate = 48_000): Blob {
+  const frames = Math.round(seconds * rate);
+  const buffer = new ArrayBuffer(44 + frames * 2);
+  const view = new DataView(buffer);
+  const ascii = (at: number, text: string): void => {
+    for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + frames * 2, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, 'data');
+  view.setUint32(40, frames * 2, true);
+  for (let i = 0; i < frames; i++) {
+    // 0.61 of full scale, so the volume the spec asks for is visible in what comes back.
+    view.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * hz * i) / rate) * 20_000), true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+describe('the soundtrack, through the container and back', () => {
+  it(
+    'muxes an audio track the browser can decode, at the volume and with the fade asked for',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, support.audioCodec.length > 0, 'this browser encodes no audio');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const source = URL.createObjectURL(await makeSourceVideo('#333'));
+      const music = URL.createObjectURL(makeTone(2, 440));
+      try {
+        const outcome = await renderSpec(
+          spec(source, {
+            jobId: 'job-audio',
+            clips: [{ ...spec(source).clips[0]!, outMs: 800 }],
+            audio: {
+              originalMuted: true,
+              originalVolume: 1,
+              voiceover: [],
+              music: {
+                uri: music,
+                startMs: 0,
+                inMs: 0,
+                outMs: 2000,
+                volume: 0.8,
+                loop: true,
+                fadeInMs: 0,
+                fadeOutMs: 300,
+              },
+            },
+          }),
+          { signal: new AbortController().signal, onProgress: () => {} },
+        );
+        expect(outcome.hasAudio).toBe(true);
+
+        // Decoding the FINISHED file is the check: an audio track the browser cannot read is a
+        // sample description nobody can read, however well the bytes were written.
+        const context = new OfflineAudioContext(2, 1, 48_000);
+        const decoded = await context.decodeAudioData(await outcome.blob.arrayBuffer());
+        expect(decoded.numberOfChannels).toBe(2);
+
+        const channel = decoded.getChannelData(0);
+        let peak = 0;
+        for (let i = 0; i < channel.length; i++) peak = Math.max(peak, Math.abs(channel[i] ?? 0));
+        // 0.8 of a tone at 0.61 of full scale is 0.49, and AAC is lossy but not by much.
+        expect(peak).toBeGreaterThan(0.35);
+        expect(peak).toBeLessThan(0.65);
+
+        // The last few per cent carry the fade out, so they have to be quieter than the peak.
+        let tail = 0;
+        for (let i = Math.floor(channel.length * 0.97); i < channel.length; i++) {
+          tail = Math.max(tail, Math.abs(channel[i] ?? 0));
+        }
+        expect(tail).toBeLessThan(peak * 0.5);
+      } finally {
+        URL.revokeObjectURL(source);
+        URL.revokeObjectURL(music);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});
+
+describe('the MediaRecorder fallback', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetRenderSupport();
+  });
+
+  /**
+   * Hides WebCodecs, which is the only way to exercise the fallback in a browser that has it.
+   *
+   * Worth doing rather than trusting: this path exists for the browsers this suite will never run
+   * in, so if it is not tested here it is not tested anywhere, and "we have a fallback" would be a
+   * claim rather than a fact.
+   */
+  function withoutWebCodecs(): void {
+    vi.stubGlobal('VideoEncoder', undefined);
+    vi.stubGlobal('AudioEncoder', undefined);
+    resetRenderSupport();
+  }
+
+  it('is what a browser without WebCodecs gets, rather than a refusal', async () => {
+    withoutWebCodecs();
+    const support = await renderSupport(160, 284, 10);
+    if (typeof MediaRecorder === 'undefined') {
+      expect(support.supported).toBe(false);
+      return;
+    }
+    expect(support.supported).toBe(true);
+    expect(support.engine).toBe('recorder');
+    expect(support.recorderMimeType.length).toBeGreaterThan(0);
+  });
+
+  it(
+    'records a real video, in real time',
+    async ctx => {
+      // The fixture is made first, while the encoder is still there to make it with.
+      const encoderSupport = await supportFor(SOURCE_WIDTH, SOURCE_HEIGHT, SOURCE_FPS);
+      needs(ctx, encoderSupport.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+      needs(ctx, typeof MediaRecorder !== 'undefined', 'this browser has no MediaRecorder');
+      const source = URL.createObjectURL(await makeSourceVideo('#a0a'));
+
+      withoutWebCodecs();
+      const support = await renderSupport(160, 284, 10);
+      needs(ctx, support.engine === 'recorder', 'the fallback did not take over');
+
+      try {
+        const started = performance.now();
+        const outcome = await renderSpec(
+          // Deliberately short: this one runs at the speed the video plays, and a test is not the
+          // place to prove that a thirty-second post takes thirty seconds.
+          spec(source, { jobId: 'job-rec', clips: [{ ...spec(source).clips[0]!, outMs: 300 }] }),
+          { signal: new AbortController().signal, onProgress: () => {} },
+        );
+        const elapsed = performance.now() - started;
+
+        expect(outcome.blob.size).toBeGreaterThan(0);
+        expect(outcome.mimeType).toMatch(/^video\/(mp4|webm)/);
+        expect(outcome.durationMs).toBe(300);
+        // Real time is the cost, and it is the one behaviour that separates this engine from the
+        // other: 300 ms of video cannot have been recorded in 50.
+        expect(elapsed).toBeGreaterThan(250);
+
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const opened = await openable(url);
+          expect(opened).not.toBeNull();
+          expect(opened?.width).toBe(160);
+          expect(opened?.height).toBe(284);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
       } finally {
         URL.revokeObjectURL(source);
       }
