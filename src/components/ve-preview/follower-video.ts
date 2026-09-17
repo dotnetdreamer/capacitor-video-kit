@@ -10,6 +10,7 @@ import {
   clipsSilenced,
   posterFor,
   previewSrc,
+  repaintPaused,
   startPlayback,
 } from './preview-media';
 
@@ -112,6 +113,12 @@ export class FollowerVideo {
     if (this.destroyed || !this.posterIsBlank) return;
     const source = this.layer ? this.store.clipByKey(this.layer.clipKey) : undefined;
     if (source && source.key === this.loadedKey) this.setPoster(source);
+  }
+
+  /** This element's box has moved on screen; see [repaintPaused] and [PreviewPlayer.repaintBase]. */
+  repaint(): void {
+    if (this.destroyed) return;
+    repaintPaused(this.video);
   }
 
   destroy(): void {

@@ -19,6 +19,7 @@ import {
   clipsSilenced,
   posterFor,
   previewSrc,
+  repaintPaused,
   startPlayback,
 } from './preview-media';
 
@@ -300,6 +301,32 @@ export class PreviewPlayer implements EditorPlayer {
     const clip = slot ? this.store.clipByKey(slot.clip.clipKey) : undefined;
     if (!slot || !clip || clip.key !== this.loadedKey) return;
     this.setPoster(clip, sourceMsAt(slot, this.store.playheadMs.value));
+  }
+
+  /**
+   * An element's box has just moved on screen, and a paused one does nothing about that by itself;
+   * see [repaintPaused] for what that costs and why a seek is the answer.
+   *
+   * This is called from the render rather than from the effects above, because the frame has to be
+   * painted into the box the element ALREADY has and the render is where it gets one. It is also the
+   * only place a geometry change can be noticed at all: a layout preset writes rectangles onto every
+   * clip of both tracks without moving the playhead, so `resync` runs, finds the element on exactly
+   * the time it is already on, and quite rightly seeks nothing. Nothing else in the player ever
+   * hears that the picture is meant to be somewhere else.
+   *
+   * A seek in flight is left to land: it is going to present a frame of its own, into whatever box
+   * the element has by then, and a nudge would only pull it off the position it was asked for. A
+   * load in flight has no frame to repaint and is filtered out by [repaintPaused].
+   */
+  repaintBase(): void {
+    if (this.destroyed || this.seekInFlight) return;
+    repaintPaused(this.video);
+  }
+
+  /** The same for the second layer, whose box every arrangement moves along with the base's. */
+  repaintExtra(): void {
+    if (this.destroyed) return;
+    this.follower?.repaint();
   }
 
   destroy(): void {

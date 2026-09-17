@@ -194,6 +194,10 @@ export class VePreview implements EditorPlayer {
   private player: PreviewPlayer | null = null;
   /** The second element the player was last given, so its listeners can be taken off again. */
   private extraEl: HTMLVideoElement | null = null;
+  /** The placement each element was last RENDERED with, which is how a box that moved is noticed;
+      see [repaintMoved]. Null until the render that first places them. */
+  private placedBase: VideoView | null = null;
+  private placedExtra: VideoView | null = null;
   private gestures: OverlayGestures | null = null;
   private stageResize: ResizeObserver | null = null;
   private readonly disposers: Array<() => void> = [];
@@ -465,11 +469,38 @@ export class VePreview implements EditorPlayer {
    * the five elements the player needs and a ref callback that never fires says nothing at all - it
    * simply leaves the field undefined. Running on every render and returning early once the player
    * exists is what that costs, and it is also what hands the second track's element over as it
-   * comes and goes: a ref plus this call replace the effect Angular needed for it.
+   * comes and goes: a ref plus this call replace the effect Angular needed for it. It is the moment
+   * an element's new box is on it as well, which is the one thing a paused one has to be told about;
+   * see [repaintMoved].
    */
   componentDidRender() {
     this.setUp();
     this.attachExtra();
+    this.repaintMoved();
+  }
+
+  /**
+   * Asks an element whose box has just moved to paint its frame into it, which a paused one does
+   * not do by itself; [repaintPaused] is where that is explained and where the seek happens.
+   *
+   * Here rather than in one of the effects on the edit, because this is the first moment the new box
+   * is actually on the element: a frame presented before it would land in the old one. The two views
+   * are compared by reference, which `computedWith` makes exact - it hands back the very object it
+   * returned last for as long as the placement means the same thing - so this costs a comparison per
+   * render and fires only when something really moved.
+   *
+   * The render that PLACES the elements moves nothing: the player seeks each of them itself as it
+   * takes them over.
+   */
+  private repaintMoved(): void {
+    const base = this.baseBox.value;
+    const extra = this.extraBox.value;
+    const movedBase = this.placedBase !== null && this.placedBase !== base;
+    const movedExtra = this.placedExtra !== null && this.placedExtra !== extra;
+    this.placedBase = base;
+    this.placedExtra = extra;
+    if (movedBase) this.player?.repaintBase();
+    if (movedExtra) this.player?.repaintExtra();
   }
 
   disconnectedCallback() {

@@ -16,6 +16,9 @@ import type { EditorStore } from '../../state/editor-store';
 /** Closer than this to where the element already is, a seek is not worth a decode. */
 export const SEEK_EPSILON_S = 0.008;
 
+/** How far a paused element is moved to make it paint again; see [repaintPaused]. */
+const REPAINT_NUDGE_S = 0.001;
+
 /**
  * How long the held frame stays up when no presented-frame callback arrives to lower it.
  *
@@ -83,6 +86,39 @@ export function startPlayback(el: HTMLMediaElement): void {
   el.play().catch((error: unknown) => {
     if ((error as DOMException)?.name !== 'AbortError') debugWarn('[ve-preview] play failed', error);
   });
+}
+
+/**
+ * Makes a PAUSED element paint the frame it is parked on again, into the box the render has just
+ * given it.
+ *
+ * A `<video>` that is not playing presents nothing of its own accord, and WKWebView composites a
+ * paused one as a layer it does not repaint when only that layer's geometry changes. A layout
+ * preset moves and clips both elements without moving the playhead by a millisecond, so the base
+ * element kept the picture it had painted for its old box and showed black inside its new one,
+ * while the export of the same manifest was correct. Everything this file already says about a
+ * fresh source - that a paused WebView video sits on the poster, or on black, until something seeks
+ * it - is true of a moved one too.
+ *
+ * A seek is what makes a paused element decode and present, and it has to be a seek to a position
+ * the element is NOT already on: a WebView is free to answer a seek to where it already is with
+ * nothing at all, which is what the player's own seek watchdog exists for. So this moves by a
+ * millisecond, which is a small fraction of a frame at any rate a phone shoots at - the same
+ * picture comes back, it is simply asked for again. The element is then that far from where the
+ * player put it, and can never be further: the next ordinary seek measures itself against
+ * [SEEK_EPSILON_S] and pulls it back the moment the nudges add up past it.
+ *
+ * An element with no frame yet is left alone. It has nothing to paint, and the load it is in the
+ * middle of ends with a seek of its own.
+ */
+export function repaintPaused(video: HTMLVideoElement): void {
+  if (!video.paused || video.readyState < 2 /* HAVE_CURRENT_DATA */) return;
+  const at = video.currentTime;
+  const ahead = at + REPAINT_NUDGE_S;
+  // Backwards at the very end of a file, where there is no room ahead to move into and the seek
+  // would be clamped straight back to the position the element is already on.
+  const room = !Number.isFinite(video.duration) || ahead <= video.duration;
+  video.currentTime = room ? ahead : Math.max(0, at - REPAINT_NUDGE_S);
 }
 
 /**
