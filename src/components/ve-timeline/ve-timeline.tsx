@@ -659,12 +659,12 @@ export class VeTimeline {
         // clamped value reads back as a seek to the wrong time.
         if (this.contentEl) this.contentEl.style.width = `${width}px`;
         if (this.pinch) {
-          this.scrollTo((this.pinch.ms / 1000) * pps, true);
+          this.scrollLaneTo((this.pinch.ms / 1000) * pps, true);
           return;
         }
         // While playing, the frame loop below owns the scroll position.
         if (playing || this.drag || this.userScrollActive) return;
-        this.scrollTo((playhead / 1000) * pps, true);
+        this.scrollLaneTo((playhead / 1000) * pps, true);
       });
     });
 
@@ -837,7 +837,7 @@ export class VeTimeline {
       // A pinch that began as a one-finger scroll can still carry the scroll along with its focal
       // point; the time under the centre line is pinned instead.
       const pinned = (this.pinch.ms / 1000) * store.pps.value;
-      if (Math.abs(x - pinned) > 1) this.scrollTo(pinned, true);
+      if (Math.abs(x - pinned) > 1) this.scrollLaneTo(pinned, true);
       return;
     }
     // Everything else that scrolls - playback, a drag's edge auto-scroll, a clamp - is not a seek.
@@ -878,7 +878,7 @@ export class VeTimeline {
       store.pause();
       // The frame loop runs a few ms ahead of the player's last write; line the content up with
       // the frame playback actually stopped on before the finger starts moving it.
-      this.scrollTo((store.playheadMs.value / 1000) * store.pps.value, true);
+      this.scrollLaneTo((store.playheadMs.value / 1000) * store.pps.value, true);
     }
     const ours = this.ourTouchList(event.touches);
     if (ours.length >= 2 && !this.pinch) this.startPinch(ours);
@@ -983,7 +983,7 @@ export class VeTimeline {
     this.pendingSeekMs = null;
     if (pending !== null) store.seek(pending);
     if (!store.playing.value && !this.drag && !this.pinch) {
-      this.scrollTo((store.playheadMs.value / 1000) * store.pps.value, true);
+      this.scrollLaneTo((store.playheadMs.value / 1000) * store.pps.value, true);
     }
   }
 
@@ -1025,7 +1025,7 @@ export class VeTimeline {
       let target = Math.min(store.totalMs.value, ms + clamp(now - seenAt, 0, FOLLOW_LEAD_MS));
       if (target < lastTarget && lastTarget - target < FOLLOW_LEAD_MS * 2) target = lastTarget;
       lastTarget = target;
-      this.scrollTo((target / 1000) * store.pps.value, false);
+      this.scrollLaneTo((target / 1000) * store.pps.value, false);
     };
     this.followRaf = requestAnimationFrame(step);
   }
@@ -1036,10 +1036,15 @@ export class VeTimeline {
   }
 
   /**
-   * A programmatic scroll. `exact` compares against the element itself (a layout read, fine off the
-   * frame loop); otherwise against the last position seen, which is enough to skip no-op writes.
+   * A programmatic scroll of the lanes. `exact` compares against the element itself (a layout read,
+   * fine off the frame loop); otherwise against the last position seen, which is enough to skip
+   * no-op writes.
+   *
+   * Not `scrollTo`: under `dist-custom-elements` a component class IS its element, so that name
+   * would replace `Element.prototype.scrollTo` on `<ve-timeline>` with a method of a different
+   * shape, and anything scrolling the element from outside would land here instead.
    */
-  private scrollTo(x: number, exact: boolean): void {
+  private scrollLaneTo(x: number, exact: boolean): void {
     const el = this.scrollerEl;
     if (!el) return;
     const current = exact ? el.scrollLeft : this.scrollX;

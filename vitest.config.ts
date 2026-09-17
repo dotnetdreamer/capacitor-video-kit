@@ -17,7 +17,12 @@ export default defineVitestConfig({
       {
         test: {
           name: 'unit',
-          include: ['src/**/*.unit.test.{ts,tsx}'],
+          /*
+           * `build/` as well as `src/`, for the one unit test that reads the components rather than
+           * running them: it needs `node:fs` and the TypeScript compiler, and `src/tsconfig.json` is
+           * the program Stencil compiles the editor with, where neither belongs.
+           */
+          include: ['src/**/*.unit.test.{ts,tsx}', 'build/**/*.unit.test.ts'],
           environment: 'stencil',
         },
       },

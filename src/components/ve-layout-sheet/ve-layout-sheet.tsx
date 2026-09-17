@@ -65,7 +65,16 @@ export class VeLayoutSheet {
     if (track) this.ctx.store.swapTrackZ(track.id);
   };
 
-  private readonly remove = () => {
+  /*
+   * `removeTrack` and not `remove`. Under `dist-custom-elements` a component class IS its element,
+   * so a member called `remove` replaces `HTMLElement.prototype.remove` on that element - and the
+   * vdom takes a sheet off the screen by calling `elm.remove()`. Closing this sheet therefore threw
+   * the second video away and left the element in the document, silently, on the tick and on every
+   * other way out. It cannot happen in the lazy build, where the element is a proxy around the
+   * instance, which is why no test in this package saw it. The guard for the whole class of it is
+   * `build/element-members.unit.test.ts`.
+   */
+  private readonly removeTrack = () => {
     const track = this.ctx.store.videoTrack.value;
     if (track) this.ctx.store.removeVideoTrack(track.id);
   };
@@ -132,7 +141,7 @@ export class VeLayoutSheet {
                     <ve-icon name="swap-vertical-outline"></ve-icon>
                     <span>Swap</span>
                   </button>
-                  <button type="button" class="ls__action ls__action--danger" onClick={this.remove}>
+                  <button type="button" class="ls__action ls__action--danger" onClick={this.removeTrack}>
                     <ve-icon name="trash-outline"></ve-icon>
                     <span>Remove</span>
                   </button>
