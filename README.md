@@ -22,14 +22,16 @@ handed.
 ## Install
 
 ```jsonc
-// package.json
-"choisy-video-kit": "file:capacitor-plugins/video-kit"
-// tsconfig.json — consumed from source, so a contract change is a type error immediately
-"paths": { "choisy-video-kit": ["./capacitor-plugins/video-kit/src/index.ts"] }
+// package.json. Until this is published, a path to the sibling checkout
+"choisy-video-kit": "file:../../choisy-video-kit"
 ```
 
-`npm install && npx cap sync android`. One npm package registers both plugin classes: the Capacitor
-CLI scans every `.kt` under `android/src/main` and emits an entry per `@CapacitorPlugin` it finds.
+`npm install` in this repository first, whose `prepare` script leaves a built `dist/` behind, then
+`npm install && npx cap sync` in the host app. The host needs nothing in its `tsconfig.json`: this
+package is resolved through `node_modules` and its exports map like any other dependency.
+
+One npm package registers both plugin classes: the Capacitor CLI scans every `.kt` under
+`android/src/main` and emits an entry per `@CapacitorPlugin` it finds.
 
 Gradle versions come from the host's `android/variables.gradle` (`kotlin_version`, `media3Version`,
 `workManagerVersion`, `okhttpVersion`, `kotlinxCoroutinesVersion`), with the plugin's own pins as a
@@ -37,9 +39,8 @@ fallback.
 
 ### Entry points
 
-The app compiles this package from source, which is what the `paths` entry above buys: a change to
-the native contract is a type error in the app immediately rather than after a publish. Everyone
-else resolves the built package through its exports map, and there are exactly two ways in.
+Every consumer, the Choisy app included, resolves the built package through its exports map, and
+there are exactly two ways in.
 
 | Specifier | What it is |
 |---|---|
@@ -80,17 +81,17 @@ imported from `choisy-video-kit` exactly as before.
 `android/`, no `ios/`, no `Package.swift`.
 
 Neither consumer loses anything by that, because neither reaches this package through a tarball.
-The app installs it as `file:capacitor-plugins/video-kit`, which npm resolves to a **symlink** at
-`node_modules/choisy-video-kit` pointing back into this directory, and `files` has no say over what
+The app installs it as `file:../../choisy-video-kit`, which npm resolves to a **symlink** at
+`node_modules/choisy-video-kit` pointing back into this repository, and `files` has no say over what
 is visible through a symlink: `npx cap sync` reads `android/` and `ios/` straight out of the working
-tree, and the app's TypeScript reads `src/` through the `paths` entry above, which is a repository
-path and never touches `node_modules`. The other consumer is `@choisy/video-editor`, which vendors
+tree, while the app's TypeScript reads `dist/` through the exports map. The other consumer is `@choisy/video-editor`, which vendors
 `npm pack` of this package and bundles it into its own tarball; that reaches `choisy-video-kit/editor`
 and nothing native, and before this narrowing it shipped 900 kB of Kotlin, Swift and TypeScript
 source into every React, Vue and Angular application that installed the editor.
 
-The consequence to know about: a tarball of this package is **not installable by a native app**. If
-one ever needs to be, put `android/src/main/`, `android/build.gradle`, `ios/Sources` and
+The consequence to know about: a tarball of this package is **not installable by a native app**, so
+this is the one thing standing between here and an `npm publish` that a host could actually install.
+When that day comes, put `android/src/main/`, `android/build.gradle`, `ios/Sources` and
 `Package.swift` back into `files` and give the editor a web-only tarball instead.
 
 ## Use
@@ -224,7 +225,7 @@ each with `phase`, an optional `httpStatus`, and `retryable`.
 The web half:
 
 ```sh
-npm run build      # dist/esm and dist/cjs, each with declarations, source maps and a module-type marker
+npm run build      # dist/esm and dist/cjs, each with declarations and a module-type marker
 npm run typecheck
 ```
 
@@ -234,8 +235,11 @@ adds the extensions to the emitted ESM afterwards, where Node is the one that ne
 
 The native half:
 
+The plugin is a Capacitor Android library, so it is built through a host app rather than on its
+own: the Gradle wrapper, the SDK location and `variables.gradle` all live there.
+
 ```powershell
-cd choisy-mobile/android
+cd <host app>/android
 $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
 .\gradlew.bat :choisy-video-kit:compileDebugKotlin :choisy-video-kit:testDebugUnitTest
 ```

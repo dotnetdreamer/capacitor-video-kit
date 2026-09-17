@@ -1,6 +1,6 @@
 {
   "name": "choisy-video-kit",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Native video composition and native background publishing for Capacitor: edit and encode on the device, then upload in a way that survives the app being killed.",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
@@ -58,9 +58,11 @@
     "build:esm": "tsc -p tsconfig.json",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "clean": "rimraf dist",
+    "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@capacitor/core": "^8.0.2",
     "rimraf": "^6.0.1",
     "typescript": "~5.9.0"
   },
