@@ -18,7 +18,7 @@ import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
 import type { EditorPanel } from '../../state/editor.types';
 import { OverlayBitmaps } from '../../state/overlay-bitmap';
-import { DISCARD_EDITS, EditorConfirm, renderFailed } from '../ve-alert/editor-confirm';
+import { DISCARD_EDITS, EditorConfirm, RENDER_UNAVAILABLE, renderFailed } from '../ve-alert/editor-confirm';
 import { formatClock, shellLayout } from './shell-layout';
 
 /**
@@ -566,7 +566,26 @@ export class VeEditor {
     const sources = this.postedSources(manifest);
     const render = store.host.render;
 
-    if (!render || !this.renderSupported || isUntouched(manifest, store.durations.value)) {
+    // A post that is one of its own clips, untouched, is posted as that file: no encode, no quality
+    // lost, and the fast path every engine tests for.
+    if (isUntouched(manifest, store.durations.value)) {
+      this.finish({ sources, manifest });
+      return;
+    }
+
+    /*
+     * A post that is NOT that, on a host that cannot build one. It used to finish here without a
+     * word, handing back a manifest and no video - and a host that takes the first clip as the
+     * post's own then published one raw clip as though it were the edit. A two layer post went out
+     * as whichever clip happened to be first.
+     *
+     * So it is asked instead. Posting the clips unedited is still on offer, because it is what the
+     * customer may well want and what a failed render already offers; what has gone is doing it to
+     * them silently.
+     */
+    if (!render || !this.renderSupported) {
+      const role = await this.confirm.ask(RENDER_UNAVAILABLE);
+      if (this.destroyed || role !== 'plain') return;
       this.finish({ sources, manifest });
       return;
     }

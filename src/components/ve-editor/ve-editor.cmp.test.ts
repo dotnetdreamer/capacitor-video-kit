@@ -93,6 +93,69 @@ afterEach(() => {
   for (const column of mounted.splice(0)) column.remove();
 });
 
+/*
+ * What a host that cannot render is told, and what it is NOT told silently.
+ *
+ * The bug: the editor finished on the spot when its host answered `isSupported()` false, handing
+ * back a manifest and no video. The app's upload flow then takes the first clip as the post's own,
+ * so a two layer post was published as whichever raw clip happened to be first, with the other one
+ * filed beside it as a source - and nobody was asked or told anything at any point.
+ *
+ * `HOST` has no `render` at all, which is exactly that case, and `manifest()` is two videos on the
+ * frame, which is a post no single clip of it can stand in for.
+ */
+describe('ve-editor with nothing to render on', () => {
+  it('asks before posting an edit it cannot build, rather than finishing silently', async () => {
+    const { editor } = await mount();
+    const done: CustomEvent[] = [];
+    editor.addEventListener('veDone', event => done.push(event as CustomEvent));
+
+    inside<HTMLButtonElement>(editor, '.ve__round--next')!.click();
+    await until('the question about the missing renderer', () => !!inside(editor, 've-alert'));
+
+    const alert = inside(editor, 've-alert')!;
+    expect(alert.getAttribute('header') ?? (alert as unknown as { header: string }).header).toContain(
+      'Can’t build your video',
+    );
+    // Still in the editor: nothing has been handed back while the question is on screen.
+    expect(done.length).toBe(0);
+  });
+
+  it('posts the clips unedited once that has been chosen, and says so by sending no video', async () => {
+    const { editor } = await mount();
+    const done: CustomEvent[] = [];
+    editor.addEventListener('veDone', event => done.push(event as CustomEvent));
+
+    inside<HTMLButtonElement>(editor, '.ve__round--next')!.click();
+    await until('the question about the missing renderer', () => !!inside(editor, 've-alert'));
+
+    const buttons = [...(inside(editor, 've-alert')!.shadowRoot?.querySelectorAll('button') ?? [])];
+    buttons.find(button => button.textContent?.includes('Post without edits'))!.click();
+    await until('the editor to finish', () => done.length > 0);
+
+    // No `stitched`: the host is told in the only way that matters that what it has is the clips,
+    // not the edit. What it must never get is a rendered-looking answer that is one of the clips.
+    expect(done[0].detail.stitched).toBeUndefined();
+    expect(done[0].detail.manifest.videoTracks.length).toBe(1);
+  });
+
+  it('keeps the editor exactly as it was when the question is declined', async () => {
+    const { editor } = await mount();
+    const done: CustomEvent[] = [];
+    editor.addEventListener('veDone', event => done.push(event as CustomEvent));
+
+    inside<HTMLButtonElement>(editor, '.ve__round--next')!.click();
+    await until('the question about the missing renderer', () => !!inside(editor, 've-alert'));
+
+    const buttons = [...(inside(editor, 've-alert')!.shadowRoot?.querySelectorAll('button') ?? [])];
+    buttons.find(button => button.textContent?.includes('Keep editing'))!.click();
+    await until('the question to go', () => !inside(editor, 've-alert'));
+
+    expect(done.length).toBe(0);
+    expect(inside(editor, 've-toolbar')).not.toBeNull();
+  });
+});
+
 describe('ve-editor fits the window it is given', () => {
   it('keeps its column inside the window once the status bar has been measured', async () => {
     const { editor, window } = await mount();

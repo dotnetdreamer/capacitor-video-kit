@@ -108,6 +108,28 @@ export const DISCARD_EDITS: ConfirmRequest = {
 };
 
 /**
+ * A post that HAS to be built, on a host that cannot build one.
+ *
+ * Not a failure - nothing was attempted - so there is nothing to try again, and that is the only
+ * way this differs from [renderFailed]. What it exists to prevent is the silence it replaces: the
+ * editor used to finish on the spot when its host answered `isSupported()` with false, handing back
+ * a manifest and no video, and a host that took the first clip as the post then published one raw
+ * clip as though it were the edit. Two videos side by side went out as the left-hand one.
+ *
+ * "Post without edits" is still offered, because for a single clip somebody only trimmed it is a
+ * reasonable thing to want and it is what [renderFailed] already offers. It is offered as a CHOICE,
+ * with the consequence in front of them, which is the whole of the fix.
+ */
+export const RENDER_UNAVAILABLE: ConfirmRequest = {
+  header: 'Can’t build your video here',
+  message: 'This device can’t build an edited video. You can post your clips as they were, without the edits, or keep editing.',
+  buttons: [
+    { text: 'Post without edits', role: 'plain' },
+    { text: 'Keep editing', role: 'cancel' },
+  ],
+};
+
+/**
  * A render that produced no file, with a different first sentence for each way it can fail, because
  * two of the three are things the customer can do something about.
  *
