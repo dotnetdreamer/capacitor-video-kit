@@ -120,6 +120,8 @@ export class VeToolbar {
 
   disconnectedCallback() {
     this.watcher.stop();
+    this.scrollerEl?.removeEventListener('wheel', this.onWheel);
+    this.scrollerEl = undefined;
   }
 
   /**
@@ -193,7 +195,37 @@ export class VeToolbar {
    * would run again as well.
    */
   private readonly keepScroller = (el?: HTMLElement) => {
+    if (this.scrollerEl === el) return;
+    this.scrollerEl?.removeEventListener('wheel', this.onWheel);
     this.scrollerEl = el;
+    // Not passive: the whole point is to take the wheel away from the page, and a passive listener
+    // may not. Attached by hand rather than through the vdom for that reason alone.
+    el?.addEventListener('wheel', this.onWheel, { passive: false });
+  };
+
+  /**
+   * A mouse wheel over the tool row, which only scrolls sideways.
+   *
+   * A wheel sends `deltaY`, a row like this scrolls in x, and no browser turns one into the other
+   * on its own - so on a desktop the last few tools were simply unreachable: the scrollbar is
+   * hidden by design, there is no touch to flick with, and shift+wheel is not something anybody
+   * should have to know. A trackpad's sideways gesture already arrives as `deltaX` and is left
+   * alone.
+   *
+   * The wheel goes back to the page at either end rather than being swallowed, so a scroll that
+   * began on the toolbar and ran out of row does what the customer meant instead of stopping dead.
+   */
+  private readonly onWheel = (event: WheelEvent) => {
+    const el = this.scrollerEl;
+    if (!el || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const room = el.scrollWidth - el.clientWidth;
+    if (room <= 0) return;
+    // Firefox reports lines and a page wheel reports pages; both have to become pixels first.
+    const step = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? el.clientWidth : 1;
+    const next = Math.max(0, Math.min(room, el.scrollLeft + event.deltaY * step));
+    if (next === el.scrollLeft) return;
+    el.scrollLeft = next;
+    event.preventDefault();
   };
 
   /* ========================================================================================= */

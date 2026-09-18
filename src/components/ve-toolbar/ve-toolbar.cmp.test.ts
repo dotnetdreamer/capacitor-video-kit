@@ -173,6 +173,36 @@ afterEach(() => {
   }
 });
 
+describe('ve-toolbar on a desktop', () => {
+  it('scrolls the row with a plain wheel, which is the only way a mouse can reach the end of it', async () => {
+    const { bar } = await mount();
+    const scroller = root(bar).querySelector('.tb__scroller') as HTMLElement;
+    // The row has to actually overflow for there to be anything to reach; the root row does.
+    await until('the row to overflow', () => scroller.scrollWidth > scroller.clientWidth);
+
+    scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true }));
+
+    // A wheel sends deltaY and this row scrolls in x: no browser turns one into the other, so
+    // without this the last tools were unreachable - the scrollbar is hidden, there is no touch to
+    // flick with, and shift+wheel is not something anybody should have to know.
+    expect(scroller.scrollLeft).toBeGreaterThan(0);
+  });
+
+  it('leaves the wheel to the page once the row has run out', async () => {
+    const { bar } = await mount();
+    const scroller = root(bar).querySelector('.tb__scroller') as HTMLElement;
+    await until('the row to overflow', () => scroller.scrollWidth > scroller.clientWidth);
+    scroller.scrollLeft = scroller.scrollWidth;
+
+    const event = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    scroller.dispatchEvent(event);
+
+    // Swallowed at the end, a scroll that began on the toolbar would stop dead rather than doing
+    // what the customer meant.
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
+
 describe('ve-toolbar', () => {
   it('shows the tools for whatever is selected, and a way back out of them', async () => {
     const { store, bar } = await mount();
