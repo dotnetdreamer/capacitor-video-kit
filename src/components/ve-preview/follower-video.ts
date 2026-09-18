@@ -69,8 +69,9 @@ export class FollowerVideo {
     this.video = media.video;
     this.hold = new VideoHold(media.video, media.hold, media.setHolding, safetyMs);
     // A load lands on the file's first frame until its metadata is in and the position can be
-    // clamped against a duration, so where the playhead is gets said again here.
-    this.listen('loadedmetadata', () => this.apply());
+    // clamped against a duration, so where the playhead is gets said again here - and said as a real
+    // seek, which is the one thing that makes a freshly loaded element present anything at all.
+    this.listen('loadedmetadata', () => this.apply(true));
     // Either of these means the new source has a frame up, which is when the held one has done its
     // job. The element is only ever moved from here, so neither can fire for anything else.
     this.listen('loadeddata', () => this.hold.lower());
@@ -121,6 +122,17 @@ export class FollowerVideo {
     repaintPaused(this.video);
   }
 
+  /**
+   * Puts this layer's picture back after the page has been away; see [PreviewPlayer.revive], which
+   * is the only caller and where the whole of it is written down. Forgetting the source is what
+   * makes [sync] load it again, and a load is what a purged element needs.
+   */
+  revive(): void {
+    if (this.destroyed || !this.video.paused) return;
+    this.loadedKey = null;
+    this.sync(this.layer, this.playing);
+  }
+
   destroy(): void {
     this.destroyed = true;
     for (const off of this.unlisten) off();
@@ -153,8 +165,11 @@ export class FollowerVideo {
     this.apply();
   }
 
-  /** Rate, sound and position, from the layer [sync] was last given. */
-  private apply(): void {
+  /**
+   * Rate, sound and position, from the layer [sync] was last given. `fresh` is a source whose
+   * metadata has just arrived, which is always seeked; see below.
+   */
+  private apply(fresh = false): void {
     const layer = this.layer;
     const clip = layer ? findClip(this.store.manifest.value, layer.clipId) : null;
     if (!clip) return;
@@ -171,7 +186,13 @@ export class FollowerVideo {
     // more of the file when the clip is sped up.
     const tolerance = this.playing && !video.paused ? (DRIFT_MS * speed) / 1000 : SEEK_EPSILON_S;
     const targetSec = this.targetMs / 1000;
-    if (Math.abs(video.currentTime - targetSec) > tolerance) video.currentTime = targetSec;
+    // A source that has just loaded is seeked whatever those two numbers say, which is the same rule
+    // the base element's loader has for the same reason: an element that has never been seeked keeps
+    // the show-poster flag the load set, and a WebView answers the first decoded frame of one that
+    // still has it by not presenting it. Every "Add video" lands exactly there - a new layer starts
+    // at 0 with the playhead on 0, so the tolerance found nothing to correct - and the second layer
+    // then sat on its blank poster, showing nothing, until some other edit happened to move it.
+    if (fresh || Math.abs(video.currentTime - targetSec) > tolerance) video.currentTime = targetSec;
 
     if (this.playing) {
       if (video.paused) startPlayback(video);

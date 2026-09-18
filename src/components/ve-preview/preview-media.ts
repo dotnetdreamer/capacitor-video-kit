@@ -122,6 +122,34 @@ export function repaintPaused(video: HTMLVideoElement): void {
 }
 
 /**
+ * Calls back every time the page comes back from being hidden, and stops when the function it
+ * returns is called.
+ *
+ * This is the one moment a paused element loses its picture with nothing in the editor having asked
+ * for anything. A hidden page is a page WebKit takes the memory back from: every paused element is
+ * put on `BufferingPolicy::PurgeResources`, which throws its decoded frame and its rendering
+ * resources away, and the page coming back puts none of it back. The element still reports
+ * HAVE_ENOUGH_DATA at the position it is parked on, and paints black.
+ *
+ * No seek cures that, which is what makes it look like a bug in this package rather than a state the
+ * platform left behind: neither [repaintPaused]'s nudge nor a real scrub across the whole post
+ * changes the policy, and the frames they ask for are never presented. Only a fresh load or playing
+ * does - `play()` is where WebKit itself puts the policy back - which is exactly the shape of the
+ * report this was found from: the base track went black, no layout preset and no scrub brought it
+ * back, and Play fixed it instantly and for good.
+ *
+ * Every host picker hides the page. Adding a second video opens one, which is why "adding the second
+ * track" was the trigger; it is no more about the second track than about the picker in front of it.
+ */
+export function onPageShown(handler: () => void): () => void {
+  const listener = () => {
+    if (document.visibilityState === 'visible') handler();
+  };
+  document.addEventListener('visibilitychange', listener);
+  return () => document.removeEventListener('visibilitychange', listener);
+}
+
+/**
  * The outgoing clip's last frame, held over a `<video>` while the element is pointed at the next
  * source.
  *
