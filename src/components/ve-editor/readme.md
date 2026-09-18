@@ -55,32 +55,34 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 
 ## CSS Custom Properties
 
-| Name                | Description                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------- |
-| `--ve-accent`       | What marks the customer's own choice: a selected chip, a slider's fill, the render bar      |
-| `--ve-bg`           | The page behind the whole editor, and the letterbox around the video                        |
-| `--ve-chrome-max`   | How wide a row of chrome runs before it stops growing and centres itself                    |
-| `--ve-cta`          | The one button that moves forward, Next                                                     |
-| `--ve-cta-text`     | Text on that button, dark because the button is not                                         |
-| `--ve-danger`       | Delete, and recording                                                                       |
-| `--ve-dim`          | Secondary text: a caption, a total, an unselected tab                                       |
-| `--ve-faint`        | Text and marks that are present but not being read: a disabled button, the timeline's ticks |
-| `--ve-lane-effect`  | The timeline lane colour for an effect layer                                                |
-| `--ve-lane-image`   | The timeline lane colour for an image layer                                                 |
-| `--ve-lane-ink`     | Text on a lane, dark because every lane colour is light                                     |
-| `--ve-lane-music`   | The timeline lane colour for music                                                          |
-| `--ve-lane-sticker` | The timeline lane colour for a sticker layer                                                |
-| `--ve-lane-text`    | The timeline lane colour for a text layer                                                   |
-| `--ve-lane-voice`   | The timeline lane colour for a voiceover                                                    |
-| `--ve-line`         | The hairline between two rows                                                               |
-| `--ve-raised`       | A tile or a control sitting on a sheet                                                      |
-| `--ve-raised-2`     | A tile sitting on another tile, one step further forward                                    |
-| `--ve-safe-bottom`  | What the home indicator covers, replaced by a measurement once the host reports one         |
-| `--ve-safe-top`     | What the status bar covers, replaced by a measurement once the host reports one             |
-| `--ve-sheet`        | The background of an open sheet                                                             |
-| `--ve-stage-gutter` | What the preview keeps free either side of the video for Back and Next, together            |
-| `--ve-surface`      | The toolbar's own background, a step up from the page                                       |
-| `--ve-text`         | Text and glyphs at full strength                                                            |
+| Name                 | Description                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `--ve-accent`        | What marks the customer's own choice: a selected chip, a slider's fill, the render bar      |
+| `--ve-bg`            | The page behind the whole editor, and the letterbox around the video                        |
+| `--ve-chrome-max`    | How wide a row of chrome runs before it stops growing and centres itself                    |
+| `--ve-cta`           | The one button that moves forward, Next                                                     |
+| `--ve-cta-text`      | Text on that button, dark because the button is not                                         |
+| `--ve-danger`        | Delete, and recording                                                                       |
+| `--ve-dim`           | Secondary text: a caption, a total, an unselected tab                                       |
+| `--ve-faint`         | Text and marks that are present but not being read: a disabled button, the timeline's ticks |
+| `--ve-lane-effect`   | The timeline lane colour for an effect layer                                                |
+| `--ve-lane-image`    | The timeline lane colour for an image layer                                                 |
+| `--ve-lane-ink`      | Text on a lane, dark because every lane colour is light                                     |
+| `--ve-lane-music`    | The timeline lane colour for music                                                          |
+| `--ve-lane-sticker`  | The timeline lane colour for a sticker layer                                                |
+| `--ve-lane-text`     | The timeline lane colour for a text layer                                                   |
+| `--ve-lane-voice`    | The timeline lane colour for a voiceover                                                    |
+| `--ve-line`          | The hairline between two rows                                                               |
+| `--ve-raised`        | A tile or a control sitting on a sheet                                                      |
+| `--ve-raised-2`      | A tile sitting on another tile, one step further forward                                    |
+| `--ve-safe-bottom`   | What the home indicator covers, replaced by a measurement once the host reports one         |
+| `--ve-safe-top`      | What the status bar covers, replaced by a measurement once the host reports one             |
+| `--ve-sheet`         | The background of an open sheet                                                             |
+| `--ve-stage-gutter`  | What the preview keeps free either side of the video for Back and Next, together            |
+| `--ve-surface`       | The toolbar's own background, a step up from the page                                       |
+| `--ve-text`          | Text and glyphs at full strength                                                            |
+| `--ve-toolbar-max`   | The same for the tool row, wide enough that its longest row still fits                      |
+| `--ve-transport-max` | The same for the clock and transport row, which wants to stay tighter                       |
 
 
 ## Dependencies

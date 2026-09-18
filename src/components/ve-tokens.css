@@ -38,6 +38,8 @@
    * @prop --ve-lane-ink: Text on a lane, dark because every lane colour is light
    * @prop --ve-stage-gutter: What the preview keeps free either side of the video for Back and Next, together
    * @prop --ve-chrome-max: How wide a row of chrome runs before it stops growing and centres itself
+   * @prop --ve-transport-max: The same for the clock and transport row, which wants to stay tighter
+   * @prop --ve-toolbar-max: The same for the tool row, wide enough that its longest row still fits
    * @prop --ve-safe-top: What the status bar covers, replaced by a measurement once the host reports one
    * @prop --ve-safe-bottom: What the home indicator covers, replaced by a measurement once the host reports one
    */
@@ -75,12 +77,26 @@
    * (two 44px buttons, 12px in from each edge, and air) is what keeps them off it. From a tablet up
    * there is room to stand them beside the frame instead, which is what the wider value buys.
    *
-   * `--ve-chrome-max` is how wide a row of chrome - the transport, a sheet's controls, a grid of
-   * tiles - may run before it stops growing and centres itself. `none` is the phone, where a row
-   * should use every pixel there is. A volume slider drawn across a 2000px monitor should not.
+   * `--ve-chrome-max` is how wide a row of chrome - a sheet's controls, a grid of tiles - may run
+   * before it stops growing and centres itself. `none` is the phone, where a row should use every
+   * pixel there is. A volume slider drawn across a 2000px monitor should not.
+   *
+   * `--ve-transport-max` is the same question for the transport, and it gets an answer of its own
+   * because that row is three groups pushed apart rather than one block of content: the clock takes
+   * the room to the left of the play button and the undo/redo/full screen buttons take the room to
+   * its right, so every pixel the row is given is a pixel BETWEEN them. At a sheet's width the
+   * clock ends up a third of a screen from the button it belongs to.
+   *
+   * `--ve-toolbar-max` is the third, and it is a different number again because the tool row has a
+   * chevron standing OUTSIDE the tiles, in the corner, while the tiles centre themselves on the row.
+   * Every pixel the row is given puts the two further apart, so on a monitor the chevron ended up
+   * against the edge of the screen with the tools half a screen away. It has to stay wide enough
+   * that the longest row - the root row, about 970px of tiles - still fits without scrolling.
    */
   --ve-stage-gutter: 128px;
   --ve-chrome-max: none;
+  --ve-transport-max: none;
+  --ve-toolbar-max: none;
 
   /*
    * What the system bars cover. `env()` is the starting point rather than the answer: `ve-editor`
@@ -109,6 +125,8 @@
   :host {
     --ve-stage-gutter: 184px;
     --ve-chrome-max: 640px;
+    --ve-transport-max: 440px;
+    --ve-toolbar-max: 1000px;
   }
 }
 

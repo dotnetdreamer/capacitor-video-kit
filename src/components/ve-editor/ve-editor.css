@@ -131,9 +131,11 @@
 
 /*
  * The clock at one end and the undo/redo/full screen buttons at the other, which is a row that has
- * to stop growing somewhere: left to the width of a monitor, the clock and the buttons end up a
- * screen apart with the play button marooned between them. `--ve-chrome-max` is `none` on a phone,
- * where the rule below is what the row already did.
+ * to stop growing somewhere: every pixel it is given is a pixel BETWEEN the three groups, so left
+ * to the width of a monitor the clock and the buttons end up a third of a screen from the play
+ * button marooned in the middle. It takes `--ve-transport-max` rather than the chrome's own width
+ * for exactly that reason - a sheet full of controls wants the room, this row does not - and on a
+ * phone both are `none` and the rule below is what the row already did.
  *
  * `width` and `box-sizing` are both needed for the centring: an auto margin makes a flex item size
  * itself to its CONTENT rather than stretch, so without the width the row would shrink to the three
@@ -146,7 +148,7 @@
   flex: 0 0 52px;
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--ve-chrome-max);
+  max-width: var(--ve-transport-max);
   margin: 0 auto;
   padding: 0 12px 0 16px;
 }

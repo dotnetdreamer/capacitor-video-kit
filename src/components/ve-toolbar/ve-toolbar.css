@@ -20,15 +20,21 @@
 }
 
 /*
- * The row stops growing at `--ve-chrome-max` and centres, which on a phone (`none`) is what it
- * already did. It matters for a LONG row on a wide screen: the track inside centres itself while it
- * fits, so without a cap the tools of a selected layer sit marooned in the middle of a monitor with
- * a screen's width of black on either side, and a row too long to fit scrolls across all of it.
+ * Capped at a width of its own, and the number matters in both directions.
+ *
+ * Too NARROW and the row scrolls for no reason: the root row is about 970px of tiles, and holding
+ * it to the width a sheet wants (760px) hid the last two behind a scroll on a screen with most of a
+ * thousand pixels to spare. Too WIDE - which is to say uncapped - and the collapse chevron, which
+ * stands outside the tiles in the corner while the tiles centre themselves, drifts out to the edge
+ * of the screen: at 1280px it sat 211px from the first tool, and on a 2560px monitor some 850px.
+ *
+ * `--ve-toolbar-max` is 1000px from a tablet up, which clears the longest row and still keeps the
+ * chevron with the tools it belongs to. On a phone it is `none` and this row is what it always was.
  */
 .tb {
   display: flex;
   align-items: center;
-  max-width: var(--ve-chrome-max, none);
+  max-width: var(--ve-toolbar-max, none);
   margin: 0 auto;
 }
 

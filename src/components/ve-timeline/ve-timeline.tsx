@@ -85,6 +85,11 @@ const LANE_PITCH_COMPACT = 40;
 /** How far the rail of lifted thumbnails slides per frame while the finger holds at an edge. */
 const REORDER_RAIL_PX = 6;
 
+/** The add button's own size and the air it keeps, both from the edge of the screen and from the
+ *  end of the video it follows. Its width is the usual 44px finger target. */
+const ADD_SIZE_PX = 44;
+const ADD_GAP_PX = 12;
+
 /*
  * The mouse's three numbers.
  *
@@ -660,6 +665,9 @@ export class VeTimeline {
   componentDidRender() {
     this.ensureBound();
     this.clampLanes();
+    // A repaint that changed the length of the video, the zoom, or the width of the screen moves
+    // the end the add button follows without any scroll having happened.
+    this.placeAdd(this.scrollX);
   }
 
   disconnectedCallback() {
@@ -1094,6 +1102,32 @@ export class VeTimeline {
     const half = Math.max(80, this.viewportWidth.value / 2);
     const chunk = Math.floor(x / half) * half;
     if (chunk !== this.scrollChunk.value) this.scrollChunk.value = chunk;
+    this.placeAdd(x);
+  }
+
+  /**
+   * Puts the add button just after the end of the video, or against the right edge once the end has
+   * been scrolled off past it.
+   *
+   * On a phone the two are almost always the same place - the filmstrip fills the width - which is
+   * why the button could simply live at the right edge. On a monitor they are not: the timeline is
+   * three or four times as wide, and scrolling to the end of the video, which is exactly where
+   * somebody reaches for "add another clip", left the button most of a screen away from the clip it
+   * would be added after.
+   *
+   * Written as a property rather than through the render because it answers to `scrollLeft`, which
+   * changes on every frame of a scroll and is not state the vdom has any business repainting for.
+   * The CSS reads it with no fallback on purpose: until this has run, `left` is invalid and the
+   * button keeps the `right: 12px` the stylesheet gives it.
+   */
+  private placeAdd(scrollX: number): void {
+    const tl = this.tlEl;
+    if (!tl) return;
+    const width = this.viewportWidth.value;
+    if (width <= 0) return;
+    const afterVideo = this.pad.value + this.totalPx.value - scrollX + ADD_GAP_PX;
+    const atEdge = width - ADD_SIZE_PX - ADD_GAP_PX;
+    tl.style.setProperty('--tl-add-x', `${Math.round(Math.max(0, Math.min(afterVideo, atEdge)))}px`);
   }
 
   /**

@@ -451,9 +451,16 @@
   background: #fff;
 }
 
+/*
+ * `--tl-add-x` is written by the component: the button follows the end of the video, and only falls
+ * back to the right edge once that end has been scrolled off past it. Until the first measurement
+ * the property is unset, which makes `left` invalid and leaves `right` in charge - so the button is
+ * never unplaced, and a timeline rendered without script still has it where it always was.
+ */
 .tl__add {
   position: absolute;
   top: calc(var(--ruler-h) + var(--track-top) + (var(--track-h) - 44px) / 2);
+  left: var(--tl-add-x);
   right: 12px;
   z-index: 6;
   display: grid;
