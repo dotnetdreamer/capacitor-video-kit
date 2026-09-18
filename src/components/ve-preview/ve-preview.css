@@ -234,6 +234,26 @@
 }
 
 /*
+ * Two of the three corners are buttons that do a thing on a click - delete, and edit or duplicate -
+ * and the third is the only one that is dragged: it scales and turns the layer. Behind the pointer
+ * query like every cursor in the package, because a cursor means nothing to a finger.
+ *
+ * The frame around them is left alone on purpose. What a drag there means depends on what is
+ * selected and on what is under the point, so a cursor covering the whole picture would promise a
+ * hold on the empty parts of the video where there is nothing to take hold of.
+ */
+@media (hover: hover) and (pointer: fine) {
+  .pv__handle--tl,
+  .pv__handle--tr {
+    cursor: pointer;
+  }
+
+  .pv__handle--br {
+    cursor: nwse-resize;
+  }
+}
+
+/*
  * `--pv-shift` is what holds a handle on the preview when its corner of the layer has left the
  * stage - see `handleSpot` for why it has to. It is a translation in the SAME turned space as the
  * rest of the transform, so it simply follows the corner offset.

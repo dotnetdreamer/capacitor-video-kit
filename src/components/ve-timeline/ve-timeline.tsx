@@ -271,11 +271,17 @@ export class VeTimeline {
   private readonly holdWidth = signal(0);
 
   /**
-   * A mouse is dragging the timeline along. Only the cursor turns on it, and it is a signal rather
-   * than a field because the cursor is drawn by a class on `.tl`, which the vdom owns: a class
-   * added by hand would be wiped by the next repaint, and a scrub repaints constantly.
+   * What the cursor is while a drag is live: nothing, the closed hand, or the resize arrows.
+   *
+   * It is put on the whole timeline rather than on the item being dragged because a drag captures
+   * the pointer - the cursor then follows the pointer wherever it goes, including well off the lane
+   * it started on, and a hand that turned back into an arrow halfway through a move would read as
+   * the drag having been dropped.
+   *
+   * A signal rather than a field because the class it draws sits on `.tl`, which the vdom owns: a
+   * class added by hand would be wiped by the next repaint, and a drag repaints constantly.
    */
-  private readonly scrubbing = signal(false);
+  private readonly dragCursor = signal<DragCursor>(null);
 
   private readonly pad = computed(() => this.viewportWidth.value / 2);
   private readonly totalPx = computed(() => (this.ctx.store.totalMs.value / 1000) * this.ctx.store.pps.value);
@@ -1389,7 +1395,7 @@ export class VeTimeline {
 
   private beginDrag(drag: TimelineDrag): void {
     this.drag = drag;
-    this.scrubbing.value = drag.kind === 'scrub';
+    this.dragCursor.value = dragCursor(drag);
     this.blockTouchScroll = true;
     try {
       this.scroller().setPointerCapture(drag.pointerId);
@@ -1862,7 +1868,7 @@ export class VeTimeline {
       }
     }
     this.drag = null;
-    this.scrubbing.value = false;
+    this.dragCursor.value = null;
     this.blockTouchScroll = false;
     const el = this.scroller();
     // The element is taken out of the document before `disconnectedCallback` runs, so a teardown in
@@ -2028,6 +2034,7 @@ export class VeTimeline {
       const store = this.ctx.store;
       const compact = this.compactSig.value;
       const pad = this.pad.value;
+      const cursor = this.dragCursor.value;
       const reorder = this.clipReorder.value;
       const trim = this.trimHandles.value;
       const track2 = this.trackSegments.value;
@@ -2035,7 +2042,13 @@ export class VeTimeline {
       return (
         <Host>
           <div
-            class={{ 'tl': true, 'tl--compact': compact, 'tl--reordering': reorder !== null, 'tl--scrubbing': this.scrubbing.value }}
+            class={{
+              'tl': true,
+              'tl--compact': compact,
+              'tl--reordering': reorder !== null,
+              'tl--drag-move': cursor === 'move',
+              'tl--drag-resize': cursor === 'resize',
+            }}
             key="tl"
             ref={this.keepTl}
           >
@@ -2316,6 +2329,22 @@ export class VeTimeline {
       </button>
     );
   }
+}
+
+/**
+ * Which cursor a drag takes, or null while none is running.
+ *
+ * An edge being pulled is the resize arrows; everything else - carrying a layer to another time,
+ * lifting a segment, scrolling the lanes, pulling the whole timeline along - is the closed hand,
+ * because all of them are the same act of having hold of something.
+ */
+type DragCursor = 'move' | 'resize' | null;
+
+function dragCursor(drag: TimelineDrag): DragCursor {
+  if (drag.kind === 'trim') return 'resize';
+  // A layer's and a sound's two edge modes trim; the third moves the whole window.
+  if ((drag.kind === 'layer' || drag.kind === 'music') && drag.mode !== 'move') return 'resize';
+  return 'move';
 }
 
 /** Places the two edge handles of an item spanning `x` to `x + w` in content px. */

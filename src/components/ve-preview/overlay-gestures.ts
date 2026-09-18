@@ -368,6 +368,8 @@ export class OverlayGestures {
   private frameRequest = 0;
   /** Set when a press on a handle was taken back by the layer under it; see [handleAt]. */
   private swallowClick = false;
+  /** The cursor last written to the stage, so a mouse resting still costs no style writes. */
+  private cursor = '';
   private destroyed = false;
   private readonly unlisten: Array<() => void> = [];
 
@@ -380,10 +382,31 @@ export class OverlayGestures {
     private readonly stage: HTMLElement,
     private readonly ui: GestureUi,
   ) {
-    this.listen('pointerdown', (e) => this.onDown(e as PointerEvent));
-    this.listen('pointermove', (e) => this.onMove(e as PointerEvent));
-    this.listen('pointerup', (e) => this.onUp(e as PointerEvent));
-    this.listen('pointercancel', (e) => this.onUp(e as PointerEvent));
+    /*
+     * Each of the four asks the cursor again once the gesture state has moved on, because all four
+     * can change what the mouse is over without the mouse itself having moved: pressing takes hold
+     * of something, releasing lets go of it, and a layer dropped under a still mouse leaves it over
+     * something new. Left to `pointermove` alone the hand stayed closed after the button came up,
+     * until the mouse was nudged.
+     */
+    this.listen('pointerdown', (e) => {
+      this.onDown(e as PointerEvent);
+      this.updateCursor(e as PointerEvent);
+    });
+    this.listen('pointermove', (e) => {
+      this.onMove(e as PointerEvent);
+      this.updateCursor(e as PointerEvent);
+    });
+    this.listen('pointerup', (e) => {
+      this.onUp(e as PointerEvent);
+      this.updateCursor(e as PointerEvent);
+    });
+    this.listen('pointercancel', (e) => {
+      this.onUp(e as PointerEvent);
+      this.updateCursor(e as PointerEvent);
+    });
+    // The mouse has left the picture, so whatever it was over is no longer under it.
+    this.listen('pointerleave', () => this.setCursor(''));
     // On the way DOWN, so it can be stopped before it reaches the handle's own click handler.
     this.listen('click', (e) => this.onClick(e), true);
     // A long press on the video would otherwise open the WebView's image/video context menu.
@@ -394,6 +417,7 @@ export class OverlayGestures {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const off of this.unlisten) off();
+    this.setCursor('');
     const gesture = this.gesture;
     if (gesture?.kind === 'drag' || gesture?.kind === 'twist') {
       this.flush();
@@ -851,6 +875,59 @@ export class OverlayGestures {
    * but inside the layer that handle belongs to, which takes it back (see [pressBelongsToLayer]).
    * The button's own click would still follow such a press, so it is swallowed on the way down.
    */
+  /* ========================================================================================= */
+  /* The cursor                                                                                */
+  /* ========================================================================================= */
+
+  /**
+   * What the mouse is told it can take hold of, worked out from the SAME hit test a press uses.
+   *
+   * This cannot be a CSS rule, which is why it is here: the frame takes every pointer event on the
+   * picture - each layer inside it is `pointer-events: none` - so the one element a rule could name
+   * covers the whole video, most of which usually holds nothing. A cursor declared there would
+   * promise a grip on empty picture. The hit test is what actually knows, and running the same one
+   * means the hand can never appear anywhere a press would not in fact grab something.
+   *
+   * Only a mouse gets this far. A finger has no cursor to show, and every `pointermove` it sends is
+   * a gesture that is already under way.
+   */
+  private updateCursor(e: PointerEvent): void {
+    if (e.pointerType !== 'mouse') return;
+    this.setCursor(this.cursorFor(e));
+  }
+
+  private cursorFor(e: PointerEvent): string {
+    const gesture = this.gesture;
+    if (gesture) {
+      // The corner handle scales and turns, so it keeps the resize arrows for the whole drag rather
+      // than becoming a hand halfway through it.
+      if (gesture.kind === 'twist' && gesture.source === 'handle') return 'nwse-resize';
+      // Anything with hold of something is the closed hand, wherever the mouse has carried it to -
+      // including well off the layer, which is exactly where a cursor read off the element under
+      // the pointer would have gone back to an arrow and read as the drag having been dropped.
+      if (gesture.kind === 'press' || gesture.kind === 'drag' || gesture.kind === 'twist') return 'grabbing';
+      // A press on empty frame, or a gesture that has given up: nothing is held.
+      return '';
+    }
+
+    // The three corner buttons draw their own cursors in CSS, so ours has to get out of their way.
+    // `handleOf` rather than `handleAt`, which decides who a press belongs to and has a side effect.
+    if (handleOf(e.target)) return '';
+
+    // While the crop sheet is open the whole frame pans the picture inside the window, so every
+    // point on it really is a grip - and nothing else on the frame can be picked up at all.
+    if (this.cropGrip()) return 'grab';
+
+    const rect = this.stage.getBoundingClientRect();
+    return this.hitTest(e.clientX - rect.left, e.clientY - rect.top, rect) ? 'grab' : '';
+  }
+
+  private setCursor(cursor: string): void {
+    if (cursor === this.cursor) return;
+    this.cursor = cursor;
+    this.stage.style.cursor = cursor;
+  }
+
   private handleAt(e: PointerEvent): SelectionHandle | null {
     const handle = handleOf(e.target);
     if (!handle) return null;
