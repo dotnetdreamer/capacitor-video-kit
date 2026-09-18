@@ -1,5 +1,7 @@
 import type { ComposeFit, ComposeRect, ComposeSpec, FilterOp } from '../definitions';
 
+import { MAX_VIDEO_TRACKS } from '../../editor';
+
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
 
 /**
@@ -20,8 +22,16 @@ import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
 /** The renderer draws one blended quad per overlay per frame, so the count is bounded. */
 export const MAX_OVERLAYS = 30;
 
-/** How many video layers may be on screen at once, THE BASE TRACK INCLUDED. */
-export const MAX_VIDEO_TRACKS = 2;
+/**
+ * How many video layers a spec may carry, THE BASE TRACK INCLUDED.
+ *
+ * Re-exported from the editor contract rather than declared again here. It was a 2 of its own
+ * while the contract said 16, so this renderer refused specs the Swift and Kotlin engines had
+ * already been proven to draw: a duplicated constant is a constant that drifts, and this one did.
+ * The cap is not a decoder budget either way - the export composites offline, and what a device
+ * can PLAY at once is the preview's business and a different number in a different place.
+ */
+export { MAX_VIDEO_TRACKS };
 
 const PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
 
