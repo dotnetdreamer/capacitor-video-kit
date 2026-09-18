@@ -29,28 +29,19 @@ import type { EditorStore } from '../../state/editor-store';
 const MAX_PIXEL_RATIO = 2;
 
 /**
- * How long the canvas will hold its last complete frame while a layer that HAD a picture is between
- * sources, before it gives up and draws the post without it.
+ * How long the OTHER layers are held back for one that is between sources, before the frame is
+ * drawn without it.
  *
- * This is what replaced the hold canvases. A `<video>` pointed at a new file paints black through
- * the whole load-seek chain, which is why every element used to carry a `<canvas>` with the outgoing
- * frame copied onto it and a signal to raise and lower it. A composited canvas keeps whatever was
- * last drawn into it for nothing, so the hold is now simply a repaint that does not happen - and
- * the only thing that needs a number is how long "not yet" may last before a layer that is never
- * coming back freezes the whole preview.
+ * Only ever reached when some layers are ready and one is not: a frame with nothing in it is never
+ * painted over a post that should be showing something, however long the wait has run. That is the
+ * rule in [PreviewCanvas.draw], and this is only the bound on how long a clip change may hold its
+ * neighbours still so the frame does not tear in half.
  */
 const WAIT_FOR_LAYER_MS = 2000;
 
-/** What one video track contributes: its element, and whether it has ever had a frame in it. */
+/** What one video track contributes: the element the compositor draws it from. */
 interface Source {
   video: HTMLVideoElement;
-  /**
-   * Whether this element has ever been drawable. It is the difference between a layer that is
-   * BETWEEN sources - worth waiting a moment for, because it had a picture and will have one again -
-   * and a layer that has never had one, which is a file that will not open and must not stop the
-   * rest of the post being drawn.
-   */
-  hadFrame: boolean;
 }
 
 /** `readyState >= HAVE_CURRENT_DATA`: the element has a frame that `drawImage` can take. */
@@ -97,7 +88,7 @@ export class PreviewCanvas {
       this.request();
       return;
     }
-    this.sources.set(trackId, { video, hadFrame: false });
+    this.sources.set(trackId, { video });
     // Every one of these is a moment this element's picture has changed with nothing in the store
     // moving: a source landing, a seek settling, a decoder waking up. While playing the frame loop
     // is already drawing, and a redraw asked for twice in a frame only happens once.
@@ -169,12 +160,14 @@ export class PreviewCanvas {
   /**
    * One composited frame: the colour work, then every layer bottom to top.
    *
-   * A layer whose element is not drawable is the whole reason this can decline to paint at all. An
-   * element that HAS had a frame and does not now is between sources, and the last complete frame
-   * on the canvas is a far better picture of the post than the same frame with a hole in it - which
-   * is precisely what the hold canvases used to buy with a bitmap copy per clip change. An element
-   * that has never had one is a file that would not open, and waiting for it forever would freeze
-   * the preview over a layer that is never coming, so it is simply left out.
+   * A layer whose element has no frame to give is the whole reason this can decline to paint at
+   * all, and the rule it follows is one line long: NEVER clear the canvas because a layer is
+   * missing. Only a post with genuinely nothing on screen is painted black.
+   *
+   * That is what the per-element hold canvases used to buy with a bitmap copy per clip change, and
+   * it is free here - a canvas keeps whatever was last drawn into it. Getting it wrong is not
+   * subtle: a `<video>` pointed at a new file has no frame for as long as the load takes, so every
+   * source change and every first play would flash black exactly where the holds used to hold.
    */
   private draw(): void {
     if (this.destroyed) return;
@@ -182,24 +175,35 @@ export class PreviewCanvas {
     if (!painter) return;
 
     const draws: LayerDraw[] = [];
-    let waiting = false;
+    // How many layers the POST says are on screen, whether or not their elements can supply one.
+    let onScreen = 0;
+    let missing = false;
     for (const layer of orderedLayers(this.store.previewLayers.value)) {
       const source = this.sources.get(layer.trackId);
       if (!source) continue;
+      onScreen += 1;
       const video = source.video;
       if (video.readyState < HAVE_CURRENT_DATA || !(video.videoWidth > 0) || !(video.videoHeight > 0)) {
-        if (source.hadFrame) waiting = true;
+        missing = true;
         continue;
       }
-      source.hadFrame = true;
       draws.push(layerDraw(layer, video));
     }
 
-    if (waiting) {
+    // Nothing to draw, over a post that should be showing something: KEEP what is on the canvas.
+    // Whatever was last composited is a far better picture of the post than black, and black is
+    // precisely what this replaced the hold canvases to avoid. It is checked before the wait below
+    // and without a bound on purpose - there is no length of wait after which a black frame is the
+    // better answer, and the post having nothing on screen at all is the case just past this.
+    if (draws.length === 0 && onScreen > 0) return;
+
+    if (missing) {
       const now = performance.now();
       if (this.waitingSince === 0) this.waitingSince = now;
-      // Held only as long as a load and a seek could honestly take. Past that the layer is not
-      // coming back, and a frozen preview is worse than the picture without it.
+      // SOME of the layers are ready and one is not. Its neighbours are held with it for as long as
+      // a load and a seek could honestly take, so a clip change does not tear the frame in half;
+      // past that the rest of the post is drawn without it rather than freezing over a layer that
+      // may never come.
       if (now - this.waitingSince < WAIT_FOR_LAYER_MS) return;
     } else {
       this.waitingSince = 0;

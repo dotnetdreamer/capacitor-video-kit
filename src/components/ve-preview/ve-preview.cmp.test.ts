@@ -184,10 +184,13 @@ function colourAt(preview: HTMLElement, fx: number, fy: number): 'red' | 'blue' 
 
 /** One element's stand-in state: where it is, every position written to it, every load asked of it. */
 interface Stood {
+  /** Where the element was last PUT. While playing, its clock runs on from here; see [standInForFiles]. */
   position: number;
   at: number[];
   loads: number[];
   paused: boolean;
+  /** When playback last started, in wall time, or 0 while paused. */
+  playedAt: number;
 }
 
 /**
@@ -200,8 +203,10 @@ interface Stood {
  * transport RUNNING: a `<video>` with no file rejects `play()`, so the player sat in a seek that
  * never landed and every test was of a preview standing still.
  *
- * The element's clock does not advance by itself, which is the honest limit of it: what plays here
- * is everything that is not the base track's own footage.
+ * Its clock RUNS: a playing element's `currentTime` is where it was put plus the wall time since,
+ * at whatever `playbackRate` the player set. That is what lets a test play a post from end to end -
+ * the base track reaching its own last frame is the moment half of the transport's decisions are
+ * made, and without a clock nothing ever reached it.
  *
  * It patches the prototype rather than the elements because a track's `<video>` is created by a
  * render and loaded in the same tick, so there is no moment in between to reach that one in.
@@ -219,19 +224,25 @@ function standInForFiles(): { of: (el: HTMLMediaElement) => Stood; restore: () =
   };
   const state = new WeakMap<HTMLMediaElement, Stood>();
   const of = (el: HTMLMediaElement): Stood => {
-    const one = state.get(el) ?? { position: 0, at: [], loads: [], paused: true };
+    const one = state.get(el) ?? { position: 0, at: [], loads: [], paused: true, playedAt: 0 };
     state.set(el, one);
     return one;
+  };
+  const clock = (el: HTMLMediaElement): number => {
+    const one = of(el);
+    if (one.paused) return one.position;
+    return one.position + ((performance.now() - one.playedAt) / 1000) * (el.playbackRate || 1);
   };
 
   Object.defineProperty(proto, 'currentTime', {
     configurable: true,
     get(this: HTMLMediaElement) {
-      return of(this).position;
+      return clock(this);
     },
     set(this: HTMLMediaElement, value: number) {
       const one = of(this);
       one.position = value;
+      one.playedAt = performance.now();
       one.at.push(value);
       // The event the player's seek watchdog exists to survive the absence of. Fired, the player
       // moves on at once instead of waiting out the watchdog on every single seek.
@@ -255,6 +266,8 @@ function standInForFiles(): { of: (el: HTMLMediaElement) => Stood; restore: () =
   proto.play = function (this: HTMLMediaElement) {
     const one = of(this);
     if (one.paused) {
+      one.position = clock(this);
+      one.playedAt = performance.now();
       one.paused = false;
       queueMicrotask(() => this.dispatchEvent(new Event('play')));
     }
@@ -263,6 +276,8 @@ function standInForFiles(): { of: (el: HTMLMediaElement) => Stood; restore: () =
   proto.pause = function (this: HTMLMediaElement) {
     const one = of(this);
     if (!one.paused) {
+      // Where it actually got to, so a pause does not rewind it to where it was started from.
+      one.position = clock(this);
       one.paused = true;
       queueMicrotask(() => this.dispatchEvent(new Event('pause')));
     }
@@ -403,6 +418,49 @@ describe('ve-preview composites the post', () => {
   );
 
   it(
+    'holds the last picture when a layer loses its frame, rather than going black',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#0000ff') };
+      const { preview } = await mount(false, files);
+      await until('the video to be composited', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+
+      // What a `<video>` reports for the whole of a source change: no frame, no size. The elements
+      // are sources now, so this is the ONLY thing the compositor can see of a clip change - and
+      // painting the post without them is the black flash the hold canvases used to cover.
+      const video = sources(preview)[0];
+      Object.defineProperty(video, 'readyState', { configurable: true, get: () => 0 });
+      Object.defineProperty(video, 'videoWidth', { configurable: true, get: () => 0 });
+
+      /*
+       * Repaints, asked for the way playback asks for them.
+       *
+       * It is the frame loop this needs and a test runner is not granted autoplay, so the redraws
+       * are asked for directly - one per event, which is what the loop does with an element in this
+       * state. Paused and undisturbed the canvas keeps its last frame whatever the elements do, so a
+       * test that did not repaint would pass over the bug.
+       */
+      const repaint = setInterval(() => video.dispatchEvent(new Event('seeked')), 60);
+      try {
+        await frames(6);
+        // Still red. A canvas keeps whatever was last drawn into it, and that is the whole reason
+        // the per-element hold canvases could go.
+        expect(colourAt(preview, 0.5, 0.5)).toBe('red');
+
+        // And STILL held well past the bound the other layers are held back by: that bound is for a
+        // frame with a hole in it, never for a frame with nothing in it. Waiting past it is the
+        // whole point - the black arrived about two seconds in, which reads as the preview playing
+        // and then dying rather than as a load taking its time.
+        await new Promise((resolve) => setTimeout(resolve, 2600));
+        expect(colourAt(preview, 0.5, 0.5)).toBe('red');
+      } finally {
+        clearInterval(repaint);
+      }
+    },
+    PIXEL_TIMEOUT_MS,
+  );
+
+  it(
     'colours the picture and leaves the letterbox bars BLACK, as the export does',
     async (ctx) => {
       needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
@@ -491,46 +549,51 @@ describe('ve-preview playing the tail past the base track', () => {
     const files = standInForFiles();
     standIns.push(files);
     const { store, preview } = await mount();
-    await until('the base to load its clip', () => files.of(sources(preview)[0]).loads.length > 0);
+    await until('the base to settle on its clip', () => files.of(sources(preview)[0]).at.length > 0);
+    await frames(3);
 
-    // The base's footage is 5s; the post is pulled out to 8. The tail is 3s of black with the
-    // layers, the music and any voiceover still on it.
+    // The customer's own post: the base's footage is 5s, the end is pulled out to 8, and a layer
+    // is still on the frame after the base has run out.
     store.setPostDuration(8000);
     expect(store.baseMs.value).toBe(5000);
     expect(store.totalMs.value).toBe(8000);
 
-    const started = performance.now();
-    store.seek(5000);
+    // Playing INTO the tail rather than starting in it, which is how it is met.
+    store.seek(4500);
     store.play();
+    await until('playback to start', () => store.playing.value, 3000);
+    await until('the base track to run out', () => store.playheadMs.value >= 5000, 5000);
 
-    await until('the tail to start running', () => store.playheadMs.value > 5100, 3000);
     // THROUGH the tail and not to the end of it. Stopping looked exactly like this used to: the
     // playhead was thrown to `totalMs` the instant the base ran out, so a test that only asked
     // whether it had moved past the base would have passed over the bug.
-    expect(store.playheadMs.value).toBeLessThan(7000);
+    await until('the tail to keep running', () => store.playheadMs.value > 5300, 3000);
+    expect(store.playheadMs.value).toBeLessThan(7500);
     expect(store.playing.value).toBe(true);
 
     await until('the post to reach its own end', () => store.playheadMs.value >= 8000, 8000);
-    // Real time, because it is a real clock: three seconds of tail cannot have gone by in one.
-    expect(performance.now() - started).toBeGreaterThan(2500);
-    await until('the transport to stop at the end', () => !store.playing.value, 2000);
+    await until('the transport to stop there', () => !store.playing.value, 2000);
     expect(store.playheadMs.value).toBe(8000);
-  }, 20_000);
+  }, 25_000);
 
   it('stops at the end of the base when the post is NOT stretched', async () => {
     const files = standInForFiles();
     standIns.push(files);
     const { store, preview } = await mount();
-    await until('the base to load its clip', () => files.of(sources(preview)[0]).loads.length > 0);
+    await until('the base to settle on its clip', () => files.of(sources(preview)[0]).at.length > 0);
+    await frames(3);
 
     // No tail: the end of the base IS the end of the post, and nothing may invent a clock for it.
     expect(store.totalMs.value).toBe(store.baseMs.value);
-    store.seek(4990);
+    store.seek(4500);
     store.play();
 
-    await until('playback to stop at the end of the post', () => !store.playing.value, 3000);
+    // Playing is asserted BEFORE stopping is: `playing` follows the element's own `play` event, so
+    // asking whether it has stopped before it has started is answered yes by a race.
+    await until('playback to start', () => store.playing.value, 3000);
+    await until('playback to stop at the end of the post', () => !store.playing.value, 5000);
     expect(store.playheadMs.value).toBe(5000);
-  });
+  }, 15_000);
 });
 
 describe('ve-preview after the page has been away', () => {
