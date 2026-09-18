@@ -230,11 +230,26 @@ export interface ComposeSpec {
   /** Selects the job folder the output and any scratch files are written to. */
   pendingPostId: string;
   /**
-   * The BASE track. It always starts at 0 and ITS length is the output's length: a track in
-   * [ComposeSpec.tracks] running past it is CUT, and one ending early leaves the base showing
-   * underneath.
+   * The BASE track. It always starts at 0, and its length is the output's length unless
+   * [ComposeSpec.durationMs] asks for more: a track in [ComposeSpec.tracks] running past the OUTPUT
+   * is CUT, and one ending early leaves whatever is under it showing.
    */
   clips: ComposeClip[];
+  /**
+   * How long the output runs, when that is MORE than the base track adds up to. Absent, 0, or any
+   * value at or below the base track means "as long as the base track", which is what every spec
+   * written before this key meant and what a spec carrying no tail still means.
+   *
+   * Past the base track's last frame the picture is BLACK. That is not a new kind of frame for any
+   * engine to learn: it is exactly what each already draws wherever a layer outlasts what is under
+   * it, and the only thing this key changes is that there is now somewhere past the base track for
+   * such a moment to exist. Everything else measured against the output - a layer's cut, the music,
+   * a voiceover, the poster - is measured against this longer number, unchanged in every other way.
+   *
+   * An engine that does not honour it renders the base track's length, which is a shorter video than
+   * was asked for rather than a wrong one.
+   */
+  durationMs?: number;
   /**
    * Extra video layers drawn over `clips`, bottom to top by `z`. Absent or empty is exactly today,
    * and every engine is expected to decide that ONCE when it builds its plan rather than per frame

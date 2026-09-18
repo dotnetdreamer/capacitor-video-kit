@@ -9,6 +9,7 @@ import {
   addVoiceover,
   applyLayoutPreset,
   canJoinWithNext,
+  clipsDurationMs,
   cssFor,
   duplicateClip,
   duplicateOverlay,
@@ -37,6 +38,7 @@ import {
   setOverlayWindow,
   setTrackOpacity,
   setTrackStart,
+  setPostDuration,
   slotAt,
   sourceMsAt,
   splitClipAt,
@@ -175,7 +177,13 @@ export class EditorStore {
   /* -- derived ----------------------------------------------------------------------------- */
 
   readonly slots = computed(() => timelineSlots(this.manifest.value));
+  /** How long the post runs: the base track, or the tail the customer has pulled past it. */
   readonly totalMs = computed(() => totalDurationMs(this.manifest.value));
+  /**
+   * Where the base track's footage ends. The same number as [totalMs] for a post nobody has
+   * stretched, and the start of the black tail for one somebody has.
+   */
+  readonly baseMs = computed(() => clipsDurationMs(this.manifest.value.clips));
   readonly filterOps = computed(() => resolveFilterOps(this.manifest.value));
   /** `filter` for the `<video>` and the tint layers drawn over it, in order. */
   readonly previewCss = computed(() => cssFor(this.filterOps.value));
@@ -236,7 +244,12 @@ export class EditorStore {
     const total = this.totalMs.value;
     const layers: PreviewVideoLayer[] = [];
 
-    const base = slotAt(m, at);
+    // Past the base track's last frame there is no base picture: the frame is black, and whatever
+    // layer is over it is drawn on black. `slotAt` holds the last segment at the very end of the
+    // timeline on purpose - a paused customer looking at the final frame has to see one - so the
+    // tail is the one place that rule has to be answered here rather than there.
+    const baseLen = clipsDurationMs(m.clips);
+    const base = at < baseLen || total <= baseLen ? slotAt(m, at) : null;
     if (base) layers.push(this.previewLayer(null, base, at, 1, 0));
 
     for (const track of m.videoTracks) {
@@ -780,6 +793,21 @@ export class EditorStore {
     const trackId = trackIdOfClip(this.manifest.value, clipId);
     if (typeof trackId !== 'string') return false;
     return findVideoTrack(this.manifest.value, trackId)?.clips.length === 1;
+  }
+
+  /**
+   * Pulls the end of the post past the base track, or lets it back in. Live; wrap in
+   * begin/endGesture, which is what the ruler's end handle does.
+   *
+   * The playhead comes back inside the post when the end is pulled in past it, the way a swap that
+   * shortens the post already brings it back: a playhead past the end is a preview showing a frame
+   * the video no longer has.
+   */
+  setPostDuration(durationMs: number, live = false): void {
+    const fn = (m: EditManifest): EditManifest => setPostDuration(m, durationMs);
+    if (live) this.preview(fn);
+    else if (!this.commit('Length', fn)) return;
+    if (this.playheadMs.value > this.totalMs.value) this.seek(this.totalMs.value);
   }
 
   /** Where the second video lands on the output timeline. Live; wrap in begin/endGesture. */

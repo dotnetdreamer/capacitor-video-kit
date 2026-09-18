@@ -5,6 +5,7 @@ import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { stickerById, stickerUrl } from '../../data/stickers';
 import {
+  MAX_POST_MS,
   MIN_LAYER_MS,
   clamp,
   effectPreset,
@@ -29,6 +30,7 @@ import {
   musicStartTrim,
   type ClipReorderDrag,
   type DragBase,
+  type EndDrag,
   type TrackDrag,
   type HitKind,
   type LanesScrollDrag,
@@ -319,6 +321,22 @@ export class VeTimeline {
 
   private readonly pad = computed(() => this.viewportWidth.value / 2);
   private readonly totalPx = computed(() => (this.ctx.store.totalMs.value / 1000) * this.ctx.store.pps.value);
+  /**
+   * The black tail: where the base track's footage stops and where the post does, content px, or
+   * null while the two are the same place.
+   *
+   * Drawn so that the empty stretch reads as deliberate. A timeline that simply ran on past the
+   * filmstrip with nothing in it looks like a bug, and a customer who has just dragged the end out
+   * needs to see the room they made.
+   */
+  private readonly tail = computed<{ x: number; w: number } | null>(() => {
+    const store = this.ctx.store;
+    const baseMs = store.baseMs.value;
+    const extraMs = store.totalMs.value - baseMs;
+    if (extraMs <= 0) return null;
+    const pps = store.pps.value;
+    return { x: this.pad.value + (baseMs / 1000) * pps, w: (extraMs / 1000) * pps };
+  });
   private readonly contentWidth = computed(() => Math.max(this.viewportWidth.value + this.totalPx.value, this.holdWidth.value));
   private readonly tileW = computed(() => (this.compactSig.value ? TRACK_H_COMPACT : TRACK_H));
 
@@ -1327,6 +1345,10 @@ export class VeTimeline {
       this.startMusicDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), kind === 'music-start' ? 'start' : 'end');
       return;
     }
+    if (kind === 'end') {
+      this.startEndDrag(this.dragBase(event.pointerId, event.clientX, event.clientY));
+      return;
+    }
 
     const press: Press = {
       pointerId: event.pointerId,
@@ -1580,6 +1602,28 @@ export class VeTimeline {
     });
   }
 
+  /**
+   * The grip on the end of the ruler: how long the post runs.
+   *
+   * `holdWidth` is taken for the reason a trim takes it. The content is as wide as the post, so
+   * pulling the end IN shrinks it under a scroller that may be scrolled to it - and a `scrollLeft`
+   * clamped back under the finger reads as the finger having moved further, which drags further,
+   * which clamps again.
+   */
+  private startEndDrag(base: DragBase): void {
+    const store = this.ctx.store;
+    store.beginGesture();
+    this.holdWidth.value = this.contentWidth.value;
+    const drag: EndDrag = {
+      ...base,
+      kind: 'end',
+      duration0: store.totalMs.value,
+      minMs: store.baseMs.value,
+      targets: this.snapTargets(),
+    };
+    this.beginDrag(drag);
+  }
+
   private startLayerDrag(base: DragBase, id: string, mode: LayerDrag['mode']): void {
     const store = this.ctx.store;
     const overlay = findOverlay(store.manifest.value, id);
@@ -1811,6 +1855,7 @@ export class VeTimeline {
     switch (drag.kind) {
       case 'trim':
       case 'track':
+      case 'end':
       case 'layer':
       case 'music':
       case 'voice': {
@@ -1818,6 +1863,7 @@ export class VeTimeline {
         const scrolling = autoScroll && this.edgeAutoScroll(drag);
         if (drag.kind === 'trim') this.applyTrim(drag);
         else if (drag.kind === 'track') this.applyTrack(drag);
+        else if (drag.kind === 'end') this.applyEnd(drag);
         else if (drag.kind === 'layer') this.applyLayer(drag);
         else if (drag.kind === 'music') this.applyMusic(drag);
         else this.applyVoice(drag);
@@ -1922,6 +1968,20 @@ export class VeTimeline {
     if (hit) start = clamp(start + hit.shiftMs, 0, hi);
     this.noteSnap(drag, hit?.target ?? null);
     store.setTrackStart(drag.trackId, start, true);
+  }
+
+  /**
+   * One frame of the end being dragged. It sticks to the same edges everything else on the timeline
+   * does, the base track's own end among them, so letting the tail go is one gesture rather than a
+   * hunt for the pixel where it disappears.
+   */
+  private applyEnd(drag: EndDrag): void {
+    const store = this.ctx.store;
+    const pps = store.pps.value;
+    const targets = [...drag.targets, this.centreMs(pps)];
+    const wanted = clamp(drag.duration0 + this.dragDeltaMs(drag, pps), drag.minMs, MAX_POST_MS);
+    const end = clamp(this.snapEdge(drag, wanted, targets, pps), drag.minMs, MAX_POST_MS);
+    store.setPostDuration(end, true);
   }
 
   private applyLayer(drag: LayerDrag): void {
@@ -2125,7 +2185,7 @@ export class VeTimeline {
       cancelAnimationFrame(this.tickRaf);
       this.tickRaf = 0;
       // The finger's last position may not have been applied yet.
-      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'track' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')) {
+      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'track' || drag.kind === 'end' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')) {
         this.applyDrag(drag, false);
       }
     }
@@ -2160,6 +2220,10 @@ export class VeTimeline {
         break;
       case 'track':
         store.endGesture('Move video');
+        break;
+      case 'end':
+        this.holdWidth.value = 0;
+        store.endGesture('Length');
         break;
       case 'layer':
         store.endGesture(drag.mode === 'move' ? 'Move layer' : 'Timing');
@@ -2323,6 +2387,7 @@ export class VeTimeline {
       const trim = this.trimHandles.value;
       const rows = this.trackRows.value;
       const marks = dropMarks(reorder?.drop ?? null, rows);
+      const tail = this.tail.value;
 
       return (
         <Host>
@@ -2376,6 +2441,13 @@ export class VeTimeline {
                     </div>
                   ))}
 
+                  {/*
+                    The stretch past the base track's last frame, where the picture is black. Drawn
+                    so the room a customer has just made reads as room rather than as a timeline
+                    that has run out of filmstrip.
+                  */}
+                  {tail ? <span class="tl__tail" key="tail" aria-hidden="true" style={{ left: `${tail.x}px`, width: `${tail.w}px` }}></span> : null}
+
                   {/* Outside the segments, so one set of arithmetic places every handle on the timeline. */}
                   {trim && trim.trackId === null
                     ? [
@@ -2399,16 +2471,23 @@ export class VeTimeline {
     });
   }
 
+  /**
+   * The ruler, and on the end of it the grip that says how long the post runs.
+   *
+   * Not `aria-hidden` any more, because the grip is a control: it is the only way to make room past
+   * the base track, and a row nobody can reach is a feature only a mouse and a finger have.
+   */
   private rulerRow(pad: number) {
     const ruler = this.ruler.value;
     return (
-      <div class="tl__ruler" key="ruler" aria-hidden="true">
-        <div class="tl__ruler-dots" style={{ 'left': `${pad}px`, 'width': `${this.totalPx.value}px`, 'background-size': ruler.dotSize }}></div>
+      <div class="tl__ruler" key="ruler">
+        <div class="tl__ruler-dots" aria-hidden="true" style={{ 'left': `${pad}px`, 'width': `${this.totalPx.value}px`, 'background-size': ruler.dotSize }}></div>
         {ruler.labels.map(label => (
-          <span class="tl__ruler-label" key={label.ms} style={{ left: `${label.x}px` }}>
+          <span class="tl__ruler-label" aria-hidden="true" key={label.ms} style={{ left: `${label.x}px` }}>
             {label.text}
           </span>
         ))}
+        <span class="tl__end" key="end" data-hit="end" role="separator" aria-label="Video length" style={{ left: `${pad + this.totalPx.value}px` }}></span>
       </div>
     );
   }
@@ -2676,7 +2755,7 @@ export class VeTimeline {
 type DragCursor = 'move' | 'resize' | null;
 
 function dragCursor(drag: TimelineDrag): DragCursor {
-  if (drag.kind === 'trim') return 'resize';
+  if (drag.kind === 'trim' || drag.kind === 'end') return 'resize';
   // A layer's and a sound's two edge modes trim; the third moves the whole window.
   if ((drag.kind === 'layer' || drag.kind === 'music') && drag.mode !== 'move') return 'resize';
   return 'move';

@@ -26,6 +26,8 @@ export type HitKind =
   | 'layer-start'
   | 'layer-end'
   | 'music'
+  /** The grip on the end of the ruler, which is how long the post runs. */
+  | 'end'
   | 'music-start'
   | 'music-end'
   | 'voice';
@@ -103,6 +105,21 @@ export interface TrimDrag extends DragBase {
   dur0: number;
   /** The last trim value previewed, so the preview is only re-seeked when the frame changes. */
   lastValue: number;
+}
+
+/**
+ * The end of the POST being pulled out past the base track, or let back in.
+ *
+ * Past the base track's last frame the picture is black, and the tail is there so that something can
+ * be put in it: a second video that plays after the first, a title, a sound that runs on. `minMs` is
+ * the base track, which the end may never be dragged inside - the base is the spine of the post, and
+ * trimming it by pulling something else is not a trim anybody asked for.
+ */
+export interface EndDrag extends DragBase {
+  kind: 'end';
+  duration0: number;
+  minMs: number;
+  targets: number[];
 }
 
 /**
@@ -221,6 +238,7 @@ export interface LanesScrollDrag extends DragBase {
 export type TimelineDrag =
   | TrimDrag
   | TrackDrag
+  | EndDrag
   | LayerDrag
   | MusicDrag
   | VoiceDrag

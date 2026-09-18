@@ -262,3 +262,36 @@ describe('reading the timeline', () => {
     expect(sourceTimeUs(planned, 1_000_000)).toBe(2_000_000);
   });
 });
+
+/*
+ * The tail, on the wire. `durationMs` is the output's length when it runs past the base track, and
+ * everything the plan measures against the output has to be measured against the longer number -
+ * a layer's cut, the music, a voiceover, the poster.
+ */
+describe('buildPlan with a tail past the base track', () => {
+  const probes = new Map([['file:///a.mp4', probed()], ['file:///b.mp4', probed()]]);
+
+  it('runs the output on past the clips', () => {
+    const plan = buildPlan(spec({ durationMs: 4000 }), probes);
+    expect(plan.totalUs).toBe(4_000_000);
+  });
+
+  it('ignores a duration the clips already cover', () => {
+    // 0, absent, or anything at or below the base track all say the same thing, and a floor UNDER
+    // what was planned would be a base track cut off by a key that is only ever asking for more.
+    expect(buildPlan(spec({ durationMs: 500 }), probes).totalUs).toBe(1_000_000);
+    expect(buildPlan(spec({ durationMs: 0 }), probes).totalUs).toBe(1_000_000);
+    expect(buildPlan(spec(), probes).totalUs).toBe(1_000_000);
+  });
+
+  it('keeps a layer laid in the tail', () => {
+    // The whole point: before the key existed this layer started past the end of the output and was
+    // planned away to nothing.
+    const track = { id: 'vt', clips: [clip({ uri: 'file:///b.mp4' })], startMs: 2000, z: 1, opacity: 1 };
+
+    const plan = buildPlan(spec({ durationMs: 4000, tracks: [track] }), probes);
+
+    expect(plan.tracks).toHaveLength(1);
+    expect(plan.tracks[0].placements[0].startUs).toBe(2_000_000);
+  });
+});

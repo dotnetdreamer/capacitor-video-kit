@@ -8,6 +8,7 @@ import {
   isUprightRect,
   rectRotationDeg,
   resolveFilterOps,
+  clipsDurationMs,
   totalDurationMs,
   videoBitrateFor,
   type EditClip,
@@ -167,6 +168,12 @@ export async function toComposeSpec(
   // and a single untouched clip is posted with no re-encode at all on the strength of it. Assigned
   // after the object for the same reason a clip's crop is.
   if (tracks) spec.tracks = tracks;
+
+  // Only when the customer has actually pulled the end past the base track. Left off otherwise, for
+  // the reason `tracks` is: a post nobody has stretched produces the spec this package has always
+  // produced, byte for byte, and every engine keeps the path it takes for one.
+  const baseMs = Math.round(clipsDurationMs(manifest.clips));
+  if (totalMs > baseMs) spec.durationMs = totalMs;
 
   return spec;
 }

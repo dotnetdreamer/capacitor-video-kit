@@ -125,6 +125,8 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     };
   });
 
+  const durationMs = Math.max(0, Math.round(finite(spec.durationMs, 0)));
+
   const audio = spec.audio ?? {
     originalMuted: false,
     originalVolume: 1,
@@ -139,6 +141,9 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     jobId,
     pendingPostId,
     clips,
+    // A tail the base track already covers is no tail at all, and the key is left off rather than
+    // read back as a number the plan would have to compare against the clips a second time.
+    ...(durationMs > 0 ? { durationMs } : {}),
     ...(tracks.length > 0 ? { tracks } : {}),
     output: {
       width,

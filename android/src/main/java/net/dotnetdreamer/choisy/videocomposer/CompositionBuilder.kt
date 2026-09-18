@@ -125,7 +125,13 @@ object CompositionBuilder {
         for (track in layers) {
             sequences += layerSequence(track, plan.totalUs, output, plan.colorMatrix)
         }
-        sequences += videoSequence(plan.clips, plan.videoSeqHasAudio, output, plan.colorMatrix)
+        sequences += videoSequence(
+            plan.clips,
+            plan.totalUs - plan.baseUs,
+            plan.videoSeqHasAudio,
+            output,
+            plan.colorMatrix,
+        )
         plan.music?.let { sequences += musicSequence(it) }
         plan.voice?.let { sequences += voiceSequence(it) }
 
@@ -199,20 +205,43 @@ object CompositionBuilder {
     /* ---------------------------------------------------------------------------------------- */
 
     /**
-     * The BASE track's clips as a sequence, which is the sequence this engine has always built.
+     * The BASE track's clips as a sequence, and behind them the TAIL: the stretch of post that runs
+     * on past the footage, where the picture is black.
+     *
+     * The gap is the same `addGap` [layerSequence] pads a layer with, and it draws the same thing -
+     * Media3 serves a gap as a 16 x 16 opaque-black bitmap at 30 fps, plus silence for a sequence
+     * that declares an audio track. On a LAYER that black has to be hidden behind an alpha gate,
+     * because a layer sits over a picture; on the base there is nothing underneath and opaque black
+     * is exactly what was asked for.
+     *
+     * With no tail this is the sequence this engine has always built, through the same two factory
+     * methods, so a post nobody has stretched reaches the encoder by the path it always took.
      */
     private fun videoSequence(
         clips: List<RenderPlan.PlannedClip>,
+        tailUs: Long,
         hasAudio: Boolean,
         output: Output,
         colorMatrix: ColorMatrix?,
     ): EditedMediaItemSequence {
         val items = clips.map { editedClip(it, output, colorMatrix) }
-        return if (hasAudio) {
-            EditedMediaItemSequence.withAudioAndVideoFrom(items)
-        } else {
-            EditedMediaItemSequence.withVideoFrom(items)
+        if (tailUs <= 0L) {
+            return if (hasAudio) {
+                EditedMediaItemSequence.withAudioAndVideoFrom(items)
+            } else {
+                EditedMediaItemSequence.withVideoFrom(items)
+            }
         }
+        val trackTypes = if (hasAudio) {
+            setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO)
+        } else {
+            setOf(C.TRACK_TYPE_VIDEO)
+        }
+        val builder = EditedMediaItemSequence.Builder(trackTypes)
+        for (item in items) builder.addItem(item)
+        // A gap must have a positive duration or Media3 rejects it, which the branch above ensures.
+        builder.addGap(tailUs)
+        return builder.build()
     }
 
     /**

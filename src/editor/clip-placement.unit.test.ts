@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { toComposeSpec } from './compose';
+import { setPostDuration } from './edit-ops';
 import {
   DEFAULT_OUTPUT,
   MAX_PLACEMENT_SIZE,
@@ -187,5 +188,26 @@ describe('how many videos a post may hold', () => {
     manifest = addVideoTrack(manifest, defaultClipEdit('a', 2000, 'three'), 'vt-3')!;
 
     expect(manifest.videoTracks.map((track) => track.z)).toEqual([2, 3]);
+  });
+});
+
+describe('the post running on past its base track', () => {
+  it('says nothing at all until the end has been pulled out', async () => {
+    // A post nobody has stretched reaches the wire as the bytes this package has always sent, which
+    // is what keeps every engine on the path it takes for one.
+    expect('durationMs' in (await spec(oneClip()))).toBe(false);
+  });
+
+  it('sends the length the customer asked for', async () => {
+    const wire = await spec(setPostDuration(oneClip(), 9000));
+
+    expect(wire.durationMs).toBe(9000);
+    // And the base track is exactly what it was: the tail is room, not footage.
+    expect(wire.clips).toHaveLength(1);
+    expect(wire.clips[0].outMs).toBe(4000);
+  });
+
+  it('measures the poster against the base track, not the black at the end', async () => {
+    expect((await spec(setPostDuration(oneClip(), 60_000))).posterAtMs).toBe(500);
   });
 });

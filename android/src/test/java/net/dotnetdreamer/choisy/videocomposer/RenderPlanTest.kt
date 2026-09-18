@@ -48,6 +48,7 @@ class RenderPlanTest {
         filter: List<FilterOp> = emptyList(),
         posterAtMs: Long = 0,
         tracks: List<Track> = emptyList(),
+        durationMs: Long = 0,
     ) = ComposeSpec(
         jobId = "job",
         pendingPostId = "post",
@@ -58,6 +59,7 @@ class RenderPlanTest {
         audio = audio,
         posterAtMs = posterAtMs,
         tracks = tracks,
+        durationMs = durationMs,
     )
 
     private fun probe(durationMs: Long, hasAudio: Boolean = true) =
@@ -867,5 +869,49 @@ class RenderPlanTest {
         // Unity right up to the moment the fade starts, and not after.
         assertEquals(48_000L, gain.isUnityUntil(0, 48_000))
         assertEquals(C.TIME_UNSET, gain.isUnityUntil(72_000, 48_000))
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
+    /*
+     * The tail: the post running on past its base track, where the picture is black. It is what
+     * makes a layer placeable anywhere rather than only where the footage underneath already
+     * reaches, and `baseUs` is what tells the builder how much black to pad the base with.
+     */
+
+    @Test
+    fun `a duration past the clips lengthens the output and leaves the base where it was`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 1000)), durationMs = 4000),
+            mapOf("file:///a.mp4" to probe(10_000)),
+        )
+
+        assertEquals(4_000_000L, plan.totalUs)
+        assertEquals(1_000_000L, plan.baseUs)
+    }
+
+    @Test
+    fun `a duration the clips already cover asks for nothing`() {
+        val probes = mapOf("file:///a.mp4" to probe(10_000))
+
+        // 0, absent, and anything at or below the base track all say the same thing. A floor UNDER
+        // what was planned would be a base track cut off by a key that only ever asks for more.
+        assertEquals(1_000_000L, RenderPlan.build(spec(listOf(clip("a", outMs = 1000))), probes).totalUs)
+        assertEquals(
+            1_000_000L,
+            RenderPlan.build(spec(listOf(clip("a", outMs = 1000)), durationMs = 500), probes).totalUs,
+        )
+    }
+
+    @Test
+    fun `a layer laid in the tail survives the plan`() {
+        // Before the key existed this layer started past the end of the output and was planned away.
+        val track = track(listOf(clip("b", outMs = 1000)), startMs = 2000)
+        val probes = mapOf("file:///a.mp4" to probe(10_000), "file:///b.mp4" to probe(10_000))
+
+        val plan = RenderPlan.build(spec(listOf(clip("a", outMs = 1000)), tracks = listOf(track), durationMs = 4000), probes)
+
+        assertEquals(1, plan.tracks.size)
+        assertEquals(2_000_000L, plan.tracks[0].startUs)
     }
 }
