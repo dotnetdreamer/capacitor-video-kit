@@ -1,6 +1,6 @@
 import type { ComposeFit, ComposePlacement, ComposeRect, ComposeSpec, FilterOp } from '../definitions';
 
-import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS } from '../../editor';
+import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, placementRange } from '../../editor';
 
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
 
@@ -253,9 +253,10 @@ function readRect(value: unknown, path: string): ComposeRect | undefined {
  * The same four numbers as `readRect` and a different bound, which is the difference between the
  * two fields rather than an inconsistency. A crop is a window on the source and cannot leave it; a
  * placement says where the picture is DRAWN, and a video placed off the edge of the frame is a
- * customer asking for the overhang to be cut off there. What is held is the rectangle's CENTRE, on
- * the frame, which is `normalisePlacement`'s rule word for word - the manifest, this reader and
- * both native parsers have to agree on it or the same post is a different picture per engine.
+ * customer asking for the overhang to be cut off there. All that is held is a strip of it on the
+ * frame, `MIN_ON_FRAME` wide, which is `normalisePlacement`'s rule word for word - the manifest,
+ * this reader and both native parsers have to agree on it or the same post is a different picture
+ * per engine.
  *
  * `rotationDeg` is not read here for the reason `plan.ts` gives: this renderer draws a clip's
  * rectangle but does not turn it, and a reader that accepted the angle would be claiming otherwise.
@@ -266,9 +267,11 @@ function readPlacement(value: unknown, path: string): ComposePlacement | undefin
   const rect = value as Record<string, unknown>;
   const w = clamp(finite(rect['w'], 1), 0.01, MAX_PLACEMENT_SIZE);
   const h = clamp(finite(rect['h'], 1), 0.01, MAX_PLACEMENT_SIZE);
+  const across = placementRange(w);
+  const down = placementRange(h);
   return {
-    x: clamp(finite(rect['x'], 0), -w / 2, 1 - w / 2),
-    y: clamp(finite(rect['y'], 0), -h / 2, 1 - h / 2),
+    x: clamp(finite(rect['x'], 0), across.min, across.max),
+    y: clamp(finite(rect['y'], 0), down.min, down.max),
     w,
     h,
   };

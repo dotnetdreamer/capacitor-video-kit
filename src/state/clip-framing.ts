@@ -1,4 +1,12 @@
-import { DEFAULT_OUTPUT, MAX_PLACEMENT_SIZE, clamp, type EditFit, type EditPlacement, type EditRect } from '../editor';
+import {
+  DEFAULT_OUTPUT,
+  MAX_PLACEMENT_SIZE,
+  clamp,
+  placementRange,
+  type EditFit,
+  type EditPlacement,
+  type EditRect,
+} from '../editor';
 
 /**
  * Where a cropped clip lands on the frame, in the editor's own coordinates.
@@ -152,10 +160,10 @@ export function slideRect(rect: EditPlacement, x: number, y: number): EditPlacem
  * The same four numbers as [placeRect] and deliberately not the same bound. A crop is a window on a
  * source and has to stay over it, so [placeRect] holds one inside the unit square; this places a
  * PICTURE, and a customer dragging a video off the side of the canvas means the part that hangs
- * over to be cut off by the frame. So nothing here holds the corners at all: what is held is the
- * CENTRE, the point the fingers took hold of and the point a turn happens about, which is the one
- * thing that has to stay reachable. See [normalisePlacement], which states the same rule for the
- * manifest and is the authority on it.
+ * over to be cut off by the frame. All that is held is a strip of it on the frame, `MIN_ON_FRAME`
+ * wide, so a video can be pushed until only that strip of it shows and no further - far enough to
+ * frame a shot along an edge, not so far that it is gone and cannot be picked up again. See
+ * [normalisePlacement], which states the same rule for the manifest and is the authority on it.
  *
  * The angle is carried rather than computed, exactly as it is for a crop: a turned rectangle is
  * held by its upright box, because a rectangle that shrank as it spun is not what a customer asked
@@ -164,9 +172,11 @@ export function slideRect(rect: EditPlacement, x: number, y: number): EditPlacem
 export function placeClipRect(cx: number, cy: number, w: number, h: number, rotationDeg = 0): EditPlacement {
   const width = clamp(w, 0, MAX_PLACEMENT_SIZE);
   const height = clamp(h, 0, MAX_PLACEMENT_SIZE);
+  const across = placementRange(width);
+  const down = placementRange(height);
   const placed: EditPlacement = {
-    x: round4(clamp(cx, 0, 1) - width / 2),
-    y: round4(clamp(cy, 0, 1) - height / 2),
+    x: round4(clamp(cx - width / 2, across.min, across.max)),
+    y: round4(clamp(cy - height / 2, down.min, down.max)),
     w: round4(width),
     h: round4(height),
   };

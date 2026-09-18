@@ -33,9 +33,9 @@ struct ComposeRect: Sendable {
 /// The four numbers are a `ComposeRect`'s and are finite and positive like one, but they do not sit
 /// inside the frame and are not meant to. A picture may be drawn off the edge of the output, and a
 /// customer who drags a video half off the canvas is asking for exactly that - the frame cuts the
-/// overhang off, here as in the preview. What the parser guarantees instead is that the rectangle's
-/// CENTRE is on the frame, so `0 <= x + w/2 <= 1` and the same in y, and that neither side is larger
-/// than `MAX_PLACEMENT_SIZE` of the frame.
+/// overhang off, here as in the preview. What the parser guarantees instead is that the rectangle
+/// keeps a strip of itself on the frame, `MIN_ON_FRAME` wide, and that neither side is larger than
+/// `MAX_PLACEMENT_SIZE` of the frame.
 ///
 /// What is new is the angle, and it is the angle
 /// `ComposeOverlay.rotationDeg` already carries in every respect that matters: CLOCKWISE degrees as

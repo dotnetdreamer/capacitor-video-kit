@@ -61,8 +61,9 @@ export interface ComposeRect {
  * frame the way a crop is held inside its source: a picture may be drawn off the edge of the
  * output, because a customer dragging a video half off the canvas is asking for the overhang to be
  * cut off there. Every engine already cuts at the output frame, so this costs none of them a line.
- * What each parser does guarantee is the pair of rules `normalisePlacement` states: the rectangle's
- * CENTRE is on the frame, and neither side is larger than `MAX_PLACEMENT_SIZE` of it.
+ * What each parser does guarantee is the pair of rules `normalisePlacement` states: a strip of the
+ * rectangle `MIN_ON_FRAME` wide is on the frame, and neither side is larger than
+ * `MAX_PLACEMENT_SIZE` of it.
  */
 export interface ComposePlacement extends ComposeRect {
   /** CLOCKWISE degrees about the rectangle's CENTRE, matching CSS `rotate()`. Absent is upright. */

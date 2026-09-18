@@ -5,7 +5,7 @@ import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { OVERLAY_BASE, isOverlayVisibleAt, type EditFit } from '../../editor';
-import { orWhole, pictureBox, sourceFrameBox, type FrameBox } from '../../state/clip-framing';
+import { FRAME_ASPECT, orWhole, pictureBox, sourceFrameBox, type FrameBox } from '../../state/clip-framing';
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
@@ -37,6 +37,12 @@ interface LayerView {
 }
 
 interface SelectionView {
+  /**
+   * What the box is around. A LAYER gets all three handles; a CLIP gets the corner that resizes and
+   * turns it, and a top-left corner that puts it back over the whole frame instead of deleting it -
+   * a segment is deleted from the timeline, never by a gesture whose whole point was to move it.
+   */
+  kind: 'overlay' | 'clip';
   isText: boolean;
   /** The layer is selected but its time window has left the playhead, so it is not on screen. */
   ghost: boolean;
@@ -212,7 +218,15 @@ export class VePreview implements EditorPlayer {
   /** True while the hold canvas covers the video, i.e. across a source change. One per element. */
   readonly holding = signal(false);
   readonly extraHolding = signal(false);
+  /** A LAYER is being dragged: the bin is on screen and the layer may be dropped into it. */
   readonly dragging = signal(false);
+  /**
+   * ANYTHING is being dragged, a clip included. Only the selection chrome reads this: a box and
+   * three handles riding along under the finger are in the way of the thing being moved, whether
+   * that thing is a sticker or the video itself. It is a second signal and not [dragging] because
+   * a clip must not put the bin on screen - there is nothing to drop a segment into.
+   */
+  readonly moving = signal(false);
   readonly trashHot = signal(false);
   readonly guides = signal<SnapGuides>(NO_GUIDES);
 
@@ -349,9 +363,10 @@ export class VePreview implements EditorPlayer {
    */
   private readonly selectionBox = computed<SelectionView | null>(() => {
     const store = this.ctx.store;
-    if (store.textEdit.value || this.dragging.value) return null;
+    if (store.textEdit.value || this.moving.value) return null;
     const overlay = store.selectedOverlay.value;
-    if (!overlay || overlay.kind === 'effect') return null;
+    if (!overlay) return this.clipSelection();
+    if (overlay.kind === 'effect') return null;
     const bitmap = store.bitmaps.value.get(overlay.id);
     const box = bitmap ? layerBox(overlay, bitmap, store.outputWidth) : null;
     if (!bitmap || !box) return null;
@@ -362,6 +377,7 @@ export class VePreview implements EditorPlayer {
       return `translate(${spot.shiftX.toFixed(1)}px, ${spot.shiftY.toFixed(1)}px)`;
     };
     return {
+      kind: 'overlay',
       isText: overlay.kind === 'text',
       ghost: !this.visibleIds.value.has(overlay.id),
       left: overlay.cx * 100,
@@ -375,6 +391,54 @@ export class VePreview implements EditorPlayer {
       shiftTransform: shift('transform'),
     };
   });
+
+  /**
+   * The same box and handles around the SELECTED CLIP's rectangle, so a video is managed on the
+   * frame the way a sticker is: a border that says where it is and what it is standing at, a corner
+   * to resize and turn it by, and a corner to put it back.
+   *
+   * The rectangle rather than the picture inside it. A clip drawn `contain` shows black down its
+   * sides, and a box drawn around the PICTURE would move as the customer changed the fit while the
+   * thing their fingers are actually moving stayed where it was. It is also the box the gestures
+   * hit test against, which is what makes a handle land where the video can be taken hold of.
+   *
+   * Ghosted when the selected clip is not the one under the playhead, exactly as a layer outside its
+   * own time window is: the box says which video is selected and the missing handles say it is not
+   * there to act on, rather than offering a corner that would resize a video nobody can see.
+   */
+  private clipSelection(): SelectionView | null {
+    const store = this.ctx.store;
+    const clip = store.selectedClip.value;
+    if (!clip) return null;
+    const rect = orWhole(clip.rect);
+    const turn = rect.rotationDeg ?? 0;
+    const onScreen = this.shownBase.value?.clipId === clip.id || this.shownExtra.value?.clipId === clip.id;
+    const stage = this.stageSize.value;
+    // The box in the frame's own pixels, which is what a handle's offset is measured in.
+    const box = { widthFrac: rect.w, aspect: (rect.w / rect.h) * FRAME_ASPECT };
+    const centre = { cx: rect.x + rect.w / 2, cy: rect.y + rect.h / 2, rotationDeg: turn };
+    const shift = (handle: SelectionHandle): string => {
+      if (!stage) return 'translate(0, 0)';
+      const spot = handleSpot(handle, centre, box, stage.width, stage.height, stage.bounds);
+      return `translate(${spot.shiftX.toFixed(1)}px, ${spot.shiftY.toFixed(1)}px)`;
+    };
+    return {
+      kind: 'clip',
+      isText: false,
+      ghost: !onScreen,
+      left: centre.cx * 100,
+      top: centre.cy * 100,
+      width: rect.w * 100,
+      // A ratio of two numbers rather than a pair of pixel sizes: the frame is not square, so a
+      // rectangle that is half the frame wide and half of it tall is not a square on screen.
+      aspect: `${rect.w * FRAME_ASPECT} / ${rect.h}`,
+      transform: layerTransform(turn),
+      iconTransform: `rotate(${-turn}deg)`,
+      shiftDelete: shift('delete'),
+      shiftEdit: shift('edit'),
+      shiftTransform: shift('transform'),
+    };
+  }
 
   /**
    * The stage's size in CSS pixels, which is the frame's, and the area its selection chrome may use.
@@ -591,6 +655,7 @@ export class VePreview implements EditorPlayer {
 
     this.gestures = new OverlayGestures(store, stage, {
       dragging: this.dragging,
+      moving: this.moving,
       trashHot: this.trashHot,
       guides: this.guides,
     });
@@ -739,6 +804,18 @@ export class VePreview implements EditorPlayer {
   private readonly deleteLayer = () => {
     const overlay = this.ctx.store.selectedOverlay.value;
     if (overlay) this.ctx.store.deleteOverlay(overlay.id);
+  };
+
+  /**
+   * A clip's top-left handle: the framing goes and the video is back over the whole frame.
+   *
+   * `resetClipFraming` and not a rectangle written by hand, because it clears the crop and the fit
+   * with the rectangle - one undo step, and the clip comes out of it with no framing fields at all,
+   * which is what puts it back on every engine's fast path and lets it post without a re-encode.
+   */
+  private readonly resetClip = () => {
+    const clip = this.ctx.store.selectedClip.value;
+    if (clip) this.ctx.store.resetClipFraming(clip.id);
   };
 
   /** The top-right handle: a text opens for typing; anything else is duplicated. */
@@ -1000,31 +1077,56 @@ export class VePreview implements EditorPlayer {
                   by hand.
                 */}
                 {!selection.ghost && [
-                  <button
-                    key="handle-delete"
-                    type="button"
-                    class="pv__handle pv__handle--tl"
-                    data-handle="delete"
-                    aria-label="Delete layer"
-                    style={{ '--pv-shift': selection.shiftDelete }}
-                    onClick={this.deleteLayer}
-                  >
-                    <ve-icon name="close" style={{ transform: selection.iconTransform }}></ve-icon>
-                  </button>,
-                  <button
-                    key="handle-edit"
-                    type="button"
-                    class="pv__handle pv__handle--tr"
-                    data-handle="edit"
-                    aria-label={selection.isText ? 'Edit text' : 'Duplicate layer'}
-                    style={{ '--pv-shift': selection.shiftEdit }}
-                    onClick={this.editLayer}
-                  >
-                    <ve-icon
-                      name={selection.isText ? 'pencil' : 'copy-outline'}
-                      style={{ transform: selection.iconTransform }}
-                    ></ve-icon>
-                  </button>,
+                  /*
+                    Top left. A layer's is Delete; a clip's puts the video back over the whole frame,
+                    because a segment is deleted from the timeline and a corner that threw one away
+                    from here would be the same button meaning two different things.
+                  */
+                  selection.kind === 'clip' ? (
+                    <button
+                      key="handle-delete"
+                      type="button"
+                      class="pv__handle pv__handle--tl"
+                      data-handle="delete"
+                      aria-label="Fit the video to the frame"
+                      style={{ '--pv-shift': selection.shiftDelete }}
+                      onClick={this.resetClip}
+                    >
+                      <ve-icon name="scan-outline" style={{ transform: selection.iconTransform }}></ve-icon>
+                    </button>
+                  ) : (
+                    <button
+                      key="handle-delete"
+                      type="button"
+                      class="pv__handle pv__handle--tl"
+                      data-handle="delete"
+                      aria-label="Delete layer"
+                      style={{ '--pv-shift': selection.shiftDelete }}
+                      onClick={this.deleteLayer}
+                    >
+                      <ve-icon name="close" style={{ transform: selection.iconTransform }}></ve-icon>
+                    </button>
+                  ),
+                  /*
+                    Top right is a layer's alone: a clip has no second copy to make here (duplicate
+                    is a timeline operation on a segment, not on a picture) and nothing to type into.
+                  */
+                  selection.kind === 'overlay' ? (
+                    <button
+                      key="handle-edit"
+                      type="button"
+                      class="pv__handle pv__handle--tr"
+                      data-handle="edit"
+                      aria-label={selection.isText ? 'Edit text' : 'Duplicate layer'}
+                      style={{ '--pv-shift': selection.shiftEdit }}
+                      onClick={this.editLayer}
+                    >
+                      <ve-icon
+                        name={selection.isText ? 'pencil' : 'copy-outline'}
+                        style={{ transform: selection.iconTransform }}
+                      ></ve-icon>
+                    </button>
+                  ) : null,
                   <div
                     key="handle-transform"
                     class="pv__handle pv__handle--br"

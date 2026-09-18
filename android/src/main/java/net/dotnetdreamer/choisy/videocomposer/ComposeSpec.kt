@@ -30,8 +30,8 @@ data class Rect(val x: Float, val y: Float, val w: Float, val h: Float)
  * the frame and are not meant to. A picture may be drawn off the edge of the output, and a customer
  * who drags a video half off the canvas is asking for exactly that - the frame cuts the overhang
  * off, in this renderer as in the preview. What the parser guarantees instead is that the
- * rectangle's CENTRE is on the frame, so 0 <= x + w/2 <= 1 and the same in y, and that neither side
- * is larger than `MAX_PLACEMENT_SIZE` of the frame - a layer is drawn into a texture of its
+ * rectangle keeps a strip of itself on the frame, `MIN_ON_FRAME` wide, and that neither side is
+ * larger than `MAX_PLACEMENT_SIZE` of the frame - a layer is drawn into a texture of its
  * rectangle's own size, and an unbounded side would be an unbounded texture.
  *
  * What is new is the angle, and it is the angle [Overlay.rotationDeg]

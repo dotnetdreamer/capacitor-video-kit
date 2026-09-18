@@ -79,7 +79,10 @@ export const NO_GUIDES: SnapGuides = { x: false, y: false, rotation: null };
 
 /** The gesture's feedback, owned by the component so its template can read it. */
 export interface GestureUi {
+  /** A LAYER is being dragged, which is what puts the bin on screen. */
   dragging: Signal<boolean>;
+  /** Anything is being dragged, a clip included, which is what takes the selection chrome off. */
+  moving: Signal<boolean>;
   trashHot: Signal<boolean>;
   guides: Signal<SnapGuides>;
 }
@@ -495,9 +498,11 @@ export class OverlayGestures {
         if (gesture.pointerId !== e.pointerId) return;
         if (distance(point, { x: gesture.x0, y: gesture.y0 }) <= TAP_SLOP_PX) return;
         this.store.beginGesture();
-        // A layer being dragged puts the bin on screen and hides its own chrome. A clip does
-        // neither: there is no bin for it (see [endDrag]) and no chrome to get in the way, and
-        // playback stops here rather than on the press so a plain tap can still toggle it.
+        // Both hide their own chrome, which is what `moving` says. Only a LAYER puts the bin on
+        // screen: there is none for a clip (see [endDrag]), and a segment is not a thing that can
+        // be thrown away by a gesture whose whole point was to move it. A clip's playback stops
+        // here rather than on the press, so that a plain tap can still toggle it.
+        this.set(this.ui.moving, true);
         if (gesture.grip) this.pausePlayback();
         else this.set(this.ui.dragging, true);
         const drag: Gesture = {
@@ -573,18 +578,30 @@ export class OverlayGestures {
 
     if (onTransformHandle) {
       const overlay = this.store.selectedOverlay.value;
-      if (overlay && overlay.kind !== 'effect') {
-        const centre = { x: rect.left + overlay.cx * rect.width, y: rect.top + overlay.cy * rect.height };
+      // With no layer selected the corner belongs to the CLIP, and drives the same `twist` the two
+      // fingers drive - one finger swung about the rectangle's centre instead of two spread across
+      // it. Everything downstream is shared: `moveTwist` sends a gesture carrying a grip to
+      // `twistClip`, so the corner resizes and turns a video by the arithmetic that already exists.
+      const grip = overlay ? null : this.selectedClipGrip();
+      const spot = overlay
+        ? overlay.kind === 'effect'
+          ? null
+          : { cx: overlay.cx, cy: overlay.cy }
+        : grip
+          ? { cx: grip.rect0.x + grip.rect0.w / 2, cy: grip.rect0.y + grip.rect0.h / 2 }
+          : null;
+      if (spot) {
+        const centre = { x: rect.left + spot.cx * rect.width, y: rect.top + spot.cy * rect.height };
         const point = { x: e.clientX, y: e.clientY };
         this.pausePlayback();
         this.store.beginGesture();
         this.gesture = {
           kind: 'twist',
           source: 'handle',
-          id: overlay.id,
-          grip: null,
-          scale0: overlay.scale,
-          rot0: overlay.rotationDeg,
+          id: grip ? grip.id : overlay!.id,
+          grip,
+          scale0: overlay?.scale ?? 1,
+          rot0: overlay?.rotationDeg ?? 0,
           dist0: Math.max(1, distance(point, centre)),
           lastAngle: angleOf(centre, point),
           turned: 0,
@@ -690,6 +707,7 @@ export class OverlayGestures {
 
     if (gesture?.kind === 'drag') {
       this.set(this.ui.dragging, false);
+      this.set(this.ui.moving, false);
       this.set(this.ui.trashHot, false);
       this.setGuides(NO_GUIDES);
     } else {
@@ -854,6 +872,7 @@ export class OverlayGestures {
     // there, and a timeline segment is deleted from the timeline or the clip row - not by a gesture
     // whose whole point was to move it.
     if (gesture.grip) {
+      this.set(this.ui.moving, false);
       this.setGuides(NO_GUIDES);
       this.gesture = { kind: 'spent' };
       this.store.endGesture(gestureLabel(gesture));
@@ -861,6 +880,7 @@ export class OverlayGestures {
     }
     const intoBin = this.ui.trashHot.value && !cancelled;
     this.set(this.ui.dragging, false);
+    this.set(this.ui.moving, false);
     this.set(this.ui.trashHot, false);
     this.setGuides(NO_GUIDES);
     this.gesture = { kind: 'spent' };

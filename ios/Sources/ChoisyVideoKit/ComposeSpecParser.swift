@@ -195,13 +195,13 @@ private func clampRect(_ r: RectDTO?) -> ComposeRect? {
 /// canvas means the overhang to be cut off by the output frame. Pulling it inside would slide that
 /// video back on screen and quietly rearrange the post.
 ///
-/// What is held is the rectangle's CENTRE, which stays on the frame: it is the point the fingers
-/// grab and the point the angle below turns about, so a picture whose centre has left the frame is
-/// one nobody can reach again, and holding it keeps a quarter of an upright rectangle on screen at
-/// worst. `MAX_PLACEMENT_SIZE` caps the size for a reason of the renderer's own - a clip on an
-/// extra layer is drawn into a texture of its rectangle's own size. Both rules are
-/// `normalisePlacement`'s in the TypeScript, to the arithmetic: this parser, the Android one and
-/// the browser's reader have to agree or the same post is a different picture per engine.
+/// What is held is a STRIP of it on the frame, `MIN_ON_FRAME` wide, and nothing else: a video can be
+/// pushed until only that strip is showing and no further, which is far enough to frame a shot along
+/// an edge and not so far that the picture is gone and cannot be picked up again.
+/// `MAX_PLACEMENT_SIZE` caps the size for a reason of the renderer's own - a clip on an extra layer
+/// is drawn into a texture of its rectangle's own size. Both rules are `normalisePlacement`'s in the
+/// TypeScript, to the arithmetic: this parser, the Android one and the browser's reader have to
+/// agree or the same post is a different picture per engine.
 ///
 /// The angle is deliberately NOT clamped and NOT wrapped into a single turn: 720 is a legal spec and
 /// sin/cos reduce it. Nor does the clamp extend to it, because a turned rectangle legitimately puts
@@ -211,12 +211,23 @@ private func clampPlacement(_ r: RectDTO?) -> ComposePlacement? {
     let w = min(r.w, MAX_PLACEMENT_SIZE)
     let h = min(r.h, MAX_PLACEMENT_SIZE)
     return ComposePlacement(
-        x: clamp(r.x, -w / 2, 1 - w / 2),
-        y: clamp(r.y, -h / 2, 1 - h / 2),
+        x: clamp(r.x, nearEdge(w), farEdge(w)),
+        y: clamp(r.y, nearEdge(h), farEdge(h)),
         w: w,
         h: h,
         rotationDeg: r.rotationDeg)
 }
+
+/// How far a placement of this size may run in one axis, as its own leading edge. A rectangle
+/// SMALLER than `MIN_ON_FRAME` keeps all of itself on the frame: it cannot leave a twelfth of the
+/// frame behind.
+private func nearEdge(_ size: Double) -> Double { min(size, MIN_ON_FRAME) - size }
+
+private func farEdge(_ size: Double) -> Double { 1 - min(size, MIN_ON_FRAME) }
+
+/// How much of a placement has to stay ON the frame, as a fraction of it. The only limit left on
+/// where a video may be put, and the same number as `MIN_ON_FRAME` in the TypeScript.
+private let MIN_ON_FRAME: Double = 1.0 / 12.0
 
 /// The largest a clip's placement rectangle may be, as a multiple of the output frame. Twice a
 /// 1080x1920 output is 2160x3840, which every renderer here can hold as a single layer; the same

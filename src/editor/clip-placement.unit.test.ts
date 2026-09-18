@@ -6,6 +6,7 @@ import {
   DEFAULT_OUTPUT,
   MAX_PLACEMENT_SIZE,
   MAX_VIDEO_TRACKS,
+  MIN_ON_FRAME,
   defaultClipEdit,
   emptyManifest,
   isFullFrameRect,
@@ -119,11 +120,20 @@ describe('a clip placement', () => {
     const off = setClipRect(oneClip(), 'a', { x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
     expect(off.clips[0].rect).toEqual({ x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
 
-    // Pushed until the centre itself would leave, which is the one thing that is held: the centre
-    // is the point the fingers grab and the point a turn happens about, so a video whose centre is
-    // off the frame is one nobody can take hold of again.
-    const lost = setClipRect(oneClip(), 'a', { x: -4, y: 9, w: 0.5, h: 0.5 });
-    expect(lost.clips[0].rect).toEqual({ x: -0.25, y: 0.75, w: 0.5, h: 0.5 });
+    // Pushed a long way further than half off, which is the point: a customer framing a strip of a
+    // video along an edge means to keep pushing. It stops with MIN_ON_FRAME of it still showing,
+    // because a rectangle with no part of it on the frame draws nothing and cannot be grabbed back.
+    const far = setClipRect(oneClip(), 'a', { x: -4, y: 9, w: 0.5, h: 0.5 });
+    expect(far.clips[0].rect?.x).toBeCloseTo(MIN_ON_FRAME - 0.5, 4);
+    expect(far.clips[0].rect?.y).toBeCloseTo(1 - MIN_ON_FRAME, 4);
+  });
+
+  it('keeps a small video whole rather than asking it to leave more than it has', () => {
+    // A video a twentieth of the frame wide cannot leave a twelfth of itself behind, so the rule
+    // reads as "all of it" there instead of pinning it somewhere it could never reach.
+    const tiny = setClipRect(oneClip(), 'a', { x: -3, y: 3, w: 0.05, h: 0.05 });
+
+    expect(tiny.clips[0].rect).toEqual({ x: 0, y: 0.95, w: 0.05, h: 0.05 });
   });
 
   it('lets a pinch grow the rectangle past the frame, up to the renderers\' ceiling', () => {
@@ -131,7 +141,7 @@ describe('a clip placement', () => {
     expect(big.clips[0].rect).toEqual({ x: -0.5, y: -0.5, w: 2, h: 2 });
 
     // A layer is drawn into a texture of its rectangle's own size, so the size is capped even
-    // though the position is not - and the centre is then held against the CAPPED size.
+    // though the position is not.
     const huge = setClipRect(oneClip(), 'a', { x: 0, y: 0, w: 9, h: 5 });
     expect(huge.clips[0].rect).toEqual({ x: 0, y: 0, w: MAX_PLACEMENT_SIZE, h: MAX_PLACEMENT_SIZE });
   });

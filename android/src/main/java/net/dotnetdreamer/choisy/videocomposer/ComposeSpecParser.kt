@@ -38,6 +38,14 @@ object ComposeSpecParser {
      */
     private const val MAX_PLACEMENT_SIZE = 2f
 
+    /**
+     * How much of a placement rectangle has to stay ON the frame, as a fraction of it. The only
+     * limit left on where a video may be put: a customer pushing one off an edge is framing the
+     * shot, so it stops only where the video would be gone altogether - a rectangle with no part of
+     * it on the frame draws nothing at all. The same number as `MIN_ON_FRAME` in the TypeScript.
+     */
+    private const val MIN_ON_FRAME = 1f / 12f
+
     private const val PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 
     fun parse(json: JSONObject): ComposeSpec {
@@ -176,12 +184,11 @@ object ComposeSpecParser {
      * the canvas means the overhang to be cut off by the output frame. Pulling a placement inside
      * would slide that video back on screen and quietly rearrange the post.
      *
-     * What is held is the rectangle's CENTRE, which stays on the frame. It is the point the fingers
-     * grab and the point the turn below happens about, so a picture whose centre has left the frame
-     * is one nobody can reach again - and holding it keeps a quarter of an upright rectangle on
-     * screen at worst. The rule is `normalisePlacement`'s in the TypeScript, to the arithmetic:
-     * this parser, the iOS one and the browser's reader all have to agree or the same post is a
-     * different picture per engine.
+     * What is held is a STRIP of it on the frame, [MIN_ON_FRAME] wide, and nothing else: a video can
+     * be pushed until only that strip is showing and no further, which is far enough to frame a shot
+     * along an edge and not so far that the picture is gone. The rule is `normalisePlacement`'s in
+     * the TypeScript, to the arithmetic: this parser, the iOS one and the browser's reader all have
+     * to agree or the same post is a different picture per engine.
      *
      * The angle is read HERE and not in [parseRect], which is why a `rotationDeg` sent on a crop is
      * ignored rather than acted on: turning the region sampled out of the source is a different
@@ -195,9 +202,10 @@ object ComposeSpecParser {
 
     /**
      * A placement's four numbers: the shape is a shape error exactly as it is for a crop, and the
-     * position is a value and is held by its centre. [MAX_PLACEMENT_SIZE] is the ceiling on the
-     * size, and it is a real limit and not a taste: a clip on an extra layer is drawn into a
-     * texture of its rectangle's own size, so an unbounded `w` is an unbounded texture.
+     * position is a value and is held so that a strip of the rectangle stays on the frame.
+     * [MAX_PLACEMENT_SIZE] is the ceiling on the size, and it is a real limit and not a taste: a
+     * clip on an extra layer is drawn into a texture of its rectangle's own size, so an unbounded
+     * `w` is an unbounded texture.
      */
     private fun parsePlacementRect(o: JSONObject, path: String): Rect {
         val w = o.finite("w", 0.0)
@@ -207,12 +215,21 @@ object ComposeSpecParser {
         val width = w.coerceAtMost(MAX_PLACEMENT_SIZE)
         val height = h.coerceAtMost(MAX_PLACEMENT_SIZE)
         return Rect(
-            x = o.finite("x", 0.0).coerceIn(-width / 2f, 1f - width / 2f),
-            y = o.finite("y", 0.0).coerceIn(-height / 2f, 1f - height / 2f),
+            x = o.finite("x", 0.0).coerceIn(nearEdge(width), farEdge(width)),
+            y = o.finite("y", 0.0).coerceIn(nearEdge(height), farEdge(height)),
             w = width,
             h = height,
         )
     }
+
+    /**
+     * How far a placement of this size may run in one axis, as its own leading edge: pushed off the
+     * near edge, and pushed off the far one. A rectangle SMALLER than [MIN_ON_FRAME] keeps all of
+     * itself on the frame, because it cannot leave a twelfth of the frame behind.
+     */
+    private fun nearEdge(size: Float): Float = minOf(size, MIN_ON_FRAME) - size
+
+    private fun farEdge(size: Float): Float = 1f - minOf(size, MIN_ON_FRAME)
 
     /**
      * The turn a rectangle stands at, straight off the wire.

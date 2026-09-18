@@ -61,9 +61,9 @@ export interface EditRect {
  * the wire when it says something (see [isFullFrameRect]), so a clip nobody turned costs nothing.
  *
  * The four numbers may leave the frame. `x` and `y` may be negative and the rectangle may be larger
- * than the frame it is drawn on, up to [MAX_PLACEMENT_SIZE]; only its centre is held on the frame.
- * Everything that hangs over an edge is cut off there, by the frame in the preview and by the
- * output frame in all four renderers, which is what makes the canvas free.
+ * than the frame it is drawn on, up to [MAX_PLACEMENT_SIZE]; all that is held is a strip of it on
+ * the frame, [MIN_ON_FRAME] wide. Everything that hangs over an edge is cut off there, by the frame
+ * in the preview and by the output frame in all four renderers, which is what makes the canvas free.
  */
 export interface EditPlacement extends EditRect {
   /** Clockwise, as CSS means it - the units and the sense of [OverlayCommon.rotationDeg]. */
@@ -379,6 +379,35 @@ export const MIN_RECT_SIZE = 0.01;
  * is nothing outside a source frame to sample.
  */
 export const MAX_PLACEMENT_SIZE = 2;
+
+/**
+ * How much of a clip's placement rectangle has to stay ON the frame, as a fraction of it.
+ *
+ * The only limit left on where a video may be put. A customer pushing one off an edge is framing
+ * the shot - a strip of it along the bottom, a corner of it behind a caption - so the rule has to
+ * let them go on until almost nothing of it is left, and stop only where the video would be gone
+ * altogether: a rectangle with no part of it on the frame is invisible in the preview, invisible in
+ * the render, and impossible to get a finger back onto.
+ *
+ * A twelfth of the frame is roughly 60px across a 720 wide output and 105 down a 1280 tall one,
+ * which is a strip a thumb can still find. A rectangle SMALLER than this keeps all of itself on the
+ * frame instead, because a video a twentieth of the frame wide cannot leave a twelfth of itself
+ * behind.
+ */
+export const MIN_ON_FRAME = 1 / 12;
+
+/**
+ * How far a placement of this size may run in one axis: from `min` (pushed off the near edge) to
+ * `max` (pushed off the far one), as the rectangle's own leading edge.
+ *
+ * One function for both axes and for all four of the places that enforce this - the manifest, the
+ * gesture that writes it, and the three parsers that read it off the wire - because the same post
+ * has to be the same picture on every engine.
+ */
+export function placementRange(size: number): { min: number; max: number } {
+  const kept = Math.min(size, MIN_ON_FRAME);
+  return { min: kept - size, max: 1 - kept };
+}
 
 /**
  * How close to the edges of the frame still counts as the whole frame. One unit of the four-decimal
@@ -849,10 +878,11 @@ export function normaliseRect(value: unknown): EditRect | undefined {
  * the arrangement every phone editor is built on. So `x` and `y` may be negative, `x + w` may pass
  * 1, and the size may run to [MAX_PLACEMENT_SIZE] of the frame.
  *
- * What is held instead is the rectangle's CENTRE, which has to stay ON the frame. The centre is the
- * point the fingers grab and the point a turn happens about, so a rectangle whose centre has left
- * the frame is one nobody can take hold of again; holding it also keeps a quarter of an upright
- * rectangle on screen at worst, which is why a video cannot be lost off a corner.
+ * What is held instead is a STRIP of it on the frame, [MIN_ON_FRAME] wide, and nothing else. That
+ * is the whole of the limit: a customer can push a video until only that strip of it is showing,
+ * which is what framing a shot along an edge actually asks for. It stops there because a rectangle
+ * with no part of it on the frame is invisible in the preview, invisible in the render, and
+ * impossible to get a finger back onto.
  *
  * The angle is NOT wrapped into a single turn. An overlay's is not either, a gesture spun twice
  * round keeps its total that way, and every engine reduces the angle itself the moment it takes a
@@ -864,13 +894,14 @@ export function normalisePlacement(value: unknown): EditPlacement | undefined {
   const raw = value as Record<string, unknown>;
   const w = round4(clamp(num(raw['w'], 1), MIN_RECT_SIZE, MAX_PLACEMENT_SIZE));
   const h = round4(clamp(num(raw['h'], 1), MIN_RECT_SIZE, MAX_PLACEMENT_SIZE));
-  // The corner is rounded BEFORE the centre is held, never after. The bound is half of a rectangle
-  // whose own decimals are already fixed, so a corner rounded once the room for it had been worked
-  // out could put the centre a ten-thousandth off the frame and hand the native parsers a placement
-  // they would have to hold all over again - the same trap [normaliseRect] steps around.
+  // The corner is rounded BEFORE it is held, never after: rounded once the room for it had already
+  // been worked out, it could land a ten-thousandth past the bound and hand the native parsers a
+  // placement they would have to hold all over again - the trap [normaliseRect] steps around too.
+  const across = placementRange(w);
+  const down = placementRange(h);
   const rect: EditPlacement = {
-    x: clamp(round4(num(raw['x'], 0)), -w / 2, 1 - w / 2),
-    y: clamp(round4(num(raw['y'], 0)), -h / 2, 1 - h / 2),
+    x: clamp(round4(num(raw['x'], 0)), across.min, across.max),
+    y: clamp(round4(num(raw['y'], 0)), down.min, down.max),
     w,
     h,
   };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_PLACEMENT_SIZE } from '../editor';
+import { MAX_PLACEMENT_SIZE, MIN_ON_FRAME } from '../editor';
 import { MIN_CLIP_RECT, placeClipRect, placeRect, scaleClipRect, scaleRect } from './clip-framing';
 
 /**
@@ -23,10 +23,16 @@ describe('placing a video on a free canvas', () => {
     expect(half).toEqual({ x: -0.3, y: 0.2, w: 0.6, h: 0.6 });
   });
 
-  it('holds the centre on the frame, so a video can never be lost off a corner', () => {
+  it('goes on past half off, and stops with a strip of the video still showing', () => {
+    // Half off is where the old rule stopped, and it was not far enough: a customer framing a strip
+    // of a video along the bottom of the frame means to keep pushing.
     const shoved = placeClipRect(-3, 4, 0.5, 0.5);
 
-    expect(shoved).toEqual({ x: -0.25, y: 0.75, w: 0.5, h: 0.5 });
+    expect(shoved.x).toBeCloseTo(MIN_ON_FRAME - 0.5, 4);
+    expect(shoved.y).toBeCloseTo(1 - MIN_ON_FRAME, 4);
+    // What is left on the frame is that strip, and it is never nothing: a rectangle wholly off the
+    // frame draws nothing at all and no finger could find it again.
+    expect(shoved.x + shoved.w).toBeCloseTo(MIN_ON_FRAME, 4);
   });
 
   it('carries the angle, and still writes no angle at all for an upright rectangle', () => {

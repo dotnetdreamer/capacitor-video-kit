@@ -148,9 +148,11 @@ describe('clamps', () => {
     expect(checked.clips[0]?.rect).toEqual({ x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
   });
 
-  it('holds a placement by its centre, and caps how large it may be', () => {
-    const lost = validateSpec(spec({ clips: [clip({ rect: { x: -4, y: 9, w: 0.5, h: 0.5 } })] }));
-    expect(lost.clips[0]?.rect).toEqual({ x: -0.25, y: 0.75, w: 0.5, h: 0.5 });
+  it('leaves a strip of a placement on the frame, and caps how large it may be', () => {
+    const far = validateSpec(spec({ clips: [clip({ rect: { x: -4, y: 9, w: 0.5, h: 0.5 } })] }));
+    // Far past half off, stopping only where the rectangle would leave the frame altogether.
+    expect(far.clips[0]?.rect?.x).toBeCloseTo(1 / 12 - 0.5, 4);
+    expect(far.clips[0]?.rect?.y).toBeCloseTo(1 - 1 / 12, 4);
 
     const huge = validateSpec(spec({ clips: [clip({ rect: { x: 0, y: 0, w: 9, h: 5 } })] }));
     expect(huge.clips[0]?.rect).toEqual({ x: 0, y: 0, w: 2, h: 2 });

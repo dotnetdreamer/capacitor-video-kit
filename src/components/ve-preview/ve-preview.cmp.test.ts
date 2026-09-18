@@ -399,6 +399,50 @@ describe('ve-preview on a free canvas', () => {
     // And the frame is what cuts it off, so nothing of it is painted beside the video.
     expect(getComputedStyle(frame).overflow).toBe('hidden');
   });
+
+  /*
+   * A video is managed on the frame the way a sticker is, which means it has to SAY it is selected
+   * and offer the same corners. The box is drawn around the clip's rectangle and not the picture
+   * inside it: those differ the moment a clip is letterboxed, and a box around the picture would
+   * drift away from the thing the fingers actually move.
+   */
+  it('draws a box and handles around the selected clip, where its rectangle is', async () => {
+    const { store, preview } = await mount(false);
+    store.commitClipFraming('seg-a', { rect: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 } }, 'Move');
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await frames(3);
+
+    const select = preview.querySelector('.pv__select') as HTMLElement;
+    expect(select).not.toBeNull();
+
+    const stage = (preview.querySelector('.pv__frame') as HTMLElement).getBoundingClientRect();
+    const box = select.getBoundingClientRect();
+    // Half the frame across, centred: the rectangle the customer placed, not the whole video.
+    expect(box.width).toBeCloseTo(stage.width * 0.5, 0);
+    expect(box.left + box.width / 2).toBeCloseTo(stage.left + stage.width / 2, 0);
+
+    // The corner that resizes and turns it, and the corner that puts it back over the frame. No
+    // duplicate corner: copying a segment is a timeline operation, not something done to a picture.
+    expect(select.querySelector('[data-handle="transform"]')).not.toBeNull();
+    expect(select.querySelector('[data-handle="delete"]')?.getAttribute('aria-label')).toBe(
+      'Fit the video to the frame',
+    );
+    expect(select.querySelector('[data-handle="edit"]')).toBeNull();
+  });
+
+  it('puts the video back over the whole frame from that corner', async () => {
+    const { store, preview } = await mount(false);
+    store.commitClipFraming('seg-a', { rect: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 } }, 'Move');
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await frames(3);
+
+    (preview.querySelector('[data-handle="delete"]') as HTMLButtonElement).click();
+    await frames(3);
+
+    // The rectangle is GONE rather than written out as the whole frame: a clip with no framing
+    // fields at all is what every engine's fast path tests for, and what posts with no re-encode.
+    expect(store.manifest.value.clips[0]).not.toHaveProperty('rect');
+  });
 });
 
 describe('ve-preview swapping the two videos', () => {

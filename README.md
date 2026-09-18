@@ -1305,6 +1305,53 @@ npm run clean      # every output of this package; `clean:all` takes the wrapper
 is published from here and is what `prepare` runs: clean, the plugin's two `tsc` passes,
 `finish-build.mjs`, `stencil build`, and `module-type.mjs` last so that it checks the finished tree.
 
+### The two watches
+
+```sh
+npm run dev          # one component on its own, http://localhost:3333/?tag=ve-slider
+npm run watch        # the directories a linked host reads, for an app running beside this
+npm run watch:angular  # only when a component gains or renames a prop or an event
+```
+
+They are not alternatives. `npm run dev` writes `www/` and nothing else, so a host linked to this
+checkout sees none of it: the app imports `plugin/`, `dist/components/` and, through
+`choisy-video-kit-angular`, `packages/angular/dist`, and the dev harness writes to none of the
+three. It is the loop for shaping a component against the page in `src/index.html`, not for seeing a
+change land in an app.
+
+`npm run watch` is the other one. It is `tsc --watch` over the plugin half and `stencil build
+--watch` over the editor half, both writing where a full build writes, so a linked app rebuilds on
+save. A component change is on screen about six seconds after the file is saved, most of it
+Stencil's. The Angular wrappers are the exception: `packages/angular/dist` is built by ng-packagr
+rather than by Stencil, so `watch:angular` goes alongside the other two on the days a component's
+props or events change, and is dead weight on every other day.
+
+**A host has to be told not to prebundle this package.** Vite's development server copies every
+dependency into a cache on startup and serves the app from that copy, which is the last full build
+of this package no matter what the watch writes afterwards. In choisy-mobile that is:
+
+```jsonc
+// angular.json, under the serve builder
+"options": { "prebundle": { "exclude": ["choisy-video-kit", "choisy-video-kit-angular"] } }
+```
+
+The exclusion has one consequence worth knowing, because the error it produces names neither this
+package nor prebundling: the host's bundler now resolves this package's imports itself, so
+`@preact/signals-core` and `mediabunny` have to be installed in the host as well. The first is a
+peer dependency and was always the host's to install; the second is a dependency of this package
+that npm does not hoist out of a `file:` link. Without them the server starts and then answers
+`Failed to resolve dependency` on the first import.
+
+`stencil.watch.config.ts` says why the watch does not simply use the published config: a production
+build names each shared chunk after a hash of its contents, and a host watching this package reads
+the rewritten component before the chunk it now imports exists, fails on it, and stays failed. The
+watch config is the published one with stable names, no minifier, source maps, and the readme
+writer dropped, that last because an incremental rebuild regenerates a component's readme from only
+what it reparsed and quietly drops the CSS custom properties table.
+
+**The watch leaves an unminified tree behind.** Run `npm run build` before a device build, a
+`npm pack`, or anything measuring size.
+
 **A test run writes nothing a consumer reads.** `stencil-test` builds the components before it hands
 them to Vitest, and that build is not `build:package`: it never reaches `module-type.mjs`, so run
 against the real config it left `dist/index.mjs` and `loader/index.mjs` deleted under their new
