@@ -14,6 +14,8 @@ import {
 import {
   MIN_CLIP_RECT,
   MIN_CROP,
+  cropStageBox,
+  cropWindowBox,
   orWhole,
   pictureBox,
   placeClipRect,
@@ -1115,10 +1117,25 @@ export class OverlayGestures {
     if (!clip) return null;
     const crop0 = orWhole(clip.crop);
     const rect0 = orWhole(clip.rect);
-    const picture = pictureBox(this.store.sourceAspect.value, crop0, rect0, this.store.clipFit(clip), this.store.frameAspect.value);
+    const aspect = this.store.sourceAspect.value;
+    const frameAspect = this.store.frameAspect.value;
+    /*
+     * Where the whole source sits on screen, which is the ruler every crop gesture is measured
+     * against: a finger that moves a tenth of this box has moved the crop a tenth of the way across
+     * the source.
+     *
+     * While the crop sheet is open that is the STAGE the preview draws the source on, and it stays
+     * put for the whole gesture because nothing a crop changes goes into it. Outside the sheet
+     * there is no stage - the preview is showing the finished post - so it is where the whole
+     * source frame WOULD sit at the crop's own scale, which is the box this has always used.
+     */
+    const source =
+      mode === 'crop'
+        ? cropStageBox(aspect, rect0, frameAspect)
+        : sourceFrameBox(pictureBox(aspect, crop0, rect0, this.store.clipFit(clip), frameAspect), crop0);
     // The angle is read once, here, for the same reason the mode is: a twist adds to where the
     // fingers landed, so re-reading it mid-pinch would compound the turn on every frame.
-    return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source: sourceFrameBox(picture, crop0), side: null };
+    return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source, side: null };
   }
 
   /** A tap on nothing: it puts the selection down, or plays and pauses when there is none. */
@@ -1260,10 +1277,13 @@ const CROP_CURSORS: Record<CropSide, string> = {
  * edge with nothing left to pan by.
  */
 function cropSideAt(grip: ClipGrip, at: Point, rect: DOMRect): CropSide | null {
-  const left = (grip.source.x + grip.crop0.x * grip.source.w) * rect.width;
-  const top = (grip.source.y + grip.crop0.y * grip.source.h) * rect.height;
-  const width = grip.crop0.w * grip.source.w * rect.width;
-  const height = grip.crop0.h * grip.source.h * rect.height;
+  // The same box the sheet draws its window at, from the same function, so what a finger grabs and
+  // what it can see are one rectangle.
+  const box = cropWindowBox(grip.source, grip.crop0);
+  const left = box.x * rect.width;
+  const top = box.y * rect.height;
+  const width = box.w * rect.width;
+  const height = box.h * rect.height;
   const right = left + width;
   const bottom = top + height;
 

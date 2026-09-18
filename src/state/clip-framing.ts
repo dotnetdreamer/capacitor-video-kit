@@ -223,6 +223,44 @@ export function scaleRect(rect: EditPlacement, factor: number, min: number, rota
 }
 
 /**
+ * Where the WHOLE source frame is shown while the crop tool is open, in fractions of the frame.
+ *
+ * The crop tool needs one thing the finished picture cannot give it: something that DOES NOT MOVE
+ * while the crop changes. [pictureBox] re-fits the kept picture into the clip's rectangle every
+ * time the crop's shape changes, which is right for the post and useless for a tool - drag the top
+ * edge down and the whole picture rescales and recentres, so the edge slides out from under the
+ * finger and the window appears to do something else entirely.
+ *
+ * So this depends on the source's shape, the clip's rectangle and the frame's, and on nothing that
+ * a crop gesture touches. The source sits still, the window moves over it, and a finger that moves
+ * a tenth of this box moves the crop a tenth of the way across the source. That is the arithmetic
+ * the gestures measure against, the box the preview draws the source into while the sheet is open,
+ * and the box the window itself is a sub-rectangle of - one function, so the three cannot disagree.
+ */
+export function cropStageBox(
+  sourceAspect: number,
+  rect: EditRect | null | undefined,
+  frameAspect: number = DEFAULT_FRAME_ASPECT,
+): FrameBox {
+  // The whole source - no crop - contained in the rectangle the clip is drawn in. `contain` and not
+  // the clip's own fit: a tool has to show all of the picture there is to choose from, and `cover`
+  // would hide the part of it hanging over the rectangle's edges - which is exactly the part a
+  // customer opens this tool to go and find.
+  return pictureBox(sourceAspect, null, rect, 'contain', frameAspect);
+}
+
+/** The crop's own window on screen: a sub-rectangle of [cropStageBox], in fractions of the frame. */
+export function cropWindowBox(stage: FrameBox, crop: EditRect | null | undefined): FrameBox {
+  const kept = orWhole(crop);
+  return {
+    x: stage.x + kept.x * stage.w,
+    y: stage.y + kept.y * stage.h,
+    w: kept.w * stage.w,
+    h: kept.h * stage.h,
+  };
+}
+
+/**
  * Which part of the crop window the fingers have hold of. An edge moves one side of the crop; a
  * corner moves the two that meet there.
  */

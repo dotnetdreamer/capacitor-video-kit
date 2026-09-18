@@ -1,3 +1,4 @@
+import { cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
 import { Painter, WHOLE_FRAME, type LayerDraw } from '../../video-composer/web/painter';
 import type { PreviewVideoLayer } from '../../state/editor-store';
@@ -174,6 +175,10 @@ export class PreviewCanvas {
     const painter = this.painter;
     if (!painter) return;
 
+    // The segment the crop sheet is open on, which is drawn as a TOOL rather than as the post; see
+    // [layerDraw]. Null whenever that sheet is shut, which is almost always.
+    const cropping = this.store.panel.value === 'crop' ? (this.store.cropClip.value?.id ?? null) : null;
+
     const draws: LayerDraw[] = [];
     // How many layers the POST says are on screen, whether or not their elements can supply one.
     let onScreen = 0;
@@ -187,7 +192,7 @@ export class PreviewCanvas {
         missing = true;
         continue;
       }
-      draws.push(layerDraw(layer, video));
+      draws.push(layerDraw(layer, video, cropping === layer.clipId ? this.store.frameAspect.value : null));
     }
 
     // Nothing to draw, over a post that should be showing something: KEEP what is on the canvas.
@@ -272,8 +277,16 @@ export function orderedLayers(layers: readonly PreviewVideoLayer[]): PreviewVide
  *
  * The angle comes off the rectangle either way and the painter turns the layer about that
  * rectangle's centre, so the two agree there as well.
+ *
+ * `cropFrameAspect` is set for the ONE segment the crop sheet is open on, and it is the exception
+ * to everything above: that segment is drawn as the crop TOOL needs it rather than as the post
+ * will have it - all of the source, no crop applied, on a stage that does not move while the crop
+ * changes. See [cropStageBox]. Without it the tool shows the finished picture, which re-fits itself
+ * on every frame of an edge drag, so the edge slides out from under the finger and the window
+ * appears to do something else entirely. It is null for every other layer and whenever the sheet is
+ * shut, and then the preview is exactly what the render draws.
  */
-export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement): LayerDraw {
+export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, cropFrameAspect: number | null = null): LayerDraw {
   const rotationDeg = layer.rect?.rotationDeg ?? 0;
   const common = {
     source: video,
@@ -282,6 +295,12 @@ export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement): La
     opacity: layer.opacity,
     rotationDeg,
   };
+  if (cropFrameAspect !== null && video.videoWidth > 0 && video.videoHeight > 0) {
+    const stage = cropStageBox(video.videoWidth / video.videoHeight, orWhole(layer.rect), cropFrameAspect);
+    // `contain` into a box that already IS the source's shape draws all of it, exactly, with no
+    // bars - so the window the sheet draws over this is a plain sub-rectangle of it.
+    return { ...common, framing: { fit: 'contain' }, dest: stage };
+  }
   if (layer.trackId === null) {
     return {
       ...common,

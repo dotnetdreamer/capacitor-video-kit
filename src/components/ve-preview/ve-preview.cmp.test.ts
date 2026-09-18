@@ -795,6 +795,35 @@ describe('ve-preview cropping one side at a time', () => {
   );
 
   it(
+    'moves the edge WITH the finger, and leaves the other three where they are on screen',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#0000ff') };
+      const { preview } = await openCrop(files);
+
+      const before = windowBox(preview);
+      const by = 40;
+      await dragBy(preview, { x: before.left + before.width / 2, y: before.top }, 0, by);
+      const after = windowBox(preview);
+
+      /*
+       * The whole of what was wrong. The window used to be drawn where the FINISHED picture lands,
+       * and the finished picture re-fits itself into the clip's rectangle every time the crop's
+       * shape changes - so dragging the top edge down rescaled and recentred the lot, the edge slid
+       * out from under the finger, and the window plainly did something other than what was asked.
+       *
+       * It is drawn over a STAGE now, which the crop cannot move, so an edge goes exactly as far as
+       * the finger took it and the other three stay put.
+       */
+      expect(after.top - before.top).toBeCloseTo(by, 0);
+      expect(after.bottom).toBeCloseTo(before.bottom, 0);
+      expect(after.left).toBeCloseTo(before.left, 0);
+      expect(after.right).toBeCloseTo(before.right, 0);
+    },
+    PIXEL_TIMEOUT_MS,
+  );
+
+  it(
     'still PANS the picture when the finger lands in the middle of the window',
     async (ctx) => {
       needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');

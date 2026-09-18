@@ -4,8 +4,8 @@ import { computed, signal } from '@preact/signals-core';
 import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { OVERLAY_BASE, isOverlayVisibleAt, type EditFit } from '../../editor';
-import { orWhole, pictureBox, type FrameBox } from '../../state/clip-framing';
+import { OVERLAY_BASE, isOverlayVisibleAt } from '../../editor';
+import { cropStageBox, cropWindowBox, orWhole, type FrameBox } from '../../state/clip-framing';
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
@@ -95,7 +95,6 @@ function sameBox(a: BoxView, b: BoxView): boolean {
 interface ExtraLayerView {
   trackId: string;
   layer: PreviewVideoLayer | null;
-  picture: BoxView;
 }
 
 /**
@@ -108,7 +107,7 @@ function sameLayerViews(a: readonly ExtraLayerView[], b: readonly ExtraLayerView
   if (a.length !== b.length) return false;
   return a.every((one, i) => {
     const other = b[i];
-    return one.trackId === other.trackId && one.layer?.clipId === other.layer?.clipId && sameBox(one.picture, other.picture);
+    return one.trackId === other.trackId && one.layer?.clipId === other.layer?.clipId;
   });
 }
 
@@ -536,14 +535,6 @@ export class VePreview implements EditorPlayer {
   );
 
   /**
-   * Where the base track's PICTURE sits inside the frame; see [pictureOf]. The crop window is drawn
-   * over it, and nothing else is: the picture itself is the compositor's.
-   */
-  private readonly basePicture = computedWith<BoxView>(
-    () => pictureOf(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
-    sameBox,
-  );
-  /**
    * Every extra track, bottom to top: which of its layers is under the playhead and where that
    * layer's picture lands - which is what the crop window is drawn over.
    *
@@ -553,17 +544,12 @@ export class VePreview implements EditorPlayer {
    * boxes that have not moved.
    */
   private readonly extraViews = computedWith<readonly ExtraLayerView[]>(() => {
-    const fit = this.postFit.value;
-    const frame = this.ctx.store.frameAspect.value;
     const shown = new Map(this.shownExtras.value.map((layer) => [layer.trackId as string, layer] as const));
     return this.ctx.store.videoTrackRows.value.map((track) => {
       const layer = shown.get(track.id) ?? null;
-      return { trackId: track.id, layer, picture: pictureOf(layer, this.extraAspectOf(track.id), fit, frame) };
+      return { trackId: track.id, layer };
     });
   }, sameLayerViews);
-
-  /** The post's own fit, which is what a layer with no clip under the playhead is drawn with. */
-  private readonly postFit = computed<EditFit>(() => this.ctx.store.clipFit(null));
 
   /**
    * The crop window drawn over the picture while the crop sheet is open: the rectangle the kept part
@@ -577,10 +563,15 @@ export class VePreview implements EditorPlayer {
       if (store.panel.value !== 'crop') return null;
       const target = store.cropClip.value;
       if (!target) return null;
-      // Either layer can be the one being cropped, and the window belongs to whichever element is
-      // actually showing that segment.
-      if (this.shownBase.value?.clipId === target.id) return this.basePicture.value;
-      return this.extraViews.value.find((view) => view.layer?.clipId === target.id)?.picture ?? null;
+      // The shape of the source being cropped, from whichever element is showing that segment.
+      const onExtra = this.shownExtras.value.find((layer) => layer.clipId === target.id)?.trackId ?? null;
+      const aspect = onExtra ? this.extraAspectOf(onExtra) : this.baseAspect.value;
+      if (!(aspect > 0)) return null;
+      // Over the STAGE, which is where the whole source is drawn while the sheet is open, and not
+      // over the finished picture: the window has to sit still under a finger that is dragging its
+      // edge, and the finished picture re-fits itself every time the crop's shape changes.
+      const stage = cropStageBox(aspect, orWhole(target.rect), store.frameAspect.value);
+      return percent(cropWindowBox(stage, target.crop));
     },
     (a, b) => (a === null || b === null ? a === b : sameBox(a, b)),
   );
@@ -1148,31 +1139,3 @@ function boxStyle(box: BoxView): { [key: string]: string } {
   };
 }
 
-/**
- * Where a layer's picture lands on the frame, as percentages - the whole frame when it fills it, the
- * letterboxed rectangle when it does not, and the cropped picture inside the clip's own rectangle
- * once it has one.
- *
- * This is CHROME arithmetic and no longer the picture's: the canvas places the picture itself, from
- * the same numbers, through `sourceWindow`. What is left for this is the box the crop tool's window
- * is drawn over, which has to sit exactly on what the customer can see.
- */
-function pictureOf(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit, frameAspect: number): BoxView {
-  const box = pictureBox(sourceAspect, layer?.crop, layer?.rect, layer?.fit ?? postFit, frameAspect);
-  // What is ON SCREEN, so `cover` inside a rectangle stops at the rectangle's edge rather than
-  // running on across the frame - the render clips it there, and the crop window drawn over this
-  // box has to agree with what the customer can actually see.
-  return percent(layer?.rect ? intersect(box, layer.rect) : box);
-}
-
-/** The part of a box that is inside another one. Empty when they do not meet, which cannot happen. */
-function intersect(box: FrameBox, rect: FrameBox): FrameBox {
-  const x = Math.max(box.x, rect.x);
-  const y = Math.max(box.y, rect.y);
-  return {
-    x,
-    y,
-    w: Math.max(0, Math.min(box.x + box.w, rect.x + rect.w) - x),
-    h: Math.max(0, Math.min(box.y + box.h, rect.y + rect.h) - y),
-  };
-}
