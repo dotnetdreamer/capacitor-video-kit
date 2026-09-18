@@ -125,7 +125,7 @@ export class VeCropSheet {
 
             <p class="cs__hint">
               <ve-icon name="crop-outline"></ve-icon>
-              {framed ? 'Drag the video to move it, pinch to zoom' : 'Pick a shape, then drag and pinch the video'}
+              {framed ? 'Drag an edge to crop a side, or drag and pinch the video' : 'Drag an edge to crop a side, or pick a shape'}
             </p>
           </div>
         </ve-sheet>

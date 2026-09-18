@@ -707,6 +707,117 @@ describe('ve-preview with several layers', () => {
   });
 });
 
+describe('ve-preview cropping one side at a time', () => {
+  /*
+   * A crop used to be a pan and a pinch and nothing else: the window kept whatever shape the ratio
+   * chips gave it, so the only way to take a strip off the top of a shot was to pick a ratio that
+   * happened to do it and then pan. Every edge of the window is draggable now, and each one moves
+   * its own side of the crop with the other three left exactly where they are.
+   */
+
+  /** One finger, pressed on the frame, dragged, and lifted - past the slop that makes it a drag. */
+  async function dragBy(preview: HTMLElement, from: { x: number; y: number }, dx: number, dy: number): Promise<void> {
+    const stage = preview.querySelector('.pv__stage') as HTMLElement;
+    const at = (x: number, y: number, type: string) =>
+      stage.dispatchEvent(
+        new PointerEvent(type, { pointerId: 1, isPrimary: true, clientX: x, clientY: y, bubbles: true, cancelable: true }),
+      );
+    at(from.x, from.y, 'pointerdown');
+    await frames(1);
+    // In two steps, so the gesture passes the tap slop and is promoted to a drag before it lands.
+    at(from.x + dx / 2, from.y + dy / 2, 'pointermove');
+    await frames(1);
+    at(from.x + dx, from.y + dy, 'pointermove');
+    await frames(2);
+    at(from.x + dx, from.y + dy, 'pointerup');
+    await frames(2);
+  }
+
+  /** Where the crop window is on screen, which is what the fingers aim at. */
+  function windowBox(preview: HTMLElement): DOMRect {
+    const el = preview.querySelector('.pv__crop') as HTMLElement | null;
+    if (!el) throw new Error('the crop window is not on screen');
+    return el.getBoundingClientRect();
+  }
+
+  async function openCrop(files: { a: string; b: string }): Promise<{ store: EditorStore; preview: HTMLElement }> {
+    const { store, preview } = await mount(false, files);
+    await until('the video to be composited', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+    // The source's shape has to have arrived: a crop is a fraction of the source, and the window is
+    // not drawn at all until the preview knows what shape that is.
+    await until('the source shape to arrive', () => store.sourceAspect.value > 0, 5000);
+    store.select({ kind: 'clip', id: 'seg-a' });
+    store.openPanel('crop');
+    await until('the crop window to be drawn', () => !!preview.querySelector('.pv__crop'), 3000);
+    return { store, preview };
+  }
+
+  it(
+    'takes a strip off the TOP when the top edge is dragged, and leaves the other three sides alone',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#0000ff') };
+      const { store, preview } = await openCrop(files);
+
+      const box = windowBox(preview);
+      await dragBy(preview, { x: box.left + box.width / 2, y: box.top }, 0, 40);
+
+      const crop = store.manifest.value.clips[0].crop;
+      expect(crop, 'the drag wrote a crop').toBeDefined();
+      // The top came down; the bottom and both sides are where they were. A pinch could not have
+      // produced this - it keeps the shape and moves all four.
+      expect(crop!.y).toBeGreaterThan(0.02);
+      expect(crop!.y + crop!.h).toBeCloseTo(1, 2);
+      expect(crop!.x).toBeCloseTo(0, 2);
+      expect(crop!.x + crop!.w).toBeCloseTo(1, 2);
+    },
+    PIXEL_TIMEOUT_MS,
+  );
+
+  it(
+    'takes a strip off the LEFT when the left edge is dragged',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#0000ff') };
+      const { store, preview } = await openCrop(files);
+
+      const box = windowBox(preview);
+      await dragBy(preview, { x: box.left, y: box.top + box.height / 2 }, 30, 0);
+
+      const crop = store.manifest.value.clips[0].crop;
+      expect(crop, 'the drag wrote a crop').toBeDefined();
+      expect(crop!.x).toBeGreaterThan(0.02);
+      expect(crop!.x + crop!.w).toBeCloseTo(1, 2);
+      expect(crop!.y).toBeCloseTo(0, 2);
+      expect(crop!.y + crop!.h).toBeCloseTo(1, 2);
+    },
+    PIXEL_TIMEOUT_MS,
+  );
+
+  it(
+    'still PANS the picture when the finger lands in the middle of the window',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#0000ff') };
+      const { store, preview } = await openCrop(files);
+      // Something to pan: a crop of the whole frame has nowhere to go.
+      store.commitClipFraming('seg-a', { crop: { x: 0.2, y: 0.2, w: 0.5, h: 0.5 } }, 'Crop');
+      await frames(3);
+
+      const box = windowBox(preview);
+      const before = store.manifest.value.clips[0].crop!;
+      await dragBy(preview, { x: box.left + box.width / 2, y: box.top + box.height / 2 }, 0, 30);
+
+      const after = store.manifest.value.clips[0].crop!;
+      // A pan moves the window and keeps its size, which is the half an edge drag must not become.
+      expect(after.w).toBeCloseTo(before.w, 4);
+      expect(after.h).toBeCloseTo(before.h, 4);
+      expect(after.y).not.toBeCloseTo(before.y, 3);
+    },
+    PIXEL_TIMEOUT_MS,
+  );
+});
+
 describe('ve-preview on a free canvas', () => {
   /*
    * A video is managed on the frame the way a sticker is, which means it has to SAY it is selected

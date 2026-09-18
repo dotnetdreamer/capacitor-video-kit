@@ -197,8 +197,9 @@ describe('ve-crop-sheet', () => {
 
     head(sheet, '.sheet__icon-btn--dim')!.click();
     await until('the crop to go', () => crop(store) === undefined);
-    // The hint says so as well: with nothing framed, there is nothing to drag or pinch yet.
-    expect(sheet.shadowRoot?.querySelector('.cs__hint')?.textContent).toContain('Pick a shape');
+    // The hint says so as well: with nothing framed there is no picture to move under the window,
+    // so what it offers is the two ways to start one - an edge, or a shape.
+    expect(sheet.shadowRoot?.querySelector('.cs__hint')?.textContent).toContain('pick a shape');
 
     head(sheet, '[aria-label="Done"]')!.click();
     await until('the panel to close', () => store.panel.value === null);

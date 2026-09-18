@@ -17,10 +17,12 @@ import {
   orWhole,
   pictureBox,
   placeClipRect,
+  resizeCrop,
   scaleClipRect,
   scaleRect,
   slideRect,
   sourceFrameBox,
+  type CropSide,
   type FrameBox,
 } from '../../state/clip-framing';
 import type { EditorStore } from '../../state/editor-store';
@@ -49,6 +51,17 @@ const HANDLE_CIRCLE_PX = 12;
  * its corner handle on the Play button; at full size it put it on Redo.
  */
 const HANDLE_EDGE_PX = 22;
+
+/**
+ * How close to an edge of the crop window a finger has to land to take hold of THAT EDGE rather
+ * than the picture behind it.
+ *
+ * A fingertip, near enough, and it has to be: the band is the whole target, there is no drawn
+ * handle bigger than it, and a customer aiming at the edge of a small window must not pan the
+ * picture instead. Anything landing outside every band pans, which is what the whole window did
+ * before the edges could be taken hold of at all.
+ */
+const CROP_EDGE_GRAB_PX = 24;
 
 /** Where the selection chrome may be drawn, in frame pixels - so negative left/top, past the frame. */
 export interface ChromeBounds {
@@ -293,6 +306,15 @@ interface ClipGrip {
   /** The angle the fingers landed on, so a twist adds to it rather than starting from upright. */
   rot0: number;
   source: FrameBox;
+  /**
+   * Which edge or corner of the crop window the fingers landed on, or null for the picture itself.
+   *
+   * Set only while the crop sheet is open, and it is what separates the tool's two gestures: a
+   * finger on the window's edge CROPS that side, a finger anywhere else PANS the source under the
+   * window. Read once as the fingers land, like everything else here, so a drag cannot wander from
+   * one to the other halfway through.
+   */
+  side: CropSide | null;
 }
 
 interface Point {
@@ -613,7 +635,7 @@ export class OverlayGestures {
 
     // The crop sheet owns the frame while it is open: every touch pans or zooms the picture inside
     // its window, and nothing else on the frame can be picked up or selected out from under it.
-    const cropping = this.cropGrip();
+    const cropping = this.cropGrip({ x: e.clientX - rect.left, y: e.clientY - rect.top }, rect);
     if (cropping) {
       this.gesture = {
         kind: 'press',
@@ -773,6 +795,14 @@ export class OverlayGestures {
     const dx = (point.x - gesture.x0) / rect.width;
     const dy = (point.y - gesture.y0) / rect.height;
     if (grip.mode === 'crop') {
+      // An edge of the window: that side of the crop follows the finger and the other three stay
+      // where they are. The distance is turned into a distance across the SOURCE by the box the
+      // whole source frame occupied when the fingers landed, exactly as the pan below is.
+      if (grip.side) {
+        const crop = resizeCrop(grip.crop0, grip.side, dx / grip.source.w, dy / grip.source.h);
+        this.queue({ kind: 'clip', id: grip.id, patch: { crop } });
+        return;
+      }
       const crop = slideRect(grip.crop0, grip.crop0.x - dx / grip.source.w, grip.crop0.y - dy / grip.source.h);
       this.queue({ kind: 'clip', id: grip.id, patch: { crop } });
       return;
@@ -956,12 +986,16 @@ export class OverlayGestures {
     // `handleOf` rather than `handleAt`, which decides who a press belongs to and has a side effect.
     if (handleOf(e.target)) return '';
 
-    // While the crop sheet is open the whole frame pans the picture inside the window, so every
-    // point on it really is a grip - and nothing else on the frame can be picked up at all.
-    if (this.cropGrip()) return 'grab';
-
     const rect = this.stage.getBoundingClientRect();
-    return this.hitTest(e.clientX - rect.left, e.clientY - rect.top, rect) ? 'grab' : '';
+    const point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+
+    // While the crop sheet is open the frame is the crop tool's: an edge of the window resizes that
+    // side, and everywhere else pans the picture under it. Nothing else on the frame can be picked
+    // up at all, so every point really is a grip of one kind or the other.
+    const cropping = this.cropGrip(point, rect);
+    if (cropping) return cropping.side ? CROP_CURSORS[cropping.side] : 'grab';
+
+    return this.hitTest(point.x, point.y, rect) ? 'grab' : '';
   }
 
   private setCursor(cursor: string): void {
@@ -1050,11 +1084,20 @@ export class OverlayGestures {
     };
   }
 
-  /** The crop sheet's clip, gripped for a pan or a zoom - or null when that sheet is not open. */
-  private cropGrip(): ClipGrip | null {
+  /**
+   * The crop sheet's clip, gripped for a pan, a zoom or an edge - or null when that sheet is shut.
+   *
+   * `at` is where the finger landed, in the frame's own pixels, and is what decides which of the
+   * three it is. A pinch has no single point and passes none, which is right: two fingers zoom the
+   * window wherever they land.
+   */
+  private cropGrip(at?: Point, rect?: DOMRect): ClipGrip | null {
     if (this.store.panel.value !== 'crop') return null;
     const clip = this.store.cropClip.value;
-    return clip ? this.clipGrip(clip.id, 'crop') : null;
+    if (!clip) return null;
+    const grip = this.clipGrip(clip.id, 'crop');
+    if (!grip || !at || !rect) return grip;
+    return { ...grip, side: cropSideAt(grip, at, rect) };
   }
 
   private selectedClipGrip(): ClipGrip | null {
@@ -1075,7 +1118,7 @@ export class OverlayGestures {
     const picture = pictureBox(this.store.sourceAspect.value, crop0, rect0, this.store.clipFit(clip), this.store.frameAspect.value);
     // The angle is read once, here, for the same reason the mode is: a twist adds to where the
     // fingers landed, so re-reading it mid-pinch would compound the turn on every frame.
-    return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source: sourceFrameBox(picture, crop0) };
+    return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source: sourceFrameBox(picture, crop0), side: null };
   }
 
   /** A tap on nothing: it puts the selection down, or plays and pauses when there is none. */
@@ -1188,6 +1231,62 @@ export function chromeBounds(stage: HTMLElement, rect: DOMRect): ChromeBounds {
 function gestureLabel(gesture: Extract<Gesture, { kind: 'drag' | 'twist' }>): string {
   if (gesture.grip) return gesture.grip.mode === 'crop' ? 'Crop' : 'Reframe';
   return gesture.kind === 'drag' ? 'Move' : 'Transform';
+}
+
+/** What the mouse is told an edge of the crop window will do. */
+const CROP_CURSORS: Record<CropSide, string> = {
+  top: 'ns-resize',
+  bottom: 'ns-resize',
+  left: 'ew-resize',
+  right: 'ew-resize',
+  topLeft: 'nwse-resize',
+  bottomRight: 'nwse-resize',
+  topRight: 'nesw-resize',
+  bottomLeft: 'nesw-resize',
+};
+
+/**
+ * Which edge or corner of the crop window a finger landed on, or null for the picture inside it.
+ *
+ * The window is worked out from the grip rather than measured off the DOM, so this and the drag
+ * that follows are reading one set of numbers: `source` is where the whole source frame sat when
+ * the fingers landed, and the crop is the part of it that is kept, so the window is simply the one
+ * inside the other.
+ *
+ * A CORNER wins over the two edges that meet at it, because a finger in the corner of a small
+ * window is inside both bands and a customer aiming at a corner means the corner. Beyond a band's
+ * width outside the window nothing is grabbed - a finger well off the window pans, as all of it
+ * used to - and the bands are clamped to a third of the window so a small one cannot become all
+ * edge with nothing left to pan by.
+ */
+function cropSideAt(grip: ClipGrip, at: Point, rect: DOMRect): CropSide | null {
+  const left = (grip.source.x + grip.crop0.x * grip.source.w) * rect.width;
+  const top = (grip.source.y + grip.crop0.y * grip.source.h) * rect.height;
+  const width = grip.crop0.w * grip.source.w * rect.width;
+  const height = grip.crop0.h * grip.source.h * rect.height;
+  const right = left + width;
+  const bottom = top + height;
+
+  const bandX = Math.min(CROP_EDGE_GRAB_PX, width / 3);
+  const bandY = Math.min(CROP_EDGE_GRAB_PX, height / 3);
+
+  // Outside the window by more than a band: the fingers are on the picture, not on its edge.
+  if (at.x < left - bandX || at.x > right + bandX || at.y < top - bandY || at.y > bottom + bandY) return null;
+
+  const onLeft = Math.abs(at.x - left) <= bandX;
+  const onRight = Math.abs(at.x - right) <= bandX;
+  const onTop = Math.abs(at.y - top) <= bandY;
+  const onBottom = Math.abs(at.y - bottom) <= bandY;
+
+  if (onTop && onLeft) return 'topLeft';
+  if (onTop && onRight) return 'topRight';
+  if (onBottom && onLeft) return 'bottomLeft';
+  if (onBottom && onRight) return 'bottomRight';
+  if (onTop) return 'top';
+  if (onBottom) return 'bottom';
+  if (onLeft) return 'left';
+  if (onRight) return 'right';
+  return null;
 }
 
 function handleOf(target: EventTarget | null): SelectionHandle | null {

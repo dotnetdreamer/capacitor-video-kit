@@ -223,6 +223,57 @@ export function scaleRect(rect: EditPlacement, factor: number, min: number, rota
 }
 
 /**
+ * Which part of the crop window the fingers have hold of. An edge moves one side of the crop; a
+ * corner moves the two that meet there.
+ */
+export type CropSide = 'top' | 'right' | 'bottom' | 'left' | 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight';
+
+/** Which sides each grip moves, so the arithmetic below is written once rather than eight times. */
+const CROP_SIDES: Record<CropSide, { left: boolean; right: boolean; top: boolean; bottom: boolean }> = {
+  top: { left: false, right: false, top: true, bottom: false },
+  right: { left: false, right: true, top: false, bottom: false },
+  bottom: { left: false, right: false, top: false, bottom: true },
+  left: { left: true, right: false, top: false, bottom: false },
+  topLeft: { left: true, right: false, top: true, bottom: false },
+  topRight: { left: false, right: true, top: true, bottom: false },
+  bottomLeft: { left: true, right: false, top: false, bottom: true },
+  bottomRight: { left: false, right: true, top: false, bottom: true },
+};
+
+/**
+ * One SIDE of a crop moved, with the other three left exactly where they are.
+ *
+ * This is the freehand half of the crop tool, and it is a different operation from [scaleRect]
+ * rather than a special case of it: a pinch zooms the window about its own centre and keeps the
+ * shape the customer chose, while dragging an edge is the customer choosing a new shape. So the
+ * opposite edge does not move, the size is free to change on one axis only, and the ratio chip
+ * simply stops matching - which [presetFor] already answers with null.
+ *
+ * `dx` and `dy` are in fractions of the SOURCE, which is what the caller gets by dividing a distance
+ * on screen by the on-screen size of the whole source frame; see [sourceFrameBox].
+ *
+ * Every edge is held twice over: inside the source, because a crop names a part of a frame and
+ * there is nothing outside it to keep, and [MIN_CROP] away from its opposite, because a window
+ * dragged shut is a clip with no picture in it. Both are clamps on the EDGE rather than on the
+ * size, so an edge pushed past its limit stops there and the rest of the rectangle stays put -
+ * where clamping the size instead would slide the whole window along as the finger kept going.
+ */
+export function resizeCrop(crop: EditRect, side: CropSide, dx: number, dy: number): EditRect {
+  const moves = CROP_SIDES[side];
+  let left = crop.x;
+  let right = crop.x + crop.w;
+  let top = crop.y;
+  let bottom = crop.y + crop.h;
+
+  if (moves.left) left = clamp(crop.x + dx, 0, right - MIN_CROP);
+  if (moves.right) right = clamp(right + dx, left + MIN_CROP, 1);
+  if (moves.top) top = clamp(crop.y + dy, 0, bottom - MIN_CROP);
+  if (moves.bottom) bottom = clamp(bottom + dy, top + MIN_CROP, 1);
+
+  return { x: round4(left), y: round4(top), w: round4(right - left), h: round4(bottom - top) };
+}
+
+/**
  * The largest crop of the source that gives a picture of `pictureAspect` (width / height of the
  * finished picture, not of the crop - a 1:1 crop of a landscape video is a tall, narrow slice of
  * it). Null asks for the source's own shape, which is the whole frame.

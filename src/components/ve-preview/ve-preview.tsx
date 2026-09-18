@@ -998,6 +998,17 @@ export class VePreview implements EditorPlayer {
                   <span class="pv__crop-corner pv__crop-corner--tr"></span>
                   <span class="pv__crop-corner pv__crop-corner--bl"></span>
                   <span class="pv__crop-corner pv__crop-corner--br"></span>
+                  {/*
+                    The four sides, each of which crops that side alone. They are drawn and not
+                    touched: every pointer on the frame is `OverlayGestures`'s, which works out
+                    which edge a finger landed on from the crop itself - see [cropSideAt] - so a
+                    handle with a hit box of its own would be a second answer to the same question
+                    and the two would drift. What these are for is SAYING the edges can be dragged.
+                  */}
+                  <span class="pv__crop-edge pv__crop-edge--t"></span>
+                  <span class="pv__crop-edge pv__crop-edge--r"></span>
+                  <span class="pv__crop-edge pv__crop-edge--b"></span>
+                  <span class="pv__crop-edge pv__crop-edge--l"></span>
                 </div>
               )}
 

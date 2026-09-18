@@ -675,9 +675,25 @@ export class EditorStore {
     this.haptic('light');
   }
 
+  /**
+   * Fill or fit: whether the picture COVERS the rectangle it is drawn in, cropping whatever hangs
+   * over, or is CONTAINED inside it with black down the sides it does not reach.
+   *
+   * The SELECTED segment's, when there is one, and the whole post's otherwise. It was the post's
+   * either way, and the tile sits in the clip tools row - so somebody who had placed a video on a
+   * layer, seen the black bands its rectangle left around it and tapped Fill changed the fit of
+   * every other segment in the post that had not been given one, which on a post of three layers
+   * is two pictures they were not looking at. The tile's own label is read back the same way.
+   */
   toggleFit(): void {
-    const fit = this.manifest.value.fit === 'cover' ? 'contain' : 'cover';
-    this.commit(fit === 'cover' ? 'Fill frame' : 'Fit frame', (m) => ({ ...m, fit }));
+    const clip = this.selectedClip.value;
+    const fit = this.clipFit(clip) === 'cover' ? 'contain' : 'cover';
+    const label = fit === 'cover' ? 'Fill frame' : 'Fit frame';
+    if (clip) {
+      this.commitClipFraming(clip.id, { fit }, label);
+      return;
+    }
+    this.commit(label, (m) => ({ ...m, fit }));
   }
 
   /* ========================================================================================= */

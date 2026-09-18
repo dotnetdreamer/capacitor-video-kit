@@ -864,4 +864,48 @@ describe('EditorStore', () => {
       expect(() => store.haptic(kind)).not.toThrow();
     }
   });
+  describe('Fill and Fit', () => {
+    /*
+     * The black bands around a video are its FIT: the picture is contained in the rectangle it was
+     * given and does not reach the sides of it. The tile that changes that sits in the clip tools
+     * row, so it belongs to the segment that is selected - it used to write the whole POST's fit,
+     * which on a post of three layers changed two pictures the customer was not looking at.
+     */
+    it('fills the selected segment and leaves the rest of the post alone', () => {
+      load();
+      const id = store.addVideoTrack(clip('c', 0, 3000))!;
+      const layer = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
+      store.select({ kind: 'clip', id: layer.id });
+
+      store.toggleFit();
+
+      const after = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
+      expect(store.clipFit(after)).toBe('cover');
+      // The post's own fit, and so every segment that has not been given one, is untouched.
+      expect(store.manifest.value.fit).toBe('contain');
+      expect(store.clipFit(store.manifest.value.clips[0])).toBe('contain');
+    });
+
+    it('reads the state back off that segment, so a second tap fits it again', () => {
+      load();
+      const id = store.addVideoTrack(clip('c', 0, 3000))!;
+      const layer = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
+      store.select({ kind: 'clip', id: layer.id });
+
+      store.toggleFit();
+      store.toggleFit();
+
+      const after = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
+      expect(store.clipFit(after)).toBe('contain');
+      expect(store.manifest.value.fit).toBe('contain');
+    });
+
+    it('still changes the POST when no segment is selected', () => {
+      load();
+      store.select(null);
+      store.toggleFit();
+      expect(store.manifest.value.fit).toBe('cover');
+    });
+  });
+
 });

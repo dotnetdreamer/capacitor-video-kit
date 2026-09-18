@@ -317,7 +317,10 @@ describe('ve-toolbar', () => {
 
     tile(bar, 'fit').click();
     await until('the label to turn over', () => tile(bar, 'fit').textContent!.includes('Fill'));
-    expect(store.manifest.value.fit).toBe('contain');
+    // On the SEGMENT that is selected, which is whose tools row this tile is in. The post's own fit
+    // is what every other segment falls back on, and a tap here must not move those.
+    expect(store.manifest.value.clips.find(clip => clip.id === 'seg-a')?.fit).toBe('contain');
+    expect(store.manifest.value.fit).toBe('cover');
   });
 
   it('rebuilds the row when the row changes and not when the manifest does', async () => {

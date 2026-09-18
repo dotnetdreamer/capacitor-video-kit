@@ -274,6 +274,53 @@
   pointer-events: none;
 }
 
+/*
+ * The grab bar on each side of the crop window: short, centred, and outside the outline so it reads
+ * as something to take hold of rather than as part of the picture.
+ *
+ * Drawn only. The finger target is a band either side of the edge, worked out in
+ * `OverlayGestures.cropSideAt` from the crop itself and comfortably larger than these bars, because
+ * a target the size of a 3px line is not one. Everything in the frame is `pointer-events: none`.
+ */
+.pv__crop-edge {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.pv__crop-edge--t,
+.pv__crop-edge--b {
+  left: 50%;
+  width: 28px;
+  height: 3px;
+  transform: translateX(-50%);
+}
+
+.pv__crop-edge--l,
+.pv__crop-edge--r {
+  top: 50%;
+  width: 3px;
+  height: 28px;
+  transform: translateY(-50%);
+}
+
+.pv__crop-edge--t {
+  top: -1px;
+}
+
+.pv__crop-edge--b {
+  bottom: -1px;
+}
+
+.pv__crop-edge--l {
+  left: -1px;
+}
+
+.pv__crop-edge--r {
+  right: -1px;
+}
+
 /* Rule of thirds, as every crop tool draws it: two lines each way, hairline, inside the window. */
 .pv__crop::before,
 .pv__crop::after {

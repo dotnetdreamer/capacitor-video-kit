@@ -95,7 +95,8 @@ export class VeToolbar {
   private readonly layerKind = computed(() => this.ctx.store.selectedOverlay.value?.kind ?? null);
   private readonly voiceSelected = computed(() => !!this.ctx.store.selectedVoice.value);
   private readonly lastClip = computed(() => this.ctx.store.manifest.value.clips.length <= 1);
-  private readonly fitContain = computed(() => this.ctx.store.manifest.value.fit === 'contain');
+  /** The SELECTED segment's fit, or the post's when nothing is selected - what a tap will change. */
+  private readonly fitContain = computed(() => this.ctx.store.clipFit(this.ctx.store.selectedClip.value) === 'contain');
   private readonly musicLoops = computed(() => !!this.ctx.store.manifest.value.music?.loop);
 
   /** Where the selected layer sits in the drawing order, which is what the four move tools need. */
