@@ -98,11 +98,11 @@ export interface PreviewMedia {
   music: HTMLAudioElement;
   voice: HTMLAudioElement;
   /**
-   * The video layer above the base one under the playhead, or null when there is none there. It is
-   * read from the same signal the component DRAWS from, so the element and the box it is placed in
-   * can never disagree about which clip they are on.
+   * Every video layer above the base one under the playhead, bottom to top. Read from the same
+   * signal the component DRAWS from, so an element and the box it is placed in can never disagree
+   * about which clip they are on.
    */
-  extraLayer: () => PreviewVideoLayer | null;
+  extraLayers: () => readonly PreviewVideoLayer[];
 }
 
 /**
@@ -166,9 +166,18 @@ export class PreviewPlayer implements EditorPlayer {
   private readonly unlisten: Array<() => void> = [];
 
   private readonly hold: VideoHold;
-  private readonly extraLayer: () => PreviewVideoLayer | null;
+  private readonly extraLayers: () => readonly PreviewVideoLayer[];
   /** The second layer's element while the post has one; see [attachFollower]. */
-  private follower: FollowerVideo | null = null;
+  /**
+   * One follower per extra video layer, by track id.
+   *
+   * A map and not a single element: a post may carry [MAX_VIDEO_TRACKS] layers and every one of them
+   * is drawn, so every one of them needs an element of its own to be drawn FROM. What it costs is a
+   * hardware decoder per layer, which is the real budget on a phone - and the answer to that is for
+   * a customer not to stack eight videos, not for the editor to show them a post that is missing
+   * one and say nothing.
+   */
+  private readonly followers = new Map<string, FollowerVideo>();
 
   constructor(
     private readonly store: EditorStore,
@@ -178,7 +187,7 @@ export class PreviewPlayer implements EditorPlayer {
     // Sized to outlast the load watchdog and one seek watchdog behind it, which is the longest a
     // hold can legitimately be waiting for the frame that replaces it.
     this.hold = new VideoHold(media.video, media.hold, media.setHolding, LOAD_WATCHDOG_MS + SEEK_WATCHDOG_MS);
-    this.extraLayer = media.extraLayer;
+    this.extraLayers = media.extraLayers;
     this.musicEl = media.music;
     this.voiceEl = media.voice;
 
@@ -299,7 +308,7 @@ export class PreviewPlayer implements EditorPlayer {
   /** A filmstrip arrived; the clip on either element may have been showing the blank poster. */
   refreshPoster(): void {
     if (this.destroyed) return;
-    this.follower?.refreshPoster();
+    for (const follower of this.followers.values()) follower.refreshPoster();
     if (!this.posterIsBlank) return;
     const slot = this.currentSlot();
     const clip = slot ? this.store.clipByKey(slot.clip.clipKey) : undefined;
@@ -330,7 +339,7 @@ export class PreviewPlayer implements EditorPlayer {
   /** The same for the second layer, whose box every arrangement moves along with the base's. */
   repaintExtra(): void {
     if (this.destroyed) return;
-    this.follower?.repaint();
+    for (const follower of this.followers.values()) follower.repaint();
   }
 
   /**
@@ -350,7 +359,7 @@ export class PreviewPlayer implements EditorPlayer {
     if (this.destroyed || !this.video.paused) return;
     this.loadedKey = null;
     this.goTo(this.store.playheadMs.value, false);
-    this.follower?.revive();
+    for (const follower of this.followers.values()) follower.revive();
   }
 
   destroy(): void {
@@ -359,8 +368,8 @@ export class PreviewPlayer implements EditorPlayer {
     this.cancelLoad?.();
     this.cancelLoad = null;
     this.hold.destroy();
-    this.follower?.destroy();
-    this.follower = null;
+    for (const follower of this.followers.values()) follower.destroy();
+    this.followers.clear();
     if (this.seekTimer) clearTimeout(this.seekTimer);
     for (const off of this.unlisten) off();
     for (const el of [this.video, this.musicEl, this.voiceEl]) {
@@ -530,7 +539,7 @@ export class PreviewPlayer implements EditorPlayer {
     } else {
       this.stopLoop();
       this.pauseAudio();
-      this.follower?.pause();
+      for (const follower of this.followers.values()) follower.pause();
     }
   }
 
@@ -562,7 +571,7 @@ export class PreviewPlayer implements EditorPlayer {
       // The clock has stopped: the base is between sources, or settling on a frame it was seeked
       // to. A second layer that ran on through that would come back a load's worth ahead and be
       // yanked back into place, so it waits with the base rather than drifting past it.
-      this.follower?.pause();
+      for (const follower of this.followers.values()) follower.pause();
       return;
     }
     const slots = this.store.slots.value;
@@ -793,15 +802,20 @@ export class PreviewPlayer implements EditorPlayer {
   /* ========================================================================================= */
 
   /**
-   * The extra track's element, handed over as the render creates it and taken back as it removes
-   * it. It arrives this way rather than through the constructor because the component only writes it
-   * out while the post HAS a second track: a post with one video never opens a second decoder, which
-   * is the budget [MAX_VIDEO_TRACKS] is counting.
+   * One layer's element, handed over as the render creates it and taken back as it removes it.
+   *
+   * It arrives this way rather than through the constructor because the component writes an element
+   * out per layer the post HAS: a post with one video never opens a second decoder, and one with
+   * five opens five because five is what it has to draw.
    */
-  attachFollower(media: FollowerMedia | null): void {
+  attachFollower(trackId: string, media: FollowerMedia | null): void {
     if (this.destroyed) return;
-    this.follower?.destroy();
-    this.follower = media ? new FollowerVideo(this.store, media, LOAD_WATCHDOG_MS + SEEK_WATCHDOG_MS) : null;
+    this.followers.get(trackId)?.destroy();
+    if (!media) {
+      this.followers.delete(trackId);
+      return;
+    }
+    this.followers.set(trackId, new FollowerVideo(this.store, media, LOAD_WATCHDOG_MS + SEEK_WATCHDOG_MS));
     // A track added while the base is still loading its own clip is going to play the moment that
     // lands, so the element is started from what the player is heading for rather than from where
     // the base happens to be sitting.
@@ -809,12 +823,19 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   /**
-   * Puts the second layer where the base has just got to. The base element is the clock - its track
-   * is the one whose length is the post's - so this is called from everywhere the base moves and
-   * from nowhere else; there is no second frame loop and no second reading of the time.
+   * Puts every layer where the base has just got to. The base element is the clock - its track is
+   * the one whose length is the post's - so this is called from everywhere the base moves and from
+   * nowhere else; there is no frame loop per layer and no second reading of the time.
+   *
+   * A follower whose track has no clip under the playhead is synced with null rather than skipped,
+   * which is what tells it to hide itself: skipping would leave the last frame of a layer that has
+   * ended sitting on the frame.
    */
   private syncFollower(playing: boolean): void {
-    this.follower?.sync(this.extraLayer(), playing);
+    const byTrack = new Map(this.extraLayers().map((layer) => [layer.trackId, layer] as const));
+    for (const [trackId, follower] of this.followers) {
+      follower.sync(byTrack.get(trackId) ?? null, playing);
+    }
   }
 
   /* ========================================================================================= */

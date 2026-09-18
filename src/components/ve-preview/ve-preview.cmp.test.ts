@@ -377,6 +377,42 @@ describe('ve-preview after the page has been away', () => {
   });
 });
 
+describe('ve-preview with several layers', () => {
+  /*
+   * There is no cap on how many videos are drawn.
+   *
+   * There used to be: two elements, the base and the FRONT-MOST layer, so a post with three showed
+   * the first and the third and nothing said where the second had gone. Somebody who split a clip
+   * and pushed half of it onto a layer of its own watched it disappear from the preview while the
+   * timeline went on showing it and the export went on including it.
+   */
+  it('draws one element per layer, however many there are', async () => {
+    const { store, preview } = await mount(false);
+    store.addVideoTrack(defaultClipEdit('clip-b', 4000, 'seg-b'));
+    store.addVideoTrack(defaultClipEdit('clip-b', 4000, 'seg-c'));
+    await frames(4);
+
+    // The base and both layers, not the base and the front-most one.
+    expect(videos(preview).length).toBe(3);
+    expect(store.videoTrackRows.value.length).toBe(2);
+  });
+
+  it("keeps a layer's element while the playhead is outside its window", async () => {
+    const { store, preview } = await mount(false);
+    // A layer that starts a second in, so the playhead at 0 is in the gap before it.
+    store.addVideoTrack(defaultClipEdit('clip-b', 2000, 'seg-b'));
+    await frames(3);
+    const before = videos(preview)[1];
+    store.setTrackStart(store.videoTrackRows.value[0].id, 1000);
+    await frames(4);
+
+    // The SAME element, hidden rather than torn down: a teardown costs another load and another
+    // black flash every time the playhead crosses the track's start.
+    expect(videos(preview)[1]).toBe(before);
+    expect(videos(preview)[1].classList.contains('pv__video--idle')).toBe(true);
+  });
+});
+
 describe('ve-preview on a free canvas', () => {
   /*
    * A video may be placed anywhere, the edges of the frame included, and what hangs over the edge

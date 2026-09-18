@@ -14,12 +14,16 @@ Nothing here is a rendering of its own. The video is the ORIGINAL clips on one `
 per video track with the filter as CSS, and each layer is the PNG `OverlayBitmaps` rasterised for
 it - so where a layer sits here, at the size it shows, is where the finished video has it.
 
-Two elements at the most, and the second one is only written out while the post has a layer over
-the base track: a phone decodes two video streams at once and the feed behind this editor may
-already hold one. That is a LIVE PREVIEW limit and not the manifest's - [MAX_VIDEO_TRACKS] layers
-can be built on the timeline and every one of them is composited by the render - so with more than
-two videos on the frame this shows the base and the front-most layer, and the rest are seen in the
-finished video rather than here.
+ONE ELEMENT PER LAYER, with no cap on how many. It was two - the base and the front-most layer -
+because a phone decodes two video streams comfortably and the feed behind this editor may already
+hold one. What that cost was worse than the decoders it saved: a post with three layers showed
+the first and the third, and somebody who split a clip and pushed half of it onto a layer of its
+own watched it vanish from the preview while the timeline went on showing it and the export went
+on including it. An editor that draws most of the post is not a preview of anything.
+
+So every layer is drawn, and the cost is a hardware decoder each. A customer who stacks more of
+them than their phone can decode will see that happen; that is a post they built, and the honest
+thing is to show it to them rather than to leave one out and say nothing.
 
 It is also the editor's player: the store forwards every play, pause and seek here. `seek`, `play`
 and `pause` are therefore plain methods and not `@Method()`s, because a `@Method()` has to return

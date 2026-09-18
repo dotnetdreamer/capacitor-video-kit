@@ -102,6 +102,42 @@ function sameView(a: VideoView, b: VideoView): boolean {
   );
 }
 
+/**
+ * One extra video TRACK as the template draws it: which element, where it goes, what is in it.
+ *
+ * Per track and not per layer under the playhead, which is the difference between an element that
+ * lives as long as the track does and one that is created and destroyed every time the playhead
+ * crosses a gap in it. `layer` is null in those gaps: the element stays in the DOM, paused and
+ * hidden, keeping its source and its last decoded frame, so coming back costs a seek rather than
+ * another load and another black flash.
+ */
+interface ExtraLayerView {
+  trackId: string;
+  layer: PreviewVideoLayer | null;
+  box: VideoView;
+  picture: BoxView;
+}
+
+/**
+ * Whether two lists of layers would be DRAWN the same, entry for entry.
+ *
+ * The playhead writes thirty times a second and almost none of those writes move anything: without
+ * this every one of them would rebuild every layer's box and hand the vdom a new style object per
+ * element per frame.
+ */
+function sameLayerViews(a: readonly ExtraLayerView[], b: readonly ExtraLayerView[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((one, i) => {
+    const other = b[i];
+    return (
+      one.trackId === other.trackId &&
+      one.layer?.clipId === other.layer?.clipId &&
+      sameView(one.box, other.box) &&
+      sameBox(one.picture, other.picture)
+    );
+  });
+}
+
 /** Whether two layers would be DRAWN the same. `sourceMs` is left out on purpose: it moves with the
     playhead 30 times a second, and only the elements playing the layers care where it has got to. */
 function sameFraming(a: PreviewVideoLayer | null, b: PreviewVideoLayer | null): boolean {
@@ -143,12 +179,16 @@ function extraLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer |
  * per video track with the filter as CSS, and each layer is the PNG `OverlayBitmaps` rasterised for
  * it - so where a layer sits here, at the size it shows, is where the finished video has it.
  *
- * Two elements at the most, and the second one is only written out while the post has a layer over
- * the base track: a phone decodes two video streams at once and the feed behind this editor may
- * already hold one. That is a LIVE PREVIEW limit and not the manifest's - [MAX_VIDEO_TRACKS] layers
- * can be built on the timeline and every one of them is composited by the render - so with more than
- * two videos on the frame this shows the base and the front-most layer, and the rest are seen in the
- * finished video rather than here.
+ * ONE ELEMENT PER LAYER, with no cap on how many. It was two - the base and the front-most layer -
+ * because a phone decodes two video streams comfortably and the feed behind this editor may already
+ * hold one. What that cost was worse than the decoders it saved: a post with three layers showed
+ * the first and the third, and somebody who split a clip and pushed half of it onto a layer of its
+ * own watched it vanish from the preview while the timeline went on showing it and the export went
+ * on including it. An editor that draws most of the post is not a preview of anything.
+ *
+ * So every layer is drawn, and the cost is a hardware decoder each. A customer who stacks more of
+ * them than their phone can decode will see that happen; that is a post they built, and the honest
+ * thing is to show it to them rather than to leave one out and say nothing.
  *
  * It is also the editor's player: the store forwards every play, pause and seek here. `seek`, `play`
  * and `pause` are therefore plain methods and not `@Method()`s, because a `@Method()` has to return
@@ -186,8 +226,11 @@ export class VePreview implements EditorPlayer {
   private stageEl?: HTMLDivElement;
   private videoEl?: HTMLVideoElement;
   private holdEl?: HTMLCanvasElement;
-  private extraVideoEl: HTMLVideoElement | null = null;
-  private extraHoldEl: HTMLCanvasElement | null = null;
+  /** One `<video>`/`<canvas>` pair per extra video layer, by track id. */
+  private readonly extraEls = new Map<string, { video: HTMLVideoElement | null; hold: HTMLCanvasElement | null }>();
+  /** What each track's element was last attached to the player as, so a repaint does not re-attach. */
+  private readonly attachedExtras = new Map<string, HTMLVideoElement>();
+  private readonly extraRefs = new Map<string, { video: (el?: HTMLElement) => void; hold: (el?: HTMLElement) => void }>();
   private musicEl?: HTMLAudioElement;
   private voiceEl?: HTMLAudioElement;
 
@@ -200,12 +243,32 @@ export class VePreview implements EditorPlayer {
   private readonly keepHold = (el?: HTMLElement) => {
     this.holdEl = el as HTMLCanvasElement | undefined;
   };
-  private readonly keepExtraVideo = (el?: HTMLElement) => {
-    this.extraVideoEl = (el as HTMLVideoElement | undefined) ?? null;
-  };
-  private readonly keepExtraHold = (el?: HTMLElement) => {
-    this.extraHoldEl = (el as HTMLCanvasElement | undefined) ?? null;
-  };
+  /**
+   * The ref pair for one layer, made once per track id and never again.
+   *
+   * Cached because a fresh arrow every render is a CHANGED ref to the vdom, which tears the old one
+   * down and puts the new one up on every repaint - and every one of those teardowns would take the
+   * layer's element away from the player and hand it back, which is a load and a black flash per
+   * frame of playback.
+   */
+  private refsFor(trackId: string): { video: (el?: HTMLElement) => void; hold: (el?: HTMLElement) => void } {
+    const known = this.extraRefs.get(trackId);
+    if (known) return known;
+    const made = {
+      video: (el?: HTMLElement) => this.keepExtra(trackId, 'video', el),
+      hold: (el?: HTMLElement) => this.keepExtra(trackId, 'hold', el),
+    };
+    this.extraRefs.set(trackId, made);
+    return made;
+  }
+
+  private keepExtra(trackId: string, which: 'video' | 'hold', el?: HTMLElement): void {
+    const pair = this.extraEls.get(trackId) ?? { video: null, hold: null };
+    if (which === 'video') pair.video = (el as HTMLVideoElement | undefined) ?? null;
+    else pair.hold = (el as HTMLCanvasElement | undefined) ?? null;
+    if (pair.video || pair.hold) this.extraEls.set(trackId, pair);
+    else this.extraEls.delete(trackId);
+  }
   private readonly keepMusic = (el?: HTMLElement) => {
     this.musicEl = el as HTMLAudioElement | undefined;
   };
@@ -217,7 +280,8 @@ export class VePreview implements EditorPlayer {
 
   /** True while the hold canvas covers the video, i.e. across a source change. One per element. */
   readonly holding = signal(false);
-  readonly extraHolding = signal(false);
+  /** The same for every extra layer, by track id: a set holds only the ones that are holding. */
+  readonly extraHolding = signal<ReadonlySet<string>>(new Set());
   /** A LAYER is being dragged: the bin is on screen and the layer may be dropped into it. */
   readonly dragging = signal(false);
   /**
@@ -232,11 +296,10 @@ export class VePreview implements EditorPlayer {
 
   private player: PreviewPlayer | null = null;
   /** The second element the player was last given, so its listeners can be taken off again. */
-  private extraEl: HTMLVideoElement | null = null;
   /** The placement each element was last RENDERED with, which is how a box that moved is noticed;
       see [repaintMoved]. Null until the render that first places them. */
   private placedBase: VideoView | null = null;
-  private placedExtra: VideoView | null = null;
+  private placedExtras = new Map<string, VideoView>();
   private gestures: OverlayGestures | null = null;
   private stageResize: ResizeObserver | null = null;
   private readonly disposers: Array<() => void> = [];
@@ -458,7 +521,8 @@ export class VePreview implements EditorPlayer {
    * yet" and draws exactly as it drew before crops existed.
    */
   private readonly baseAspect = signal(0);
-  private readonly extraAspect = signal(0);
+  /** Each extra layer's source shape, by track id. Absent is "its metadata has not landed yet". */
+  private readonly extraAspects = signal<ReadonlyMap<string, number>>(new Map());
 
   private readonly readBaseAspect = (): void => {
     const video = this.videoEl;
@@ -467,12 +531,36 @@ export class VePreview implements EditorPlayer {
     }
   };
 
-  private readonly readExtraAspect = (): void => {
-    const video = this.extraEl;
-    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
-      this.extraAspect.value = video.videoWidth / video.videoHeight;
+  /**
+   * One listener for every layer's element, rather than one bound per track.
+   *
+   * The element that fired is looked up in the map instead of being closed over, which is what
+   * keeps the listener a single stable function: one that was made per track would have to be
+   * remembered per track as well, purely to be taken off again.
+   */
+  private readonly readExtraAspect = (event: Event): void => {
+    const video = event.target as HTMLVideoElement;
+    if (!(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
+    for (const [trackId, pair] of this.extraEls) {
+      if (pair.video === video) {
+        this.setExtraAspect(trackId, video.videoWidth / video.videoHeight);
+        return;
+      }
     }
   };
+
+  private setExtraAspect(trackId: string, aspect: number): void {
+    if (this.extraAspects.value.get(trackId) === aspect) return;
+    const next = new Map(this.extraAspects.value);
+    if (aspect > 0) next.set(trackId, aspect);
+    else next.delete(trackId);
+    this.extraAspects.value = next;
+  }
+
+  /** The shape of one layer's source, or 0 while its metadata is still on its way. */
+  private extraAspectOf(trackId: string | null): number {
+    return (trackId && this.extraAspects.value.get(trackId)) || 0;
+  }
 
   /**
    * What each `<video>` element is showing: the base track's layer under the playhead, and the one
@@ -484,17 +572,22 @@ export class VePreview implements EditorPlayer {
     () => baseLayerOf(this.ctx.store.previewLayers.value),
     sameFraming,
   );
+  /**
+   * Every layer above the base one under the playhead, bottom to top - and there is no cap on how
+   * many that is. Each gets an element of its own, which costs a decoder each; a post that stacks
+   * more layers than the device can decode is a post the customer built, and showing them all of it
+   * is the only honest thing to do with it.
+   */
+  private readonly shownExtras = computed<readonly PreviewVideoLayer[]>(() =>
+    this.ctx.store.previewLayers.value.filter((layer) => layer.trackId !== null),
+  );
+
+  /** The front-most of them, which is what the selection chrome and the crop window follow. */
   private readonly shownExtra = computedWith<PreviewVideoLayer | null>(
     () => extraLayerOf(this.ctx.store.previewLayers.value),
     sameFraming,
   );
 
-  /**
-   * Whether the second layer is on screen at this instant. Outside its track's window the element
-   * stays in the DOM, paused and hidden: its source and its last decoded frame stay with it, so
-   * coming back into the window costs a seek rather than another load and another black flash.
-   */
-  private readonly extraOnScreen = computed(() => this.shownExtra.value !== null);
   /**
    * Whether the BASE track has a picture at this instant. False only in the tail a customer has
    * pulled past the base track's last frame, where the post is black and whatever layer is over it
@@ -515,10 +608,7 @@ export class VePreview implements EditorPlayer {
     () => videoView(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameView,
   );
-  private readonly extraBox = computedWith<VideoView>(
-    () => videoView(this.shownExtra.value, this.extraAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
-    sameView,
-  );
+
 
   /**
    * Where each layer's PICTURE sits inside the 9:16 frame, as percentages - the whole frame when it
@@ -530,10 +620,30 @@ export class VePreview implements EditorPlayer {
     () => pictureOf(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameBox,
   );
-  private readonly extraPicture = computedWith<BoxView>(
-    () => pictureOf(this.shownExtra.value, this.extraAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
-    sameBox,
-  );
+  /**
+   * Every extra layer as the template draws it, bottom to top: the element's box, the picture inside
+   * it, and the layer itself.
+   *
+   * One computed over the whole list rather than a pair per track, because the list is what changes:
+   * a layer added or removed changes its length, and a playhead crossing a clip boundary changes one
+   * entry. [sameLayerViews] is what keeps the playhead's thirty writes a second from rebuilding
+   * boxes that have not moved.
+   */
+  private readonly extraViews = computedWith<readonly ExtraLayerView[]>(() => {
+    const fit = this.postFit.value;
+    const frame = this.ctx.store.frameAspect.value;
+    const shown = new Map(this.shownExtras.value.map((layer) => [layer.trackId as string, layer] as const));
+    return this.ctx.store.videoTrackRows.value.map((track) => {
+      const layer = shown.get(track.id) ?? null;
+      const aspect = this.extraAspectOf(track.id);
+      return {
+        trackId: track.id,
+        layer,
+        box: videoView(layer, aspect, fit, frame),
+        picture: pictureOf(layer, aspect, fit, frame),
+      };
+    });
+  }, sameLayerViews);
 
   /** The post's own fit, which is what a layer with no clip under the playhead is drawn with. */
   private readonly postFit = computed<EditFit>(() => this.ctx.store.clipFit(null));
@@ -553,8 +663,7 @@ export class VePreview implements EditorPlayer {
       // Either layer can be the one being cropped, and the window belongs to whichever element is
       // actually showing that segment.
       if (this.shownBase.value?.clipId === target.id) return this.basePicture.value;
-      if (this.shownExtra.value?.clipId === target.id) return this.extraPicture.value;
-      return null;
+      return this.extraViews.value.find((view) => view.layer?.clipId === target.id)?.picture ?? null;
     },
     (a, b) => (a === null || b === null ? a === b : sameBox(a, b)),
   );
@@ -574,7 +683,7 @@ export class VePreview implements EditorPlayer {
    */
   componentDidRender() {
     this.setUp();
-    this.attachExtra();
+    this.attachExtras();
     this.repaintMoved();
   }
 
@@ -593,11 +702,27 @@ export class VePreview implements EditorPlayer {
    */
   private repaintMoved(): void {
     const base = this.baseBox.value;
-    const extra = this.extraBox.value;
     const movedBase = this.placedBase !== null && this.placedBase !== base;
-    const movedExtra = this.placedExtra !== null && this.placedExtra !== extra;
     this.placedBase = base;
-    this.placedExtra = extra;
+
+    /*
+     * Per track, and only for a track that was already there.
+     *
+     * A track APPEARING is not a box that moved: its element is loading its first source and that
+     * load ends in a seek of its own, so a repaint here would nudge it a millisecond off the
+     * position it is about to be put on - and the nudge, arriving first, is what the element would
+     * present. Compared by value rather than by identity because the list is rebuilt whenever any
+     * entry in it changes, and one layer moving must not repaint the others.
+     */
+    let movedExtra = false;
+    const placed = new Map<string, VideoView>();
+    for (const view of this.extraViews.value) {
+      const was = this.placedExtras.get(view.trackId);
+      if (was && !sameView(was, view.box)) movedExtra = true;
+      placed.set(view.trackId, view.box);
+    }
+    this.placedExtras = placed;
+
     if (movedBase) this.player?.repaintBase();
     if (movedExtra) this.player?.repaintExtra();
   }
@@ -611,7 +736,7 @@ export class VePreview implements EditorPlayer {
       video.removeEventListener('loadedmetadata', this.readBaseAspect);
       video.removeEventListener('resize', this.readBaseAspect);
     }
-    this.detachExtra();
+    this.detachExtras();
     this.gestures?.destroy();
     this.gestures = null;
     this.stageResize?.disconnect();
@@ -648,7 +773,7 @@ export class VePreview implements EditorPlayer {
       voice,
       // The store's list and not [shownExtra], which holds its value while only `sourceMs` has
       // moved: where the layer has got to in its file is the one thing the element needs.
-      extraLayer: () => extraLayerOf(store.previewLayers.value),
+      extraLayers: () => store.previewLayers.value.filter((layer) => layer.trackId !== null),
     });
     store.attachPlayer(this);
     this.player.start();
@@ -697,8 +822,10 @@ export class VePreview implements EditorPlayer {
       deferredEffect(
         () => {
           const target = store.cropClip.value;
-          const onExtra = !!target && this.shownExtra.value?.clipId === target.id;
-          return onExtra ? this.extraAspect.value : this.baseAspect.value;
+          const onExtra = target
+            ? this.shownExtras.value.find((layer) => layer.clipId === target.id)?.trackId ?? null
+            : null;
+          return onExtra ? this.extraAspectOf(onExtra) : this.baseAspect.value;
         },
         (aspect) => {
           store.sourceAspect.value = aspect;
@@ -722,42 +849,61 @@ export class VePreview implements EditorPlayer {
   }
 
   /**
-   * Hands the second layer's element to the player, or takes it back. Nothing is done when the
-   * element has not actually changed, which is what makes this safe to call from every render: a
-   * second pass would put a second pair of listeners on the same element.
+   * Hands every layer's element to the player, and takes back the ones whose layer has gone.
+   *
+   * Nothing is done for an element that has not actually changed, which is what makes this safe to
+   * call from every render: a second pass would put a second pair of listeners on the same element
+   * and a second follower on the same track.
    */
-  private attachExtra(): void {
-    const video = this.extraVideoEl;
-    const hold = this.extraHoldEl;
-    if (this.extraEl === video) return;
-    if (this.extraEl) {
-      this.extraEl.removeEventListener('loadedmetadata', this.readExtraAspect);
-      this.extraEl.removeEventListener('resize', this.readExtraAspect);
+  private attachExtras(): void {
+    for (const [trackId, pair] of this.extraEls) {
+      const video = pair.video;
+      if (!video || !pair.hold || this.attachedExtras.get(trackId) === video) continue;
+      this.releaseExtra(trackId);
+      this.attachedExtras.set(trackId, video);
+      video.addEventListener('loadedmetadata', this.readExtraAspect);
+      video.addEventListener('resize', this.readExtraAspect);
+      this.player?.attachFollower(trackId, {
+        video,
+        hold: pair.hold,
+        setHolding: (on) => this.setExtraHolding(trackId, on),
+      });
     }
-    this.extraEl = video;
-    if (!video || !hold) {
-      // The shape belonged to a file that has left the screen, and a stale one would place the next
-      // layer's picture against the wrong source for as long as its metadata took to arrive.
-      this.extraAspect.value = 0;
-      this.player?.attachFollower(null);
-      return;
+
+    // And the other way: a track the render no longer writes an element for, whose follower is now
+    // driving an element that has left the document.
+    for (const trackId of [...this.attachedExtras.keys()]) {
+      if (!this.extraEls.get(trackId)?.video) this.releaseExtra(trackId);
     }
-    video.addEventListener('loadedmetadata', this.readExtraAspect);
-    video.addEventListener('resize', this.readExtraAspect);
-    this.player?.attachFollower({
-      video,
-      hold,
-      setHolding: (on) => {
-        this.extraHolding.value = on;
-      },
-    });
   }
 
-  /** The same, on the way out, where the element has already gone and only the listeners are left. */
-  private detachExtra(): void {
-    this.extraVideoEl = null;
-    this.extraHoldEl = null;
-    this.attachExtra();
+  /** One track's element given back: listeners off, follower destroyed, stale shape forgotten. */
+  private releaseExtra(trackId: string): void {
+    const attached = this.attachedExtras.get(trackId);
+    if (!attached) return;
+    attached.removeEventListener('loadedmetadata', this.readExtraAspect);
+    attached.removeEventListener('resize', this.readExtraAspect);
+    this.attachedExtras.delete(trackId);
+    // The shape belonged to a file that has left the screen, and a stale one would place the next
+    // layer's picture against the wrong source for as long as its metadata took to arrive.
+    this.setExtraAspect(trackId, 0);
+    this.setExtraHolding(trackId, false);
+    this.player?.attachFollower(trackId, null);
+  }
+
+  /** The same, on the way out, where the elements have gone and only the listeners are left. */
+  private detachExtras(): void {
+    this.extraEls.clear();
+    this.attachExtras();
+  }
+
+  private setExtraHolding(trackId: string, on: boolean): void {
+    const has = this.extraHolding.value.has(trackId);
+    if (has === on) return;
+    const next = new Set(this.extraHolding.value);
+    if (on) next.add(trackId);
+    else next.delete(trackId);
+    this.extraHolding.value = next;
   }
 
   private measureStage(stage: HTMLElement): void {
@@ -836,8 +982,8 @@ export class VePreview implements EditorPlayer {
       const store = this.ctx.store;
       const css = store.previewCss.value;
       const base = this.baseBox.value;
-      const extra = this.extraBox.value;
-      const extraOn = this.extraOnScreen.value;
+      const extras = this.extraViews.value;
+      const holding = this.extraHolding.value;
       const baseOn = this.baseOnScreen.value;
       const guides = this.guides.value;
       const selection = this.selectionBox.value;
@@ -924,25 +1070,25 @@ export class VePreview implements EditorPlayer {
               )}
 
               {/*
-                The second video layer, drawn over the first one and its colour - which is the z
-                order, the base track being z 0 and nothing sorting below it.
+                Every video layer above the first, each drawn over the one below it and its colour -
+                which is the z order, the base track being z 0 and nothing sorting below it.
 
-                It is written out only while the post HAS a second track: a hidden element still
-                holds a hardware decoder, and two of those is the whole budget on a mid-range phone.
-                Inside the gaps in that track's own window it stays put, paused and hidden, because
-                tearing it down there would cost another load and another black flash every time the
-                playhead crossed the track's start - and the decoder was already spent on the track
-                existing at all.
+                ONE ELEMENT PER LAYER, with no cap. It costs a hardware decoder each, which is the
+                real budget on a mid-range phone; the answer to that is for a customer not to stack
+                eight videos at once, not for the editor to draw seven of their eight and say
+                nothing about the one it left out. Inside the gaps in a track's own window its
+                element stays put, paused and hidden, because tearing it down would cost another
+                load and another black flash every time the playhead crossed the track's start.
               */}
-              {store.videoTrackRows.value.length > 0 && [
+              {extras.map((view) => [
                 <video
-                  key="extra-video"
-                  ref={this.keepExtraVideo}
-                  class={{ pv__video: true, 'pv__video--idle': !extraOn }}
+                  key={`extra-video-${view.trackId}`}
+                  ref={this.refsFor(view.trackId).video}
+                  class={{ pv__video: true, 'pv__video--idle': !view.layer }}
                   playsinline
                   webkit-playsinline=""
                   preload="auto"
-                  style={placement(extra, css.filter)}
+                  style={placement(view.box, css.filter)}
                 ></video>,
 
                 /*
@@ -951,11 +1097,11 @@ export class VePreview implements EditorPlayer {
                   one doing it.
                 */
                 <canvas
-                  key="extra-hold"
-                  ref={this.keepExtraHold}
-                  class={{ pv__hold: true, 'pv__hold--on': this.extraHolding.value && extraOn }}
+                  key={`extra-hold-${view.trackId}`}
+                  ref={this.refsFor(view.trackId).hold}
+                  class={{ pv__hold: true, 'pv__hold--on': holding.has(view.trackId) && !!view.layer }}
                   aria-hidden="true"
-                  style={placement(extra, css.filter)}
+                  style={placement(view.box, css.filter)}
                 ></canvas>,
 
                 /*
@@ -964,18 +1110,18 @@ export class VePreview implements EditorPlayer {
                   tint painted here at full strength over a half faded video would show a colour
                   neither renderer produces.
                 */
-                css.tints.length > 0 && extraOn && (
+                css.tints.length > 0 && view.layer && (
                   <div
-                    key="extra-tints"
+                    key={`extra-tints-${view.trackId}`}
                     class="pv__tints"
-                    style={{ ...boxStyle(this.extraPicture.value), opacity: String(extra.opacity) }}
+                    style={{ ...boxStyle(view.picture), opacity: String(view.box.opacity) }}
                   >
                     {css.tints.map((tint, index) => (
                       <div key={index} class="pv__tint" style={{ background: tint }}></div>
                     ))}
                   </div>
                 ),
-              ]}
+              ])}
 
               {this.layers.value.map((layer) =>
                 layer.effect ? (
