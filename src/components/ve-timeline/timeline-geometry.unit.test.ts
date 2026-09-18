@@ -7,6 +7,7 @@ import {
   dropTargetAt,
   frameUrl,
   nearestSnap,
+  snapTargets,
   rulerLabel,
   rulerStepMs,
   segmentTiles,
@@ -113,6 +114,66 @@ describe('segmentTiles', () => {
     expect(tilesOf({ inMs: 4000 })).toEqual([]);
     expect(tilesOf({ pps: 0 })).toEqual([]);
     expect(tilesOf({ tileW: 0 })).toEqual([]);
+  });
+});
+
+describe('snapTargets', () => {
+  /*
+   * What a dragged edge is held to. The base track's boundaries were the whole list, so a segment
+   * on a layer had nothing to meet: splitting a video and carrying half of it onto a layer of its
+   * own leaves two pictures that are meant to join exactly, and the timeline would let them miss.
+   */
+  /*
+   * Deliberately disjoint numbers: the layer begins at 7 s and ends at 10, and NOTHING else on the
+   * post is at either. A layer whose boundaries happened to coincide with the base's would pass
+   * these whether or not the layers were read at all.
+   */
+  const post = {
+    totalMs: 20000,
+    // The base: two segments, 4 s then 2 s, so boundaries at 0, 4 and 6.
+    rows: [
+      { startMs: 0, durationsMs: [4000, 2000] },
+      // A layer that begins at 7 s carrying one 3 s segment: 7 and 10.
+      { startMs: 7000, durationsMs: [3000] },
+    ],
+  };
+
+  it('holds 0 and the end of the post', () => {
+    const targets = snapTargets(post);
+    expect(targets).toContain(0);
+    expect(targets).toContain(20000);
+  });
+
+  it('holds every boundary on the BASE track', () => {
+    const targets = snapTargets(post);
+    expect(targets).toContain(4000);
+    expect(targets).toContain(6000);
+  });
+
+  it('holds where a LAYER begins and where each of its segments ends', () => {
+    const targets = snapTargets(post);
+    // Neither of these is a boundary of the base track or the end of the post.
+    expect(targets).toContain(7000);
+    expect(targets).toContain(10000);
+  });
+
+  it('measures a layer from its own start, not from the beginning of the post', () => {
+    const late = snapTargets({ totalMs: 30000, rows: [{ startMs: 5000, durationsMs: [2000, 3000] }] });
+    // 5 s in, then 2 s, then 3 more: the boundaries are 5, 7 and 10 - never 2 and 5.
+    expect(late).toContain(5000);
+    expect(late).toContain(7000);
+    expect(late).toContain(10000);
+    expect(late).not.toContain(2000);
+  });
+
+  it('snaps a second video to the end of the one beside it on its own layer, which is the point', () => {
+    const two = snapTargets({ totalMs: 30000, rows: [{ startMs: 7000, durationsMs: [3000] }] });
+    // Dragged to 9950, fifty milliseconds short of where the first one on that layer ends.
+    expect(nearestSnap([9950], two, 100)).toEqual({ shiftMs: 50, target: 10000 });
+  });
+
+  it('snaps to the end of the timeline', () => {
+    expect(nearestSnap([19950], snapTargets(post), 100)).toEqual({ shiftMs: 50, target: 20000 });
   });
 });
 

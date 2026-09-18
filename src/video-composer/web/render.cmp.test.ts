@@ -470,6 +470,49 @@ describe('the painter', () => {
     painter.dispose();
   });
 
+  it('draws NOTHING outside a crop - the part cropped away is not a letterbox bar', () => {
+    /*
+     * A window is worked out so the KEPT picture lands on the destination rectangle, and it goes on
+     * mapping past that rectangle in both directions. What lies immediately outside it is the part
+     * of the source the customer just cropped away, and a sampler bounded only by the SOURCE drew
+     * it - so a clip cropped to half its height came out showing the other half in its own bars,
+     * in the preview and in the finished file alike. The crop tool was the one place it was
+     * unmissable: the window said one thing and the picture said another.
+     */
+    const painter = new Painter({ width: 100, height: 200 });
+    painter.setColour(null, { filter: 'none', tints: [] });
+    // A source with a WHITE top half and a grey bottom half, cropped to the bottom half alone.
+    const source = square('#808080', 100);
+    const ctx = source.getContext('2d');
+    if (!ctx) throw new Error('no canvas');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, 100, 50);
+
+    painter.paintLayers([
+      {
+        source,
+        sourceWidth: 100,
+        sourceHeight: 100,
+        framing: { fit: 'contain', crop: { x: 0, y: 0.5, w: 1, h: 0.5 } },
+        dest: { x: 0, y: 0, w: 1, h: 1 },
+        opacity: 1,
+      },
+    ]);
+
+    // The kept half is 2:1, so on a 100x200 frame it lands 100 wide and 50 tall, centred: y 75..125.
+    const [r, g, b] = pixelAt(painter, 50, 100);
+    expect(r).toBeGreaterThan(100);
+    expect(r).toBeLessThan(160);
+    expect(g).toBe(r);
+    expect(b).toBe(r);
+
+    // Above and below that band is a BAR. The half that was cropped away is white, so drawing it
+    // there is the exact failure, and black is the only right answer.
+    expect(pixelAt(painter, 50, 40)).toEqual([0, 0, 0]);
+    expect(pixelAt(painter, 50, 160)).toEqual([0, 0, 0]);
+    painter.dispose();
+  });
+
   it('puts an extra layer where its rectangle says, over the base', () => {
     const painter = new Painter({ width: 100, height: 100 });
     painter.setColour(null, { filter: 'none', tints: [] });

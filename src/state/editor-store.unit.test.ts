@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   MAX_LAYERS,
   MAX_VIDEO_TRACKS,
+  clipsDurationMs,
   emptyManifest,
   findOverlay,
+  moveClipToTrack,
   removeClip,
   type EditClip,
   type EditManifest,
@@ -720,15 +722,22 @@ describe('EditorStore', () => {
         expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual([null]);
       });
 
-      it('cuts a layer that runs past the base, and holds one that ends with it on the last frame', () => {
+      it('GROWS the post for a layer that runs past the base, rather than cutting the layer', () => {
+        // The base is 6 s; the layer begins at 5 and runs 4, so the post is 9. It used to be 6 and
+        // the layer lost three quarters of itself - which is what splitting a video and carrying
+        // the second half onto a layer does in one tap.
         load({ videoTracks: [track([clip('c', 0, 4000)], { startMs: 5000 })] });
-        store.seek(6000);
+        expect(store.totalMs.value).toBe(9000);
 
+        // Over the base's own footage, both are on screen.
+        store.seek(5500);
+        expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual([null, 'vt']);
+
+        // Past it, the base is black and the layer plays on - all the way to its own last frame.
+        store.seek(8000);
         const layers = store.previewLayers.value;
-        expect(layers.length).toBe(2);
-        // A second of the layer is all that fits before the post ends, and the last frame is that
-        // second's last rather than the clip's.
-        expect(layers[1].sourceMs).toBe(1000);
+        expect(layers.map((layer) => layer.trackId)).toEqual(['vt']);
+        expect(layers[0].sourceMs).toBe(3000);
       });
     });
 
@@ -790,17 +799,47 @@ describe('EditorStore', () => {
         expect(undoAll()).toBe(2);
       });
 
-      it('swaps the layers, and says so when the post changes length with them', () => {
+      it('keeps the whole post when the second half of a split is carried onto a layer', () => {
+        /*
+         * The plainest way to lose footage there was: split a video, drag the second half onto a
+         * layer of its own. The base track loses that half, so the POST got shorter - and the half
+         * now sitting on the layer began exactly where the post had just stopped, so it was drawn
+         * nowhere, played never and cut out of the export, while the timeline went on showing it.
+         */
+        load();
+        const wholePost = store.totalMs.value;
+        expect(wholePost).toBe(6000);
+
+        // The second segment onto a LAYER OF ITS OWN, dropped where it already sits: at 4 s, which
+        // is where the first half ends. That is the drag, and the new row starts there.
+        const moved = moveClipToTrack(store.manifest.value, 'b', { kind: 'new', index: 0 }, 4000, 'vt-new');
+        expect(moved).not.toBeNull();
+        store.load(sources, new Map([['a', 4000], ['b', 2000]]), moved!);
+
+        // The base is the first half alone, and the post is still as long as both halves.
+        expect(clipsDurationMs(store.manifest.value.clips)).toBe(4000);
+        expect(store.manifest.value.videoTracks[0]).toMatchObject({ startMs: 4000 });
+        expect(store.totalMs.value).toBe(wholePost);
+
+        // And the half on the layer is on screen where it was, rather than off the end of the post.
+        store.seek(5000);
+        expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual(['vt-new']);
+      });
+
+      it('swaps the layers and keeps the post as long as the footage on it', () => {
         load({ videoTracks: [track([clip('c', 0, 3000)])] });
         store.seek(6000);
         store.swapTrackZ('vt');
 
         expect(store.manifest.value.clips.map((c) => c.id)).toEqual(['c']);
         expect(store.videoTrack.value?.clips.map((c) => c.id)).toEqual(['a', 'b']);
-        expect(store.totalMs.value).toBe(3000);
-        // The playhead was past the end of what the post has just become.
-        expect(store.playheadMs.value).toBe(3000);
-        expect(store.toast.value?.text).toBe('Your video is now 3.0s');
+        // The six seconds moved from the base onto the layer; the post is still six seconds long,
+        // because a post is as long as the things on it. It used to shrink to the base's three and
+        // throw half of what the customer had just moved off the end of its own timeline.
+        expect(store.totalMs.value).toBe(6000);
+        expect(store.playheadMs.value).toBe(6000);
+        // Nothing to say: the length did not change.
+        expect(store.toast.value?.text).toBeUndefined();
       });
 
       it('carries a segment onto a layer of its own, and back', () => {

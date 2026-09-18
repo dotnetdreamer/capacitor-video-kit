@@ -1351,15 +1351,44 @@ export function clipsDurationMs(clips: readonly EditClip[]): number {
 }
 
 /**
- * How long the finished video runs: the base track, or the tail a customer has pulled past it.
+ * How long the post's own CONTENT runs: the base track, and every layer measured from where that
+ * layer starts.
  *
- * Takes the larger of the two rather than trusting [EditManifest.durationMs], so a manifest built by
- * hand, or one whose base track has grown since the end was last dragged, cannot ask for an output
- * that cuts its own base track off. A caller measuring one TRACK passes `{ clips }` on its own and
- * gets the sequence sum, which is what a track's length has always been.
+ * The base track alone was the answer, and it was the wrong one the moment a layer could outlast
+ * it. Splitting a video and carrying the second half onto a layer of its own is the plainest way
+ * there: the base loses that half, so the post got SHORTER, and the half now sitting on the layer
+ * began exactly where the post had just stopped - drawn nowhere, played never, and cut out of the
+ * export, while the timeline went on showing it. A post is as long as the things on it.
+ *
+ * A caller measuring ONE track passes `{ clips }` on its own and gets the sequence sum, which is
+ * what a track's length has always been.
  */
-export function totalDurationMs(manifest: Pick<EditManifest, 'clips'> & Partial<Pick<EditManifest, 'durationMs'>>): number {
-  return Math.max(clipsDurationMs(manifest.clips), Math.max(0, manifest.durationMs ?? 0));
+export function contentDurationMs(
+  manifest: Pick<EditManifest, 'clips'> & Partial<Pick<EditManifest, 'videoTracks'>>,
+): number {
+  let longest = clipsDurationMs(manifest.clips);
+  for (const track of manifest.videoTracks ?? []) {
+    // From where the layer STARTS, because `startMs` delays it rather than seeking into it - so a
+    // two second clip on a layer that begins at ten seconds ends at twelve, not at two.
+    longest = Math.max(longest, Math.max(0, track.startMs) + clipsDurationMs(track.clips));
+  }
+  return longest;
+}
+
+/**
+ * How long the finished video runs: everything the post holds, or the tail a customer has pulled
+ * past all of it.
+ *
+ * Takes the larger of the two rather than trusting [EditManifest.durationMs], so a manifest built
+ * by hand, or one whose content has grown since the end was last dragged, cannot ask for an output
+ * that cuts its own footage off.
+ */
+export function totalDurationMs(
+  manifest: Pick<EditManifest, 'clips'> &
+    Partial<Pick<EditManifest, 'videoTracks'>> &
+    Partial<Pick<EditManifest, 'durationMs'>>,
+): number {
+  return Math.max(contentDurationMs(manifest), Math.max(0, manifest.durationMs ?? 0));
 }
 
 /**

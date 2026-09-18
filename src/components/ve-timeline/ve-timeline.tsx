@@ -56,6 +56,7 @@ import {
   dropTargetAt,
   frameUrl,
   nearestSnap,
+  snapTargets,
   rulerLabel,
   rulerStepMs,
   segmentTiles,
@@ -1541,10 +1542,23 @@ export class VeTimeline {
     if (drag.moved) this.scheduleTick();
   }
 
-  /** 0, the end, and every boundary between segments - what layers, sound and voice snap to. */
+  /**
+   * 0, the end of the post, and the start and end of every segment on EVERY row - what clips,
+   * layers, sound and voice all snap to. See [snapTargets], which is where the rule is written.
+   */
   private snapTargets(): number[] {
     const store = this.ctx.store;
-    return [0, store.totalMs.value, ...store.slots.value.slice(1).map(slot => slot.startMs)];
+    const manifest = store.manifest.value;
+    return snapTargets({
+      totalMs: store.totalMs.value,
+      rows: [
+        { startMs: 0, durationsMs: store.slots.value.map(slot => slot.durationMs) },
+        ...manifest.videoTracks.map(track => ({
+          startMs: track.startMs,
+          durationsMs: timelineSlots({ clips: track.clips }).map(slot => slot.durationMs),
+        })),
+      ],
+    });
   }
 
   private startTrim(base: DragBase, id: string, edge: 'in' | 'out'): void {

@@ -186,6 +186,50 @@ export function segmentTiles(args: {
 }
 
 /**
+ * Everything on the timeline a dragged edge may snap to: 0, the end of the post, and the START and
+ * END of every segment on every row - the base track and each layer alike.
+ *
+ * The layers were missing, and they are the rows a customer most needs held in line: splitting a
+ * video and carrying half of it onto a layer of its own leaves two pictures that are meant to meet
+ * exactly, and nothing on the timeline would hold them there. The base track's own boundaries were
+ * the only targets, so a clip on layer two could be dropped a frame short of the one beside it and
+ * nothing said so.
+ *
+ * A layer is a SEQUENCE laid end to end from its own `startMs`, so its boundaries are that start
+ * plus the running total of what is on it - which is also why the track's start is a target in its
+ * own right even when the row is empty of anything else to meet.
+ *
+ * Duplicates are left in. `nearestSnap` takes the closest of whatever it is given, and two rows
+ * whose segments end at the same instant are the one target twice over - which is the case a
+ * customer is most often aiming at.
+ */
+export function snapTargets(post: SnapPost): number[] {
+  const targets = [0, Math.max(0, post.totalMs)];
+  for (const row of post.rows) {
+    let at = Math.max(0, row.startMs);
+    targets.push(at);
+    for (const durationMs of row.durationsMs) {
+      at += Math.max(0, durationMs);
+      targets.push(at);
+    }
+  }
+  return targets;
+}
+
+/** One row of the timeline as [snapTargets] reads it: where it begins, and what is laid along it. */
+export interface SnapRow {
+  startMs: number;
+  /** Each segment's length on the OUTPUT timeline, so a sped-up clip counts as what it plays for. */
+  durationsMs: readonly number[];
+}
+
+export interface SnapPost {
+  totalMs: number;
+  /** The base track first, then every layer - though the order makes no difference to the answer. */
+  rows: readonly SnapRow[];
+}
+
+/**
  * The nearest snap for a set of moving edges: which target is within `thresholdPx` of which edge,
  * and how far (ms) the edges have to shift to meet it. Null when nothing is close enough.
  */

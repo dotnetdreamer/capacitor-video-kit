@@ -1,7 +1,7 @@
 import type { ComposeRect } from '../definitions';
 
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
-import { drawRects, sourceWindow, type Frame, type Framing } from './geometry';
+import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
 
 /**
  * Where a frame is actually assembled: video layers first, overlays on top.
@@ -109,6 +109,7 @@ in vec2 v_uv;
 in vec2 v_out;
 uniform sampler2D u_tex;
 uniform vec4 u_clip;
+uniform vec4 u_kept;
 uniform mat3 u_matrix;
 uniform vec3 u_offset;
 uniform float u_opacity;
@@ -118,10 +119,15 @@ void main() {
   // rectangle sits inside a destination that is the whole frame: fitted cover, its picture is
   // larger than the rectangle it was put in, and every engine cuts it there.
   if (v_out.x < u_clip.x || v_out.y < u_clip.y || v_out.x > u_clip.x + u_clip.z || v_out.y > u_clip.y + u_clip.w) discard;
-  // Outside the source is a letterbox bar: a piece of the output that stands for no piece of the
-  // source. It is black, and the colour matrix never touches it.
+  // Outside the KEPT part of the source is a letterbox bar: a piece of the output that stands for
+  // no piece of the picture. It is black, and the colour matrix never touches it.
+  //
+  // u_kept is the clip's crop, and the whole frame for a clip with none. The source's own edges are
+  // not the bound: the window goes on mapping past the rectangle the kept picture lands on, and
+  // what lies just outside it is the part of the source the customer cropped away - which a test
+  // against 0..1 drew into the bars.
   vec3 rgb = vec3(0.0);
-  if (v_uv.x >= 0.0 && v_uv.x <= 1.0 && v_uv.y >= 0.0 && v_uv.y <= 1.0) {
+  if (v_uv.x >= u_kept.x && v_uv.x <= u_kept.x + u_kept.z && v_uv.y >= u_kept.y && v_uv.y <= u_kept.y + u_kept.w) {
     rgb = clamp(u_matrix * texture(u_tex, v_uv).rgb + u_offset, 0.0, 1.0);
   }
   // Premultiplied, which is what the blend function below expects.
@@ -299,9 +305,11 @@ export class Painter {
       }
 
       const bounds = boundsOf(layer);
+      const kept = layer.framing.crop ?? FULL_FRAME;
       const pivot = this.pivotOf(layer);
       const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
       gl.uniform4f(this.uniforms['u_clip'] ?? null, bounds.x, bounds.y, bounds.w, bounds.h);
+      gl.uniform4f(this.uniforms['u_kept'] ?? null, kept.x, kept.y, kept.w, kept.h);
       gl.uniform4f(this.uniforms['u_dest'] ?? null, layer.dest.x, layer.dest.y, layer.dest.w, layer.dest.h);
       gl.uniform4f(this.uniforms['u_window'] ?? null, window.x, window.y, window.w, window.h);
       gl.uniform2f(this.uniforms['u_frame'] ?? null, this.output.width, this.output.height);
@@ -358,7 +366,7 @@ export class Painter {
         height: Math.max(1, Math.round(layer.dest.h * this.output.height)),
       };
       const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
-      const rects = drawRects(window, frame, layer.sourceWidth, layer.sourceHeight);
+      const rects = drawRects(window, frame, layer.sourceWidth, layer.sourceHeight, layer.framing.crop);
 
       const originX = layer.dest.x * this.output.width;
       const originY = layer.dest.y * this.output.height;
@@ -500,6 +508,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
       u_frame: gl.getUniformLocation(program, 'u_frame'),
       u_pivot: gl.getUniformLocation(program, 'u_pivot'),
       u_clip: gl.getUniformLocation(program, 'u_clip'),
+      u_kept: gl.getUniformLocation(program, 'u_kept'),
       u_turn: gl.getUniformLocation(program, 'u_turn'),
       u_matrix: gl.getUniformLocation(program, 'u_matrix'),
       u_offset: gl.getUniformLocation(program, 'u_offset'),

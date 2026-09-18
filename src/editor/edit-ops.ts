@@ -9,7 +9,7 @@ import {
   MIN_SCALE,
   MIN_SPEED,
   clamp,
-  clipsDurationMs,
+  contentDurationMs,
   isFullFrameRect,
   normalisePlacement,
   normaliseRect,
@@ -370,9 +370,11 @@ export function insertClip(
  * produced.
  */
 export function setPostDuration(manifest: EditManifest, durationMs: number): EditManifest {
-  const base = clipsDurationMs(manifest.clips);
-  const wanted = clamp(Math.round(durationMs), base, MAX_POST_MS);
-  const next = wanted <= base ? 0 : wanted;
+  // Never shorter than the post's own CONTENT, layers included. The end handle stretches a post
+  // past what is on it; it does not cut a layer off, which is what trimming that layer is for.
+  const content = contentDurationMs(manifest);
+  const wanted = clamp(Math.round(durationMs), content, MAX_POST_MS);
+  const next = wanted <= content ? 0 : wanted;
   return next === manifest.durationMs ? manifest : { ...manifest, durationMs: next };
 }
 

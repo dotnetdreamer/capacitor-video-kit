@@ -86,22 +86,30 @@ export function sourceWindow(
  *
  * `drawImage` takes a source rectangle and a destination rectangle and cannot sample outside the
  * image, so the window has to be turned back into the pair it came from: the part of the source
- * that actually exists, and where on the frame it lands. Everything the window asks for outside the
- * source is a letterbox bar, and a bar is simply a piece of the frame nothing is drawn on - which
- * is why the caller clears to black first and this returns null for a window that misses the source
- * altogether.
+ * that may be drawn, and where on the frame it lands. Everything the window asks for outside that
+ * is a letterbox bar, and a bar is simply a piece of the frame nothing is drawn on - which is why
+ * the caller clears to black first and this returns null for a window that misses it altogether.
+ *
+ * `kept` is the part of the source the clip's CROP keeps, and the whole frame for a clip that has
+ * no crop. It is the bound rather than the source's own edges, and that distinction is the whole
+ * reason this takes an argument at all: a window is worked out so that the KEPT picture lands on
+ * the destination rectangle, but it goes on mapping past that rectangle in both directions, and
+ * what lies immediately outside is the part of the source the customer just cropped away. Bounded
+ * only by the source, a clip cropped to half its height drew the other half into its own letterbox
+ * bars - on the frame, in the preview, and in the finished file.
  */
 export function drawRects(
   window: ComposeRect,
   frame: Frame,
   inputWidth: number,
   inputHeight: number,
+  kept: ComposeRect = FULL_FRAME,
 ): { sx: number; sy: number; sw: number; sh: number; dx: number; dy: number; dw: number; dh: number } | null {
-  // The window in source fractions, clipped to the source that exists.
-  const x0 = Math.max(0, window.x);
-  const y0 = Math.max(0, window.y);
-  const x1 = Math.min(1, window.x + window.w);
-  const y1 = Math.min(1, window.y + window.h);
+  // The window in source fractions, clipped to the part of the source that may be drawn.
+  const x0 = Math.max(kept.x, window.x);
+  const y0 = Math.max(kept.y, window.y);
+  const x1 = Math.min(kept.x + kept.w, window.x + window.w);
+  const y1 = Math.min(kept.y + kept.h, window.y + window.h);
   if (!(x1 > x0) || !(y1 > y0) || !(window.w > 0) || !(window.h > 0)) return null;
 
   // Where that clipped piece lands on the frame, as fractions of it, then in pixels.
@@ -122,7 +130,11 @@ export function drawRects(
   };
 }
 
-/** Whether a normalised sample coordinate falls on the source at all, rather than on a bar. */
-export function sampleIsInside(u: number, v: number): boolean {
-  return u >= 0 && u <= 1 && v >= 0 && v <= 1;
+/**
+ * Whether a normalised sample coordinate falls on the part of the source that may be drawn, rather
+ * than on a bar. `kept` is the clip's crop, and the whole frame for a clip that has none; see
+ * [drawRects] for why the source's own edges are not the bound.
+ */
+export function sampleIsInside(u: number, v: number, kept: ComposeRect = FULL_FRAME): boolean {
+  return u >= kept.x && u <= kept.x + kept.w && v >= kept.y && v <= kept.y + kept.h;
 }
