@@ -44,6 +44,20 @@ export interface LayerDraw {
   dest: ComposeRect;
   /** 0..1 over the whole layer. */
   opacity: number;
+  /**
+   * CLOCKWISE degrees about the PLACEMENT RECTANGLE's centre, in OUTPUT PIXELS - the contract
+   * `ComposePlacement` states, and the same units and sense `OverlayDraw.rotationDeg` already had.
+   *
+   * The pivot is the rectangle's centre and not the destination's, and the difference is real: an
+   * extra layer's rectangle BECAME its `dest` when the plan was built, so the two coincide, while a
+   * base-track clip keeps its rectangle inside `framing` and is drawn into a destination that is
+   * the whole frame. One formula covers both - see [pivotOf] - because a rectangle read out of the
+   * framing is expressed in the destination's own coordinates either way.
+   *
+   * Absent or 0 is upright, and an upright layer takes exactly the path it took before this field
+   * existed: no transform on the 2D canvas, an identity turn in the shader.
+   */
+  rotationDeg?: number;
 }
 
 export interface OverlayDraw {
@@ -63,24 +77,47 @@ const VERTEX_SHADER = `#version 300 es
 in vec2 a_pos;
 uniform vec4 u_dest;
 uniform vec4 u_window;
+uniform vec2 u_frame;
+uniform vec2 u_pivot;
+// cos and sin of the layer's angle, so the shader takes no trigonometry per vertex. (1, 0) is upright.
+uniform vec2 u_turn;
 out vec2 v_uv;
+out vec2 v_out;
 void main() {
   // a_pos runs 0..1 over the layer's own frame. The destination puts that frame on the output, and
   // the window says which part of the source the same corner stands for.
   vec2 outUV = u_dest.xy + a_pos * u_dest.zw;
-  gl_Position = vec4(outUV.x * 2.0 - 1.0, 1.0 - outUV.y * 2.0, 0.0, 1.0);
+  // Handed on BEFORE the turn, so the fragment shader cuts the layer in the rectangle's own frame:
+  // cover clips to the rectangle, and the rectangle turns with the picture inside it.
+  v_out = outUV;
+  // Turned in OUTPUT PIXELS and nowhere else. Normalised space is stretched by the frame, so a
+  // square window turned 45 degrees there comes out a rhombus on a post that is not square - which
+  // is exactly what ComposePlacement says an engine must not do.
+  vec2 px = outUV * u_frame;
+  vec2 d = px - u_pivot;
+  // y is DOWN here, as it is on a canvas, so this is the clockwise turn rotationDeg means with no
+  // sign to flip - the same rotation paintOverlay gets from ctx.rotate().
+  px = u_pivot + vec2(d.x * u_turn.x - d.y * u_turn.y, d.x * u_turn.y + d.y * u_turn.x);
+  vec2 ndc = px / u_frame;
+  gl_Position = vec4(ndc.x * 2.0 - 1.0, 1.0 - ndc.y * 2.0, 0.0, 1.0);
   v_uv = u_window.xy + a_pos * u_window.zw;
 }`;
 
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 in vec2 v_uv;
+in vec2 v_out;
 uniform sampler2D u_tex;
+uniform vec4 u_clip;
 uniform mat3 u_matrix;
 uniform vec3 u_offset;
 uniform float u_opacity;
 out vec4 fragColor;
 void main() {
+  // Outside the layer's own RECTANGLE there is no layer. It matters for a base-track clip, whose
+  // rectangle sits inside a destination that is the whole frame: fitted cover, its picture is
+  // larger than the rectangle it was put in, and every engine cuts it there.
+  if (v_out.x < u_clip.x || v_out.y < u_clip.y || v_out.x > u_clip.x + u_clip.z || v_out.y > u_clip.y + u_clip.w) discard;
   // Outside the source is a letterbox bar: a piece of the output that stands for no piece of the
   // source. It is black, and the colour matrix never touches it.
   vec3 rgb = vec3(0.0);
@@ -108,9 +145,17 @@ export class Painter {
   private cssFilter = 'none';
   private cssTints: string[] = [];
 
-  constructor(output: Frame) {
+  /**
+   * @param onto a canvas that is already ON SCREEN to assemble the frame in, for the editor's live
+   *   preview. The render passes none and gets one of its own, which it hands to the encoder; the
+   *   preview passes the element in its own DOM, so the finished frame IS the picture the customer
+   *   is looking at rather than something copied onto it thirty times a second.
+   */
+  constructor(output: Frame, onto?: HTMLCanvasElement) {
     this.output = output;
-    this.canvas = createCanvas(output.width, output.height);
+    this.canvas = onto ?? createCanvas(output.width, output.height);
+    this.canvas.width = output.width;
+    this.canvas.height = output.height;
     const ctx = this.canvas.getContext('2d', { alpha: false, willReadFrequently: false });
     if (!ctx) throw new Error('this browser would not give the renderer a 2D canvas');
     this.ctx = ctx;
@@ -159,12 +204,16 @@ export class Painter {
   paintLayers(layers: readonly LayerDraw[]): void {
     const gl = this.gl;
     if (gl && this.glCanvas && this.program) {
-      this.paintLayersGl(gl, layers);
-      this.ctx.globalAlpha = 1;
-      this.ctx.globalCompositeOperation = 'source-over';
-      this.ctx.filter = 'none';
-      this.ctx.drawImage(this.glCanvas, 0, 0);
-      return;
+      if (this.paintLayersGl(gl, layers)) {
+        this.ctx.globalAlpha = 1;
+        this.ctx.globalCompositeOperation = 'source-over';
+        this.ctx.filter = 'none';
+        this.ctx.drawImage(this.glCanvas, 0, 0);
+        return;
+      }
+      // The shader refused a source and said so once; every frame after this one takes the 2D path
+      // straight away rather than throwing the same SecurityError thirty times a second.
+      this.dropGl();
     }
     this.paintLayers2d(layers);
   }
@@ -184,17 +233,36 @@ export class Painter {
     ctx.restore();
   }
 
-  /** Frees the textures the layers were uploaded into. */
+  /**
+   * Frees the textures the layers were uploaded into, and hands the GL context itself back.
+   *
+   * The context matters as much as the textures where a painter is not a one-off: a browser keeps
+   * only a handful of live WebGL contexts per page and drops the oldest when a new one is made, so
+   * a preview that builds a painter every time its stage changes size would quietly kill the
+   * context of the one it is still drawing with.
+   */
   dispose(): void {
     const gl = this.gl;
     if (!gl) return;
     for (const texture of this.textures.values()) gl.deleteTexture(texture);
     this.textures.clear();
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    this.dropGl();
+  }
+
+  /** Forgets the GL path, for a context that has been given back or has refused a frame. */
+  private dropGl(): void {
+    this.gl = null;
+    this.glCanvas = null;
+    this.program = null;
+    this.uniforms = {};
+    this.textures.clear();
   }
 
   /* ------------------------------------------------------------------------------------------ */
 
-  private paintLayersGl(gl: WebGL2RenderingContext, layers: readonly LayerDraw[]): void {
+  /** Returns false when this browser would not let the shader have a frame; see the catch below. */
+  private paintLayersGl(gl: WebGL2RenderingContext, layers: readonly LayerDraw[]): boolean {
     gl.viewport(0, 0, this.output.width, this.output.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -216,16 +284,53 @@ export class Painter {
       const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
 
       gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, layer.source));
-      // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
-      // texture object itself is kept, which is what saves the allocation.
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
+      try {
+        // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
+        // texture object itself is kept, which is what saves the allocation.
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
+      } catch {
+        // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
+        // canvas: `texImage2D` throws a SecurityError outright. Every source this package loads is
+        // same-origin (a blob, or the host's own file scheme), so this is the editor being pointed
+        // at a remote URL by a host that may - and the honest answer is the picture drawn without a
+        // shader rather than no picture at all.
+        gl.disable(gl.BLEND);
+        return false;
+      }
 
+      const bounds = boundsOf(layer);
+      const pivot = this.pivotOf(layer);
+      const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
+      gl.uniform4f(this.uniforms['u_clip'] ?? null, bounds.x, bounds.y, bounds.w, bounds.h);
       gl.uniform4f(this.uniforms['u_dest'] ?? null, layer.dest.x, layer.dest.y, layer.dest.w, layer.dest.h);
       gl.uniform4f(this.uniforms['u_window'] ?? null, window.x, window.y, window.w, window.h);
+      gl.uniform2f(this.uniforms['u_frame'] ?? null, this.output.width, this.output.height);
+      gl.uniform2f(this.uniforms['u_pivot'] ?? null, pivot.x, pivot.y);
+      gl.uniform2f(this.uniforms['u_turn'] ?? null, Math.cos(radians), Math.sin(radians));
       gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
     gl.disable(gl.BLEND);
+    return true;
+  }
+
+  /**
+   * The point a layer TURNS ABOUT, in output pixels: the centre of the rectangle its picture is
+   * placed in, which is what `ComposePlacement` names and what the preview's gestures move.
+   *
+   * One formula for both kinds of layer. An extra track's rectangle became its `dest` when the plan
+   * was built and was taken off the clip, so the framing has none and this is the destination's own
+   * centre. A base-track clip keeps its rectangle in the framing and is drawn into a destination
+   * that is the whole frame, so the rectangle - which is in fractions of that destination - is put
+   * back through it here. Turning about the DESTINATION's centre instead would swing a base clip
+   * around the middle of the frame rather than around itself.
+   */
+  private pivotOf(layer: LayerDraw): { x: number; y: number } {
+    const bounds = boundsOf(layer);
+    return {
+      x: (bounds.x + bounds.w / 2) * this.output.width,
+      y: (bounds.y + bounds.h / 2) * this.output.height,
+    };
   }
 
   /**
@@ -257,10 +362,27 @@ export class Painter {
 
       const originX = layer.dest.x * this.output.width;
       const originY = layer.dest.y * this.output.height;
+      // Where this layer is allowed to paint: its own rectangle, which for an extra layer IS the
+      // destination and for a base-track clip is a rectangle inside it. In output pixels.
+      const bounds = boundsOf(layer);
+      const clipX = bounds.x * this.output.width;
+      const clipY = bounds.y * this.output.height;
+      const clipW = Math.max(1, bounds.w * this.output.width);
+      const clipH = Math.max(1, bounds.h * this.output.height);
 
       ctx.save();
+      // Before the clip and before the draw, so the rectangle is cut in the layer's OWN turned
+      // frame - which is what `cover` clipping to a turned rectangle means, and what the GL path
+      // gets for free by turning the quad it samples through.
+      const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
+      if (radians !== 0) {
+        const pivot = this.pivotOf(layer);
+        ctx.translate(pivot.x, pivot.y);
+        ctx.rotate(radians);
+        ctx.translate(-pivot.x, -pivot.y);
+      }
       ctx.beginPath();
-      ctx.rect(originX, originY, frame.width, frame.height);
+      ctx.rect(clipX, clipY, clipW, clipH);
       ctx.clip();
       // A layer's own frame is black first, so its letterbox bars cover whatever is under them
       // exactly as they do natively rather than letting it show through. Unconditional, because the
@@ -271,7 +393,7 @@ export class Painter {
       // made a layer's bars turn transparent as a pinch took it through the frame's own size.
       ctx.globalAlpha = layer.opacity;
       ctx.fillStyle = '#000';
-      ctx.fillRect(originX, originY, frame.width, frame.height);
+      ctx.fillRect(clipX, clipY, clipW, clipH);
       if (rects) {
         ctx.globalAlpha = layer.opacity;
         ctx.filter = this.cssFilter;
@@ -302,6 +424,33 @@ export class Painter {
     this.textures.set(source, texture);
     return texture;
   }
+}
+
+/**
+ * The part of the OUTPUT a layer may paint on, in fractions of it: the rectangle its picture was
+ * placed in.
+ *
+ * One formula for both kinds of layer, which is the point. An extra layer's rectangle BECAME its
+ * `dest` when the plan was built and was taken off the clip, so the framing has none and this is
+ * simply the destination. A base-track clip keeps its rectangle in the framing and is drawn into a
+ * destination that is the whole frame, so the rectangle - in fractions of that destination - is put
+ * back through it here.
+ *
+ * It is the layer's clip AND the point it turns about, and those have to be the same rectangle:
+ * `ComposePlacement` says `fit` is measured in the upright rectangle and the fitted picture is
+ * turned as one piece, with `cover` still clipping to the rectangle in the rectangle's own turned
+ * frame. Without the clip a base clip fitted `cover` paints its overflow across the whole frame,
+ * because the only edge the sampler knows about is the SOURCE's.
+ */
+function boundsOf(layer: LayerDraw): ComposeRect {
+  const rect = layer.framing.rect;
+  if (!rect) return layer.dest;
+  return {
+    x: layer.dest.x + rect.x * layer.dest.w,
+    y: layer.dest.y + rect.y * layer.dest.h,
+    w: rect.w * layer.dest.w,
+    h: rect.h * layer.dest.h,
+  };
 }
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {
@@ -348,6 +497,10 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
     uniforms: {
       u_dest: gl.getUniformLocation(program, 'u_dest'),
       u_window: gl.getUniformLocation(program, 'u_window'),
+      u_frame: gl.getUniformLocation(program, 'u_frame'),
+      u_pivot: gl.getUniformLocation(program, 'u_pivot'),
+      u_clip: gl.getUniformLocation(program, 'u_clip'),
+      u_turn: gl.getUniformLocation(program, 'u_turn'),
       u_matrix: gl.getUniformLocation(program, 'u_matrix'),
       u_offset: gl.getUniformLocation(program, 'u_offset'),
       u_opacity: gl.getUniformLocation(program, 'u_opacity'),

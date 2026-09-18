@@ -10,11 +10,14 @@
 The video at the top of the editor: the edit played back live, every layer drawn over it as the
 bitmap the render will place, and the layers moved, scaled and turned by hand right on the frame.
 
-Nothing here is a rendering of its own. The video is the ORIGINAL clips on one `<video>` element
-per video track with the filter as CSS, and each layer is the PNG `OverlayBitmaps` rasterised for
-it - so where a layer sits here, at the size it shows, is where the finished video has it.
+The picture is ONE CANVAS, composited by `Painter` - the browser renderer's own compositor - from
+one hidden `<video>` element per video track. It is not a second implementation of the render
+contract that agrees with the first by inspection: it is the first, handed the same layers, so
+where a clip sits here, at the size, angle and colour it shows, is where the finished video has
+it. See [PreviewCanvas]. Each overlay layer is still the PNG `OverlayBitmaps` rasterised for it,
+drawn over the canvas as an `<img>`, because that is what the render places too.
 
-ONE ELEMENT PER LAYER, with no cap on how many. It was two - the base and the front-most layer -
+ONE ELEMENT PER TRACK, with no cap on how many. It was two - the base and the front-most layer -
 because a phone decodes two video streams comfortably and the feed behind this editor may already
 hold one. What that cost was worse than the decoders it saved: a post with three layers showed
 the first and the third, and somebody who split a clip and pushed half of it onto a layer of its
@@ -34,8 +37,8 @@ Scoped rather than shadow, which is the one exception in the package. `chromeBou
 host's own box through `stage.parentElement` to work out how far into the letterbox band a
 selection handle may hang, and inside a shadow root that parent is null: the fallback clamps every
 handle to the frame, with no error and nothing failing, and the two regressions `HANDLE_EDGE_PX`
-exists to prevent are back. Scoped also keeps both `<video>` elements in the light DOM, which is
-where WKWebView composites them today.
+exists to prevent are back. Scoped also keeps every `<video>` element in the light DOM, which is
+where WKWebView decodes them today.
 
 ## Properties
 

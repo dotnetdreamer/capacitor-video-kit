@@ -9,12 +9,18 @@
  * The other half of making this tree loadable, the package.json in each emitted directory saying
  * which module system it holds, is `module-type.mjs`. It marks Stencil's output as well as this
  * one, and it runs last so that it can check the whole published tree at once.
+ *
+ * The tree to fix up is the first argument, relative to the package root, and defaults to the
+ * plugin's. `build-mcp.mjs` passes `mcp`, which is the same `tsc` with the same extensionless
+ * sources emitted somewhere else, and so has exactly the same thing wrong with it.
  */
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const plugin = resolve(fileURLToPath(new URL('../plugin/', import.meta.url)));
+const packageDir = resolve(fileURLToPath(new URL('../', import.meta.url)));
+const treeArg = process.argv[2] ?? 'plugin/esm';
+const tree = resolve(packageDir, treeArg);
 
 const files = [];
 (function walk(dir) {
@@ -23,7 +29,7 @@ const files = [];
     if (statSync(path).isDirectory()) walk(path);
     else if (path.endsWith('.js') || path.endsWith('.d.ts')) files.push(path);
   }
-})(join(plugin, 'esm'));
+})(tree);
 
 /** `from '<spec>'`, `from "<spec>"` and both quote forms of `import('<spec>')`. */
 const specifier = /((?:from|import\()\s*['"])(\.{1,2}\/[^'"]*)(['"])/g;
@@ -42,7 +48,7 @@ for (const file of files) {
     const target = resolve(dirname(file), spec);
     if (existsSync(target + suffix)) return `${open}${spec}.js${close}`;
     if (existsSync(join(target, `index${suffix}`))) return `${open}${spec}/index.js${close}`;
-    throw new Error(`${file} imports '${spec}', which nothing in plugin/esm answers`);
+    throw new Error(`${relative(packageDir, file)} imports '${spec}', which nothing in ${treeArg} answers`);
   });
   if (after !== before) {
     writeFileSync(file, after);
@@ -50,4 +56,4 @@ for (const file of files) {
   }
 }
 
-console.log(`finish-build: added extensions in ${rewritten} files`);
+console.log(`finish-build: added extensions in ${rewritten} files under ${treeArg}`);

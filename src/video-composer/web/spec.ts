@@ -258,8 +258,12 @@ function readRect(value: unknown, path: string): ComposeRect | undefined {
  * this reader and both native parsers have to agree on it or the same post is a different picture
  * per engine.
  *
- * `rotationDeg` is not read here for the reason `plan.ts` gives: this renderer draws a clip's
- * rectangle but does not turn it, and a reader that accepted the angle would be claiming otherwise.
+ * `rotationDeg` is carried through, clockwise degrees about the rectangle's centre, and is NOT
+ * wrapped into a single turn: the builder does not wrap it either, a gesture spun twice round keeps
+ * its total, and the compositor reduces the angle itself the moment it takes a cosine of it. A
+ * whole number of turns is dropped instead of stored as an angle, because a missing key is what
+ * tells the painter there is no transform to build - the same rule `normalisePlacement` follows on
+ * the way out, so a rectangle turned and put back produces the spec it produced before.
  */
 function readPlacement(value: unknown, path: string): ComposePlacement | undefined {
   if (value === undefined || value === null) return undefined;
@@ -269,12 +273,14 @@ function readPlacement(value: unknown, path: string): ComposePlacement | undefin
   const h = clamp(finite(rect['h'], 1), 0.01, MAX_PLACEMENT_SIZE);
   const across = placementRange(w);
   const down = placementRange(h);
-  return {
+  const placed: ComposePlacement = {
     x: clamp(finite(rect['x'], 0), across.min, across.max),
     y: clamp(finite(rect['y'], 0), down.min, down.max),
     w,
     h,
   };
+  const rotationDeg = finite(rect['rotationDeg'], 0);
+  return rotationDeg % 360 === 0 ? placed : { ...placed, rotationDeg };
 }
 
 /** One colour op. An unrecognised `op` is a caller bug, not a value to be guessed at. */

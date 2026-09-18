@@ -13,6 +13,14 @@
  * the root `tsconfig.json` compiles into `plugin/` under its own rules. `editor/` is deliberately
  * not among them: the contract is the one thing both halves share, and the components read it from
  * `../editor` the way the proxies read it from `./editor`.
+ *
+ * `mcp/` is excluded for a harder reason than "it is a different build". It imports
+ * `@modelcontextprotocol/sdk`, which is an OPTIONAL peer dependency, so on a consumer that has not
+ * installed it the specifier does not resolve at all. Left in this program, every editor build and
+ * every `npm run typecheck` on such a checkout fails with a TS2307 pointing at a package the
+ * consumer was never asked to install - and worse, Stencil copies everything it compiles into
+ * `dist/collection`, so an app bundling the editor would be bundling a tool server it has no use
+ * for. `tsconfig.mcp.json` compiles it instead, and only when it is asked to.
  */
 {
   "extends": "../tsconfig.base.json",
@@ -32,5 +40,5 @@
     "types": ["@stencil/vitest/globals"]
   },
   "include": ["."],
-  "exclude": ["plugin.ts", "video-composer", "post-publisher", "web-runtime", "node_modules"]
+  "exclude": ["plugin.ts", "video-composer", "post-publisher", "web-runtime", "mcp", "node_modules"]
 }

@@ -77,7 +77,7 @@
  * A pseudo-element and not a border or an inset shadow, and each for its own reason. A BORDER would
  * be inside the frame's box and so inside the coordinate space every layer and every clip rectangle
  * is a fraction OF, moving the picture a pixel away from where the render puts it. An INSET SHADOW
- * paints between the background and the children, so both `<video>` elements would cover it. This
+ * paints between the background and the children, so the composited canvas would cover it. This
  * is the last thing in the frame and the only positioned child without a rectangle of its own, so
  * it paints over the video, it is cut to the frame's own radius by `overflow: hidden`, and it takes
  * no touch: every child in here is `pointer-events: none` for the reason `touch-action` is declared.
@@ -91,82 +91,40 @@
   pointer-events: none;
 }
 
-.pv__video {
-  position: absolute;
-  /*
-   * Placed by its top-left corner and its size rather than by `inset`, because a cropped clip is
-   * given the box the whole source frame occupies - which is bigger than the frame and hangs off
-   * its edges. The render writes all four numbers; these are what a clip with no framing gets.
-   */
-  left: 0;
-  top: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  /*
-   * No background of its own: the frame's black shows through the bars of a clip that is not 9:16,
-   * and the CSS filter - which paints an element's background along with its picture - cannot fade
-   * or tint them. The render colours the picture before it letterboxes it, for the same reason.
-   */
-  background: transparent;
-  pointer-events: none;
-}
-
 /*
- * The second layer's element outside its track's own window. It stays in the DOM - it is holding a
- * decoder either way, and tearing it down would cost another load and another black flash the next
- * time the playhead crossed the track's start - but `display: none` keeps it off the compositor
- * while it waits. After `.pv__video`, which it has to beat on source order at equal specificity.
- */
-.pv__video--idle {
-  display: none;
-}
-
-/*
- * Sits directly over its own video and nowhere else in the stack: each one is the next sibling of a
- * `.pv__video` and carries no z-index, so the tints, the overlay layers and the selection chrome -
- * all later in the DOM inside a frame that is already a stacking context - keep painting above it.
- * Those are drawn from store signals and stay correct during a hold, so they should not be covered.
+ * The picture: every video layer composited into this one canvas by the browser renderer's own
+ * `Painter`. It fills the frame exactly, so a fraction of the frame is a fraction of the canvas and
+ * the geometry the render computes needs no translation to land here.
  *
- * `display: none` rather than `opacity: 0` when off: an invisible canvas still costs a composited
- * layer on every frame of playback, and this one is idle almost all of the time.
+ * Its BACKING SIZE - how many device pixels it actually holds - is written by the component from
+ * the stage's measured box, not from the post: everything a layer carries is a fraction, so a 4K
+ * post composited at 4K for a 400px preview would be waste and nothing else.
  */
-.pv__hold {
-  position: absolute;
-  /*
-   * The same box as the video, written by the same signal: the canvas holds the raw frame of the
-   * outgoing clip, so it has to be cropped and placed exactly as the element it covers.
-   */
-  left: 0;
-  top: 0;
-  display: none;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  /* Same reasoning as `.pv__video`: the frame's own black is what shows through the bars. */
-  background: transparent;
-  pointer-events: none;
-}
-
-/*
- * The held frame, up. This is the rule the whole hold canvas exists for, and it is the one a Sass
- * `&--on` would have taken with it into a file nothing compiles: without it every clip change
- * flashes black again and nothing says why.
- */
-.pv__hold--on {
-  display: block;
-}
-
-/* Over the PICTURE, not the frame, so a tint stops where the video does. */
-.pv__tints {
-  position: absolute;
-  pointer-events: none;
-}
-
-.pv__tint {
+.pv__canvas {
   position: absolute;
   inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/*
+ * The sources: one `<video>` per video track, drawn FROM rather than shown. They are seeked exactly
+ * as they always were and are now invisible.
+ *
+ * Not `display: none`, and this is the whole of the rule. Some WebViews stop decoding a video that
+ * is not laid out, and an element that has stopped decoding is a layer that composites black. So
+ * each one keeps a real box - a pixel of it, in the frame's top-left corner, under the canvas - at
+ * zero opacity and taking no touch, which every platform goes on presenting frames into.
+ */
+.pv__source {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
   pointer-events: none;
 }
 

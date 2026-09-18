@@ -1,0 +1,18 @@
+{
+  /* The MCP server's own tests: `tsconfig.mcp.json` with them added back and nothing emitted.
+
+     Exactly the arrangement `tsconfig.plugin-tests.json` describes, for exactly the same reason.
+     `tsconfig.mcp.json` EMITS, and `files` ships `mcp/`, so a test compiled by it would be
+     installed into the node_modules of anyone who asked for the server. Excluded there and left at
+     that, the tests would go unchecked by `npm run typecheck`, which is where a broken one is
+     cheapest to find. So they are checked here instead.
+
+     The exclusion is restated rather than emptied: an empty list drops TypeScript's own default,
+     which is what keeps `node_modules` out of the program. */
+  "extends": "./tsconfig.mcp.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/mcp/**/*.ts"],
+  "exclude": ["node_modules"]
+}

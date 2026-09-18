@@ -1,4 +1,4 @@
-import type { ComposeClip, ComposeMusic, ComposeOutput, ComposeRect, ComposeSpec, ComposeTrack, ComposeVoiceover } from '../definitions';
+import type { ComposeClip, ComposeMusic, ComposeOutput, ComposePlacement, ComposeSpec, ComposeTrack, ComposeVoiceover } from '../definitions';
 
 import { fold, isIdentity, type ColorMatrix } from './color-matrix';
 import type { Frame } from './geometry';
@@ -58,8 +58,15 @@ export interface PlannedClip {
 export interface LayerPlacement {
   startUs: number;
   endUs: number;
-  /** The layer's rectangle on the output frame, 0..1, top-left origin. */
-  rect: ComposeRect;
+  /**
+   * The layer's rectangle on the output frame, 0..1, top-left origin - and the angle it is turned
+   * to, which the compositor applies about this rectangle's centre in output pixels.
+   *
+   * The angle rides on the rectangle rather than beside it because it belongs to it: `fit` is
+   * measured in the UPRIGHT rectangle and the fitted picture is turned as one piece, so everything
+   * below that sizes a layer's frame from `rect.w` and `rect.h` is right to ignore the turn.
+   */
+  rect: ComposePlacement;
 }
 
 export interface PlannedTrack {

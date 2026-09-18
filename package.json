@@ -36,6 +36,12 @@
         "default": "./plugin/cjs/editor/index.js"
       }
     },
+    "./mcp": {
+      "import": {
+        "types": "./mcp/mcp/index.d.ts",
+        "default": "./mcp/mcp/index.js"
+      }
+    },
     "./ui": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/index.mjs",
@@ -66,6 +72,7 @@
     "android/src/main/",
     "android/build.gradle",
     "android/proguard-rules.pro",
+    "mcp/**",
     "!dist/collection/assets"
   ],
   "keywords": [
@@ -96,11 +103,12 @@
   ],
   "scripts": {
     "build": "npm run build:package && npm run build:wrappers",
-    "build:package": "npm run clean && npm run build:plugin && npm run build:ui && node scripts/module-type.mjs",
+    "build:package": "npm run clean && npm run build:plugin && npm run build:ui && npm run build:mcp && node scripts/module-type.mjs",
     "build:plugin": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finish-build.mjs",
     "build:ui": "stencil build",
+    "build:mcp": "node scripts/build-mcp.mjs",
     "build:wrappers": "npm run build --workspace choisy-video-kit-react && npm run build --workspace choisy-video-kit-vue && npm run build --workspace choisy-video-kit-angular",
-    "clean": "rimraf plugin dist loader www .stencil .stencil-test-build src/components.d.ts",
+    "clean": "rimraf plugin dist loader mcp www .stencil .stencil-test-build src/components.d.ts",
     "dev": "stencil build --dev --watch --serve --config stencil.dev.config.ts",
     "watch": "npm run watch:ui & npm run watch:plugin & wait",
     "watch:ui": "stencil build --watch --config stencil.watch.config.ts",
@@ -110,11 +118,12 @@
     "prepare": "npm run build:package",
     "test": "stencil-test --prod --stencil-config stencil.test.config.ts",
     "test:watch": "stencil-test --prod --watch --stencil-config stencil.test.config.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.plugin-tests.json && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.mcp-tests.json && tsc -p tsconfig.plugin-tests.json && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces",
     "generate": "stencil generate",
     "clean:all": "npm run clean && npm run clean --workspaces --if-present"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@preact/signals-core": "^1.14.4",
     "@stencil/angular-output-target": "^1.5.0",
     "@stencil/core": "^4.45.0",
@@ -132,11 +141,15 @@
   },
   "peerDependencies": {
     "@capacitor/core": ">=8.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@preact/signals-core": "^1.14.4",
     "@stencil/core": "^4.45.0"
   },
   "peerDependenciesMeta": {
     "@capacitor/core": {
+      "optional": true
+    },
+    "@modelcontextprotocol/sdk": {
       "optional": true
     },
     "@preact/signals-core": {

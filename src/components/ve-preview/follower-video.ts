@@ -5,12 +5,10 @@ import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
 import {
   BLANK_POSTER,
   SEEK_EPSILON_S,
-  VideoHold,
   applyClipAudio,
   clipsSilenced,
   posterFor,
   previewSrc,
-  repaintPaused,
   startPlayback,
 } from './preview-media';
 
@@ -26,10 +24,6 @@ const DRIFT_MS = 80;
 
 export interface FollowerMedia {
   video: HTMLVideoElement;
-  /** Where the outgoing frame is held while this element is pointed at the next source. */
-  hold: HTMLCanvasElement;
-  /** Raises and lowers the hold. The component owns the signal the render reads. */
-  setHolding: (on: boolean) => void;
 }
 
 /**
@@ -42,13 +36,13 @@ export interface FollowerMedia {
  * playhead, or null when the track's window has not started, has ended, or the post has no second
  * layer at that instant, and null simply pauses it where it stands.
  *
- * It keeps its own hold canvas for the same reason the base has one: pointing a `<video>` at another
- * file paints black through the whole load-seek chain, and a second layer flashing black is no
- * better than the first one doing it.
+ * It has no hold canvas and needs none. Pointing a `<video>` at another file paints black through
+ * the whole load-seek chain, which is what a hold used to cover; the preview is one composited
+ * canvas now, and a canvas keeps what was last drawn into it - so a layer between sources is simply
+ * a layer the compositor does not repaint. See [PreviewCanvas].
  */
 export class FollowerVideo {
   private readonly video: HTMLVideoElement;
-  private readonly hold: VideoHold;
   private readonly unlisten: Array<() => void> = [];
 
   /** The host clip key whose source is on the element, whether or not it loaded. */
@@ -64,24 +58,12 @@ export class FollowerVideo {
   constructor(
     private readonly store: EditorStore,
     media: FollowerMedia,
-    safetyMs: number,
   ) {
     this.video = media.video;
-    this.hold = new VideoHold(media.video, media.hold, media.setHolding, safetyMs);
     // A load lands on the file's first frame until its metadata is in and the position can be
     // clamped against a duration, so where the playhead is gets said again here - and said as a real
     // seek, which is the one thing that makes a freshly loaded element present anything at all.
     this.listen('loadedmetadata', () => this.apply(true));
-    // Either of these means the new source has a frame up, which is when the held one has done its
-    // job. The element is only ever moved from here, so neither can fire for anything else.
-    this.listen('loadeddata', () => {
-      this.hold.prime();
-      this.hold.lower();
-    });
-    this.listen('seeked', () => {
-      this.hold.prime();
-      this.hold.lower();
-    });
     this.listen('error', () => this.onError());
   }
 
@@ -122,12 +104,6 @@ export class FollowerVideo {
     if (source && source.key === this.loadedKey) this.setPoster(source);
   }
 
-  /** This element's box has moved on screen; see [repaintPaused] and [PreviewPlayer.repaintBase]. */
-  repaint(): void {
-    if (this.destroyed) return;
-    repaintPaused(this.video);
-  }
-
   /**
    * Puts this layer's picture back after the page has been away; see [PreviewPlayer.revive], which
    * is the only caller and where the whole of it is written down. Forgetting the source is what
@@ -142,7 +118,6 @@ export class FollowerVideo {
   destroy(): void {
     this.destroyed = true;
     for (const off of this.unlisten) off();
-    this.hold.destroy();
     // Pauses and strips the element, so the decoder is handed back at once rather than whenever the
     // element is collected - the whole reason there may only ever be two of these.
     this.video.pause();
@@ -161,7 +136,6 @@ export class FollowerVideo {
     this.loadedKey = source.key;
     // Order matters: the frame has to be copied while the OLD source is still on screen. One line
     // later, after `src` is assigned, there is nothing left to copy.
-    this.hold.raise();
     this.setPoster(source);
     video.src = previewSrc(this.store, source);
     video.load();
@@ -213,7 +187,6 @@ export class FollowerVideo {
     // same unreadable file again on the very next playhead write, and again on the one after that;
     // the layer simply shows nothing until its clip changes, which is what the render would do with
     // a file it cannot open either.
-    this.hold.lower();
   }
 
   private setPoster(source: EditorSource): void {

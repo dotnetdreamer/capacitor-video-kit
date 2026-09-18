@@ -158,6 +158,29 @@ describe('clamps', () => {
     expect(huge.clips[0]?.rect).toEqual({ x: 0, y: 0, w: 2, h: 2 });
   });
 
+  it('carries a placement ANGLE, which the renderer now turns the picture by', () => {
+    const turned = validateSpec(spec({ clips: [clip({ rect: { x: 0.2, y: 0.2, w: 0.5, h: 0.5, rotationDeg: 30 } })] }));
+    expect(turned.clips[0]?.rect?.rotationDeg).toBe(30);
+    // Not wrapped into a single turn: a gesture spun twice round keeps its total, and the painter
+    // reduces the angle itself the moment it takes a cosine of it.
+    const spun = validateSpec(spec({ clips: [clip({ rect: { x: 0, y: 0, w: 1, h: 1, rotationDeg: 400 } })] }));
+    expect(spun.clips[0]?.rect?.rotationDeg).toBe(400);
+  });
+
+  it('drops a whole number of turns rather than storing it as an angle', () => {
+    // A missing key is what tells the painter there is no transform to build, so a rectangle turned
+    // right round and a rectangle nobody touched have to produce the same spec.
+    const upright = validateSpec(spec({ clips: [clip({ rect: { x: 0, y: 0, w: 0.5, h: 0.5, rotationDeg: -720 } })] }));
+    expect(upright.clips[0]?.rect).not.toHaveProperty('rotationDeg');
+  });
+
+  it('ignores an angle that arrives on a CROP, which is a window and not a picture', () => {
+    const cropped = validateSpec(
+      spec({ clips: [clip({ crop: { x: 0, y: 0, w: 0.5, h: 0.5, rotationDeg: 45 } as never })] }),
+    );
+    expect(cropped.clips[0]?.crop).not.toHaveProperty('rotationDeg');
+  });
+
   it('leaves an absent crop and rect absent, which is what every engine tests for', () => {
     const checked = validateSpec(spec());
     expect(checked.clips[0]).not.toHaveProperty('crop');

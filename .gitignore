@@ -1,12 +1,17 @@
 node_modules/
 
-# The two build outputs. `plugin/` is the Capacitor plugin's `tsc` pair, `dist/` and `loader/` are
+# The build outputs. `plugin/` is the Capacitor plugin's `tsc` pair, `dist/` and `loader/` are
 # Stencil's, and `dist/` also catches the three wrapper packages' own output.
 /plugin/
 dist/
 loader/
 www/
 .stencil/
+
+# The MCP server's `tsc` output, written by scripts/build-mcp.mjs. Anchored, so that `src/mcp/`,
+# which is the source and IS tracked, is not caught by it. The build only produces this directory
+# when @modelcontextprotocol/sdk is installed, so on most checkouts there is nothing here at all.
+/mcp/
 
 # What `npm test` builds into. It is a whole Stencil build, kept away from the published tree so
 # that a test run cannot leave `dist/` half written. See stencil.test.config.ts.

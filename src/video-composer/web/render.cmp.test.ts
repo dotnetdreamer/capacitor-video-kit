@@ -538,6 +538,91 @@ describe('the painter', () => {
     painter.dispose();
   });
 
+  it('turns a layer about its rectangle, in OUTPUT PIXELS rather than in fractions', () => {
+    // A frame that is not square, which is the whole of the trap: an angle applied in 0..1
+    // coordinates shears a rectangle, and 100x200 is far enough from square for it to show.
+    const painter = new Painter({ width: 100, height: 200 });
+    painter.setColour(null, { filter: 'none', tints: [] });
+    painter.paintLayers([
+      {
+        source: square('#fff'),
+        sourceWidth: 100,
+        sourceHeight: 100,
+        framing: { fit: 'cover' },
+        // 40 x 30 pixels, centred at (50, 85). Turned a quarter, that is 30 x 40 about the same
+        // point: x 35..65, y 65..105.
+        dest: { x: 0.3, y: 0.35, w: 0.4, h: 0.15 },
+        opacity: 1,
+        rotationDeg: 90,
+      },
+    ]);
+
+    // Inside the turned rectangle and OUTSIDE the upright one, which is what says it turned at all.
+    const [r, g, b] = pixelAt(painter, 50, 68);
+    expect(r).toBeGreaterThan(200);
+    expect(g).toBeGreaterThan(200);
+    expect(b).toBeGreaterThan(200);
+    // Where the upright rectangle reached and the turned one does not.
+    expect(pixelAt(painter, 32, 85)).toEqual([0, 0, 0]);
+    // The two that separate a turn in PIXELS from a turn in fractions. Turned in normalised space,
+    // this layer would come out 15 x 80 pixels rather than 30 x 40 - narrower here, taller there.
+    expect(pixelAt(painter, 60, 85)[0]).toBeGreaterThan(200);
+    expect(pixelAt(painter, 50, 110)).toEqual([0, 0, 0]);
+    painter.dispose();
+  });
+
+  it("cuts a base-track clip at its RECTANGLE, which fitting it COVER makes it overflow", () => {
+    // A square source into a rectangle half the frame wide and half of it tall, on a frame that is
+    // not square: fitted `cover`, the picture is 50 across and 50 down inside a rectangle that is
+    // 50 by 25, so 12 or so of it hangs over each side. Every engine cuts it at the rectangle, and
+    // the browser one did not: its destination is the WHOLE FRAME - a base clip's rectangle is
+    // folded into the source window rather than becoming a quad - and the only edge the sampler
+    // knows about on its own is the source's.
+    const painter = new Painter({ width: 100, height: 100 });
+    painter.setColour(null, { filter: 'none', tints: [] });
+    painter.paintLayers([
+      {
+        source: square('#fff'),
+        sourceWidth: 100,
+        sourceHeight: 100,
+        framing: { fit: 'cover', rect: { x: 0.25, y: 0.375, w: 0.5, h: 0.25 } },
+        dest: { x: 0, y: 0, w: 1, h: 1 },
+        opacity: 1,
+      },
+    ]);
+
+    // Inside the rectangle: the picture.
+    expect(pixelAt(painter, 50, 50)[0]).toBeGreaterThan(200);
+    // Just past its top and bottom edges, where the overflow would have landed.
+    expect(pixelAt(painter, 50, 33)).toEqual([0, 0, 0]);
+    expect(pixelAt(painter, 50, 66)).toEqual([0, 0, 0]);
+    painter.dispose();
+  });
+
+  it("turns a base-track clip about its RECTANGLE's centre, not the frame's", () => {
+    const painter = new Painter({ width: 100, height: 100 });
+    painter.setColour(null, { filter: 'none', tints: [] });
+    painter.paintLayers([
+      {
+        source: square('#fff'),
+        sourceWidth: 100,
+        sourceHeight: 100,
+        // The base track's rectangle stays in the FRAMING and its destination is the whole frame,
+        // so the pivot cannot be read off `dest`: this rectangle's centre is (25, 25), the frame's
+        // is (50, 50), and a half turn about the wrong one moves the picture to the far corner.
+        framing: { fit: 'cover', rect: { x: 0, y: 0, w: 0.5, h: 0.5 } },
+        dest: { x: 0, y: 0, w: 1, h: 1 },
+        opacity: 1,
+        rotationDeg: 180,
+      },
+    ]);
+
+    // A half turn about its own centre is the rectangle it started in.
+    expect(pixelAt(painter, 25, 25)[0]).toBeGreaterThan(200);
+    expect(pixelAt(painter, 75, 75)).toEqual([0, 0, 0]);
+    painter.dispose();
+  });
+
   it('draws an overlay at its centre, at its own size', () => {
     const painter = new Painter({ width: 100, height: 100 });
     painter.setColour(null, { filter: 'none', tints: [] });

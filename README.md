@@ -104,6 +104,7 @@ handed.
 | The editor's web components and its store | the rest of `src/` | `choisy-video-kit/ui`, `/loader`, `/dist/components/*` |
 | The native engines | `ios/Sources/`, `android/src/main/` | the Capacitor CLI, on `npx cap sync` |
 | React, Vue and Angular bindings | `packages/react`, `packages/vue`, `packages/angular` | `choisy-video-kit-react` and its two siblings |
+| The MCP server, which is optional and built only when it is asked for | `src/mcp/` | `choisy-video-kit/mcp`, or `node mcp/mcp/stdio.js` |
 
 One repository and, for everything but the three wrappers, one npm package. The wrappers have to be
 separate packages because a generated Stencil wrapper compiles against its framework and a package
@@ -1015,6 +1016,11 @@ is consumed as.
 |---|---|---|---|
 | The plugin | `src/plugin.ts`, `src/video-composer/`, `src/post-publisher/`, `src/editor/` | `tsconfig.json` and `tsconfig.cjs.json` | `plugin/esm/`, `plugin/cjs/` |
 | The editor | everything else in `src/`, and `src/editor/` again | `tsconfig.stencil.json`, which extends `src/tsconfig.json` | `dist/`, `loader/` |
+| The MCP server, when it is built at all | `src/mcp/`, and `src/editor/` a third time | `tsconfig.mcp.json` | `mcp/` |
+
+The third is in the table for completeness and is not part of a normal build: it produces nothing
+unless `@modelcontextprotocol/sdk` is installed, and **The MCP server** below is the whole of it.
+The two that are always there are the two the heading counts.
 
 `src/editor/` is in both, which is the point of the merge: the contract is compiled into the
 plugin's tree for `choisy-video-kit` and `choisy-video-kit/editor`, and again into the components
@@ -1094,6 +1100,117 @@ declares itself as a development dependency:
 npm answers it with a symlink at `node_modules/choisy-video-kit` pointing at `.`, each wrapper's
 exact edge dedupes onto it, and `npm ls --all` exits 0. The wrappers then compile against the same
 exports map a published consumer reads, rather than against a path mapping that only works here.
+
+## The MCP server
+
+An agent that can call these tools can build a post: lay out the base track, trim and split it, put
+a second video over it, add text, stickers, photos and effects, place music and voiceover, choose
+the frame. What it produces is an `EditManifest`, the same document the editor's own UI produces,
+because the tools call the same functions the UI's buttons call. Hand the result to `<ve-editor>`
+through its `manifest` property, or straight to `toComposeSpec`, and it renders exactly as an edit
+made by dragging.
+
+It is **off unless it is asked for**, and the section below on leaving it out is the important half
+of this one if you are shipping an app.
+
+### The tools
+
+| Tool | What it does |
+|---|---|
+| `manifest_create` | Starts a post, optionally with its base track laid out and its frame chosen |
+| `manifest_edit` | Applies a list of edit ops in order, all or nothing |
+| `manifest_inspect` | Reads a post back: durations, rows, layers, sound, and the colour ops the render will actually apply |
+| `manifest_validate` | Runs a manifest through the editor's own normaliser and says what had to change |
+| `catalog_list` | The filter, effect, layout and text style ids, the frames on offer, every edit op's parameters, and the limits |
+
+Three of the five change nothing and say so through MCP's `readOnlyHint`.
+
+A manifest is around 200 lines of JSON and an edit is usually a dozen ops, so the server keeps
+manifests under short ids: every tool returns a `manifestId`, and every tool that reads one takes
+either that or an inline `manifest`. Inline is not a fallback. It is how a draft the app already has
+gets edited without being imported first, and what comes back is stored either way.
+
+Two things are worth knowing before driving it:
+
+**An op that names something the post does not have is refused, not ignored.** The editor's own
+functions return the manifest unchanged for a clip id that is not there, which is right for a UI,
+where the button belongs to a clip that exists. An agent can name anything, usually by carrying an
+id over from an earlier version of the edit, and a silent no-op leaves it unable to tell "refused"
+from "ignored". So the error names the id and lists the ones there are.
+
+**A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
+was, and the message names the op and its position, because "no clip c3" means something different
+at op 1 than it does at op 7 with five removals behind it.
+
+### What it deliberately does not do
+
+It does not render. Rendering is `toComposeSpec` plus a `RasterContext`, and a raster context is a
+canvas: text is measured with its real loaded font, stickers and photos are decoded, and every layer
+comes back as a PNG. None of that exists in a Node process, and faking it would produce a video that
+did not match what the customer saw, which is the one promise the rasteriser exists to keep.
+
+So the line is real rather than a first cut. Everything an edit **is** can be done here; turning it
+into pixels belongs to the device with the screen it was edited on.
+
+### Running it
+
+```json
+{
+  "mcpServers": {
+    "choisy-video-kit": {
+      "command": "node",
+      "args": ["/absolute/path/to/choisy-video-kit/mcp/mcp/stdio.js"]
+    }
+  }
+}
+```
+
+Or inside something that already runs, with a transport of its own:
+
+```ts
+import { createVideoKitMcpServer } from 'choisy-video-kit/mcp';
+
+const server = createVideoKitMcpServer({ version: '1.3.0' });
+await server.connect(myTransport);
+```
+
+The doubled `mcp/mcp/` is `tsc` output, not a typo: `src/mcp/` imports the editor core out of
+`src/editor/`, so the common root is `src` and the emitted tree mirrors it, with `mcp/editor/` and
+`mcp/data/` beside the server. That is what makes `mcp/` self-contained and safe to delete whole.
+
+### Leaving it out
+
+`@modelcontextprotocol/sdk` brings around 190 packages with it, a web framework and a JOSE
+implementation among them, and none of that belongs anywhere near an app bundle. So an app that
+wants nothing to do with the server pays nothing for it, and does not have to remember a flag to get
+that:
+
+| What you have | What the build does |
+|---|---|
+| No `@modelcontextprotocol/sdk` installed | Skips it, says so in one line, and leaves no `mcp/` behind |
+| The SDK installed | Builds it |
+| `CHOISY_VIDEO_KIT_MCP=0` | Never builds it, and deletes an `mcp/` an earlier build left |
+| `CHOISY_VIDEO_KIT_MCP=1` | Builds it, and **fails** if the SDK is missing, because a build told to produce the server and quietly not doing so is how a client discovers it instead |
+
+The SDK is an **optional peer dependency**, so the first row is what an app gets without doing
+anything. Four things keep it that way and each one is load bearing:
+
+- `src/mcp/` is excluded from `src/tsconfig.json` and `tsconfig.stencil.json`, so the editor build
+  never compiles it. Left in, Stencil would copy it into `dist/collection`, which is published, and
+  an app bundling the editor would be bundling a tool server it has no use for.
+- It is not in `tsconfig.json`'s `include` either, so the plugin build never emits it.
+- `server.ts` is the only file in the package that imports the SDK, and only `choisy-video-kit/mcp`
+  reaches it. No other entry point leads there, so no bundler follows it.
+- `files` names `mcp/**` rather than `mcp/`. That is not cosmetic: Stencil's package.json validation
+  resolves every non-glob entry and fails the whole build when one is missing, and this directory is
+  missing on purpose whenever the server was not built.
+
+To check for yourself that nothing leaked:
+
+```sh
+npm run build:package
+grep -rl modelcontextprotocol dist/ plugin/ loader/   # nothing
+```
 
 ## The parts worth knowing about
 
@@ -1297,13 +1414,17 @@ npm install        # `prepare` builds the package, so a linked host has somethin
 npm run build      # the package, then the three wrapper packages
 npm test           # vitest in a mock DOM, and Playwright Chromium for the components, both web
                    # render engines, and the file each of them produces
-npm run typecheck  # the plugin, its own tests, the editor, the build helpers and the wrappers
+npm run typecheck  # the plugin, its own tests, the editor, the MCP server, the build helpers
+                   # and the wrappers
+npm run build:mcp  # only the MCP server, which a normal build skips unless its SDK is installed
 npm run clean      # every output of this package; `clean:all` takes the wrappers with it
 ```
 
 `npm run build` is `build:package` and then `build:wrappers`. `build:package` is the whole of what
 is published from here and is what `prepare` runs: clean, the plugin's two `tsc` passes,
-`finish-build.mjs`, `stencil build`, and `module-type.mjs` last so that it checks the finished tree.
+`finish-build.mjs`, `stencil build`, `build-mcp.mjs`, and `module-type.mjs` last so that it checks
+the finished tree. `build-mcp.mjs` is the one step that can decide to do nothing, and **The MCP
+server** above says when and why.
 
 ### The two watches
 

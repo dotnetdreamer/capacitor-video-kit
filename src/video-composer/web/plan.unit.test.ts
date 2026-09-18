@@ -125,6 +125,28 @@ describe('extra video layers', () => {
     expect(layer?.placements[0]?.rect).toEqual({ x: 0.5, y: 0, w: 0.5, h: 0.5 });
   });
 
+  it("carries the layer's angle on its placement, and sizes its frame from the UPRIGHT rectangle", () => {
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: 5000 })],
+        tracks: [
+          {
+            id: 'pip',
+            z: 1,
+            clips: [clip({ key: 'b', rect: { x: 0.25, y: 0.25, w: 0.5, h: 0.25, rotationDeg: 45 } })],
+          },
+        ],
+      }),
+      new Map(),
+    );
+    const layer = plan.tracks[0];
+    // `fit` is measured BEFORE the turn and the fitted picture is turned as one piece, so the frame
+    // is the rectangle's own size - not the bounding box of the turned one, which would make a clip
+    // swell and shrink as it spun.
+    expect(layer?.clips[0]?.frame).toEqual({ width: 360, height: 320 });
+    expect(layer?.placements[0]?.rect.rotationDeg).toBe(45);
+  });
+
   it('CUTS a layer that would outlast the base rather than lengthening the post', () => {
     const plan = buildPlan(
       spec({

@@ -1,0 +1,26 @@
+{
+  /* The MCP server, compiled on its own and OPTIONAL.
+
+     It is a separate program rather than five more files in `tsconfig.json`'s `include` because it
+     is the one part of this package a consumer may want nothing to do with. A mobile app installs
+     this package to edit video; it has no use for a tool server, and `@modelcontextprotocol/sdk`
+     pulls in around 190 packages - a web framework, a CORS layer, a JOSE implementation - none of
+     which belong anywhere near an app bundle. Kept out of the plugin build, none of it is reachable
+     from anything an app imports, and `scripts/build-mcp.mjs` will not run this compile at all
+     unless the SDK is installed or the build is explicitly told to.
+
+     `src/mcp` imports the editor core out of `src/editor`, so the common root is `src` and the
+     emitted tree mirrors it: the server lands at `mcp/mcp/` with `mcp/editor/` and `mcp/data/`
+     beside it. That doubling is the price of the tree being SELF-CONTAINED, which is what matters
+     here - `mcp/` can be deleted whole, and the plugin build neither produces it nor depends on it.
+
+     ESM only. There is no CommonJS half because there is no consumer that needs one: this is a
+     program Node runs and a module a Node host imports, and both have read ESM for years. */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "mcp",
+    "rootDir": "src"
+  },
+  "include": ["src/mcp/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

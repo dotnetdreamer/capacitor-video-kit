@@ -14,13 +14,11 @@ import { FollowerVideo, type FollowerMedia } from './follower-video';
 import {
   BLANK_POSTER,
   SEEK_EPSILON_S,
-  VideoHold,
   applyClipAudio,
   clipsSilenced,
   onPageShown,
   posterFor,
   previewSrc,
-  repaintPaused,
   startPlayback,
 } from './preview-media';
 
@@ -91,10 +89,6 @@ let lastAudioLeadMs = DEFAULT_AUDIO_LEAD_MS;
 
 export interface PreviewMedia {
   video: HTMLVideoElement;
-  /** Where the outgoing frame is held while the video element is pointed at the next source. */
-  hold: HTMLCanvasElement;
-  /** Raises and lowers the hold. The component owns the signal the render reads. */
-  setHolding: (on: boolean) => void;
   music: HTMLAudioElement;
   voice: HTMLAudioElement;
   /**
@@ -152,6 +146,23 @@ export class PreviewPlayer implements EditorPlayer {
   private rafId = 0;
   private lastWriteAt = 0;
 
+  /**
+   * The wall clock that runs the post's TAIL: the stretch a customer has pulled past the end of the
+   * base track's own footage, where the base is black and the layers, the music and the voiceover
+   * are still going.
+   *
+   * It exists because the base element is the clock, and in the tail there is nothing for it to
+   * play. Every clip on it having ended used to be the end of playback outright - the transport
+   * stopped and the playhead jumped to the end - so a second layer running two seconds past the
+   * first one simply never played those two seconds, in a post whose own timeline plainly showed
+   * them. Nothing else could notice: `follow` reads the element's `currentTime`, and an element
+   * with nothing to play has no time to read.
+   *
+   * `performance.now()` and not a frame count, because a dropped frame must not slow the post down.
+   * Null whenever the base is the clock again, which is every instant before [EditorStore.baseMs].
+   */
+  private tail: { fromMs: number; wallMs: number } | null = null;
+
   private musicUri: string | null = null;
   private voiceUri: string | null = null;
   /** Audio elements started or seeked and not yet checked: where they were put (ms), and how often. */
@@ -165,7 +176,6 @@ export class PreviewPlayer implements EditorPlayer {
   private destroyed = false;
   private readonly unlisten: Array<() => void> = [];
 
-  private readonly hold: VideoHold;
   private readonly extraLayers: () => readonly PreviewVideoLayer[];
   /** The second layer's element while the post has one; see [attachFollower]. */
   /**
@@ -184,9 +194,6 @@ export class PreviewPlayer implements EditorPlayer {
     media: PreviewMedia,
   ) {
     this.video = media.video;
-    // Sized to outlast the load watchdog and one seek watchdog behind it, which is the longest a
-    // hold can legitimately be waiting for the frame that replaces it.
-    this.hold = new VideoHold(media.video, media.hold, media.setHolding, LOAD_WATCHDOG_MS + SEEK_WATCHDOG_MS);
     this.extraLayers = media.extraLayers;
     this.musicEl = media.music;
     this.voiceEl = media.voice;
@@ -261,6 +268,10 @@ export class PreviewPlayer implements EditorPlayer {
 
   pause(): void {
     this.autoplay = false;
+    // The exact position first: the frame loop's last write can be a tick old, and in the tail
+    // nothing else knows where the playhead had got to.
+    if (this.tail) this.store.playheadMs.value = this.tailMs();
+    this.stopTail();
     if (!this.video.paused) {
       this.video.pause();
       // The last frame-loop write can be up to a tick old; the paused playhead should be exact.
@@ -317,32 +328,6 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   /**
-   * An element's box has just moved on screen, and a paused one does nothing about that by itself;
-   * see [repaintPaused] for what that costs and why a seek is the answer.
-   *
-   * This is called from the render rather than from the effects above, because the frame has to be
-   * painted into the box the element ALREADY has and the render is where it gets one. It is also the
-   * only place a geometry change can be noticed at all: a layout preset writes rectangles onto every
-   * clip of both tracks without moving the playhead, so `resync` runs, finds the element on exactly
-   * the time it is already on, and quite rightly seeks nothing. Nothing else in the player ever
-   * hears that the picture is meant to be somewhere else.
-   *
-   * A seek in flight is left to land: it is going to present a frame of its own, into whatever box
-   * the element has by then, and a nudge would only pull it off the position it was asked for. A
-   * load in flight has no frame to repaint and is filtered out by [repaintPaused].
-   */
-  repaintBase(): void {
-    if (this.destroyed || this.seekInFlight) return;
-    repaintPaused(this.video);
-  }
-
-  /** The same for the second layer, whose box every arrangement moves along with the base's. */
-  repaintExtra(): void {
-    if (this.destroyed) return;
-    for (const follower of this.followers.values()) follower.repaint();
-  }
-
-  /**
    * Puts the picture back after the page has been away; [onPageShown] is where what takes it is
    * written down.
    *
@@ -364,10 +349,10 @@ export class PreviewPlayer implements EditorPlayer {
 
   destroy(): void {
     this.destroyed = true;
+    this.stopTail();
     this.stopLoop();
     this.cancelLoad?.();
     this.cancelLoad = null;
-    this.hold.destroy();
     for (const follower of this.followers.values()) follower.destroy();
     this.followers.clear();
     if (this.seekTimer) clearTimeout(this.seekTimer);
@@ -386,6 +371,14 @@ export class PreviewPlayer implements EditorPlayer {
   /** Puts the element on the segment under `ms`, loading its source only when it is not already on. */
   private goTo(ms: number, autoplay: boolean, forceSeek = false): void {
     if (this.destroyed) return;
+    // Past the base track's own footage, in a post somebody has stretched: there is no clip to put
+    // on the element and no element time to read, so the tail's own clock takes over.
+    const baseMs = this.store.baseMs.value;
+    if (ms >= baseMs && this.store.totalMs.value > baseMs) {
+      this.enterTail(ms, autoplay);
+      return;
+    }
+    this.stopTail();
     const slots = this.store.slots.value;
     const index = slotIndexAt(slots, ms);
     if (index < 0) return;
@@ -428,9 +421,6 @@ export class PreviewPlayer implements EditorPlayer {
         debugWarn('[ve-preview] clip could not be loaded', clip.key, video.error);
         // Forgotten, so the next attempt loads it again rather than seeking a source that is not there.
         this.loadedKey = null;
-        // Nothing is coming to replace the held frame, and holding a stale one over a clip that
-        // will not play reads as the preview being stuck. The queued seek below may raise it again.
-        this.hold.lower();
         this.readPlayState();
         // A seek that arrived during the failed load may well be for another clip that does play.
         if (queued !== null) this.goTo(queued, false);
@@ -453,9 +443,6 @@ export class PreviewPlayer implements EditorPlayer {
       video.removeEventListener('error', onError);
     };
 
-    // Order matters: the frame has to be copied while the OLD source is still on screen. One line
-    // later, after `src` is assigned, there is nothing left to copy.
-    this.hold.raise();
     this.setPoster(clip, sourceMsAt(slot, ms));
     video.src = previewSrc(this.store, clip);
     video.load();
@@ -508,15 +495,9 @@ export class PreviewPlayer implements EditorPlayer {
     if (this.queuedMs !== null) {
       const next = this.queuedMs;
       this.queuedMs = null;
-      // Still holding on purpose: a scrub that queued another target has not arrived anywhere yet,
-      // and lowering between the two would show the intermediate frame as a flicker.
       this.goTo(next, this.isPlaying());
       return;
     }
-    // Settled on the frame that was asked for, so the held one has done its job - and this frame is
-    // what the NEXT clip change will hold up while its own source loads.
-    this.hold.prime();
-    this.hold.lower();
     if (!this.video.paused) this.syncAudio(this.store.playheadMs.value, true);
   }
 
@@ -532,7 +513,9 @@ export class PreviewPlayer implements EditorPlayer {
    */
   private readPlayState(): void {
     if (this.destroyed) return;
-    const playing = !this.video.paused;
+    // The tail counts: the element is paused there because it has nothing to play, and a transport
+    // that read it would show Play over a post that is plainly running.
+    const playing = !this.video.paused || this.tail !== null;
     if (this.store.playing.value !== playing) this.store.playing.value = playing;
     if (playing) {
       this.startLoop();
@@ -564,6 +547,11 @@ export class PreviewPlayer implements EditorPlayer {
    * from a copy taken when the segment started, means a trim changed mid-playback applies at once.
    */
   private follow(): void {
+    // In the tail there is no element time to read; see [tail].
+    if (this.tail) {
+      this.followTail();
+      return;
+    }
     // While a new source is loading, the element still reports the OLD source's position. Acting on
     // it would compare the previous clip's time against the next clip's trim - and skip the next
     // clip outright whenever it is trimmed shorter.
@@ -600,6 +588,60 @@ export class PreviewPlayer implements EditorPlayer {
     this.writePlayhead(false);
   }
 
+  /**
+   * Puts the playhead in the tail and, when it should be running, starts its clock.
+   *
+   * The element is paused rather than left where it was: the tail is BLACK - the render draws
+   * nothing past the base track's last frame - and the preview agrees without being told, because
+   * `previewLayers` hands the compositor no base layer here. What is left to do is the layers, the
+   * music and the voiceover, which are all driven from the playhead.
+   */
+  private enterTail(ms: number, autoplay: boolean): void {
+    const at = clamp(ms, this.store.baseMs.value, this.store.totalMs.value);
+    this.cancelSeek();
+    this.queuedMs = null;
+    this.autoplay = autoplay;
+    if (!this.video.paused) this.video.pause();
+    this.store.playheadMs.value = at;
+    this.tail = autoplay ? { fromMs: at, wallMs: performance.now() } : null;
+    this.syncAudio(at, autoplay);
+    this.syncFollower(autoplay);
+    this.readPlayState();
+  }
+
+  /** One step of the tail, which is the frame loop's whole job once the base has nothing to play. */
+  private followTail(): void {
+    const total = this.store.totalMs.value;
+    const at = this.tailMs();
+    if (at >= total) {
+      this.stopTail();
+      this.store.playheadMs.value = total;
+      this.pauseAudio();
+      this.readPlayState();
+      return;
+    }
+    // Throttled exactly as the base's own writes are, and for the same reason: the timeline scrolls
+    // from this signal, and writing it sixty times a second is work rather than feedback. The end
+    // above is checked every frame regardless, so the post still stops where it says it does.
+    const now = performance.now();
+    if (now - this.lastWriteAt < PLAYHEAD_WRITE_MS) return;
+    this.lastWriteAt = now;
+    this.store.playheadMs.value = at;
+    this.syncAudio(at, true, true);
+    this.syncFollower(true);
+  }
+
+  /** Where the tail's clock has got to, held inside the post. */
+  private tailMs(): number {
+    const tail = this.tail;
+    if (!tail) return this.store.playheadMs.value;
+    return clamp(tail.fromMs + (performance.now() - tail.wallMs), 0, this.store.totalMs.value);
+  }
+
+  private stopTail(): void {
+    this.tail = null;
+  }
+
   private writePlayhead(force: boolean): void {
     if (this.pendingLoad || this.seekInFlight) return;
     const now = performance.now();
@@ -631,6 +673,14 @@ export class PreviewPlayer implements EditorPlayer {
     const current = slots[index];
     const next = slots[index + 1];
     if (!next) {
+      // The base track has run out. If the POST has not - the customer pulled the end out past its
+      // last frame - then what follows is black with the layers still on it, and playing stops at
+      // the end of the post rather than at the end of the base.
+      const baseMs = this.store.baseMs.value;
+      if (wasPlaying && this.store.totalMs.value > baseMs) {
+        this.goTo(baseMs, true);
+        return;
+      }
       this.video.pause();
       this.pauseAudio();
       this.store.playheadMs.value = this.store.totalMs.value;
@@ -815,7 +865,7 @@ export class PreviewPlayer implements EditorPlayer {
       this.followers.delete(trackId);
       return;
     }
-    this.followers.set(trackId, new FollowerVideo(this.store, media, LOAD_WATCHDOG_MS + SEEK_WATCHDOG_MS));
+    this.followers.set(trackId, new FollowerVideo(this.store, media));
     // A track added while the base is still loading its own clip is going to play the moment that
     // lands, so the element is started from what the player is heading for rather than from where
     // the base happens to be sitting.
@@ -853,6 +903,7 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   private isPlaying(): boolean {
+    if (this.tail) return true;
     return this.pendingLoad ? this.autoplay : !this.video.paused;
   }
 

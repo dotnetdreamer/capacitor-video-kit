@@ -5,7 +5,7 @@ import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { OVERLAY_BASE, isOverlayVisibleAt, type EditFit } from '../../editor';
-import { orWhole, pictureBox, sourceFrameBox, type FrameBox } from '../../state/clip-framing';
+import { orWhole, pictureBox, type FrameBox } from '../../state/clip-framing';
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
@@ -20,6 +20,7 @@ import {
   type SelectionHandle,
   type SnapGuides,
 } from './overlay-gestures';
+import { PreviewCanvas } from './preview-canvas';
 import { PreviewPlayer } from './preview-player';
 
 /** One layer as the render places it. Positions and sizes are percentages of the frame. */
@@ -74,47 +75,26 @@ interface BoxView {
   height: number;
 }
 
-/** Where a layer's `<video>` element is put, how it fills the box it is given, and what cuts it off. */
-interface VideoView extends BoxView {
-  objectFit: 'contain' | 'cover' | 'fill';
-  /** `none` when the frame's own `overflow: hidden` is the only edge there is; see [videoView]. */
-  clipPath: string;
-  /** The layer's own, over the whole of it. The base track's is always 1. */
-  opacity: number;
-  /** `none` for an upright layer, so nothing is composited that does not have to be. */
-  transform: string;
-  /** What the transform turns ABOUT, in the element's own box; see [videoView]. */
-  transformOrigin: string;
-}
-
 function sameBox(a: BoxView, b: BoxView): boolean {
   return a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
 }
 
-function sameView(a: VideoView, b: VideoView): boolean {
-  return (
-    sameBox(a, b) &&
-    a.objectFit === b.objectFit &&
-    a.clipPath === b.clipPath &&
-    a.opacity === b.opacity &&
-    a.transform === b.transform &&
-    a.transformOrigin === b.transformOrigin
-  );
-}
-
 /**
- * One extra video TRACK as the template draws it: which element, where it goes, what is in it.
+ * One extra video TRACK: which layer of it is under the playhead, and where that layer's picture
+ * lands on the frame.
  *
  * Per track and not per layer under the playhead, which is the difference between an element that
  * lives as long as the track does and one that is created and destroyed every time the playhead
- * crosses a gap in it. `layer` is null in those gaps: the element stays in the DOM, paused and
- * hidden, keeping its source and its last decoded frame, so coming back costs a seek rather than
- * another load and another black flash.
+ * crosses a gap in it. `layer` is null in those gaps: the element stays in the DOM, paused, keeping
+ * its source and its last decoded frame, so coming back costs a seek rather than another load.
+ *
+ * No box any more. Where a layer is DRAWN is the canvas's business now and is worked out from the
+ * same numbers the render uses; what is left here is the picture rectangle, which is chrome - the
+ * crop window is drawn over it.
  */
 interface ExtraLayerView {
   trackId: string;
   layer: PreviewVideoLayer | null;
-  box: VideoView;
   picture: BoxView;
 }
 
@@ -122,19 +102,13 @@ interface ExtraLayerView {
  * Whether two lists of layers would be DRAWN the same, entry for entry.
  *
  * The playhead writes thirty times a second and almost none of those writes move anything: without
- * this every one of them would rebuild every layer's box and hand the vdom a new style object per
- * element per frame.
+ * this every one of them would rebuild every entry and hand the vdom a new style object per frame.
  */
 function sameLayerViews(a: readonly ExtraLayerView[], b: readonly ExtraLayerView[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((one, i) => {
     const other = b[i];
-    return (
-      one.trackId === other.trackId &&
-      one.layer?.clipId === other.layer?.clipId &&
-      sameView(one.box, other.box) &&
-      sameBox(one.picture, other.picture)
-    );
+    return one.trackId === other.trackId && one.layer?.clipId === other.layer?.clipId && sameBox(one.picture, other.picture);
   });
 }
 
@@ -156,30 +130,17 @@ function baseLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | 
 }
 
 /**
- * The video layer over the base one, or null when no layer has anything on screen at this instant.
- *
- * The FRONT-MOST of them, which with one layer is the only one and with several is the one whose
- * picture is really on top. This element is the preview's second and last decoder (see the note on
- * the class), so with three videos on the frame it can show two of them, and the two it shows are
- * the base and whatever is drawn over everything else. The render draws them all.
- */
-function extraLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | null {
-  // `previewLayers` is sorted bottom to top, so the last one that is not the base is the front one.
-  for (let i = layers.length - 1; i >= 0; i--) {
-    if (layers[i].trackId !== null) return layers[i];
-  }
-  return null;
-}
-
-/**
  * The video at the top of the editor: the edit played back live, every layer drawn over it as the
  * bitmap the render will place, and the layers moved, scaled and turned by hand right on the frame.
  *
- * Nothing here is a rendering of its own. The video is the ORIGINAL clips on one `<video>` element
- * per video track with the filter as CSS, and each layer is the PNG `OverlayBitmaps` rasterised for
- * it - so where a layer sits here, at the size it shows, is where the finished video has it.
+ * The picture is ONE CANVAS, composited by `Painter` - the browser renderer's own compositor - from
+ * one hidden `<video>` element per video track. It is not a second implementation of the render
+ * contract that agrees with the first by inspection: it is the first, handed the same layers, so
+ * where a clip sits here, at the size, angle and colour it shows, is where the finished video has
+ * it. See [PreviewCanvas]. Each overlay layer is still the PNG `OverlayBitmaps` rasterised for it,
+ * drawn over the canvas as an `<img>`, because that is what the render places too.
  *
- * ONE ELEMENT PER LAYER, with no cap on how many. It was two - the base and the front-most layer -
+ * ONE ELEMENT PER TRACK, with no cap on how many. It was two - the base and the front-most layer -
  * because a phone decodes two video streams comfortably and the feed behind this editor may already
  * hold one. What that cost was worse than the decoders it saved: a post with three layers showed
  * the first and the third, and somebody who split a clip and pushed half of it onto a layer of its
@@ -199,8 +160,8 @@ function extraLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer |
  * host's own box through `stage.parentElement` to work out how far into the letterbox band a
  * selection handle may hang, and inside a shadow root that parent is null: the fallback clamps every
  * handle to the frame, with no error and nothing failing, and the two regressions `HANDLE_EDGE_PX`
- * exists to prevent are back. Scoped also keeps both `<video>` elements in the light DOM, which is
- * where WKWebView composites them today.
+ * exists to prevent are back. Scoped also keeps every `<video>` element in the light DOM, which is
+ * where WKWebView decodes them today.
  */
 @Component({
   tag: 've-preview',
@@ -224,49 +185,44 @@ export class VePreview implements EditorPlayer {
    * say for themselves whether the second track is on screen.
    */
   private stageEl?: HTMLDivElement;
+  private canvasEl?: HTMLCanvasElement;
   private videoEl?: HTMLVideoElement;
-  private holdEl?: HTMLCanvasElement;
-  /** One `<video>`/`<canvas>` pair per extra video layer, by track id. */
-  private readonly extraEls = new Map<string, { video: HTMLVideoElement | null; hold: HTMLCanvasElement | null }>();
+  /** One `<video>` per extra video track, by track id. */
+  private readonly extraEls = new Map<string, HTMLVideoElement>();
   /** What each track's element was last attached to the player as, so a repaint does not re-attach. */
   private readonly attachedExtras = new Map<string, HTMLVideoElement>();
-  private readonly extraRefs = new Map<string, { video: (el?: HTMLElement) => void; hold: (el?: HTMLElement) => void }>();
+  private readonly extraRefs = new Map<string, (el?: HTMLElement) => void>();
   private musicEl?: HTMLAudioElement;
   private voiceEl?: HTMLAudioElement;
 
   private readonly keepStage = (el?: HTMLElement) => {
     this.stageEl = el as HTMLDivElement | undefined;
   };
+  private readonly keepCanvas = (el?: HTMLElement) => {
+    this.canvasEl = el as HTMLCanvasElement | undefined;
+  };
   private readonly keepVideo = (el?: HTMLElement) => {
     this.videoEl = el as HTMLVideoElement | undefined;
   };
-  private readonly keepHold = (el?: HTMLElement) => {
-    this.holdEl = el as HTMLCanvasElement | undefined;
-  };
   /**
-   * The ref pair for one layer, made once per track id and never again.
+   * The ref for one track's element, made once per track id and never again.
    *
    * Cached because a fresh arrow every render is a CHANGED ref to the vdom, which tears the old one
    * down and puts the new one up on every repaint - and every one of those teardowns would take the
-   * layer's element away from the player and hand it back, which is a load and a black flash per
+   * track's element away from the player and hand it back, which is a load and a black flash per
    * frame of playback.
    */
-  private refsFor(trackId: string): { video: (el?: HTMLElement) => void; hold: (el?: HTMLElement) => void } {
+  private refsFor(trackId: string): (el?: HTMLElement) => void {
     const known = this.extraRefs.get(trackId);
     if (known) return known;
-    const made = {
-      video: (el?: HTMLElement) => this.keepExtra(trackId, 'video', el),
-      hold: (el?: HTMLElement) => this.keepExtra(trackId, 'hold', el),
-    };
+    const made = (el?: HTMLElement) => this.keepExtra(trackId, el);
     this.extraRefs.set(trackId, made);
     return made;
   }
 
-  private keepExtra(trackId: string, which: 'video' | 'hold', el?: HTMLElement): void {
-    const pair = this.extraEls.get(trackId) ?? { video: null, hold: null };
-    if (which === 'video') pair.video = (el as HTMLVideoElement | undefined) ?? null;
-    else pair.hold = (el as HTMLCanvasElement | undefined) ?? null;
-    if (pair.video || pair.hold) this.extraEls.set(trackId, pair);
+  private keepExtra(trackId: string, el?: HTMLElement): void {
+    const video = el as HTMLVideoElement | undefined;
+    if (video) this.extraEls.set(trackId, video);
     else this.extraEls.delete(trackId);
   }
   private readonly keepMusic = (el?: HTMLElement) => {
@@ -278,10 +234,6 @@ export class VePreview implements EditorPlayer {
 
   /* -- gesture feedback, written by OverlayGestures ---------------------------------------- */
 
-  /** True while the hold canvas covers the video, i.e. across a source change. One per element. */
-  readonly holding = signal(false);
-  /** The same for every extra layer, by track id: a set holds only the ones that are holding. */
-  readonly extraHolding = signal<ReadonlySet<string>>(new Set());
   /** A LAYER is being dragged: the bin is on screen and the layer may be dropped into it. */
   readonly dragging = signal(false);
   /**
@@ -295,11 +247,8 @@ export class VePreview implements EditorPlayer {
   readonly guides = signal<SnapGuides>(NO_GUIDES);
 
   private player: PreviewPlayer | null = null;
-  /** The second element the player was last given, so its listeners can be taken off again. */
-  /** The placement each element was last RENDERED with, which is how a box that moved is noticed;
-      see [repaintMoved]. Null until the render that first places them. */
-  private placedBase: VideoView | null = null;
-  private placedExtras = new Map<string, VideoView>();
+  /** The compositor: everything the customer sees of their own footage; see [PreviewCanvas]. */
+  private canvas: PreviewCanvas | null = null;
   private gestures: OverlayGestures | null = null;
   private stageResize: ResizeObserver | null = null;
   private readonly disposers: Array<() => void> = [];
@@ -475,7 +424,11 @@ export class VePreview implements EditorPlayer {
     if (!clip) return null;
     const rect = orWhole(clip.rect);
     const turn = rect.rotationDeg ?? 0;
-    const onScreen = this.shownBase.value?.clipId === clip.id || this.shownExtra.value?.clipId === clip.id;
+    // ANY layer under the playhead, not the base and the front-most one. Every layer is composited,
+    // so a segment on a middle track is on screen; asking only the front one would ghost the box
+    // around a video the customer can plainly see, and take its handles away with it.
+    const onScreen =
+      this.shownBase.value?.clipId === clip.id || this.shownExtras.value.some((layer) => layer.clipId === clip.id);
     const stage = this.stageSize.value;
     // The box in the frame's own pixels, which is what a handle's offset is measured in.
     const box = { widthFrac: rect.w, aspect: (rect.w / rect.h) * store.frameAspect.value };
@@ -541,8 +494,8 @@ export class VePreview implements EditorPlayer {
   private readonly readExtraAspect = (event: Event): void => {
     const video = event.target as HTMLVideoElement;
     if (!(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
-    for (const [trackId, pair] of this.extraEls) {
-      if (pair.video === video) {
+    for (const [trackId, element] of this.extraEls) {
+      if (element === video) {
         this.setExtraAspect(trackId, video.videoWidth / video.videoHeight);
         return;
       }
@@ -582,47 +535,17 @@ export class VePreview implements EditorPlayer {
     this.ctx.store.previewLayers.value.filter((layer) => layer.trackId !== null),
   );
 
-  /** The front-most of them, which is what the selection chrome and the crop window follow. */
-  private readonly shownExtra = computedWith<PreviewVideoLayer | null>(
-    () => extraLayerOf(this.ctx.store.previewLayers.value),
-    sameFraming,
-  );
-
   /**
-   * Whether the BASE track has a picture at this instant. False only in the tail a customer has
-   * pulled past the base track's last frame, where the post is black and whatever layer is over it
-   * is drawn on black.
-   *
-   * The element stays in the DOM and keeps its decoder, as the extra one does out of its own window:
-   * the playhead crosses this line in both directions while an edit is being made, and a teardown
-   * each way is a load and a black flash each way.
-   */
-  private readonly baseOnScreen = computed(() => this.shownBase.value !== null);
-
-  /**
-   * Where each `<video>` element is put inside the frame; see [videoView]. One per layer, and the
-   * base's is the same arithmetic on the same numbers it has always been given - a post with one
-   * video draws exactly what it drew before there were two.
-   */
-  private readonly baseBox = computedWith<VideoView>(
-    () => videoView(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
-    sameView,
-  );
-
-
-  /**
-   * Where each layer's PICTURE sits inside the 9:16 frame, as percentages - the whole frame when it
-   * fills it, the letterboxed rectangle when it does not, and the cropped picture inside the clip's
-   * own rectangle once it has one. The tints are drawn over these rather than over the frame,
-   * because the render colours a clip's frames before they are letterboxed.
+   * Where the base track's PICTURE sits inside the frame; see [pictureOf]. The crop window is drawn
+   * over it, and nothing else is: the picture itself is the compositor's.
    */
   private readonly basePicture = computedWith<BoxView>(
     () => pictureOf(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameBox,
   );
   /**
-   * Every extra layer as the template draws it, bottom to top: the element's box, the picture inside
-   * it, and the layer itself.
+   * Every extra track, bottom to top: which of its layers is under the playhead and where that
+   * layer's picture lands - which is what the crop window is drawn over.
    *
    * One computed over the whole list rather than a pair per track, because the list is what changes:
    * a layer added or removed changes its length, and a playhead crossing a clip boundary changes one
@@ -635,13 +558,7 @@ export class VePreview implements EditorPlayer {
     const shown = new Map(this.shownExtras.value.map((layer) => [layer.trackId as string, layer] as const));
     return this.ctx.store.videoTrackRows.value.map((track) => {
       const layer = shown.get(track.id) ?? null;
-      const aspect = this.extraAspectOf(track.id);
-      return {
-        trackId: track.id,
-        layer,
-        box: videoView(layer, aspect, fit, frame),
-        picture: pictureOf(layer, aspect, fit, frame),
-      };
+      return { trackId: track.id, layer, picture: pictureOf(layer, this.extraAspectOf(track.id), fit, frame) };
     });
   }, sameLayerViews);
 
@@ -684,47 +601,11 @@ export class VePreview implements EditorPlayer {
   componentDidRender() {
     this.setUp();
     this.attachExtras();
-    this.repaintMoved();
-  }
-
-  /**
-   * Asks an element whose box has just moved to paint its frame into it, which a paused one does
-   * not do by itself; [repaintPaused] is where that is explained and where the seek happens.
-   *
-   * Here rather than in one of the effects on the edit, because this is the first moment the new box
-   * is actually on the element: a frame presented before it would land in the old one. The two views
-   * are compared by reference, which `computedWith` makes exact - it hands back the very object it
-   * returned last for as long as the placement means the same thing - so this costs a comparison per
-   * render and fires only when something really moved.
-   *
-   * The render that PLACES the elements moves nothing: the player seeks each of them itself as it
-   * takes them over.
-   */
-  private repaintMoved(): void {
-    const base = this.baseBox.value;
-    const movedBase = this.placedBase !== null && this.placedBase !== base;
-    this.placedBase = base;
-
-    /*
-     * Per track, and only for a track that was already there.
-     *
-     * A track APPEARING is not a box that moved: its element is loading its first source and that
-     * load ends in a seek of its own, so a repaint here would nudge it a millisecond off the
-     * position it is about to be put on - and the nudge, arriving first, is what the element would
-     * present. Compared by value rather than by identity because the list is rebuilt whenever any
-     * entry in it changes, and one layer moving must not repaint the others.
-     */
-    let movedExtra = false;
-    const placed = new Map<string, VideoView>();
-    for (const view of this.extraViews.value) {
-      const was = this.placedExtras.get(view.trackId);
-      if (was && !sameView(was, view.box)) movedExtra = true;
-      placed.set(view.trackId, view.box);
-    }
-    this.placedExtras = placed;
-
-    if (movedBase) this.player?.repaintBase();
-    if (movedExtra) this.player?.repaintExtra();
+    // The canvas is composited from the store and not from the DOM, so a render cannot move a
+    // picture without something in the store having moved it - but a render is also the first
+    // moment a newly written element exists, and the cheapest place to ask for the frame that puts
+    // it on screen. Asking twice before an animation frame still draws once.
+    this.canvas?.request();
   }
 
   disconnectedCallback() {
@@ -737,6 +618,8 @@ export class VePreview implements EditorPlayer {
       video.removeEventListener('resize', this.readBaseAspect);
     }
     this.detachExtras();
+    this.canvas?.destroy();
+    this.canvas = null;
     this.gestures?.destroy();
     this.gestures = null;
     this.stageResize?.disconnect();
@@ -752,26 +635,24 @@ export class VePreview implements EditorPlayer {
   private setUp(): void {
     if (this.player) return;
     const stage = this.stageEl;
+    const canvas = this.canvasEl;
     const video = this.videoEl;
-    const hold = this.holdEl;
     const music = this.musicEl;
     const voice = this.voiceEl;
-    if (!stage || !video || !hold || !music || !voice) return;
+    if (!stage || !canvas || !video || !music || !voice) return;
 
     // `resize` covers the next clip being a different shape; both fire once per load, not per frame.
     video.addEventListener('loadedmetadata', this.readBaseAspect);
     video.addEventListener('resize', this.readBaseAspect);
 
     const store = this.ctx.store;
+    this.canvas = new PreviewCanvas(store, canvas);
+    this.canvas.attach(null, video);
     this.player = new PreviewPlayer(store, {
       video,
-      hold,
-      setHolding: (on) => {
-        this.holding.value = on;
-      },
       music,
       voice,
-      // The store's list and not [shownExtra], which holds its value while only `sourceMs` has
+      // The store's list and not [shownExtras], which holds its value while only `sourceMs` has
       // moved: where the layer has got to in its file is the one thing the element needs.
       extraLayers: () => store.previewLayers.value.filter((layer) => layer.trackId !== null),
     });
@@ -803,6 +684,30 @@ export class VePreview implements EditorPlayer {
    */
   private watchTheEdit(): void {
     const store = this.ctx.store;
+
+    /*
+     * Everything the PICTURE is made of, in one effect: which layers are on screen and where each
+     * one's clip is in its own file, and the colour the post is graded with. A redraw is asked for,
+     * not performed - several of these land in the same tick during an edit, and the canvas draws
+     * once on the next animation frame.
+     *
+     * Deferred like the rest for the same reason: `previewLayers` is read here, and a redraw that
+     * ran inside `commit()` would be reading the manifest halfway through being replaced.
+     */
+    this.disposers.push(
+      deferredEffect(
+        () => [store.previewLayers.value, store.filterOps.value, store.frameAspect.value] as const,
+        () => this.canvas?.request(),
+      ),
+    );
+
+    // Playing is a frame per animation frame; stopped is on demand. Nothing is drawn on a timer.
+    this.disposers.push(
+      deferredEffect(
+        () => store.playing.value,
+        (playing) => this.canvas?.setPlaying(playing),
+      ),
+    );
 
     // A trim, split, speed, reorder, delete or undo: show the right frame again (or keep playing
     // with the new speed). `store.clips` too, because a replaced source keeps its segment id, and
@@ -856,24 +761,20 @@ export class VePreview implements EditorPlayer {
    * and a second follower on the same track.
    */
   private attachExtras(): void {
-    for (const [trackId, pair] of this.extraEls) {
-      const video = pair.video;
-      if (!video || !pair.hold || this.attachedExtras.get(trackId) === video) continue;
+    for (const [trackId, video] of this.extraEls) {
+      if (this.attachedExtras.get(trackId) === video) continue;
       this.releaseExtra(trackId);
       this.attachedExtras.set(trackId, video);
       video.addEventListener('loadedmetadata', this.readExtraAspect);
       video.addEventListener('resize', this.readExtraAspect);
-      this.player?.attachFollower(trackId, {
-        video,
-        hold: pair.hold,
-        setHolding: (on) => this.setExtraHolding(trackId, on),
-      });
+      this.player?.attachFollower(trackId, { video });
+      this.canvas?.attach(trackId, video);
     }
 
     // And the other way: a track the render no longer writes an element for, whose follower is now
     // driving an element that has left the document.
     for (const trackId of [...this.attachedExtras.keys()]) {
-      if (!this.extraEls.get(trackId)?.video) this.releaseExtra(trackId);
+      if (!this.extraEls.get(trackId)) this.releaseExtra(trackId);
     }
   }
 
@@ -887,8 +788,8 @@ export class VePreview implements EditorPlayer {
     // The shape belonged to a file that has left the screen, and a stale one would place the next
     // layer's picture against the wrong source for as long as its metadata took to arrive.
     this.setExtraAspect(trackId, 0);
-    this.setExtraHolding(trackId, false);
     this.player?.attachFollower(trackId, null);
+    this.canvas?.attach(trackId, null);
   }
 
   /** The same, on the way out, where the elements have gone and only the listeners are left. */
@@ -897,28 +798,14 @@ export class VePreview implements EditorPlayer {
     this.attachExtras();
   }
 
-  private setExtraHolding(trackId: string, on: boolean): void {
-    const has = this.extraHolding.value.has(trackId);
-    if (has === on) return;
-    const next = new Set(this.extraHolding.value);
-    if (on) next.add(trackId);
-    else next.delete(trackId);
-    this.extraHolding.value = next;
-  }
-
   private measureStage(stage: HTMLElement): void {
     const rect = stage.getBoundingClientRect();
     if (rect.width <= 0) return;
-    const was = this.stageSize.value;
     this.stageSize.value = { width: rect.width, height: rect.height, bounds: chromeBounds(stage, rect) };
-    // A stage that changes size moves both pictures without changing one number [repaintMoved]
-    // compares: every box in the frame is a PERCENTAGE of this rectangle, so opening a sheet - which
-    // is what shrinks the stage - leaves the views identical and the elements somewhere else on
-    // screen. A paused element does nothing about that by itself; see [repaintPaused].
-    if (was && (was.width !== rect.width || was.height !== rect.height)) {
-      this.player?.repaintBase();
-      this.player?.repaintExtra();
-    }
+    // The compositor is sized to the SCREEN and not to the post, so this is also the one thing that
+    // changes how many pixels it draws. Compositing a 4K post at 4K for a 400px preview is waste,
+    // and everything a layer carries is a fraction, so the picture is the same either way.
+    this.canvas?.resize(rect.width, rect.height);
   }
 
   /* ========================================================================================= */
@@ -980,11 +867,7 @@ export class VePreview implements EditorPlayer {
   render() {
     return this.watcher.run(() => {
       const store = this.ctx.store;
-      const css = store.previewCss.value;
-      const base = this.baseBox.value;
       const extras = this.extraViews.value;
-      const holding = this.extraHolding.value;
-      const baseOn = this.baseOnScreen.value;
       const guides = this.guides.value;
       const selection = this.selectionBox.value;
       const ph = this.placeholder.value;
@@ -1014,114 +897,51 @@ export class VePreview implements EditorPlayer {
           >
             {/*
               Every child of the frame carries a key. Stencil matches unkeyed siblings of the same
-              tag BY POSITION, and there are two `<video>` and two `<canvas>` among ten conditional
-              blocks here: a base element the vdom re-used for the extra track's one would leave
+              tag BY POSITION, and there is one `<video>` per video track among a dozen conditional
+              blocks here: a base element the vdom re-used for a track's one would leave
               `PreviewPlayer`, which read `media.video` once, driving an element that is no longer in
-              the document. The preview freezes on its last painted frame, the transport still says
-              it is playing, and nothing throws.
+              the document. The preview freezes on its last composited frame, the transport still
+              says it is playing, and nothing throws.
             */}
             <div key="frame" class="pv__frame">
               {/*
-                Its box is the whole SOURCE frame at the crop's scale, not the frame: what the crop
-                threw away hangs outside this element's parent and the parent clips it. With no crop
-                and no rectangle the box is the frame itself and the fit is the clip's own, which is
-                the element this preview has always drawn. See `videoView`.
+                The picture. Every video layer, composited by the browser renderer's own `Painter`
+                from the hidden elements below - so the preview and the export are one piece of
+                code and cannot drift. Its size on screen is the frame's; how many device pixels it
+                is drawn at is [measureStage]'s answer, not the post's.
+              */}
+              <canvas key="composite" class="pv__canvas" aria-hidden="true" ref={this.keepCanvas}></canvas>
+
+              {/*
+                The sources. One `<video>` per video track, seeked by `PreviewPlayer` and its
+                followers exactly as before and drawn from by the canvas above.
+
+                Invisible, and deliberately NOT `display: none`: some WebViews stop decoding a
+                video that is not laid out, and an element that has stopped decoding is a black
+                layer. They keep a real box at the corner of the frame, at zero opacity and taking
+                no touch, which is enough for every platform to go on presenting frames into them.
               */}
               <video
                 key="base-video"
                 ref={this.keepVideo}
-                class={{ pv__video: true, 'pv__video--idle': !baseOn }}
+                class="pv__source"
                 playsinline
                 webkit-playsinline=""
                 preload="auto"
-                style={placement(base, css.filter)}
+                aria-hidden="true"
               ></video>
 
-              {/*
-                The outgoing clip's last frame, held over the video while the element is pointed at
-                the next source. Pointing a <video> at a new file tears its decode pipeline down, and
-                WKWebView paints black through the whole load-seek chain - the `poster` attribute
-                does not reliably cover it and is blank anyway for a clip whose filmstrip has not
-                been cut yet. A bitmap cannot go black, costs no decoder, and holds the real frame at
-                full resolution.
-                It carries the SAME filter and fit as the video because drawImage captures the raw
-                frame: without them the colour and the letterboxing would pop for the length of the
-                hold.
-              */}
-              <canvas
-                key="base-hold"
-                ref={this.keepHold}
-                class={{ pv__hold: true, 'pv__hold--on': this.holding.value && baseOn }}
-                aria-hidden="true"
-                style={placement(base, css.filter)}
-              ></canvas>
-
-              {/*
-                CSS has no filter function for a tint, so each is drawn the way the render applies
-                it: on top, over the picture only - the render tints the frames before they are
-                letterboxed.
-              */}
-              {css.tints.length > 0 && (
-                <div key="base-tints" class="pv__tints" style={boxStyle(this.basePicture.value)} hidden={!baseOn}>
-                  {css.tints.map((tint, index) => (
-                    <div key={index} class="pv__tint" style={{ background: tint }}></div>
-                  ))}
-                </div>
-              )}
-
-              {/*
-                Every video layer above the first, each drawn over the one below it and its colour -
-                which is the z order, the base track being z 0 and nothing sorting below it.
-
-                ONE ELEMENT PER LAYER, with no cap. It costs a hardware decoder each, which is the
-                real budget on a mid-range phone; the answer to that is for a customer not to stack
-                eight videos at once, not for the editor to draw seven of their eight and say
-                nothing about the one it left out. Inside the gaps in a track's own window its
-                element stays put, paused and hidden, because tearing it down would cost another
-                load and another black flash every time the playhead crossed the track's start.
-              */}
-              {extras.map((view) => [
+              {extras.map((view) => (
                 <video
                   key={`extra-video-${view.trackId}`}
-                  ref={this.refsFor(view.trackId).video}
-                  class={{ pv__video: true, 'pv__video--idle': !view.layer }}
+                  ref={this.refsFor(view.trackId)}
+                  class="pv__source"
                   playsinline
                   webkit-playsinline=""
                   preload="auto"
-                  style={placement(view.box, css.filter)}
-                ></video>,
-
-                /*
-                  Its own held frame, for the reason the base element has one: this element loads
-                  sources of its own, and a second layer flashing black is no better than the first
-                  one doing it.
-                */
-                <canvas
-                  key={`extra-hold-${view.trackId}`}
-                  ref={this.refsFor(view.trackId).hold}
-                  class={{ pv__hold: true, 'pv__hold--on': holding.has(view.trackId) && !!view.layer }}
                   aria-hidden="true"
-                  style={placement(view.box, css.filter)}
-                ></canvas>,
-
-                /*
-                  Carries the LAYER's opacity, like the element it sits on. The render tints a
-                  layer's picture and only then composites the layer at the track's opacity, so a
-                  tint painted here at full strength over a half faded video would show a colour
-                  neither renderer produces.
-                */
-                css.tints.length > 0 && view.layer && (
-                  <div
-                    key={`extra-tints-${view.trackId}`}
-                    class="pv__tints"
-                    style={{ ...boxStyle(view.picture), opacity: String(view.box.opacity) }}
-                  >
-                    {css.tints.map((tint, index) => (
-                      <div key={index} class="pv__tint" style={{ background: tint }}></div>
-                    ))}
-                  </div>
-                ),
-              ])}
+                ></video>
+              ))}
 
               {this.layers.value.map((layer) =>
                 layer.effect ? (
@@ -1317,107 +1137,21 @@ function boxStyle(box: BoxView): { [key: string]: string } {
   };
 }
 
-/** Where a `<video>` element and the canvas over it are placed, and what the filter does to both. */
-function placement(view: VideoView, filter: string): { [key: string]: string } {
-  return {
-    ...boxStyle(view),
-    filter,
-    'object-fit': view.objectFit,
-    'clip-path': view.clipPath,
-    opacity: String(view.opacity),
-    // After the clip, which is what the render does: the picture is cut to its rectangle and the
-    // result is turned as one piece. A transform applies to the already clipped element, so the
-    // two agree without either having to know about the other.
-    transform: view.transform,
-    'transform-origin': view.transformOrigin,
-  };
-}
-
 /**
- * Where a layer's `<video>` element is put inside the frame, which is the preview's whole answer to
- * crop and reframe: the element is given the box the WHOLE source frame would occupy at the crop's
- * scale, and the frame's `overflow: hidden` cuts off everything the crop threw away. What is left on
- * screen is then exactly what `Placement.place` and Media3's `Crop` will compute.
+ * Where a layer's picture lands on the frame, as percentages - the whole frame when it fills it, the
+ * letterboxed rectangle when it does not, and the cropped picture inside the clip's own rectangle
+ * once it has one.
  *
- * A clip with no crop and no rectangle takes the path this preview has always taken - the element
- * filling the frame with its own `object-fit` - and so does one whose metadata has not arrived yet,
- * because the arithmetic below needs the source's shape and there is nothing to be gained from
- * guessing it for the two frames before it lands. A null layer takes it too: for the second element
- * that is a gap in its own track, where it is hidden anyway, and for the base it is a post with no
- * clips left on it at all.
- *
- * It takes a LAYER rather than a clip because the second video track is nothing more than another
- * one of these: the rectangle, the crop and the fit are the same fields, read from the same
- * manifest, and a second copy of this arithmetic is a second place for the two to disagree.
+ * This is CHROME arithmetic and no longer the picture's: the canvas places the picture itself, from
+ * the same numbers, through `sourceWindow`. What is left for this is the box the crop tool's window
+ * is drawn over, which has to sit exactly on what the customer can see.
  */
-function videoView(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit, frameAspect: number): VideoView {
-  const fit = layer?.fit ?? postFit;
-  const opacity = layer?.opacity ?? 1;
-  const dest = orWhole(layer?.rect);
-  const turn = dest.rotationDeg ?? 0;
-  const transform = turn ? `rotate(${turn}deg)` : 'none';
-  if (!(sourceAspect > 0) || (!layer?.crop && !layer?.rect)) {
-    // The element IS the rectangle here, so its own centre is the rectangle's centre.
-    return { ...percent(dest), objectFit: fit, clipPath: 'none', opacity, transform, transformOrigin: '50% 50%' };
-  }
-  const source = sourceFrameBox(pictureBox(sourceAspect, layer.crop, layer.rect, fit, frameAspect), layer.crop);
-  // `fill` and not the layer's own fit: the box above IS the source's shape, to the pixel, so there
-  // is nothing left for a fit to do and anything but `fill` would letterbox it twice.
-  return {
-    ...percent(source),
-    objectFit: 'fill',
-    clipPath: clipTo(source, layer.rect),
-    opacity,
-    transform,
-    // The RECTANGLE's centre, not the element's, and that distinction is the whole of this. A
-    // cropped or filled clip is given an element BIGGER than the rectangle it is drawn in, with
-    // the overhang cut off by `clipPath`, so turning about the element's own middle would swing
-    // the picture around a point that is not where the render turns it. The contract is explicit:
-    // the fit is measured in the upright rectangle and the fitted result is turned about THAT
-    // rectangle's centre. Expressed here as a fraction of the element, because that is the box
-    // `transform-origin` measures against.
-    transformOrigin: originIn(source, layer.rect),
-  };
-}
-
-/** Where a rectangle's centre falls inside an element's box, as the percentages CSS wants. */
-function originIn(element: FrameBox, rect: FrameBox | null | undefined): string {
-  if (!rect) return '50% 50%';
-  const x = (rect.x + rect.w / 2 - element.x) / element.w;
-  const y = (rect.y + rect.h / 2 - element.y) / element.h;
-  return `${pct(x)}% ${pct(y)}%`;
-}
-
-/** Where a layer's picture lands on the frame; see [VePreview.basePicture]. */
 function pictureOf(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit, frameAspect: number): BoxView {
   const box = pictureBox(sourceAspect, layer?.crop, layer?.rect, layer?.fit ?? postFit, frameAspect);
   // What is ON SCREEN, so `cover` inside a rectangle stops at the rectangle's edge rather than
-  // running on across the frame - the render clips it there and the tints have to agree.
+  // running on across the frame - the render clips it there, and the crop window drawn over this
+  // box has to agree with what the customer can actually see.
   return percent(layer?.rect ? intersect(box, layer.rect) : box);
-}
-
-/**
- * What cuts the `<video>` element down to the rectangle its clip is drawn in.
- *
- * A clip that fills its rectangle, or one that is cropped, is given an element BIGGER than that
- * rectangle - the whole source frame at the crop's scale - and the part that hangs over has to go.
- * The frame's `overflow: hidden` only cuts it off at the frame's own edges, which is the right
- * answer for a clip drawn over the whole frame and the wrong one for a clip drawn over half of it:
- * the render clips at the rectangle, and this preview has to show the same picture.
- *
- * The insets are fractions of the ELEMENT, because that is the box `clip-path` measures against,
- * and none of them is ever negative - a rectangle the element already sits inside asks for no
- * clipping at all rather than for a region larger than the element, which is not a thing every
- * WebView agrees on.
- */
-function clipTo(element: FrameBox, rect: FrameBox | null | undefined): string {
-  if (!rect) return 'none';
-  const top = Math.max(0, (rect.y - element.y) / element.h);
-  const right = Math.max(0, (element.x + element.w - (rect.x + rect.w)) / element.w);
-  const bottom = Math.max(0, (element.y + element.h - (rect.y + rect.h)) / element.h);
-  const left = Math.max(0, (rect.x - element.x) / element.w);
-  if (!top && !right && !bottom && !left) return 'none';
-  return `inset(${pct(top)}% ${pct(right)}% ${pct(bottom)}% ${pct(left)}%)`;
 }
 
 /** The part of a box that is inside another one. Empty when they do not meet, which cannot happen. */
@@ -1430,8 +1164,4 @@ function intersect(box: FrameBox, rect: FrameBox): FrameBox {
     w: Math.max(0, Math.min(box.x + box.w, rect.x + rect.w) - x),
     h: Math.max(0, Math.min(box.y + box.h, rect.y + rect.h) - y),
   };
-}
-
-function pct(value: number): number {
-  return Math.round(value * 10_000) / 100;
 }

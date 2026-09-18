@@ -105,7 +105,14 @@ for (const [from, to] of RENAMES) {
  */
 let checked = 0;
 
-for (const dir of ['plugin', 'dist', 'loader']) {
+/*
+ * `mcp` is in the list only when it is there. It is the optional half of the package and
+ * `build-mcp.mjs` does not always produce it, but when it does it is `tsc` output exactly like
+ * `plugin/esm` and has to hold up to the same check.
+ */
+const TREES = ['plugin', 'dist', 'loader', 'mcp'].filter((dir) => isDirectory(join(packageDir, dir)));
+
+for (const dir of TREES) {
   for (const file of sources(join(packageDir, dir))) {
     const kind = moduleKind(file);
     if (kind === 'either') continue;
@@ -122,7 +129,7 @@ for (const dir of ['plugin', 'dist', 'loader']) {
   }
 }
 
-console.log(`module-type: ${MARKERS.length} markers, ${RENAMES.length} renames, ${checked} files agree`);
+console.log(`module-type: ${MARKERS.length} markers, ${RENAMES.length} renames, ${checked} files agree across ${TREES.join(', ')}`);
 
 function* sources(dir) {
   for (const entry of readdirSync(dir)) {
@@ -167,6 +174,14 @@ function governingType(file) {
 function isFile(path) {
   try {
     return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }

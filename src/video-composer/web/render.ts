@@ -155,7 +155,10 @@ async function drawEveryFrame(
       const clip = plan.clips[baseIndex];
       const startUs = plan.prefixOutUs[baseIndex] ?? 0;
       if (clip) {
-        const draw = await layerDraw(layers, 'base', clip, atUs - startUs, frameSeconds, WHOLE_FRAME, 1);
+        // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
+        // destination of its own, so the angle comes off the clip; the painter turns it about that
+        // same rectangle's centre either way.
+        const draw = await layerDraw(layers, 'base', clip, atUs - startUs, frameSeconds, WHOLE_FRAME, 1, clip.clip.rect?.rotationDeg ?? 0);
         if (draw) draws.push(draw);
       }
     }
@@ -167,7 +170,7 @@ async function drawEveryFrame(
       const clip = track.clips[visible];
       const placement = track.placements[visible];
       if (!clip || !placement) continue;
-      const draw = await layerDraw(layers, track.id, clip, atUs - placement.startUs, frameSeconds, placement.rect, track.opacity);
+      const draw = await layerDraw(layers, track.id, clip, atUs - placement.startUs, frameSeconds, placement.rect, track.opacity, placement.rect.rotationDeg ?? 0);
       if (draw) draws.push(draw);
     }
 
@@ -221,6 +224,7 @@ async function layerDraw(
   frameSeconds: number,
   dest: ComposeRect,
   opacity: number,
+  rotationDeg: number,
 ): Promise<LayerDraw | null> {
   const reader = await layers.reader(layerId, clip.clip.uri, clip.clip.key);
   await reader.seek(sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000, frameSeconds);
@@ -235,6 +239,7 @@ async function layerDraw(
     framing: { fit: clip.clip.fit, crop: clip.clip.crop, rect: clip.clip.rect },
     dest,
     opacity,
+    rotationDeg,
   };
 }
 
