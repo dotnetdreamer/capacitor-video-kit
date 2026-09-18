@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ComposeClip, ComposeSpec } from '../definitions';
 
-import { SpecError, validateSpec } from './spec';
+import { MAX_VIDEO_TRACKS, SpecError, validateSpec } from './spec';
 
 /**
  * The refusals, which have to be the same refusals `ComposeSpecParser` makes.
@@ -84,17 +84,19 @@ describe('refusals', () => {
     ).toThrow(/overlays\[0\]\.png/);
   });
 
-  it('refuses more layers than there are decoders for, rather than dropping one', () => {
-    expect(() =>
-      validateSpec(
-        spec({
-          tracks: [
-            { id: 'a', clips: [clip()], z: 1 },
-            { id: 'b', clips: [clip()], z: 2 },
-          ],
-        }),
-      ),
-    ).toThrow(/at most 1 extra video track/);
+  it('takes as many layers as the contract allows, and refuses the one past it', () => {
+    // The cap is NOT a decoder budget, which is what it used to be and what this test used to
+    // assert: the export composites offline, and what a device can play at once is the preview's
+    // business. It is a ceiling so an absurd spec comes back as a sentence rather than as an out
+    // of memory kill, and it is the contract's own number so this renderer cannot drift from the
+    // Swift and Kotlin ones again.
+    const tracks = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ id: `t${i}`, clips: [clip()], z: i + 1 }));
+
+    expect(() => validateSpec(spec({ tracks: tracks(MAX_VIDEO_TRACKS - 1) }))).not.toThrow();
+    expect(() => validateSpec(spec({ tracks: tracks(MAX_VIDEO_TRACKS) }))).toThrow(
+      new RegExp(`at most ${MAX_VIDEO_TRACKS - 1} extra video track`),
+    );
   });
 
   it('refuses a filter op it does not know', () => {
