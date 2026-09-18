@@ -17,7 +17,8 @@ import {
   MIN_CROP,
   orWhole,
   pictureBox,
-  placeRect,
+  placeClipRect,
+  scaleClipRect,
   scaleRect,
   slideRect,
   sourceFrameBox,
@@ -762,7 +763,11 @@ export class OverlayGestures {
     const x = snapToCentre(gesture.cx0 + dx, rect.width);
     const y = snapToCentre(gesture.cy0 + dy, rect.height);
     this.setGuides({ x: x.snapped, y: y.snapped, rotation: null });
-    this.queue({ kind: 'clip', id: grip.id, patch: { rect: placeRect(x.value, y.value, grip.rect0.w, grip.rect0.h) } });
+    // The angle the fingers landed on travels with the drag. Nothing else on the patch carries it -
+    // a rectangle written without one is a rectangle put back upright - so a customer who turned a
+    // video and then moved it would have watched it straighten as it went.
+    const placed = placeClipRect(x.value, y.value, grip.rect0.w, grip.rect0.h, grip.rot0);
+    this.queue({ kind: 'clip', id: grip.id, patch: { rect: placed } });
   }
 
   private moveTwist(gesture: Extract<Gesture, { kind: 'twist' }>): void {
@@ -829,7 +834,7 @@ export class OverlayGestures {
       return;
     }
     const rotation = snapRotation(grip.rot0 + turned);
-    const rect = scaleRect(grip.rect0, factor, MIN_CLIP_RECT, rotation.value);
+    const rect = scaleClipRect(grip.rect0, factor, MIN_CLIP_RECT, rotation.value);
     const showSnap = rotation.snapped && (Math.abs(turned) > SNAP_DEG || rotation.value !== grip.rot0);
     this.setGuides({
       x: false,

@@ -20,8 +20,12 @@ export const MANIFEST_VERSION = 5;
 export type EditFit = 'contain' | 'cover';
 
 /**
- * A rectangle in normalised coordinates: 0..1, TOP-LEFT origin with y pointing down - the same
- * system every overlay's `cx`/`cy` already uses, and the one `ComposeRect` puts on the wire.
+ * A rectangle in normalised coordinates: TOP-LEFT origin with y pointing down, the same system
+ * every overlay's `cx`/`cy` already uses and the one `ComposeRect` puts on the wire.
+ *
+ * A crop is inside 0..1 and could hardly be anything else - it names a part of a source frame. A
+ * placement is not: it says where a picture is drawn on the output, and a video moved to the edge
+ * of the canvas hangs over it. [normalisePlacement] holds the one and [normaliseRect] the other.
  */
 export interface EditRect {
   x: number;
@@ -55,6 +59,11 @@ export interface EditRect {
  *
  * Absent and a whole number of turns are the same upright rectangle, and a rectangle only reaches
  * the wire when it says something (see [isFullFrameRect]), so a clip nobody turned costs nothing.
+ *
+ * The four numbers may leave the frame. `x` and `y` may be negative and the rectangle may be larger
+ * than the frame it is drawn on, up to [MAX_PLACEMENT_SIZE]; only its centre is held on the frame.
+ * Everything that hangs over an edge is cut off there, by the frame in the preview and by the
+ * output frame in all four renderers, which is what makes the canvas free.
  */
 export interface EditPlacement extends EditRect {
   /** Clockwise, as CSS means it - the units and the sense of [OverlayCommon.rotationDeg]. */
@@ -331,6 +340,18 @@ export const MAX_SCALE = 6;
  * past the source's real resolution has to impose its own, tighter, limit on top.
  */
 export const MIN_RECT_SIZE = 0.01;
+
+/**
+ * The largest a clip's placement rectangle may be, as a multiple of the frame.
+ *
+ * A placement is free of the frame's edges (see [normalisePlacement]), so its size has to stop
+ * somewhere or a pinch could ask for a rectangle a thousand frames wide. Two is what the renderers
+ * can take rather than a matter of taste: a clip on an extra video layer is drawn into a texture of
+ * its rectangle's own size, and twice a 1080x1920 output is 2160x3840, still inside the 4096 every
+ * GL implementation this package runs on guarantees. A crop has no such cap and needs none - there
+ * is nothing outside a source frame to sample.
+ */
+export const MAX_PLACEMENT_SIZE = 2;
 
 /**
  * How close to the edges of the frame still counts as the whole frame. One unit of the four-decimal
@@ -792,9 +813,19 @@ export function normaliseRect(value: unknown): EditRect | undefined {
 }
 
 /**
- * A placement rectangle brought inside the frame with its angle kept, or `undefined` for anything
- * that is not one. The four numbers are [normaliseRect]'s, and the angle is held at the same four
- * decimals they are.
+ * A placement rectangle with its angle kept, or `undefined` for anything that is not one.
+ *
+ * A placement is FREE of the frame, and that is the whole difference between it and a crop. A crop
+ * names a part of a source and there is nothing outside a source to name, so [normaliseRect] holds
+ * one inside the unit square; a placement says where a picture is DRAWN, and a customer who pushes
+ * a video off the side of the canvas means the part that hangs over to be cut off by the frame -
+ * the arrangement every phone editor is built on. So `x` and `y` may be negative, `x + w` may pass
+ * 1, and the size may run to [MAX_PLACEMENT_SIZE] of the frame.
+ *
+ * What is held instead is the rectangle's CENTRE, which has to stay ON the frame. The centre is the
+ * point the fingers grab and the point a turn happens about, so a rectangle whose centre has left
+ * the frame is one nobody can take hold of again; holding it also keeps a quarter of an upright
+ * rectangle on screen at worst, which is why a video cannot be lost off a corner.
  *
  * The angle is NOT wrapped into a single turn. An overlay's is not either, a gesture spun twice
  * round keeps its total that way, and every engine reduces the angle itself the moment it takes a
@@ -802,9 +833,21 @@ export function normaliseRect(value: unknown): EditRect | undefined {
  * back is the rectangle it was before anybody touched it, down to its keys.
  */
 export function normalisePlacement(value: unknown): EditPlacement | undefined {
-  const rect = normaliseRect(value);
-  if (!rect) return undefined;
-  const deg = round4(num((value as Record<string, unknown>)['rotationDeg'], 0));
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const w = round4(clamp(num(raw['w'], 1), MIN_RECT_SIZE, MAX_PLACEMENT_SIZE));
+  const h = round4(clamp(num(raw['h'], 1), MIN_RECT_SIZE, MAX_PLACEMENT_SIZE));
+  // The corner is rounded BEFORE the centre is held, never after. The bound is half of a rectangle
+  // whose own decimals are already fixed, so a corner rounded once the room for it had been worked
+  // out could put the centre a ten-thousandth off the frame and hand the native parsers a placement
+  // they would have to hold all over again - the same trap [normaliseRect] steps around.
+  const rect: EditPlacement = {
+    x: clamp(round4(num(raw['x'], 0)), -w / 2, 1 - w / 2),
+    y: clamp(round4(num(raw['y'], 0)), -h / 2, 1 - h / 2),
+    w,
+    h,
+  };
+  const deg = round4(num(raw['rotationDeg'], 0));
   return deg % 360 === 0 ? rect : { ...rect, rotationDeg: deg };
 }
 
@@ -831,11 +874,15 @@ export function isUprightRect(rect: EditPlacement | null | undefined): boolean {
 export function isFullFrameRect(rect: EditPlacement | null | undefined): boolean {
   if (!rect) return true;
   if (!isUprightRect(rect)) return false;
+  // Each of the four against the frame's own number in BOTH directions. A crop can only ever be
+  // smaller than the frame and inside it, so one-sided tests read the same for one - but a
+  // placement may hang off an edge and may be larger than the frame, and `x <= 0` alone would
+  // call a video pushed half off the left side "the whole frame" and throw its rectangle away.
   return (
-    rect.x <= FULL_FRAME_EPSILON &&
-    rect.y <= FULL_FRAME_EPSILON &&
-    rect.w >= 1 - FULL_FRAME_EPSILON &&
-    rect.h >= 1 - FULL_FRAME_EPSILON
+    Math.abs(rect.x) <= FULL_FRAME_EPSILON &&
+    Math.abs(rect.y) <= FULL_FRAME_EPSILON &&
+    Math.abs(rect.w - 1) <= FULL_FRAME_EPSILON &&
+    Math.abs(rect.h - 1) <= FULL_FRAME_EPSILON
   );
 }
 

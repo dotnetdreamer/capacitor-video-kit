@@ -322,8 +322,10 @@ enum Orientation {
 
 enum Placement {
 
-    /// Turns a wire rectangle - normalised 0...1, TOP-LEFT origin, y DOWN - into a rectangle of
-    /// `frame` in Core Image's coordinates, which are y-UP from the bottom-left.
+    /// Turns a wire rectangle - normalised, TOP-LEFT origin, y DOWN - into a rectangle of `frame` in
+    /// Core Image's coordinates, which are y-UP from the bottom-left. A crop is inside 0...1 and a
+    /// placement need not be: a picture drawn off the edge of the output comes through here with a
+    /// negative origin or a side past the frame, and the render bounds are what cut it off.
     ///
     /// The flip is the whole reason this function exists, and it is the single easiest thing in this
     /// file to get wrong. `r.y` names the rectangle's TOP edge measured downwards from the top, so

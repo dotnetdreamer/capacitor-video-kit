@@ -188,16 +188,17 @@ class ComposeSpecParserTest {
     }
 
     @Test
-    fun `a turned rectangle is clamped in its four numbers and not in its angle`() {
-        // A turned rectangle legitimately puts its corners outside the frame - the frame crops them
-        // - so the clamp that brings x and y back inside 0..1 stops where the angle starts.
+    fun `a turned rectangle keeps its size and its angle where it was placed`() {
+        // A placement hanging off the right edge is a video the customer pushed half off the canvas,
+        // and the frame is what crops it. Neither the four numbers nor the angle are touched here:
+        // the centre is still on the frame, which is the only thing this parser holds a placement to.
         val json = minimalJson().apply {
             getJSONArray("clips").getJSONObject(0)
                 .put("rect", rectJson(0.75, 0.0, 0.5, 1.0).put("rotationDeg", -540.0))
         }
         val rect = ComposeSpecParser.parse(json).clips[0].rect!!
         assertEquals(0.75f, rect.x, 1e-6f)
-        assertEquals(0.25f, rect.w, 1e-6f)
+        assertEquals(0.5f, rect.w, 1e-6f)
         assertEquals(-540f, rect.rotationDeg!!, 1e-4f)
     }
 
@@ -264,20 +265,60 @@ class ComposeSpecParserTest {
     }
 
     @Test
-    fun `a rectangle hanging off the frame is clamped back inside it`() {
+    fun `a crop hanging off the source is clamped back inside it`() {
         val json = minimalJson().apply {
-            getJSONArray("clips").getJSONObject(0)
-                .put("crop", rectJson(-0.2, 0.6, 3.0, 0.9))
-                .put("rect", rectJson(0.75, 0.0, 0.5, 1.0))
+            getJSONArray("clips").getJSONObject(0).put("crop", rectJson(-0.2, 0.6, 3.0, 0.9))
         }
-        val clip = ComposeSpecParser.parse(json).clips[0]
-        assertEquals(0f, clip.crop!!.x, 1e-6f)
-        assertEquals(1f, clip.crop!!.w, 1e-6f)
+        val crop = ComposeSpecParser.parse(json).clips[0].crop!!
+        assertEquals(0f, crop.x, 1e-6f)
+        assertEquals(1f, crop.w, 1e-6f)
         // y stood, so the height is cut to the room it left rather than the other way round.
-        assertEquals(0.6f, clip.crop!!.y, 1e-6f)
-        assertEquals(0.4f, clip.crop!!.h, 1e-6f)
-        assertEquals(0.75f, clip.rect!!.x, 1e-6f)
-        assertEquals(0.25f, clip.rect!!.w, 1e-6f)
+        assertEquals(0.6f, crop.y, 1e-6f)
+        assertEquals(0.4f, crop.h, 1e-6f)
+    }
+
+    @Test
+    fun `a placement hanging off the frame keeps its overhang`() {
+        // The difference between the two fields, in one test. A crop is a window on the source and
+        // cannot leave it; a placement says where the picture is DRAWN, and a customer who drags a
+        // video off the side of the canvas means the overhang to be cut off by the output frame.
+        // Clamping it back inside would slide their video onto the screen and rearrange the post.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(-0.3, 0.4, 0.6, 0.6))
+        }
+        val rect = ComposeSpecParser.parse(json).clips[0].rect!!
+        assertEquals(-0.3f, rect.x, 1e-6f)
+        assertEquals(0.6f, rect.w, 1e-6f)
+        assertEquals(0.4f, rect.y, 1e-6f)
+    }
+
+    @Test
+    fun `a placement whose centre has left the frame is brought back to the edge`() {
+        // The one thing a placement IS held to. The centre is the point the fingers grab and the
+        // point a turn happens about, so a picture whose centre is off the frame is one nobody can
+        // reach again - and holding it keeps a quarter of an upright rectangle on screen at worst.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(-4.0, 9.0, 0.5, 0.5))
+        }
+        val rect = ComposeSpecParser.parse(json).clips[0].rect!!
+        assertEquals(-0.25f, rect.x, 1e-6f)
+        assertEquals(0.75f, rect.y, 1e-6f)
+        assertEquals(0.5f, rect.w, 1e-6f)
+        assertEquals(0.5f, rect.h, 1e-6f)
+    }
+
+    @Test
+    fun `a placement larger than the frame is capped, and its centre held with the capped size`() {
+        // A layer is drawn into a texture of its rectangle's own size, so an unbounded side is an
+        // unbounded texture. Two frames is the cap, and the centre is then held against THAT size.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(0.0, 0.0, 9.0, 5.0))
+        }
+        val rect = ComposeSpecParser.parse(json).clips[0].rect!!
+        assertEquals(2f, rect.w, 1e-6f)
+        assertEquals(2f, rect.h, 1e-6f)
+        assertEquals(0f, rect.x, 1e-6f)
+        assertEquals(0f, rect.y, 1e-6f)
     }
 
     private fun rectJson(x: Double, y: Double, w: Double, h: Double) =

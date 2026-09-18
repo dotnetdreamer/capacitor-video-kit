@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { toComposeSpec } from './compose';
 import {
   DEFAULT_OUTPUT,
+  MAX_PLACEMENT_SIZE,
   MAX_VIDEO_TRACKS,
   defaultClipEdit,
   emptyManifest,
@@ -108,6 +109,50 @@ describe('a clip placement', () => {
     // A rectangle written before angles existed reopens as the upright rectangle it was, with no
     // `rotationDeg` key defaulted onto it.
     expect(normalisePlacement({ x: 0, y: 0.5, w: 1, h: 0.5 })).toEqual({ x: 0, y: 0.5, w: 1, h: 0.5 });
+  });
+
+  it('lets a video hang off the frame, and holds nothing but its centre', () => {
+    // The whole of a free canvas, in one rectangle. A customer who drags a video half off the left
+    // edge means the overhang to be cut off there, so the negative x stands and the size stands
+    // with it - the old rule slid it back on screen and rearranged the post.
+    const off = setClipRect(oneClip(), 'a', { x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
+    expect(off.clips[0].rect).toEqual({ x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
+
+    // Pushed until the centre itself would leave, which is the one thing that is held: the centre
+    // is the point the fingers grab and the point a turn happens about, so a video whose centre is
+    // off the frame is one nobody can take hold of again.
+    const lost = setClipRect(oneClip(), 'a', { x: -4, y: 9, w: 0.5, h: 0.5 });
+    expect(lost.clips[0].rect).toEqual({ x: -0.25, y: 0.75, w: 0.5, h: 0.5 });
+  });
+
+  it('lets a pinch grow the rectangle past the frame, up to the renderers\' ceiling', () => {
+    const big = setClipRect(oneClip(), 'a', { x: -0.5, y: -0.5, w: 2, h: 2 });
+    expect(big.clips[0].rect).toEqual({ x: -0.5, y: -0.5, w: 2, h: 2 });
+
+    // A layer is drawn into a texture of its rectangle's own size, so the size is capped even
+    // though the position is not - and the centre is then held against the CAPPED size.
+    const huge = setClipRect(oneClip(), 'a', { x: 0, y: 0, w: 9, h: 5 });
+    expect(huge.clips[0].rect).toEqual({ x: 0, y: 0, w: MAX_PLACEMENT_SIZE, h: MAX_PLACEMENT_SIZE });
+  });
+
+  it('still calls only the frame itself the whole frame', () => {
+    // `worthKeeping` throws away a rectangle that says nothing, and it asks this. A video pushed
+    // half off the left edge has a negative x and a video pinched larger than the frame has a
+    // width past 1, and a one-sided test called both of them "the whole frame" and dropped the
+    // rectangle - which put the video back where it started with nothing on screen to say why.
+    expect(isFullFrameRect({ x: -0.5, y: 0, w: 1, h: 1 })).toBe(false);
+    expect(isFullFrameRect({ x: 0, y: 0, w: 2, h: 2 })).toBe(false);
+    expect(isFullFrameRect({ x: 0, y: 0, w: 1, h: 1 })).toBe(true);
+    expect(setClipRect(oneClip(), 'a', { x: -0.5, y: 0, w: 1, h: 1 }).clips[0]).toHaveProperty('rect');
+  });
+
+  it('sends the overhang to the engines rather than tidying it away', async () => {
+    const wire = await spec(setClipRect(oneClip(), 'a', { x: -0.3, y: 0.4, w: 0.6, h: 0.6 }));
+
+    // The wire is the contract all four renderers read, and every one of them cuts at the output
+    // frame already. A rectangle squared up here would be a different picture on the phone than
+    // the one the customer watched in the preview.
+    expect(wire.clips[0].rect).toEqual({ x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
   });
 
   it('takes the angle away with the rectangle, whether it is reset or laid out again', () => {

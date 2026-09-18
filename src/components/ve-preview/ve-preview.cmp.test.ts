@@ -377,6 +377,30 @@ describe('ve-preview after the page has been away', () => {
   });
 });
 
+describe('ve-preview on a free canvas', () => {
+  /*
+   * A video may be placed anywhere, the edges of the frame included, and what hangs over the edge
+   * is cut off there rather than sliding the video back on screen. The preview is the only place a
+   * customer ever sees that decision being made, so it is the place to pin it: the element really
+   * does start left of the frame, and the frame really does keep it from painting over the shell.
+   */
+  it('draws a video that hangs off the edge, cut off at the frame', async () => {
+    const { store, preview } = await mount(false);
+    store.commitClipFraming('seg-a', { rect: { x: -0.25, y: 0.25, w: 0.5, h: 0.5 } }, 'Move');
+    await frames(3);
+
+    const frame = preview.querySelector('.pv__frame') as HTMLElement;
+    const video = box(videos(preview)[0]);
+    const stage = frame.getBoundingClientRect();
+
+    // Half of it is off the left edge: the element's own box says so, in real pixels.
+    expect(video.left).toBeLessThan(stage.left - 1);
+    expect(video.width).toBeCloseTo(stage.width * 0.5, 0);
+    // And the frame is what cuts it off, so nothing of it is painted beside the video.
+    expect(getComputedStyle(frame).overflow).toBe('hidden');
+  });
+});
+
 describe('ve-preview swapping the two videos', () => {
   /*
    * Swap is the one operation that moves a layer's clips to the OTHER layer, and the preview draws

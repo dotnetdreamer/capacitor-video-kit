@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { placeRect, scaleRect, slideRect } from './clip-framing';
+import { placeClipRect, placeRect, scaleClipRect, scaleRect, slideRect } from './clip-framing';
 
 /**
  * A clip's placement rectangle can be TURNED, which is what makes a free canvas free. These pin the
@@ -26,6 +26,12 @@ describe('a turned placement', () => {
     // video. Both of these went through placeRect, which is where an angle would be dropped.
     expect(slideRect(turned, 0.1, 0.2).rotationDeg).toBe(30);
     expect(scaleRect(turned, 1.5, 0.12).rotationDeg).toBe(30);
+
+    // And the two a CLIP takes, which are the ones a finger on the frame actually reaches. The drag
+    // hands the angle in by hand - it builds a rectangle from the size it grabbed rather than
+    // sliding the old one - so a drag that forgot to pass it straightened the video as it moved.
+    expect(placeClipRect(0.6, 0.7, turned.w, turned.h, turned.rotationDeg!).rotationDeg).toBe(30);
+    expect(scaleClipRect(turned, 1.5, 0.12).rotationDeg).toBe(30);
   });
 
   it('takes a new angle from a twist while keeping the size the pinch asked for', () => {

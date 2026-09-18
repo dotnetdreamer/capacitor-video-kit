@@ -1,6 +1,6 @@
-import type { ComposeFit, ComposeRect, ComposeSpec, FilterOp } from '../definitions';
+import type { ComposeFit, ComposePlacement, ComposeRect, ComposeSpec, FilterOp } from '../definitions';
 
-import { MAX_VIDEO_TRACKS } from '../../editor';
+import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS } from '../../editor';
 
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
 
@@ -211,7 +211,7 @@ function readClip(input: unknown, path: string): ComposeSpec['clips'][number] {
   // for to keep taking the path it took before crops and rectangles existed.
   const crop = readRect(clip['crop'], `${path}.crop`);
   if (crop) out.crop = crop;
-  const rect = readRect(clip['rect'], `${path}.rect`);
+  const rect = readPlacement(clip['rect'], `${path}.rect`);
   if (rect) out.rect = rect;
   return out;
 }
@@ -221,11 +221,12 @@ function readFit(value: unknown): ComposeFit {
 }
 
 /**
- * A rectangle brought inside the frame, or undefined for anything that is not one.
+ * A crop brought inside the source, or undefined for anything that is not one.
  *
  * The size asked for is what is kept: a rectangle pushed off an edge slides back in rather than
  * being squashed against it, which is the rule `normaliseRect` follows in the manifest and the one
- * that keeps a crop dragged to the right edge from becoming a zero-width black frame.
+ * that keeps a crop dragged to the right edge from becoming a zero-width black frame. A placement
+ * is read by `readPlacement` and is not held inside anything but its own centre.
  */
 function readRect(value: unknown, path: string): ComposeRect | undefined {
   if (value === undefined || value === null) return undefined;
@@ -236,6 +237,33 @@ function readRect(value: unknown, path: string): ComposeRect | undefined {
   return {
     x: clamp(finite(rect['x'], 0), 0, 1 - w),
     y: clamp(finite(rect['y'], 0), 0, 1 - h),
+    w,
+    h,
+  };
+}
+
+/**
+ * A placement rectangle, or undefined for anything that is not one.
+ *
+ * The same four numbers as `readRect` and a different bound, which is the difference between the
+ * two fields rather than an inconsistency. A crop is a window on the source and cannot leave it; a
+ * placement says where the picture is DRAWN, and a video placed off the edge of the frame is a
+ * customer asking for the overhang to be cut off there. What is held is the rectangle's CENTRE, on
+ * the frame, which is `normalisePlacement`'s rule word for word - the manifest, this reader and
+ * both native parsers have to agree on it or the same post is a different picture per engine.
+ *
+ * `rotationDeg` is not read here for the reason `plan.ts` gives: this renderer draws a clip's
+ * rectangle but does not turn it, and a reader that accepted the angle would be claiming otherwise.
+ */
+function readPlacement(value: unknown, path: string): ComposePlacement | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object') throw new SpecError(path);
+  const rect = value as Record<string, unknown>;
+  const w = clamp(finite(rect['w'], 1), 0.01, MAX_PLACEMENT_SIZE);
+  const h = clamp(finite(rect['h'], 1), 0.01, MAX_PLACEMENT_SIZE);
+  return {
+    x: clamp(finite(rect['x'], 0), -w / 2, 1 - w / 2),
+    y: clamp(finite(rect['y'], 0), -h / 2, 1 - h / 2),
     w,
     h,
   };

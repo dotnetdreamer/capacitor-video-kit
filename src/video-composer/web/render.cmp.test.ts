@@ -502,6 +502,42 @@ describe('the painter', () => {
     painter.dispose();
   });
 
+  it('draws a layer that hangs off the frame, cut off at the edge', () => {
+    const painter = new Painter({ width: 100, height: 100 });
+    painter.setColour(null, { filter: 'none', tints: [] });
+    painter.paintLayers([
+      {
+        source: square('#00f'),
+        sourceWidth: 100,
+        sourceHeight: 100,
+        framing: { fit: 'cover' },
+        dest: { x: 0, y: 0, w: 1, h: 1 },
+        opacity: 1,
+      },
+      {
+        source: square('#fff'),
+        sourceWidth: 100,
+        sourceHeight: 100,
+        framing: { fit: 'cover' },
+        // Half a frame wide, dragged so that half of IT is off the left edge: a quarter of the
+        // output is covered and the rest of the layer is simply not there.
+        dest: { x: -0.25, y: 0.25, w: 0.5, h: 0.5 },
+        opacity: 1,
+      },
+    ]);
+
+    // Inside the part that landed: white.
+    const [r, g, b] = pixelAt(painter, 10, 50);
+    expect(r).toBeGreaterThan(200);
+    expect(g).toBeGreaterThan(200);
+    expect(b).toBeGreaterThan(200);
+    // Past the layer's right edge, which is a quarter of the way across: the base shows.
+    const [, , base] = pixelAt(painter, 40, 50);
+    expect(base).toBeGreaterThan(200);
+    expect(pixelAt(painter, 40, 50)[0]).toBeLessThan(60);
+    painter.dispose();
+  });
+
   it('draws an overlay at its centre, at its own size', () => {
     const painter = new Painter({ width: 100, height: 100 });
     painter.setColour(null, { filter: 'none', tints: [] });

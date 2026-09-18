@@ -25,8 +25,8 @@
 /** How a source frame is fitted into the output rectangle when the aspect ratios differ. */
 export type ComposeFit = 'contain' | 'cover';
 
-/** A rectangle in normalised coordinates: 0..1, TOP-LEFT origin, y down - the same system
-    ComposeOverlay.cx/cy already uses. */
+/** A rectangle in normalised coordinates: TOP-LEFT origin, y down - the same system
+    ComposeOverlay.cx/cy already uses. A crop is inside 0..1 and a [ComposePlacement] need not be. */
 export interface ComposeRect {
   x: number;
   y: number;
@@ -56,6 +56,13 @@ export interface ComposeRect {
  *
  * Absent is upright, and the builder never writes a `rotationDeg` of 0: a missing key is what tells
  * an engine there is no turn to make, exactly as a missing `rect` tells it there is no placement.
+ *
+ * The four numbers are FINITE and positive, and that is all. A placement is not held inside the
+ * frame the way a crop is held inside its source: a picture may be drawn off the edge of the
+ * output, because a customer dragging a video half off the canvas is asking for the overhang to be
+ * cut off there. Every engine already cuts at the output frame, so this costs none of them a line.
+ * What each parser does guarantee is the pair of rules `normalisePlacement` states: the rectangle's
+ * CENTRE is on the frame, and neither side is larger than `MAX_PLACEMENT_SIZE` of it.
  */
 export interface ComposePlacement extends ComposeRect {
   /** CLOCKWISE degrees about the rectangle's CENTRE, matching CSS `rotate()`. Absent is upright. */

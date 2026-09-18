@@ -164,9 +164,10 @@ enum ComposeSpecParser {
 private func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 private func clamp01(_ v: Double) -> Double { clamp(v, 0, 1) }
 
-/// Pulls a decoded rectangle into the unit square. `w` and `h` were already rejected if they were
-/// not positive, which is the split this parser draws everywhere: a shape error is thrown, a value
-/// that is merely out of range is clamped.
+/// Pulls a decoded CROP into the unit square. `w` and `h` were already rejected if they were not
+/// positive, which is the split this parser draws everywhere: a shape error is thrown, a value that
+/// is merely out of range is clamped. A placement is not pulled inside anything; see
+/// `clampPlacement`, which is where a picture is allowed to hang off the frame.
 ///
 /// The order is x and y first, then w and h against whatever room is left, so a rectangle that
 /// overhangs the right edge keeps its position and loses its overhang rather than sliding back
@@ -185,15 +186,41 @@ private func clampRect(_ r: RectDTO?) -> ComposeRect? {
     return ComposeRect(x: x, y: y, w: min(r.w, 1 - x), h: min(r.h, 1 - y))
 }
 
-/// The same four numbers through the same clamp, with the angle carried across untouched.
+/// The same four numbers through a DIFFERENT clamp, with the angle carried across untouched.
+///
+/// Different because a placement is not a crop. A crop names the part of a source frame that is
+/// kept and there is nothing outside that frame to name, so `clampRect` pulls one inside; a
+/// placement says where the picture is DRAWN, and a customer who drags a video off the side of the
+/// canvas means the overhang to be cut off by the output frame. Pulling it inside would slide that
+/// video back on screen and quietly rearrange the post.
+///
+/// What is held is the rectangle's CENTRE, which stays on the frame: it is the point the fingers
+/// grab and the point the angle below turns about, so a picture whose centre has left the frame is
+/// one nobody can reach again, and holding it keeps a quarter of an upright rectangle on screen at
+/// worst. `MAX_PLACEMENT_SIZE` caps the size for a reason of the renderer's own - a clip on an
+/// extra layer is drawn into a texture of its rectangle's own size. Both rules are
+/// `normalisePlacement`'s in the TypeScript, to the arithmetic: this parser, the Android one and
+/// the browser's reader have to agree or the same post is a different picture per engine.
 ///
 /// The angle is deliberately NOT clamped and NOT wrapped into a single turn: 720 is a legal spec and
-/// sin/cos reduce it. Nor does the clamp above extend to it, because a turned rectangle legitimately
-/// puts its corners outside the frame and the frame is what crops them.
+/// sin/cos reduce it. Nor does the clamp extend to it, because a turned rectangle legitimately puts
+/// its corners outside the frame and the frame is what crops them.
 private func clampPlacement(_ r: RectDTO?) -> ComposePlacement? {
-    guard let r, let box = clampRect(r) else { return nil }
-    return ComposePlacement(x: box.x, y: box.y, w: box.w, h: box.h, rotationDeg: r.rotationDeg)
+    guard let r else { return nil }
+    let w = min(r.w, MAX_PLACEMENT_SIZE)
+    let h = min(r.h, MAX_PLACEMENT_SIZE)
+    return ComposePlacement(
+        x: clamp(r.x, -w / 2, 1 - w / 2),
+        y: clamp(r.y, -h / 2, 1 - h / 2),
+        w: w,
+        h: h,
+        rotationDeg: r.rotationDeg)
 }
+
+/// The largest a clip's placement rectangle may be, as a multiple of the output frame. Twice a
+/// 1080x1920 output is 2160x3840, which every renderer here can hold as a single layer; the same
+/// number as `MAX_PLACEMENT_SIZE` in the TypeScript, where a customer's gesture meets it first.
+private let MAX_PLACEMENT_SIZE: Double = 2
 
 // MARK: - org.json-lenient readers
 

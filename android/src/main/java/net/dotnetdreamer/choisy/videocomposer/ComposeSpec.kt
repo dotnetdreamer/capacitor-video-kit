@@ -12,10 +12,10 @@ enum class Fit { CONTAIN, COVER }
  * A rectangle in normalised coordinates: 0..1, TOP-LEFT origin, y down - the same system
  * [Overlay.cx] and [Overlay.cy] already use, and the web's.
  *
- * The parser guarantees a rectangle that came off the wire is finite and sits inside the frame:
+ * The parser guarantees a CROP that came off the wire is finite and sits inside the source frame:
  * 0 <= x, x + w <= 1, and the same in y. A side can still come out as 0, but only for a rectangle
  * whose origin was clamped onto the far edge, which is a rectangle that was never on the frame in
- * the first place.
+ * the first place. A [Placement] carries no such promise; see there.
  *
  * A rectangle COMPUTED from one is under no such promise. [RenderPlan.sourceWindow] returns a
  * window that deliberately runs outside 0..1, because the part of the output a letterbox bar covers
@@ -26,8 +26,15 @@ data class Rect(val x: Float, val y: Float, val w: Float, val h: Float)
 /**
  * Where a clip's picture is drawn: a rectangle that may also be TURNED.
  *
- * The four numbers are a [Rect]'s and carry every one of its guarantees, because the parser clamps
- * them through the same reader. What is new is the angle, and it is the angle [Overlay.rotationDeg]
+ * The four numbers are a [Rect]'s and are FINITE and positive like one, but they do not sit inside
+ * the frame and are not meant to. A picture may be drawn off the edge of the output, and a customer
+ * who drags a video half off the canvas is asking for exactly that - the frame cuts the overhang
+ * off, in this renderer as in the preview. What the parser guarantees instead is that the
+ * rectangle's CENTRE is on the frame, so 0 <= x + w/2 <= 1 and the same in y, and that neither side
+ * is larger than `MAX_PLACEMENT_SIZE` of the frame - a layer is drawn into a texture of its
+ * rectangle's own size, and an unbounded side would be an unbounded texture.
+ *
+ * What is new is the angle, and it is the angle [Overlay.rotationDeg]
  * already carries in every respect that matters: CLOCKWISE degrees as CSS `rotate()` means them,
  * about the rectangle's CENTRE, and NOT clamped, because a caller may legitimately send 720 and
  * sin/cos reduce it.

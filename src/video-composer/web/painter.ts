@@ -262,13 +262,16 @@ export class Painter {
       ctx.beginPath();
       ctx.rect(originX, originY, frame.width, frame.height);
       ctx.clip();
-      // An extra layer's own frame is black first, so its letterbox bars cover the base exactly as
-      // they do natively rather than letting it show through.
-      if (layer.dest.w < 1 || layer.dest.h < 1) {
-        ctx.globalAlpha = layer.opacity;
-        ctx.fillStyle = '#000';
-        ctx.fillRect(originX, originY, frame.width, frame.height);
-      }
+      // A layer's own frame is black first, so its letterbox bars cover whatever is under them
+      // exactly as they do natively rather than letting it show through. Unconditional, because the
+      // GL path above is: its shader paints every sample that falls outside the source black at the
+      // layer's opacity, whatever size the rectangle is. The test this replaces was `dest.w < 1 ||
+      // dest.h < 1` - a layer smaller than the output - which stopped being a proxy for anything
+      // the moment a rectangle could be larger than the output or hang off its edge, and would have
+      // made a layer's bars turn transparent as a pinch took it through the frame's own size.
+      ctx.globalAlpha = layer.opacity;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(originX, originY, frame.width, frame.height);
       if (rects) {
         ctx.globalAlpha = layer.opacity;
         ctx.filter = this.cssFilter;

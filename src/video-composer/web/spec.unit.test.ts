@@ -133,10 +133,27 @@ describe('clamps', () => {
     expect(checked.overlays[0]?.opacity).toBe(1);
   });
 
-  it('slides a rectangle back inside the frame rather than squashing it', () => {
+  it('slides a crop back inside the source rather than squashing it', () => {
     const checked = validateSpec(spec({ clips: [clip({ crop: { x: 0.9, y: 0, w: 0.5, h: 1 } })] }));
     // The size asked for is kept; a crop dragged to the right edge must not become a black frame.
     expect(checked.clips[0]?.crop).toEqual({ x: 0.5, y: 0, w: 0.5, h: 1 });
+  });
+
+  it('leaves a placement hanging off the frame where the customer put it', () => {
+    // A crop is a window on the source and cannot leave it. A placement says where the picture is
+    // DRAWN, and this renderer cuts at the output frame like the other three, so a video dragged
+    // half off the canvas has to reach it with its overhang intact or the browser draws a
+    // different post from the one the preview showed.
+    const checked = validateSpec(spec({ clips: [clip({ rect: { x: -0.3, y: 0.4, w: 0.6, h: 0.6 } })] }));
+    expect(checked.clips[0]?.rect).toEqual({ x: -0.3, y: 0.4, w: 0.6, h: 0.6 });
+  });
+
+  it('holds a placement by its centre, and caps how large it may be', () => {
+    const lost = validateSpec(spec({ clips: [clip({ rect: { x: -4, y: 9, w: 0.5, h: 0.5 } })] }));
+    expect(lost.clips[0]?.rect).toEqual({ x: -0.25, y: 0.75, w: 0.5, h: 0.5 });
+
+    const huge = validateSpec(spec({ clips: [clip({ rect: { x: 0, y: 0, w: 9, h: 5 } })] }));
+    expect(huge.clips[0]?.rect).toEqual({ x: 0, y: 0, w: 2, h: 2 });
   });
 
   it('leaves an absent crop and rect absent, which is what every engine tests for', () => {

@@ -1,4 +1,4 @@
-import { DEFAULT_OUTPUT, clamp, type EditFit, type EditPlacement, type EditRect } from '../editor';
+import { DEFAULT_OUTPUT, MAX_PLACEMENT_SIZE, clamp, type EditFit, type EditPlacement, type EditRect } from '../editor';
 
 /**
  * Where a cropped clip lands on the frame, in the editor's own coordinates.
@@ -110,7 +110,12 @@ export function sourceFrameBox(picture: FrameBox, crop: EditRect | null | undefi
 }
 
 /**
- * A rectangle of the size given, centred where it is asked for and held inside the frame.
+ * A CROP of the size given, centred where it is asked for and held inside the unit square.
+ *
+ * Inside, because a crop names the part of a source frame that is kept and there is nothing outside
+ * a source frame to keep. Where a clip's picture is DRAWN is [placeClipRect], which is free of the
+ * frame's edges; the two are one function apart on purpose, so neither bound can be applied to the
+ * other by accident.
  *
  * The angle is carried rather than computed: a turned rectangle is still held inside the frame by
  * its UPRIGHT box, which is deliberate. Clamping the turned corners instead would make a rectangle
@@ -142,10 +147,57 @@ export function slideRect(rect: EditPlacement, x: number, y: number): EditPlacem
 }
 
 /**
- * A rectangle zoomed about its own centre. The factor is squeezed first rather than the result
- * clamped afterwards, so a pinch that would take one edge past the frame stops the whole rectangle
- * at that point instead of quietly changing its shape - the shape is the customer's aspect choice
- * and a pinch must never overwrite it.
+ * A clip's rectangle ON the frame, of the size given and centred where the fingers put it.
+ *
+ * The same four numbers as [placeRect] and deliberately not the same bound. A crop is a window on a
+ * source and has to stay over it, so [placeRect] holds one inside the unit square; this places a
+ * PICTURE, and a customer dragging a video off the side of the canvas means the part that hangs
+ * over to be cut off by the frame. So nothing here holds the corners at all: what is held is the
+ * CENTRE, the point the fingers took hold of and the point a turn happens about, which is the one
+ * thing that has to stay reachable. See [normalisePlacement], which states the same rule for the
+ * manifest and is the authority on it.
+ *
+ * The angle is carried rather than computed, exactly as it is for a crop: a turned rectangle is
+ * held by its upright box, because a rectangle that shrank as it spun is not what a customer asked
+ * a rotate gesture for.
+ */
+export function placeClipRect(cx: number, cy: number, w: number, h: number, rotationDeg = 0): EditPlacement {
+  const width = clamp(w, 0, MAX_PLACEMENT_SIZE);
+  const height = clamp(h, 0, MAX_PLACEMENT_SIZE);
+  const placed: EditPlacement = {
+    x: round4(clamp(cx, 0, 1) - width / 2),
+    y: round4(clamp(cy, 0, 1) - height / 2),
+    w: round4(width),
+    h: round4(height),
+  };
+  // Left OFF when upright, for [placeRect]'s reason: absent is the byte an untouched clip is
+  // recognised by, and a zero would be the same picture at the cost of a re-encode.
+  if (rotationDeg) placed.rotationDeg = round(rotationDeg, 1);
+  return placed;
+}
+
+/**
+ * A clip's rectangle zoomed about its own centre, up to [MAX_PLACEMENT_SIZE] of the frame.
+ *
+ * [scaleRect]'s rule with [scaleRect]'s ceiling taken off: a crop cannot grow past the source it
+ * samples, while a picture can be pinched larger than the frame and simply be cut off by it. The
+ * factor is still squeezed before it is applied rather than the result clamped afterwards, because
+ * the shape is the customer's aspect choice and a pinch must never overwrite it.
+ */
+export function scaleClipRect(rect: EditPlacement, factor: number, min: number, rotationDeg?: number): EditPlacement {
+  const cx = rect.x + rect.w / 2;
+  const cy = rect.y + rect.h / 2;
+  const grow = MAX_PLACEMENT_SIZE / Math.max(rect.w, rect.h);
+  const shrink = Math.max(min / rect.w, min / rect.h);
+  const k = clamp(factor, Math.min(shrink, grow), grow);
+  return placeClipRect(cx, cy, rect.w * k, rect.h * k, rotationDeg ?? rect.rotationDeg ?? 0);
+}
+
+/**
+ * A CROP zoomed about its own centre. The factor is squeezed first rather than the result clamped
+ * afterwards, so a pinch that would take one edge past the source stops the whole rectangle at that
+ * point instead of quietly changing its shape - the shape is the customer's aspect choice and a
+ * pinch must never overwrite it. A picture's rectangle zooms through [scaleClipRect] instead.
  */
 export function scaleRect(rect: EditPlacement, factor: number, min: number, rotationDeg?: number): EditPlacement {
   const cx = rect.x + rect.w / 2;

@@ -17,9 +17,10 @@ enum Fit: String, Sendable { case contain, cover }
 /// is the web's system and the one `ComposeOverlay.cx/cy` already uses. Core Image is y-UP, so
 /// `Placement` is the one place these get flipped, exactly as `OverlayBitmap` is for an overlay.
 ///
-/// The parser guarantees `w > 0`, `h > 0` and `x + w <= 1`, `y + h <= 1`, so a consumer never has to
-/// range check one. Doubles rather than CGFloat because everything on the wire is a Double here and
-/// the conversion belongs at the one point of use.
+/// For a CROP the parser guarantees `w > 0`, `h > 0` and `x + w <= 1`, `y + h <= 1`, so a consumer
+/// never has to range check one. A `ComposePlacement` is finite and positive but sits where it
+/// likes; see there. Doubles rather than CGFloat because everything on the wire is a Double here
+/// and the conversion belongs at the one point of use.
 struct ComposeRect: Sendable {
     let x: Double
     let y: Double
@@ -29,8 +30,14 @@ struct ComposeRect: Sendable {
 
 /// Where a clip's picture is drawn: a rectangle that may also be TURNED.
 ///
-/// The four numbers are a `ComposeRect`'s and carry every one of its guarantees, because the parser
-/// clamps them through the same code. What is new is the angle, and it is the angle
+/// The four numbers are a `ComposeRect`'s and are finite and positive like one, but they do not sit
+/// inside the frame and are not meant to. A picture may be drawn off the edge of the output, and a
+/// customer who drags a video half off the canvas is asking for exactly that - the frame cuts the
+/// overhang off, here as in the preview. What the parser guarantees instead is that the rectangle's
+/// CENTRE is on the frame, so `0 <= x + w/2 <= 1` and the same in y, and that neither side is larger
+/// than `MAX_PLACEMENT_SIZE` of the frame.
+///
+/// What is new is the angle, and it is the angle
 /// `ComposeOverlay.rotationDeg` already carries in every respect that matters: CLOCKWISE degrees as
 /// CSS `rotate()` means them, about the rectangle's CENTRE, and NOT clamped, because a caller may
 /// legitimately send 720 and sin/cos reduce it.

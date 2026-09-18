@@ -28,6 +28,16 @@ object ComposeSpecParser {
      */
     const val MAX_VIDEO_TRACKS = 16
 
+    /**
+     * The largest a clip's placement rectangle may be, as a multiple of the output frame. A
+     * placement may hang off the frame's edges (see [placementOrNull]), so its SIZE is what has to
+     * stop somewhere: a clip on an extra layer is drawn into a texture of its rectangle's own size,
+     * and twice a 1080x1920 output is 2160x3840, still inside the 4096 every GL implementation
+     * guarantees. The same number as `MAX_PLACEMENT_SIZE` in the TypeScript, which is where a
+     * customer's gesture meets it first.
+     */
+    private const val MAX_PLACEMENT_SIZE = 2f
+
     private const val PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 
     fun parse(json: JSONObject): ComposeSpec {
@@ -157,7 +167,20 @@ object ComposeSpecParser {
         optJSONObject(key)?.let { parseRect(it, path) }
 
     /**
-     * The same four numbers through the same clamp, with the angle carried across untouched.
+     * The same four numbers through a DIFFERENT clamp, with the angle carried across untouched.
+     *
+     * Different because a placement is not a crop. A crop is a window on the source frame and there
+     * is nothing outside that frame to sample, so [parseRect] pulls one into the unit square; a
+     * placement says where the picture is DRAWN, and a customer who drags a video off the side of
+     * the canvas means the overhang to be cut off by the output frame. Pulling a placement inside
+     * would slide that video back on screen and quietly rearrange the post.
+     *
+     * What is held is the rectangle's CENTRE, which stays on the frame. It is the point the fingers
+     * grab and the point the turn below happens about, so a picture whose centre has left the frame
+     * is one nobody can reach again - and holding it keeps a quarter of an upright rectangle on
+     * screen at worst. The rule is `normalisePlacement`'s in the TypeScript, to the arithmetic:
+     * this parser, the iOS one and the browser's reader all have to agree or the same post is a
+     * different picture per engine.
      *
      * The angle is read HERE and not in [parseRect], which is why a `rotationDeg` sent on a crop is
      * ignored rather than acted on: turning the region sampled out of the source is a different
@@ -165,9 +188,30 @@ object ComposeSpecParser {
      */
     private fun JSONObject.placementOrNull(key: String, path: String): Placement? =
         optJSONObject(key)?.let {
-            val box = parseRect(it, path)
+            val box = parsePlacementRect(it, path)
             Placement(box.x, box.y, box.w, box.h, it.rotationDegOrNull())
         }
+
+    /**
+     * A placement's four numbers: the shape is a shape error exactly as it is for a crop, and the
+     * position is a value and is held by its centre. [MAX_PLACEMENT_SIZE] is the ceiling on the
+     * size, and it is a real limit and not a taste: a clip on an extra layer is drawn into a
+     * texture of its rectangle's own size, so an unbounded `w` is an unbounded texture.
+     */
+    private fun parsePlacementRect(o: JSONObject, path: String): Rect {
+        val w = o.finite("w", 0.0)
+        if (w <= 0f) throw SpecException("$path.w")
+        val h = o.finite("h", 0.0)
+        if (h <= 0f) throw SpecException("$path.h")
+        val width = w.coerceAtMost(MAX_PLACEMENT_SIZE)
+        val height = h.coerceAtMost(MAX_PLACEMENT_SIZE)
+        return Rect(
+            x = o.finite("x", 0.0).coerceIn(-width / 2f, 1f - width / 2f),
+            y = o.finite("y", 0.0).coerceIn(-height / 2f, 1f - height / 2f),
+            w = width,
+            h = height,
+        )
+    }
 
     /**
      * The turn a rectangle stands at, straight off the wire.
@@ -187,9 +231,10 @@ object ComposeSpecParser {
     }
 
     /**
-     * The split this file is built on, applied to a rectangle: a rectangle with no area is a shape
-     * error and fails loudly, one that hangs off the edge of the frame is an out-of-range value and
-     * is clamped back inside it.
+     * The split this file is built on, applied to a CROP: a rectangle with no area is a shape error
+     * and fails loudly, one that hangs off the edge of the source is an out-of-range value and is
+     * clamped back inside it. A placement goes through [parsePlacementRect] and is held by its
+     * centre instead, because the frame is something a picture is allowed to hang off.
      *
      * Which side of the line each number falls on follows the rest of the file rather than being
      * invented here. `x` and `y` are values like an overlay's `cx`: missing, or unreadable as a
