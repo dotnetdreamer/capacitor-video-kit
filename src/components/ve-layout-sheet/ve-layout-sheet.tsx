@@ -34,7 +34,7 @@ export class VeLayoutSheet {
     // Remove takes the second video off, and so can an undo: there is then nothing left to lay out.
     // Deferred, so the sheet is not unmounting itself part way through the undo that emptied it.
     this.stopClose = closeWhenGone(
-      () => !store.videoTrack.value,
+      () => !store.layoutTrack.value,
       () => store.closePanel(),
     );
   }
@@ -48,20 +48,20 @@ export class VeLayoutSheet {
   private readonly onConfirm = () => this.ctx.store.closePanel();
 
   private readonly pick = (chip: LayoutChip) => {
-    const track = this.ctx.store.videoTrack.value;
+    const track = this.ctx.store.layoutTrack.value;
     if (track) this.ctx.store.applyLayoutPreset(track.id, chip.id, chip.label);
   };
 
   /** Inside the slider's gesture, which is why the change is live: one drag, one undo step. */
   private readonly onOpacity = (event: CustomEvent<number>) => {
-    const track = this.ctx.store.videoTrack.value;
+    const track = this.ctx.store.layoutTrack.value;
     if (!track) return;
     const opacity = event.detail / 100;
     if (opacity !== track.opacity) this.ctx.store.setTrackOpacity(track.id, opacity, true);
   };
 
   private readonly swap = () => {
-    const track = this.ctx.store.videoTrack.value;
+    const track = this.ctx.store.layoutTrack.value;
     if (track) this.ctx.store.swapTrackZ(track.id);
   };
 
@@ -75,7 +75,7 @@ export class VeLayoutSheet {
    * `build/element-members.unit.test.ts`.
    */
   private readonly removeTrack = () => {
-    const track = this.ctx.store.videoTrack.value;
+    const track = this.ctx.store.layoutTrack.value;
     if (track) this.ctx.store.removeVideoTrack(track.id);
   };
 
@@ -87,7 +87,7 @@ export class VeLayoutSheet {
    */
   private activePreset(): LayoutPresetId | null {
     const { store } = this.ctx;
-    const track = store.videoTrack.value;
+    const track = store.layoutTrack.value;
     if (!track) return null;
     const clips = store.manifest.value.clips;
     const baseRect = clips[0]?.rect ?? null;
@@ -99,7 +99,7 @@ export class VeLayoutSheet {
 
   render() {
     return this.watcher.run(() => {
-      const track = this.ctx.store.videoTrack.value;
+      const track = this.ctx.store.layoutTrack.value;
       const activeId = this.activePreset();
 
       return (

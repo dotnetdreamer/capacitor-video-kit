@@ -113,9 +113,20 @@ function baseLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | 
   return layers.find((layer) => layer.trackId === null) ?? null;
 }
 
-/** The layer over it, or null when the second track has nothing on screen at this instant. */
+/**
+ * The video layer over the base one, or null when no layer has anything on screen at this instant.
+ *
+ * The FRONT-MOST of them, which with one layer is the only one and with several is the one whose
+ * picture is really on top. This element is the preview's second and last decoder (see the note on
+ * the class), so with three videos on the frame it can show two of them, and the two it shows are
+ * the base and whatever is drawn over everything else. The render draws them all.
+ */
 function extraLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | null {
-  return layers.find((layer) => layer.trackId !== null) ?? null;
+  // `previewLayers` is sorted bottom to top, so the last one that is not the base is the front one.
+  for (let i = layers.length - 1; i >= 0; i--) {
+    if (layers[i].trackId !== null) return layers[i];
+  }
+  return null;
 }
 
 /**
@@ -126,9 +137,12 @@ function extraLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer |
  * per video track with the filter as CSS, and each layer is the PNG `OverlayBitmaps` rasterised for
  * it - so where a layer sits here, at the size it shows, is where the finished video has it.
  *
- * Two elements at the most, and the second one is only written out while the post has a second
- * track: a phone decodes two video streams at once and the feed behind this editor may already hold
- * one, which is the whole reason [MAX_VIDEO_TRACKS] is two.
+ * Two elements at the most, and the second one is only written out while the post has a layer over
+ * the base track: a phone decodes two video streams at once and the feed behind this editor may
+ * already hold one. That is a LIVE PREVIEW limit and not the manifest's - [MAX_VIDEO_TRACKS] layers
+ * can be built on the timeline and every one of them is composited by the render - so with more than
+ * two videos on the frame this shows the base and the front-most layer, and the rest are seen in the
+ * finished video rather than here.
  *
  * It is also the editor's player: the store forwards every play, pause and seek here. `seek`, `play`
  * and `pause` are therefore plain methods and not `@Method()`s, because a `@Method()` has to return
@@ -825,7 +839,7 @@ export class VePreview implements EditorPlayer {
                 playhead crossed the track's start - and the decoder was already spent on the track
                 existing at all.
               */}
-              {!!store.videoTrack.value && [
+              {store.videoTrackRows.value.length > 0 && [
                 <video
                   key="extra-video"
                   ref={this.keepExtraVideo}

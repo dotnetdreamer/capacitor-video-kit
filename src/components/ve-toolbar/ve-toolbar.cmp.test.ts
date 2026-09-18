@@ -203,7 +203,7 @@ describe('ve-toolbar', () => {
     // A segment on the second video layer gets a shorter row: split, join, duplicate and reorder
     // all rearrange the base track and have nothing to rearrange here.
     store.select({ kind: 'clip', id: 'seg-c' });
-    await until('the second video row', () => label(bar) === 'Second video tools');
+    await until('the video layer row', () => label(bar) === 'Video layer tools');
     expect(ids(bar)).toEqual(['layout', 'crop', 'speed', 'volume', 'start-here', 'replace', 'delete']);
     expect(tile(bar, 'delete').textContent).toContain('Remove');
 

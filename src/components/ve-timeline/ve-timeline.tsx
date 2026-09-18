@@ -10,11 +10,15 @@ import {
   effectPreset,
   findClip,
   findOverlay,
+  findVideoTrack,
   moveLayerTo,
   musicSectionMs,
   musicWindow,
   overlayEndMs,
   timelineSlots,
+  totalDurationMs,
+  trackIdOfClip,
+  type ClipDropTarget,
   type EditOverlay,
   type OverlayKind,
 } from '../../editor';
@@ -25,6 +29,7 @@ import {
   musicStartTrim,
   type ClipReorderDrag,
   type DragBase,
+  type TrackDrag,
   type HitKind,
   type LanesScrollDrag,
   type LayerDrag,
@@ -46,20 +51,20 @@ import {
   TRACK_H,
   TRACK_H_COMPACT,
   durationChip,
+  dropTargetAt,
   frameUrl,
   nearestSnap,
   rulerLabel,
   rulerStepMs,
   segmentTiles,
   touchDistance,
+  type DropRow,
   type FilmTile,
 } from './timeline-geometry';
 
 /** Movement that turns a press into a scroll or a drag, and cancels a long press. */
 const MOVE_SLOP_PX = 8;
 const LONG_PRESS_MS = 350;
-/** A lifted segment dragged this far up or down is put back: the customer changed their mind. */
-const REORDER_CANCEL_PX = 30;
 /** A drag this close to the side of the timeline scrolls it, faster the closer it gets. */
 const EDGE_ZONE_PX = 36;
 const EDGE_SPEED_PX = 12;
@@ -80,8 +85,6 @@ const FLING_STOP_MS = 120;
  * between from the clock so it scrolls on every frame, but never runs further ahead than this.
  */
 const FOLLOW_LEAD_MS = 50;
-/** Lanes geometry in compact mode, where only the voiceover lane can show. */
-const LANE_PITCH_COMPACT = 40;
 /** How far the rail of lifted thumbnails slides per frame while the finger holds at an edge. */
 const REORDER_RAIL_PX = 6;
 
@@ -121,8 +124,9 @@ interface SegmentView {
 }
 
 /**
- * One segment of the second video layer. It carries no `shift`, and the row it is drawn in has no
- * handles: nothing in that lane is dragged yet, which is why it is a view of its own rather than a
+ * One segment of an extra video layer. It carries no `shift`, because the left trim handle that
+ * nudges a segment is the base track's alone: a layer's row can be tapped, and lifted onto another
+ * layer, but its edges are not pulled. That is why it is a view of its own rather than a
  * [SegmentView] with the drag parts left empty.
  */
 interface TrackSegmentView {
@@ -132,6 +136,12 @@ interface TrackSegmentView {
   selected: boolean;
   chip: string;
   tiles: FilmTile[];
+}
+
+/** One extra video layer's row, nearest the base track first - the order they are drawn in. */
+interface TrackRowView {
+  id: string;
+  segments: TrackSegmentView[];
 }
 
 /**
@@ -152,6 +162,11 @@ interface EdgeHandlesView {
 
 interface TrimHandlesView extends EdgeHandlesView {
   id: string;
+}
+
+/** The same, for a segment's handles, which are drawn in whichever row the segment is on. */
+interface ClipHandlesView extends TrimHandlesView {
+  trackId: string | null;
 }
 
 interface MusicHandlesView extends EdgeHandlesView {
@@ -186,6 +201,8 @@ interface VoiceLaneView {
 
 interface ClipReorderView {
   id: string;
+  /** The layer the segment was lifted from: null for the base track. */
+  fromTrackId: string | null;
   to: number;
   size: number;
   pitch: number;
@@ -194,6 +211,11 @@ interface ClipReorderView {
   /** The rail's and the lifted tile's positions when the lift began; the drag moves them directly. */
   ox0: number;
   lx0: number;
+  ly0: number;
+  /** Where the rail is drawn, `.tl`-relative px: on the row the segment came off. */
+  railTop: number;
+  /** The layer a drop would land on, or null while the drag is still a reorder of its own row. */
+  drop: ClipDropTarget | null;
 }
 
 interface PinchState {
@@ -205,9 +227,16 @@ interface PinchState {
 }
 
 /**
- * TikTok's timeline: a ruler, the video track as a filmstrip, and a lane under it for every layer,
- * the sound and the voiceover - all on one horizontal native scroller that moves under a WHITE
- * playhead fixed at the centre. Scrolling IS seeking.
+ * TikTok's timeline: a ruler, the base video track as a filmstrip, and under it a row for every
+ * extra video layer and a lane for every overlay, the sound and the voiceover - all on one
+ * horizontal native scroller that moves under a WHITE playhead fixed at the centre. Scrolling IS
+ * seeking.
+ *
+ * A long press lifts a segment, and a lifted segment is two drags in one. Carried SIDEWAYS it
+ * reorders the row it came off, which collapses into a rail of square thumbnails to do it. Carried
+ * DOWN it leaves that row: the row under the finger lights up, the gap under each row opens a video
+ * layer that is not there yet, and letting go puts the segment there. That is the whole of how a
+ * post gets more than one picture on the frame from the timeline.
  *
  * Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  *  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
@@ -221,10 +250,10 @@ interface PinchState {
  * The browser keeps doing what it does best: the content is `touch-action: pan-x`, so a horizontal
  * swipe anywhere is a native, compositor-driven scroll with momentum, while a vertical one is
  * refused by the browser and handed to us as pointer events (Chrome decides the axis from the first
- * movement past the touch slop and zeroes the other axis for the whole gesture) - which is how the
- * lanes scroll vertically under a fixed ruler and video track without the two directions ever
- * mixing. Handles and selected items are `touch-action: none`, so dragging them never scrolls
- * anything.
+ * movement past the touch slop and zeroes the other axis for the whole gesture) - which is how
+ * everything under the base track scrolls vertically, the video layers included, under a fixed ruler
+ * and filmstrip without the two directions ever mixing. Handles and selected items are
+ * `touch-action: none`, so dragging them never scrolls anything.
  */
 @Component({
   tag: 've-timeline',
@@ -329,8 +358,12 @@ export class VeTimeline {
     (a, b) => a.dotSize === b.dotSize && sameList(a.labels, b.labels, (x, y) => x.ms === y.ms && x.x === y.x),
   );
 
-  /** While the left trim handle is held: how far the held segment and those after it are nudged. */
-  private readonly trimShift = signal<{ index: number; px: number } | null>(null);
+  /**
+   * While a left trim handle is held: which ROW is nudged, from which segment, and by how far. The
+   * row matters now that every layer has handles of its own - a nudge is one row's ripple, and the
+   * others must not move with it.
+   */
+  private readonly trimShift = signal<{ trackId: string | null; index: number; px: number } | null>(null);
 
   private readonly segments = computedWith<SegmentView[]>(
     () => {
@@ -348,7 +381,7 @@ export class VeTimeline {
         const last = i === slots.length - 1;
         const x = pad + (slot.startMs / 1000) * pps;
         const full = (slot.durationMs / 1000) * pps;
-        const nudge = shift && i >= shift.index ? shift.px : 0;
+        const nudge = shift && shift.trackId === null && i >= shift.index ? shift.px : 0;
         return {
           id: clip.id,
           x,
@@ -375,59 +408,78 @@ export class VeTimeline {
   );
 
   /**
-   * The second video layer's segments, at their real place on the output timeline - offset by the
-   * layer's own start, and cut where the base track ends, because the base track's length is the
-   * length of the post and the render cuts everything to it.
+   * One row per extra video layer, nearest the base track first, each holding that layer's segments
+   * at their real place on the output timeline - offset by the layer's own start, and cut where the
+   * base track ends, because the base track's length is the length of the post and the render cuts
+   * everything to it.
    *
-   * Read-only for this stage: a tap selects a segment, so the crop sheet and the preview's gestures
-   * can act on it, and there is no handle to trim with and no long press to reorder by. There is
-   * nothing to reorder yet either - the layer holds one clip.
+   * A segment here selects and lifts exactly as one on the base track does: the same tap opens the
+   * same tools, and the same long press carries it to another layer. What it has no handles for is
+   * trimming, which stays the base track's - an extra layer has a `startMs` of its own and a left
+   * trim there is a question about whether the layer moves with the cut or ripples inside it, which
+   * is a drag of its own rather than a variation on this one.
    */
-  private readonly trackSegments = computedWith<TrackSegmentView[]>(
+  private readonly trackRows = computedWith<TrackRowView[]>(
     () => {
       const store = this.ctx.store;
-      const track = store.videoTrack.value;
       // Compact is the slim arrangement above a sheet: the filmstrip, and nothing that is not needed
       // to keep one's place in the video.
-      if (!track || this.compactSig.value) return [];
+      if (this.compactSig.value) return [];
+      const tracks = store.videoTrackRows.value;
+      if (!tracks.length) return [];
       const pps = store.pps.value;
       const pad = this.pad.value;
       const strips = store.filmstrips.value;
       const selection = store.selection.value;
       const win = this.renderWindow.value;
       const total = store.totalMs.value;
+      const shift = this.trimShift.value;
 
-      const views: TrackSegmentView[] = [];
-      for (const slot of timelineSlots({ clips: track.clips })) {
-        const startMs = track.startMs + slot.startMs;
-        const durationMs = Math.min(slot.durationMs, total - startMs);
-        if (durationMs <= 0) continue;
-        const clip = slot.clip;
-        const x = pad + (startMs / 1000) * pps;
-        views.push({
-          id: clip.id,
-          x,
-          w: Math.max(2, (durationMs / 1000) * pps),
-          selected: selection?.kind === 'clip' && selection.id === clip.id,
-          chip: durationChip(durationMs),
-          tiles: segmentTiles({
-            inMs: clip.inMs,
-            // The cut above is in OUTPUT time; the strip is grided on SOURCE time, so it is the trim
-            // the cut leaves that decides which tiles there are to draw.
-            outMs: Math.min(clip.outMs, clip.inMs + durationMs * (clip.speed || 1)),
-            speed: clip.speed,
-            pps,
-            tileW: TRACK2_H,
-            segX: x,
-            winLeft: win.left,
-            winRight: win.right,
-            strip: strips.get(clip.clipKey),
-          }),
-        });
-      }
-      return views;
+      return tracks.map(track => {
+        const segments: TrackSegmentView[] = [];
+        for (const slot of timelineSlots({ clips: track.clips })) {
+          const startMs = track.startMs + slot.startMs;
+          const durationMs = Math.min(slot.durationMs, total - startMs);
+          if (durationMs <= 0) continue;
+          const clip = slot.clip;
+          const nudge = shift && shift.trackId === track.id && slot.index >= shift.index ? shift.px : 0;
+          const x = pad + (startMs / 1000) * pps + nudge;
+          segments.push({
+            id: clip.id,
+            x,
+            w: Math.max(2, (durationMs / 1000) * pps),
+            selected: selection?.kind === 'clip' && selection.id === clip.id,
+            chip: durationChip(durationMs),
+            tiles: segmentTiles({
+              inMs: clip.inMs,
+              // The cut above is in OUTPUT time; the strip is grided on SOURCE time, so it is the
+              // trim the cut leaves that decides which tiles there are to draw.
+              outMs: Math.min(clip.outMs, clip.inMs + durationMs * (clip.speed || 1)),
+              speed: clip.speed,
+              pps,
+              tileW: TRACK2_H,
+              segX: x,
+              winLeft: win.left,
+              winRight: win.right,
+              strip: strips.get(clip.clipKey),
+            }),
+          });
+        }
+        return { id: track.id, segments };
+      });
     },
-    (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.selected === y.selected && x.chip === y.chip && sameTiles(x.tiles, y.tiles)),
+    (a, b) =>
+      sameList(
+        a,
+        b,
+        (x, y) =>
+          x.id === y.id &&
+          sameList(
+            x.segments,
+            y.segments,
+            (p, q) => p.id === q.id && p.x === q.x && p.w === q.w && p.selected === q.selected && p.chip === q.chip && sameTiles(p.tiles, q.tiles),
+          ),
+      ),
   );
 
   /**
@@ -438,23 +490,41 @@ export class VeTimeline {
    * right, nor the right one to the left - so the two can neither swap nor stack, and a handle that
    * is pinned says so rather than pretending to be the real edge.
    */
-  private readonly trimHandles = computed<TrimHandlesView | null>(() => {
+  private readonly trimHandles = computed<ClipHandlesView | null>(() => {
     const store = this.ctx.store;
     const selection = store.selection.value;
     if (selection?.kind !== 'clip') return null;
-    const slot = store.slots.value.find(s => s.clip.id === selection.id);
-    if (!slot) return null;
-
+    const manifest = store.manifest.value;
+    const trackId = trackIdOfClip(manifest, selection.id);
+    if (trackId === undefined) return null;
     const pps = store.pps.value;
     const shift = this.trimShift.value;
-    const nudge = shift && slot.index >= shift.index ? shift.px : 0;
-    const x = this.pad.value + (slot.startMs / 1000) * pps + nudge;
-    // The width the segment is DRAWN with, gap included, not the width its duration is worth. Every
-    // segment but the last gives [SEGMENT_GAP_PX] back to the cut after it, and an end handle placed
-    // on the duration instead would stand that far past the border it is supposed to be holding.
-    const full = (slot.durationMs / 1000) * pps;
-    const last = slot.index === store.slots.value.length - 1;
-    return { id: slot.clip.id, ...edgeHandles(x, Math.max(2, last ? full : full - SEGMENT_GAP_PX)) };
+    const nudged = (index: number): number => (shift && shift.trackId === trackId && index >= shift.index ? shift.px : 0);
+
+    if (trackId === null) {
+      const slots = store.slots.value;
+      const slot = slots.find(s => s.clip.id === selection.id);
+      if (!slot) return null;
+      const x = this.pad.value + (slot.startMs / 1000) * pps + nudged(slot.index);
+      // The width the segment is DRAWN with, gap included, not the width its duration is worth.
+      // Every segment but the last gives [SEGMENT_GAP_PX] back to the cut after it, and an end
+      // handle placed on the duration instead would stand that far past the border it holds.
+      const full = (slot.durationMs / 1000) * pps;
+      const last = slot.index === slots.length - 1;
+      return { trackId, id: slot.clip.id, ...edgeHandles(x, Math.max(2, last ? full : full - SEGMENT_GAP_PX)) };
+    }
+
+    // A layer's segments are drawn with no gap between them and cut where the base track ends, so
+    // their handles are placed on the width the row really drew - the same arithmetic `trackRows`
+    // uses, for the same reason the base track's handles use the base track's.
+    const track = findVideoTrack(manifest, trackId);
+    const slot = track && timelineSlots({ clips: track.clips }).find(s => s.clip.id === selection.id);
+    if (!track || !slot) return null;
+    const startMs = track.startMs + slot.startMs;
+    const durationMs = Math.min(slot.durationMs, store.totalMs.value - startMs);
+    if (durationMs <= 0) return null;
+    const x = this.pad.value + (startMs / 1000) * pps + nudged(slot.index);
+    return { trackId, id: slot.clip.id, ...edgeHandles(x, Math.max(2, (durationMs / 1000) * pps)) };
   });
 
   /** The selected layer's two edge handles, on its own two edges. */
@@ -1274,7 +1344,12 @@ export class VeTimeline {
       consumed: event.pointerType !== 'mouse' && this.userScrollActive && performance.now() - this.flingAt < FLING_STOP_MS,
       timer: null,
     };
-    const canLift = (kind === 'clip' && store.slots.value.length > 1) || (kind === 'layer' && store.layerCount.value > 1);
+    // A base segment lifts once there is a second one: with only one, there is nothing to reorder it
+    // past and nowhere to carry it either, because the base track may not be emptied. A segment on a
+    // layer always lifts - it has the base track and every other layer to go to, and the gap under
+    // any of them.
+    const canLift =
+      (kind === 'clip' && store.slots.value.length > 1) || kind === 'track-clip' || (kind === 'layer' && store.layerCount.value > 1);
     if (canLift) press.timer = setTimeout(() => this.onLongPress(press), LONG_PRESS_MS);
     this.press = press;
   };
@@ -1388,7 +1463,7 @@ export class VeTimeline {
     if (this.press !== press || this.drag || this.pinch) return;
     press.timer = null;
     this.press = null;
-    if (press.kind === 'clip') this.startClipReorder(press);
+    if (press.kind === 'clip' || press.kind === 'track-clip') this.startClipReorder(press);
     else if (press.kind === 'layer') this.startLayerReorder(press);
   }
 
@@ -1397,6 +1472,11 @@ export class VeTimeline {
     switch (press.kind) {
       case 'layer':
         return !!press.id && store.isSelected({ kind: 'overlay', id: press.id });
+      // A selected segment on a LAYER is a body to drag; one on the base track is not. The base
+      // track has no start of its own to move - it is the post - so a sideways drag there is the
+      // timeline being pulled along, which is what it has always been.
+      case 'track-clip':
+        return !!press.id && store.isSelected({ kind: 'clip', id: press.id });
       case 'music':
         return store.musicSelected.value;
       case 'voice':
@@ -1447,8 +1527,14 @@ export class VeTimeline {
 
   private startTrim(base: DragBase, id: string, edge: 'in' | 'out'): void {
     const store = this.ctx.store;
-    const slot = store.slots.value.find(s => s.clip.id === id);
+    const manifest = store.manifest.value;
+    const trackId = trackIdOfClip(manifest, id);
+    if (trackId === undefined) return;
+    const track = trackId === null ? null : findVideoTrack(manifest, trackId);
+    if (trackId !== null && !track) return;
+    const slot = (track ? timelineSlots({ clips: track.clips }) : store.slots.value).find(s => s.clip.id === id);
     if (!slot) return;
+    const trackStart0 = track?.startMs ?? 0;
     store.beginGesture();
     this.holdWidth.value = this.contentWidth.value;
     const drag: TrimDrag = {
@@ -1456,15 +1542,42 @@ export class VeTimeline {
       kind: 'trim',
       edge,
       id,
+      trackId,
       index: slot.index,
       in0: slot.clip.inMs,
       out0: slot.clip.outMs,
       speed: slot.clip.speed || 1,
-      slotStart: slot.startMs,
+      slotStart: trackStart0 + slot.startMs,
+      trackStart0,
+      movesTrack: track !== null && edge === 'in' && slot.index === 0,
       dur0: slot.durationMs,
       lastValue: edge === 'in' ? slot.clip.inMs : slot.clip.outMs,
     };
     this.beginDrag(drag);
+  }
+
+  /**
+   * A selected segment on a layer, dragged sideways: the layer goes with it.
+   *
+   * The whole row and not the one segment, because a track is a sequence with no gaps in it - there
+   * is no place inside one for a segment to be moved TO. Carrying a segment somewhere of its own is
+   * the long press, which puts it on a layer of its own.
+   */
+  private startTrackDrag(base: DragBase, clipId: string): void {
+    const store = this.ctx.store;
+    const trackId = trackIdOfClip(store.manifest.value, clipId);
+    if (typeof trackId !== 'string') return;
+    const track = findVideoTrack(store.manifest.value, trackId);
+    if (!track) return;
+    store.beginGesture();
+    this.beginDrag({
+      ...base,
+      kind: 'track',
+      trackId,
+      start0: track.startMs,
+      lengthMs: totalDurationMs({ clips: track.clips }),
+      targets: this.snapTargets(),
+    });
   }
 
   private startLayerDrag(base: DragBase, id: string, mode: LayerDrag['mode']): void {
@@ -1505,6 +1618,8 @@ export class VeTimeline {
     const base = { ...this.dragBase(press.pointerId, press.x0, press.y0), x: press.x, y: press.y, moved: true };
     if (press.kind === 'layer' && press.id) {
       this.startLayerDrag(base, press.id, 'move');
+    } else if (press.kind === 'track-clip' && press.id) {
+      this.startTrackDrag(base, press.id);
     } else if (press.kind === 'music') {
       this.startMusicDrag(base, 'move');
     } else if (press.kind === 'voice' && press.id) {
@@ -1566,40 +1681,68 @@ export class VeTimeline {
   }
 
   /**
-   * A long press on a segment lifts it. The track collapses into a row of square thumbnails - the
-   * lifted one under the finger - because segments can be any width, and a 40-second segment could
-   * never be carried past its neighbours on a screen 400 px wide.
+   * A long press on a segment lifts it, and a lifted segment is two drags in one.
+   *
+   * SIDEWAYS its own row collapses into a rail of square thumbnails - the lifted one under the
+   * finger - because segments can be any width, and a 40-second segment could never be carried past
+   * its neighbours on a screen 400 px wide. DOWNWARDS it leaves that row: the rows come back, the
+   * one under the finger lights up, and the gap under each of them opens a video layer of its own.
    */
   private startClipReorder(press: Press): void {
     const store = this.ctx.store;
-    const slots = store.slots.value;
-    const from = slots.findIndex(slot => slot.clip.id === press.id);
-    if (!press.id || from < 0 || slots.length < 2) return;
+    const id = press.id;
+    if (!id) return;
+    const manifest = store.manifest.value;
+    const trackId = trackIdOfClip(manifest, id);
+    if (trackId === undefined) return;
+    const track = trackId === null ? null : findVideoTrack(manifest, trackId);
+    if (trackId !== null && !track) return;
+
+    const rows = this.videoRows();
+    const row = rows.find(r => r.trackId === trackId);
+    if (!row) return;
+
+    const slots = timelineSlots({ clips: track ? track.clips : manifest.clips });
+    const from = slots.findIndex(slot => slot.clip.id === id);
+    if (from < 0) return;
+
     const base = { ...this.dragBase(press.pointerId, press.x, press.y) };
-    const size = this.tileW.value - 8;
+    const tlTop = this.tlEl?.getBoundingClientRect().top ?? 0;
+    // The tiles are square and as tall as the row they came off, which is the whole point of the
+    // rail: it reads as the same strip, laid out so a finger can carry one tile past another.
+    const size = (trackId === null ? this.tileW.value : TRACK2_H) - 8;
     const pitch = size + 8;
     const rel = press.x - base.viewLeft;
     const originX = rel - (from * pitch + size / 2);
+    const railTop = row.top - tlTop + (row.bottom - row.top - size) / 2;
     const strips = store.filmstrips.value;
     const thumbs = slots.map(slot => ({
       id: slot.clip.id,
       url: frameUrl(strips.get(slot.clip.clipKey), slot.clip.inMs),
     }));
+    const atMs0 = (track?.startMs ?? 0) + slots[from].startMs;
     const drag: ClipReorderDrag = {
       ...base,
       kind: 'clip-reorder',
-      id: press.id,
+      id,
+      fromTrackId: trackId,
       from,
       to: from,
       count: slots.length,
       originX,
       size,
       pitch,
+      rows,
+      tlTop,
+      drop: null,
+      atMs0,
+      atMs: atMs0,
+      targets: this.snapTargets(),
     };
     this.beginDrag(drag);
-    const id = press.id;
     this.clipReorder.value = {
       id,
+      fromTrackId: trackId,
       to: from,
       size,
       pitch,
@@ -1607,8 +1750,25 @@ export class VeTimeline {
       liftedUrl: thumbs[from].url,
       ox0: originX,
       lx0: rel - size / 2,
+      ly0: press.y - tlTop - size / 2,
+      railTop,
+      drop: null,
     };
     store.haptic('medium');
+  }
+
+  /**
+   * The video rows as they are on the screen, TOP FIRST: the base track's filmstrip, then every
+   * layer. Measured when a lift begins and not again - the rows do not move during one, and
+   * re-measuring under a finger is how a drop target starts drifting.
+   */
+  private videoRows(): DropRow[] {
+    const nodes = this.contentEl?.querySelectorAll<HTMLElement>('[data-vrow]');
+    if (!nodes?.length) return [];
+    return Array.from(nodes, node => {
+      const rect = node.getBoundingClientRect();
+      return { trackId: node.dataset['vrow'] === 'base' ? null : (node.dataset['vrow'] ?? null), top: rect.top, bottom: rect.bottom };
+    });
   }
 
   private startLayerReorder(press: Press): void {
@@ -1650,12 +1810,14 @@ export class VeTimeline {
   private applyDrag(drag: TimelineDrag, autoScroll: boolean): boolean {
     switch (drag.kind) {
       case 'trim':
+      case 'track':
       case 'layer':
       case 'music':
       case 'voice': {
         if (!drag.moved) return false;
         const scrolling = autoScroll && this.edgeAutoScroll(drag);
         if (drag.kind === 'trim') this.applyTrim(drag);
+        else if (drag.kind === 'track') this.applyTrack(drag);
         else if (drag.kind === 'layer') this.applyLayer(drag);
         else if (drag.kind === 'music') this.applyMusic(drag);
         else this.applyVoice(drag);
@@ -1711,14 +1873,22 @@ export class VeTimeline {
       const edge = this.snapEdge(drag, drag.slotStart + deltaMs, centre, pps);
       store.previewTrim(drag.id, drag.in0 + (edge - drag.slotStart) * drag.speed, drag.out0);
       const inMs = findClip(store.manifest.value, drag.id)?.inMs ?? drag.in0;
-      const px = ((inMs - drag.in0) / drag.speed / 1000) * pps;
-      const shift = this.trimShift.value;
-      if (!shift || shift.index !== drag.index || Math.abs(shift.px - px) > 0.1) {
-        this.trimShift.value = { index: drag.index, px };
+      const lost = (inMs - drag.in0) / drag.speed;
+      if (drag.movesTrack) {
+        // The layer starts where its first segment does, so the two move together and everything
+        // after stays where it was on the video. There is no nudge to make: the row re-lays itself
+        // around the new start on the same frame.
+        store.setTrackStart(drag.trackId as string, drag.trackStart0 + lost, true);
+      } else {
+        const px = (lost / 1000) * pps;
+        const shift = this.trimShift.value;
+        if (!shift || shift.trackId !== drag.trackId || shift.index !== drag.index || Math.abs(shift.px - px) > 0.1) {
+          this.trimShift.value = { trackId: drag.trackId, index: drag.index, px };
+        }
       }
       if (inMs !== drag.lastValue) {
         drag.lastValue = inMs;
-        store.seek(drag.slotStart);
+        store.seek(drag.movesTrack ? edge : drag.slotStart);
       }
       return;
     }
@@ -1732,6 +1902,26 @@ export class VeTimeline {
       const duration = (outMs - (clip?.inMs ?? drag.in0)) / drag.speed;
       store.seek(drag.slotStart + Math.max(0, duration - EDGE_FRAME_MS));
     }
+  }
+
+  /**
+   * One frame of a video layer being carried along the timeline. It keeps its length and whichever
+   * of its two edges comes near something sticks to it.
+   *
+   * It can go no further than the end of the post. The base track is what fixes how long the post
+   * runs and everything over it is cut to that, in the preview and in both native engines, so a
+   * layer dragged past the end would be a layer that renders as nothing.
+   */
+  private applyTrack(drag: TrackDrag): void {
+    const store = this.ctx.store;
+    const pps = store.pps.value;
+    const targets = [...drag.targets, this.centreMs(pps)];
+    const hi = Math.max(0, store.totalMs.value - MIN_LAYER_MS);
+    let start = clamp(drag.start0 + this.dragDeltaMs(drag, pps), 0, hi);
+    const hit = nearestSnap([start, start + drag.lengthMs], targets, pps);
+    if (hit) start = clamp(start + hit.shiftMs, 0, hi);
+    this.noteSnap(drag, hit?.target ?? null);
+    store.setTrackStart(drag.trackId, start, true);
   }
 
   private applyLayer(drag: LayerDrag): void {
@@ -1834,34 +2024,72 @@ export class VeTimeline {
     return true;
   }
 
+  /**
+   * One frame of a lifted segment.
+   *
+   * Which of the two drags is live is decided from the finger's ROW and nothing else: back on the
+   * row it came off, it is a reorder and the rail answers; on any other row, or in a gap between
+   * two, it is a move to another video layer. Lifted clear above the whole stack it is neither, and
+   * the segment goes back where it was - the one gesture that has always meant "changed my mind".
+   */
   private applyClipReorder(drag: ClipReorderDrag, autoScroll: boolean): boolean {
-    if (Math.abs(drag.y - drag.y0) > REORDER_CANCEL_PX) {
+    const store = this.ctx.store;
+    const target = dropTargetAt(drag.y, drag.rows);
+    if (!target) {
       this.endDrag(true);
       return false;
     }
+    const ownRow =
+      (target.kind === 'base' && drag.fromTrackId === null) || (target.kind === 'track' && target.trackId === drag.fromTrackId);
+    const drop = ownRow ? null : target;
+
     const rel = drag.x - drag.viewLeft;
     let scrolling = false;
     if (autoScroll) {
-      // The rail slides to bring thumbnails that are off screen within reach of the finger.
-      const railEnd = drag.originX + (drag.count - 1) * drag.pitch + drag.size;
-      if (rel < EDGE_ZONE_PX && drag.originX < EDGE_ZONE_PX) {
-        drag.originX = Math.min(EDGE_ZONE_PX, drag.originX + REORDER_RAIL_PX);
-        scrolling = true;
-      } else if (rel > drag.viewWidth - EDGE_ZONE_PX && railEnd > drag.viewWidth - EDGE_ZONE_PX) {
-        drag.originX = Math.max(drag.viewWidth - EDGE_ZONE_PX - (drag.count - 1) * drag.pitch - drag.size, drag.originX - REORDER_RAIL_PX);
-        scrolling = true;
+      // Carrying the segment to another layer scrolls the TIMELINE, because where it lands there is
+      // a time; reordering its own row slides the RAIL, because where it lands there is an index.
+      if (drop) {
+        scrolling = this.edgeAutoScroll(drag);
+      } else {
+        const railEnd = drag.originX + (drag.count - 1) * drag.pitch + drag.size;
+        if (rel < EDGE_ZONE_PX && drag.originX < EDGE_ZONE_PX) {
+          drag.originX = Math.min(EDGE_ZONE_PX, drag.originX + REORDER_RAIL_PX);
+          scrolling = true;
+        } else if (rel > drag.viewWidth - EDGE_ZONE_PX && railEnd > drag.viewWidth - EDGE_ZONE_PX) {
+          drag.originX = Math.max(drag.viewWidth - EDGE_ZONE_PX - (drag.count - 1) * drag.pitch - drag.size, drag.originX - REORDER_RAIL_PX);
+          scrolling = true;
+        }
       }
     }
+
     const root = this.reorderEl;
     root?.style.setProperty('--ox', `${drag.originX}px`);
     root?.style.setProperty('--lx', `${rel - drag.size / 2}px`);
+    root?.style.setProperty('--ly', `${drag.y - drag.tlTop - drag.size / 2}px`);
 
-    const to = clamp(Math.round((rel - drag.originX - drag.size / 2) / drag.pitch), 0, drag.count - 1);
-    if (to !== drag.to) {
-      drag.to = to;
-      this.ctx.store.haptic('selection');
-      const view = this.clipReorder.value;
-      if (view) this.clipReorder.value = { ...view, to };
+    if (drop) {
+      // The sideways half of the drag is still worth something on another layer: it is where the
+      // segment lands in TIME. It sticks to the same edges a layer or a sound sticks to.
+      const pps = store.pps.value;
+      const targets = [...drag.targets, this.centreMs(pps)];
+      drag.atMs = Math.max(0, this.snapEdge(drag, drag.atMs0 + this.dragDeltaMs(drag, pps), targets, pps));
+    } else {
+      const to = clamp(Math.round((rel - drag.originX - drag.size / 2) / drag.pitch), 0, drag.count - 1);
+      if (to !== drag.to) {
+        drag.to = to;
+        store.haptic('selection');
+      }
+    }
+
+    if (!sameDrop(drag.drop, drop)) {
+      drag.drop = drop;
+      // A row lighting up is worth a tick of its own: it is a different landing place, not a
+      // different place in the same row.
+      store.haptic('selection');
+    }
+    const view = this.clipReorder.value;
+    if (view && (view.to !== drag.to || !sameDrop(view.drop, drag.drop))) {
+      this.clipReorder.value = { ...view, to: drag.to, drop: drag.drop };
     }
     return scrolling;
   }
@@ -1897,7 +2125,7 @@ export class VeTimeline {
       cancelAnimationFrame(this.tickRaf);
       this.tickRaf = 0;
       // The finger's last position may not have been applied yet.
-      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')) {
+      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'track' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')) {
         this.applyDrag(drag, false);
       }
     }
@@ -1930,6 +2158,9 @@ export class VeTimeline {
         this.holdWidth.value = 0;
         store.endGesture('Trim');
         break;
+      case 'track':
+        store.endGesture('Move video');
+        break;
       case 'layer':
         store.endGesture(drag.mode === 'move' ? 'Move layer' : 'Timing');
         break;
@@ -1941,7 +2172,11 @@ export class VeTimeline {
         break;
       case 'clip-reorder':
         this.clipReorder.value = null;
-        if (!cancelled && drag.to !== drag.from) store.moveClipTo(drag.id, drag.to);
+        if (cancelled) break;
+        // Another layer, or a layer of its own under the row it was dropped on; otherwise another
+        // place in the row it never left.
+        if (drag.drop) store.moveClipToTrack(drag.id, drag.drop, drag.atMs);
+        else if (drag.to !== drag.from) store.moveClipTo(drag.id, drag.to);
         break;
       case 'layer-reorder': {
         drag.row?.style.removeProperty('--lift');
@@ -1979,11 +2214,33 @@ export class VeTimeline {
     }
     this.setLaneY(this.laneY);
     const selection = this.ctx.store.selection.value;
-    const lanes = this.layerLanes.value;
-    const key = revealKey(selection, lanes);
+    const row = this.selectionRow(selection);
+    // The ROW a selection is on and not merely which selection it is. A layer sent to the back, a
+    // segment carried onto another video layer, or an undo of either is the same selection on a new
+    // row - and with more rows than fit on the screen, that row can be out of sight.
+    const key = `${selectionKey(selection)}@${row?.offsetTop ?? -1}`;
     if (key === this.revealedKey) return;
     this.revealedKey = key;
-    this.revealLane(selection, lanes, this.compactSig.value);
+    this.revealRow(row);
+  }
+
+  /** The row the selection is drawn on, or null when it has none among the lanes. */
+  private selectionRow(selection: EditorSelection | null): HTMLElement | null {
+    const lanes = this.lanesEl;
+    if (!lanes || !selection) return null;
+    switch (selection.kind) {
+      case 'overlay':
+        return lanes.querySelector<HTMLElement>(`[data-lane-id="${CSS.escape(selection.id)}"]`);
+      case 'music':
+        return lanes.querySelector<HTMLElement>('[data-row="music"]');
+      case 'voice':
+        return lanes.querySelector<HTMLElement>('[data-row="voice"]');
+      case 'clip': {
+        // A segment on the base track is on the fixed row above the lanes, which is always in view.
+        const trackId = this.ctx.store.selectedClipTrackId.value;
+        return trackId ? lanes.querySelector<HTMLElement>(`[data-vrow="${CSS.escape(trackId)}"]`) : null;
+      }
+    }
   }
 
   private laneMaxY(): number {
@@ -2024,24 +2281,17 @@ export class VeTimeline {
     this.inertiaRaf = 0;
   }
 
-  private revealLane(selection: EditorSelection | null, lanes: readonly LayerLaneView[], compact: boolean): void {
-    if (!selection || selection.kind === 'clip') return;
-    let index: number;
-    if (compact) {
-      if (selection.kind !== 'voice') return;
-      index = 0;
-    } else if (selection.kind === 'overlay') {
-      index = lanes.findIndex(lane => lane.id === selection.id);
-      if (index < 0) return;
-    } else {
-      index = selection.kind === 'music' ? lanes.length : lanes.length + 1;
-    }
+  /**
+   * Scrolls a row into view, measured off the row itself rather than counted in pitches: the rows
+   * are no longer all one height now that the video layers are among them, and a count would put a
+   * selection under the fold as soon as one of them had been scrolled past.
+   */
+  private revealRow(row: HTMLElement | null): void {
     const view = this.lanesViewEl;
-    if (!view) return;
-    const pitch = compact ? LANE_PITCH_COMPACT : LANE_PITCH;
-    const gap = compact ? 4 : 8;
-    const top = index * pitch;
-    const bottom = top + pitch - gap;
+    if (!view || !row) return;
+    const gap = this.compactSig.value ? 4 : 8;
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
     const height = view.clientHeight;
     if (top < this.laneY) this.setLaneY(top);
     else if (bottom > this.laneY + height) this.setLaneY(bottom - height + gap);
@@ -2071,7 +2321,8 @@ export class VeTimeline {
       const cursor = this.dragCursor.value;
       const reorder = this.clipReorder.value;
       const trim = this.trimHandles.value;
-      const track2 = this.trackSegments.value;
+      const rows = this.trackRows.value;
+      const marks = dropMarks(reorder?.drop ?? null, rows);
 
       return (
         <Host>
@@ -2080,6 +2331,7 @@ export class VeTimeline {
               'tl': true,
               'tl--compact': compact,
               'tl--reordering': reorder !== null,
+              'tl--dropping': reorder?.drop != null,
               'tl--drag-move': cursor === 'move',
               'tl--drag-resize': cursor === 'resize',
             }}
@@ -2091,7 +2343,17 @@ export class VeTimeline {
               <div class="tl__content" key="content" ref={this.keepContent} style={{ width: `${this.contentWidth.value}px` }}>
                 {compact ? null : this.rulerRow(pad)}
 
-                <div class="tl__track" key="track">
+                <div
+                  class={{
+                    'tl__track': true,
+                    'tl__vrow': true,
+                    'tl__vrow--source': reorder !== null && reorder.fromTrackId === null,
+                    'tl__vrow--drop': marks.on === 0,
+                    'tl__vrow--drop-under': marks.under === 0,
+                  }}
+                  key="track"
+                  data-vrow="base"
+                >
                   <button
                     type="button"
                     class="tl__mute"
@@ -2104,7 +2366,7 @@ export class VeTimeline {
 
                   {this.segments.value.map(seg => (
                     <div
-                      class={{ 'seg': true, 'seg--selected': seg.selected }}
+                      class={{ 'seg': true, 'seg--selected': seg.selected, 'seg--ghost': reorder?.drop != null && reorder.id === seg.id }}
                       key={seg.id}
                       data-hit="clip"
                       data-id={seg.id}
@@ -2115,7 +2377,7 @@ export class VeTimeline {
                   ))}
 
                   {/* Outside the segments, so one set of arithmetic places every handle on the timeline. */}
-                  {trim
+                  {trim && trim.trackId === null
                     ? [
                         <span class="handle handle--in" key="trim-in" data-hit="clip-in" data-id={trim.id} style={{ left: `${trim.inX}px` }}></span>,
                         <span class="handle handle--out" key="trim-out" data-hit="clip-out" data-id={trim.id} style={{ left: `${trim.outX}px` }}></span>,
@@ -2123,23 +2385,7 @@ export class VeTimeline {
                     : null}
                 </div>
 
-                {track2.length ? (
-                  <div class="tl__track2" key="track2">
-                    {track2.map(seg => (
-                      <div
-                        class={{ 'seg': true, 'seg--extra': true, 'seg--selected': seg.selected }}
-                        key={seg.id}
-                        data-hit="track-clip"
-                        data-id={seg.id}
-                        style={{ left: `${seg.x}px`, width: `${seg.w}px` }}
-                      >
-                        {this.segmentInner(seg)}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-
-                {this.showLanes.value ? this.lanes(compact, pad) : null}
+                {this.showLanes.value ? this.lanes(compact, pad, rows, marks, reorder) : null}
               </div>
             </div>
 
@@ -2191,11 +2437,60 @@ export class VeTimeline {
     ];
   }
 
-  private lanes(compact: boolean, pad: number) {
+  /**
+   * Everything under the base track, on one vertical scroller: the extra video layers first, then a
+   * lane for each overlay, the sound and the voiceover.
+   *
+   * The video layers belong in here rather than in the fixed column above, because there is no cap
+   * on how many of them a post may have - fifteen rows of 48 px is three times the whole timeline.
+   * Only the ruler and the base track are fixed, which is right: the base track IS the post, and
+   * everything else is something laid over it.
+   */
+  private lanes(compact: boolean, pad: number, rows: TrackRowView[], marks: { on: number; under: number }, reorder: ClipReorderView | null) {
     const layerHandles = this.layerHandles.value;
+    const trim = this.trimHandles.value;
     return (
       <div class="tl__lanes-view" key="lanes-view" ref={this.keepLanesView}>
         <div class={{ 'tl__lanes': true, 'tl__lanes--reordering': this.layerReorder.value !== null }} key="lanes" ref={this.keepLanes}>
+          {rows.map((row, i) => (
+            <div
+              class={{
+                'tl__track2': true,
+                'tl__vrow': true,
+                'tl__vrow--source': reorder?.fromTrackId === row.id,
+                'tl__vrow--drop': marks.on === i + 1,
+                'tl__vrow--drop-under': marks.under === i + 1,
+              }}
+              key={row.id}
+              data-vrow={row.id}
+            >
+              {row.segments.map(seg => (
+                <div
+                  class={{
+                    'seg': true,
+                    'seg--extra': true,
+                    'seg--selected': seg.selected,
+                    'seg--ghost': reorder?.drop != null && reorder.id === seg.id,
+                  }}
+                  key={seg.id}
+                  data-hit="track-clip"
+                  data-id={seg.id}
+                  style={{ left: `${seg.x}px`, width: `${seg.w}px` }}
+                >
+                  {this.segmentInner(seg)}
+                </div>
+              ))}
+
+              {/* Every layer is trimmed on its own, by the same two handles the base track has. */}
+              {trim?.trackId === row.id
+                ? [
+                    <span class="handle handle--in" key="trim-in" data-hit="clip-in" data-id={trim.id} style={{ left: `${trim.inX}px` }}></span>,
+                    <span class="handle handle--out" key="trim-out" data-hit="clip-out" data-id={trim.id} style={{ left: `${trim.outX}px` }}></span>,
+                  ]
+                : null}
+            </div>
+          ))}
+
           {compact
             ? null
             : this.layerLanes.value.map((lane, i) => {
@@ -2275,7 +2570,7 @@ export class VeTimeline {
     const music = this.musicLane.value;
     const handles = this.musicHandles.value;
     return (
-      <div class="lane" key="music-lane">
+      <div class="lane" key="music-lane" data-row="music">
         {music ? (
           [
             <div
@@ -2307,7 +2602,7 @@ export class VeTimeline {
   private voiceRow() {
     const recording = this.recording.value;
     return (
-      <div class="lane" key="voice-lane">
+      <div class="lane" key="voice-lane" data-row="voice">
         {this.voiceLane.value.map(take => (
           <div
             class={{ 'item': true, 'item--voice': true, 'item--selected': take.selected }}
@@ -2340,7 +2635,13 @@ export class VeTimeline {
         key="reorder"
         ref={this.keepReorder}
         aria-hidden="true"
-        style={{ '--size': `${reorder.size}px`, '--ox': `${reorder.ox0}px`, '--lx': `${reorder.lx0}px` }}
+        style={{
+          '--size': `${reorder.size}px`,
+          '--rail-top': `${reorder.railTop}px`,
+          '--ox': `${reorder.ox0}px`,
+          '--lx': `${reorder.lx0}px`,
+          '--ly': `${reorder.ly0}px`,
+        }}
       >
         <div class="tl__reorder-rail" key="rail">
           {this.reorderSlots.value.map(thumb => (
@@ -2381,6 +2682,27 @@ function dragCursor(drag: TimelineDrag): DragCursor {
   return 'move';
 }
 
+/**
+ * Which video row a live drop is pointing at, both counted from the base track at 0: `on` is a row
+ * the segment would land on, `under` a row a new layer would open beneath. -1 is neither.
+ */
+function dropMarks(drop: ClipDropTarget | null, rows: readonly TrackRowView[]): { on: number; under: number } {
+  if (!drop) return { on: -1, under: -1 };
+  if (drop.kind === 'new') return { on: -1, under: drop.index };
+  if (drop.kind === 'base') return { on: 0, under: -1 };
+  const i = rows.findIndex(row => row.id === drop.trackId);
+  return { on: i < 0 ? -1 : i + 1, under: -1 };
+}
+
+/** Whether two drop targets name the same landing place, `null` (the segment's own row) included. */
+function sameDrop(a: ClipDropTarget | null, b: ClipDropTarget | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'track' && b.kind === 'track') return a.trackId === b.trackId;
+  if (a.kind === 'new' && b.kind === 'new') return a.index === b.index;
+  return true;
+}
+
 /** Places the two edge handles of an item spanning `x` to `x + w` in content px. */
 function edgeHandles(x: number, w: number): EdgeHandlesView {
   // The white bar stands 16 px into the start handle's 44 px box and 14 px into the end one's, so
@@ -2391,19 +2713,6 @@ function edgeHandles(x: number, w: number): EdgeHandlesView {
 function selectionKey(selection: EditorSelection | null): string {
   if (!selection) return '';
   return 'id' in selection ? `${selection.kind}:${selection.id}` : selection.kind;
-}
-
-/**
- * What the lanes were last scrolled to show: the selection AND the row its lane is on. A layer sent
- * to the back (or dragged to another row, or put back by an undo) is still the same selection, but
- * its lane has moved - with more layers than the three or four rows on screen, To back drops it out
- * of sight - so a new row has to be followed just like a new selection. The music and voiceover rows
- * sit under the layer lanes and move whenever their number changes.
- */
-function revealKey(selection: EditorSelection | null, lanes: readonly LayerLaneView[]): string {
-  const key = selectionKey(selection);
-  if (selection?.kind === 'overlay') return `${key}@${lanes.findIndex(lane => lane.id === selection.id)}`;
-  return selection?.kind === 'music' || selection?.kind === 'voice' ? `${key}@${lanes.length}` : key;
 }
 
 /** Element-wise, for the comparisons the array computeds are built with. */

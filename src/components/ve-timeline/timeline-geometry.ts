@@ -1,4 +1,4 @@
-import { clamp } from '../../editor';
+import { clamp, type ClipDropTarget } from '../../editor';
 
 import type { Filmstrip } from '../../state/editor.types';
 
@@ -54,6 +54,53 @@ export const MIN_ITEM_PX = 28;
 
 /** How close, in pixels, a dragged edge has to come to something before it sticks to it. */
 export const SNAP_PX = 8;
+
+/**
+ * A lifted segment lands ON a row until the finger is this far into the row's foot, where it starts
+ * to mean the gap under it instead.
+ *
+ * Small on purpose. The gap between two rows is [LANE_PITCH] minus a row's height and can be as
+ * little as 8 px, which is not a target a thumb can hit: the band that opens a new layer has to
+ * borrow a few pixels from the row on each side of it, or the only way to make a layer would be to
+ * drag past the last row entirely.
+ */
+export const DROP_EDGE_PX = 10;
+
+/** Lifted this far above the top row, the segment is being put back rather than carried anywhere. */
+export const DROP_CANCEL_PX = 28;
+
+/** One video row's vertical extent on the screen. `trackId` is null for the base track. */
+export interface DropRow {
+  trackId: string | null;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * What a finger at `y` is over: a row to drop onto, the gap under a row where a new layer would
+ * open, or null for far enough above the whole stack to mean "put it back".
+ *
+ * `rows` are the video rows as they are drawn, TOP FIRST: the base track's filmstrip, then every
+ * layer nearest the base first. The gap under row `i` opens a layer at row index `i`, which counting
+ * from the base track is exactly the [ClipDropTarget] `new` index - the base being row 0 and its gap
+ * being the first place a layer can go.
+ *
+ * Anything below the last row is that last gap: a finger dragged down past the lanes has said which
+ * way it is going, and refusing it there would be a drag that stops working the further it is
+ * carried.
+ */
+export function dropTargetAt(y: number, rows: readonly DropRow[]): ClipDropTarget | null {
+  if (!rows.length || y < rows[0].top - DROP_CANCEL_PX) return null;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const foot = Math.max(row.top, row.bottom - DROP_EDGE_PX);
+    if (y < foot) return row.trackId === null ? { kind: 'base' } : { kind: 'track', trackId: row.trackId };
+    const next = rows[i + 1];
+    if (!next) break;
+    if (y < next.top + DROP_EDGE_PX) return { kind: 'new', index: i };
+  }
+  return { kind: 'new', index: rows.length - 1 };
+}
 
 /** Candidate ruler spacings, in seconds. The first that leaves room for a label wins. */
 const RULER_STEPS_S = [0.5, 1, 2, 5, 10, 15, 30] as const;

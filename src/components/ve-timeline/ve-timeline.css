@@ -106,8 +106,18 @@
   margin-top: var(--track-top);
 }
 
-.tl--reordering .tl__track {
+/*
+ * While a lifted segment is being REORDERED, the row it came off is the rail of thumbnails instead
+ * and the row itself is out of the way. While it is being carried to another LAYER the row comes
+ * back, because the rows are what the customer is now aiming at, and the segment under the finger
+ * is greyed in its old place so it is clear which one is in the air.
+ */
+.tl--reordering:not(.tl--dropping) .tl__vrow--source {
   visibility: hidden;
+}
+
+.seg--ghost {
+  opacity: 0.3;
 }
 
 .tl__mute {
@@ -172,12 +182,53 @@
 .tl__track2 {
   position: relative;
   flex: 0 0 var(--track2-h);
-  margin-top: var(--lane-gap);
 }
 
 /* Square, like every filmstrip tile, which at this height means narrower ones. */
 .seg--extra .seg__tile {
   width: var(--track2-h);
+}
+
+/*
+ * A selected segment on a layer is a body to drag: dragging it carries the whole layer along the
+ * timeline, so the browser must not read the same swipe as a scroll. The base track's segments keep
+ * `pan-x`, because a sideways drag there IS the scroll.
+ */
+.seg--extra.seg--selected {
+  touch-action: none;
+}
+
+/*
+ * Where a lifted segment would land. A LAYER is outlined, because the segment joins what is already
+ * on that row; a GAP is a line across the timeline, because what happens there is a row opening
+ * that is not there yet. Both run the whole length of the content, so the answer is on screen
+ * wherever the timeline happens to be scrolled to.
+ *
+ * Drawn in `::after` rather than as a border or an outline on the row itself: a border would move
+ * the filmstrip inside it by two pixels on every frame the target changed.
+ */
+.tl__vrow--drop::after,
+.tl__vrow--drop-under::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.tl__vrow--drop::after {
+  top: -3px;
+  bottom: -3px;
+  border: 2px solid var(--ve-accent, #a6ff2e);
+  border-radius: 8px;
+}
+
+.tl__vrow--drop-under::after {
+  bottom: calc(var(--lane-gap) / -2 - 1.5px);
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ve-accent, #a6ff2e);
 }
 
 .seg__border {
@@ -273,7 +324,13 @@
   overflow: clip;
 }
 
+/*
+ * `position: relative` so it is every row's `offsetParent`: the reveal measures a row's `offsetTop`
+ * against this element, and against a static one it would be measured against the scrolling view
+ * instead - which is to say against the offset it is trying to work out.
+ */
 .tl__lanes {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--lane-gap);
@@ -481,22 +538,29 @@
   transform: scale(0.94);
 }
 
-/* While a segment is lifted, the track becomes a row of square thumbnails the finger can carry. */
+/*
+ * While a segment is lifted, the row it came off becomes a rail of square thumbnails the finger can
+ * carry. The whole timeline, because the lifted tile is carried DOWN it as well as along: the layer
+ * rows are the other half of what a lift can do.
+ */
 .tl__reorder {
   position: absolute;
-  top: calc(var(--ruler-h) + var(--track-top));
-  left: 0;
-  right: 0;
+  inset: 0;
   z-index: 4;
-  height: var(--track-h);
   pointer-events: none;
 }
 
+/* `--rail-top` is the row the lift began on; `--ox`, `--lx` and `--ly` are written per frame. */
 .tl__reorder-rail {
   position: absolute;
-  top: calc(50% - var(--size) / 2);
+  top: var(--rail-top, 0px);
   left: 0;
   transform: translate3d(var(--ox, 0px), 0, 0);
+}
+
+/* Carried to another layer there is no row left to reorder, so the rail goes and the tile stays. */
+.tl--dropping .tl__reorder-rail {
+  display: none;
 }
 
 .rtile {
@@ -519,12 +583,12 @@
 }
 
 .rtile--lifted {
-  top: calc(50% - var(--size) / 2);
+  top: 0;
   z-index: 1;
   box-shadow:
     0 0 0 2px #fff,
     0 10px 24px rgba(0, 0, 0, 0.6);
-  transform: translate3d(var(--lx, 0px), 0, 0) scale(1.05);
+  transform: translate3d(var(--lx, 0px), var(--ly, 0px), 0) scale(1.05);
   transition: none;
 }
 

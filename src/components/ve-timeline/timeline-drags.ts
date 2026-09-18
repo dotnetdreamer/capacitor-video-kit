@@ -1,4 +1,6 @@
-import { MIN_LAYER_MS, clamp, type EditMusic } from '../../editor';
+import { MIN_LAYER_MS, clamp, type ClipDropTarget, type EditMusic } from '../../editor';
+
+import type { DropRow } from './timeline-geometry';
 
 /*
  * What a finger on the timeline can be doing, and the arithmetic for the drags whose rules are not
@@ -15,7 +17,10 @@ export type HitKind =
   | 'clip'
   | 'clip-in'
   | 'clip-out'
-  /** A segment on the second video layer. It selects and nothing more - that lane is read-only. */
+  /**
+   * A segment on one of the extra video layers. It selects like a segment on the base track and
+   * lifts like one; what it has no handles for is trimming, which is still the base track's alone.
+   */
   | 'track-clip'
   | 'layer'
   | 'layer-start'
@@ -73,14 +78,47 @@ export interface TrimDrag extends DragBase {
   kind: 'trim';
   edge: 'in' | 'out';
   id: string;
+  /** The row the segment is on: null for the base track. */
+  trackId: string | null;
   index: number;
   in0: number;
   out0: number;
   speed: number;
+  /** The segment's left edge on the OUTPUT timeline, the layer's own start included. */
   slotStart: number;
+  /** That layer's start when the drag began; only a `movesTrack` drag changes it. */
+  trackStart0: number;
+  /**
+   * Whether this handle carries the whole layer with it, which the FIRST segment of a layer's left
+   * handle does and nothing else does.
+   *
+   * A layer has a start of its own, and that start IS its first segment's left edge: trimming the
+   * front off without moving it would leave the edge where it was and shrink the layer from the far
+   * end instead - a handle pulled one way and a bar shortening the other. So the two move together
+   * and the rest of the layer stays where it was on the video, which is exactly what the music bar's
+   * left handle has always done. Every other handle ripples inside its own row, as the base track's
+   * always have.
+   */
+  movesTrack: boolean;
   dur0: number;
   /** The last trim value previewed, so the preview is only re-seeked when the frame changes. */
   lastValue: number;
+}
+
+/**
+ * A video layer carried along the timeline by a segment on it.
+ *
+ * The WHOLE layer moves, not the segment under the finger: a track is a sequence with no gaps in it,
+ * so its segments have no place of their own to be moved to - what a layer has is one start, and
+ * that is what this drag writes.
+ */
+export interface TrackDrag extends DragBase {
+  kind: 'track';
+  trackId: string;
+  start0: number;
+  /** How long the layer runs, so its far edge can stick to something too. */
+  lengthMs: number;
+  targets: number[];
 }
 
 export interface LayerDrag extends DragBase {
@@ -110,9 +148,23 @@ export interface VoiceDrag extends DragBase {
   targets: number[];
 }
 
+/**
+ * A segment lifted by a long press, which is two drags in one.
+ *
+ * SIDEWAYS it reorders the row it came from, and the row collapses into a rail of square thumbnails
+ * to do it - segments can be any width, and a 40-second one could never be carried past its
+ * neighbours on a screen 400 px wide. DOWNWARDS (or back up) it leaves that row altogether and is
+ * carried to another video layer, or to a layer of its own opened between two rows; the rail goes
+ * away there, because what the customer is aiming at is the rows themselves.
+ *
+ * `drop` is which of the two is live. Null is the rail, and `to` is the answer; anything else is the
+ * layer under the finger, and `atMs` is where the segment would land on the output timeline.
+ */
 export interface ClipReorderDrag extends DragBase {
   kind: 'clip-reorder';
   id: string;
+  /** The layer the segment was lifted from: null for the base track. */
+  fromTrackId: string | null;
   from: number;
   to: number;
   count: number;
@@ -120,6 +172,17 @@ export interface ClipReorderDrag extends DragBase {
   originX: number;
   size: number;
   pitch: number;
+  /** The video rows as they were drawn when the lift began; nothing moves them during one. */
+  rows: DropRow[];
+  /** The timeline's own top, client px: the origin the lifted thumbnail is placed against. */
+  tlTop: number;
+  /** Where the layer under the finger is, or null while the finger is still on its own row. */
+  drop: ClipDropTarget | null;
+  /** Where the segment started on the OUTPUT timeline, and where it would land now. */
+  atMs0: number;
+  atMs: number;
+  /** 0, the end and every segment boundary of the base track, for the drop to stick to. */
+  targets: number[];
 }
 
 export interface LayerReorderDrag extends DragBase {
@@ -157,6 +220,7 @@ export interface LanesScrollDrag extends DragBase {
 
 export type TimelineDrag =
   | TrimDrag
+  | TrackDrag
   | LayerDrag
   | MusicDrag
   | VoiceDrag

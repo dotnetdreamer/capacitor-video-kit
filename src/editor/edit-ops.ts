@@ -296,14 +296,37 @@ export function removeClip(manifest: EditManifest, clipId: string): EditManifest
   };
 }
 
+/**
+ * A segment carried to another place in the sequence it is already on - the base track's, or an
+ * extra layer's. Which layer it is on is read from the clip rather than passed in, because a
+ * reorder is a drag that never left its row and the caller counted its indices against that row.
+ */
 export function moveClip(manifest: EditManifest, clipId: string, toIndex: number): EditManifest {
-  const from = manifest.clips.findIndex((clip) => clip.id === clipId);
-  const to = clamp(Math.round(toIndex), 0, manifest.clips.length - 1);
-  if (from < 0 || from === to) return manifest;
-  const clips = [...manifest.clips];
-  const [moved] = clips.splice(from, 1);
-  clips.splice(to, 0, moved);
-  return { ...manifest, clips };
+  const trackId = trackIdOfClip(manifest, clipId);
+  if (trackId === undefined) return manifest;
+  if (trackId === null) {
+    const clips = reordered(manifest.clips, clipId, toIndex);
+    return clips === manifest.clips ? manifest : { ...manifest, clips };
+  }
+  const track = findVideoTrack(manifest, trackId);
+  if (!track) return manifest;
+  const clips = reordered(track.clips, clipId, toIndex);
+  if (clips === track.clips) return manifest;
+  return {
+    ...manifest,
+    videoTracks: manifest.videoTracks.map((t) => (t.id === trackId ? { ...t, clips } : t)),
+  };
+}
+
+/** The same list when the segment is not on it or is already there, so a no-op stays an identity. */
+function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip[] {
+  const from = clips.findIndex((clip) => clip.id === clipId);
+  const to = clamp(Math.round(toIndex), 0, clips.length - 1);
+  if (from < 0 || from === to) return clips;
+  const next = [...clips];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
 }
 
 /** Points a segment at a different source, keeping its speed and sound but not its trim. */
@@ -362,6 +385,135 @@ export function addVideoTrack(manifest: EditManifest, clip: EditClip, trackId: s
     opacity: 1,
   };
   return { ...manifest, videoTracks: [...manifest.videoTracks, track] };
+}
+
+/**
+ * Where a segment lifted off the timeline is being put down.
+ *
+ * `index` counts ROWS DOWN THE SCREEN from the base track, which is the gap the customer actually
+ * aimed at: 0 is the gap directly under the base track's filmstrip, 1 the gap under the layer below
+ * that. It is not a `z` - `z` is a number nobody sees and this op renumbers it on every move - and
+ * it is not an index into `videoTracks` either, because the row the segment came off may be emptied
+ * by the move and take its gap with it.
+ */
+export type ClipDropTarget =
+  | { kind: 'base' }
+  | { kind: 'track'; trackId: string }
+  | { kind: 'new'; index: number };
+
+/**
+ * Carries one segment from the layer it is on to another one, or to a layer of its own opened
+ * between two rows. Null when the move cannot be made, which is the answer to four things:
+ *
+ *  - the last segment of the BASE track, which fixes how long the post runs and may not be emptied;
+ *  - a drop back onto the row it came from, which is [moveClip]'s job and not this one's;
+ *  - a new layer once [MAX_VIDEO_TRACKS] of them are on the post, the base counted;
+ *  - a drop onto a layer whose only segment IS the one being carried.
+ *
+ * `atMs` is where the segment was let go on the OUTPUT timeline. A new layer keeps it exactly - the
+ * layer's own `startMs` is what a track has instead of a per-clip placement - and a drop onto a
+ * track that is already there keeps only as much of it as a SEQUENCE can: its segments play one
+ * after another with no gaps between them, so the nearest boundary is what the drop lands on.
+ *
+ * What the segment IS does not change: its trim, speed, sound and framing travel with it, rectangle
+ * included. A clip arriving on a new layer with no rectangle covers the frame, exactly as
+ * [addVideoTrack] leaves the layer it opens, and a layout preset or the crop tool is what places it.
+ * Guessing an arrangement here would be guessing before the customer has said.
+ */
+export function moveClipToTrack(
+  manifest: EditManifest,
+  clipId: string,
+  target: ClipDropTarget,
+  atMs: number,
+  newTrackId: string,
+): EditManifest | null {
+  const clip = findClip(manifest, clipId);
+  const fromTrackId = trackIdOfClip(manifest, clipId);
+  if (!clip || fromTrackId === undefined) return null;
+  if (fromTrackId === null && manifest.clips.length <= 1) return null;
+  if (target.kind === 'base' && fromTrackId === null) return null;
+  if (target.kind === 'track' && target.trackId === fromTrackId) return null;
+
+  const fromRow = manifest.videoTracks.findIndex((track) => track.id === fromTrackId);
+  // Taken off FIRST, so everything below counts the row this move is about to empty as already
+  // gone: the last segment of a layer carried onto a layer of its own is one layer swapped for
+  // another, not a seventeenth one, and the gaps under it have all moved up a row.
+  const lifted = removeClip(manifest, clipId);
+  if (!lifted) return null;
+  const emptied = lifted.videoTracks.length < manifest.videoTracks.length;
+
+  if (target.kind === 'base') {
+    return { ...lifted, clips: insertAtTime(lifted.clips, clip, 0, atMs) };
+  }
+
+  if (target.kind === 'track') {
+    const owner = findVideoTrack(lifted, target.trackId);
+    if (!owner) return null;
+    return {
+      ...lifted,
+      videoTracks: lifted.videoTracks.map((track) =>
+        track.id === owner.id ? { ...track, clips: insertAtTime(track.clips, clip, track.startMs, atMs) } : track,
+      ),
+    };
+  }
+
+  const rows = [...lifted.videoTracks].sort((a, b) => a.z - b.z);
+  let index = clamp(Math.round(target.index), 0, manifest.videoTracks.length);
+  if (emptied && fromRow >= 0 && index > fromRow) index -= 1;
+  index = clamp(index, 0, rows.length);
+  // The ONLY segment of a layer, put back in the gap that layer already filled: nothing has been
+  // replaced, the layer has been slid along the timeline. It keeps its id, and with it its opacity,
+  // the sheet that may be open on it and the selection this drop ends with. The gap above the row
+  // and the gap below it are the same gap once the row itself is gone.
+  const slid = emptied && fromRow >= 0 && index === fromRow ? findVideoTrack(manifest, fromTrackId as string) : null;
+  if (!slid && lifted.videoTracks.length >= MAX_VIDEO_TRACKS - 1) return null;
+  rows.splice(index, 0, {
+    id: slid?.id ?? newTrackId,
+    clips: [clip],
+    startMs: Math.max(0, Math.round(atMs)),
+    // Written by the restack below, which is the only thing that decides a layer's place in the
+    // drawing order once the rows have been rearranged.
+    z: 0,
+    opacity: slid?.opacity ?? 1,
+  });
+  return { ...lifted, videoTracks: restack(rows) };
+}
+
+/**
+ * `clip` put into a sequence at the place `atMs` falls, `startMs` being where that sequence's first
+ * segment lands on the output timeline.
+ *
+ * Past the halfway line of a segment is the gap AFTER it, which is how every list a finger drops
+ * something into decides between two places.
+ */
+function insertAtTime(clips: readonly EditClip[], clip: EditClip, startMs: number, atMs: number): EditClip[] {
+  const into = atMs - startMs;
+  let cursor = 0;
+  let index = clips.length;
+  for (let i = 0; i < clips.length; i++) {
+    const duration = clipDurationMs(clips[i]);
+    if (into < cursor + duration / 2) {
+      index = i;
+      break;
+    }
+    cursor += duration;
+  }
+  const next = [...clips];
+  next.splice(index, 0, clip);
+  return next;
+}
+
+/**
+ * The layers numbered 1 upwards in the order they are now in, the base track being 0 and nothing
+ * sorting below it.
+ *
+ * `z` is the drawing order all four engines read, and the timeline draws its rows in the same
+ * order: a row moved without its number moving with it is a timeline saying one picture is over
+ * another while the frame says the opposite. Renumbering rather than leaving gaps also keeps
+ * [addVideoTrack]'s "one above the highest" arriving on top of everything.
+ */
+function restack(tracks: readonly EditVideoTrack[]): EditVideoTrack[] {
+  return tracks.map((track, i) => (track.z === i + 1 ? track : { ...track, z: i + 1 }));
 }
 
 /**

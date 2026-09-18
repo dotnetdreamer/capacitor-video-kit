@@ -802,6 +802,60 @@ describe('EditorStore', () => {
         expect(store.playheadMs.value).toBe(3000);
         expect(store.toast.value?.text).toBe('Your video is now 3.0s');
       });
+
+      it('carries a segment onto a layer of its own, and back', () => {
+        store.select({ kind: 'clip', id: 'b' });
+        expect(store.moveClipToTrack('b', { kind: 'new', index: 0 }, 2000)).toBe(true);
+
+        expect(store.manifest.value.clips.map((c) => c.id)).toEqual(['a']);
+        expect(store.videoTrack.value).toMatchObject({ startMs: 2000, z: 1 });
+        // The segment stays selected: the customer put it somewhere and the tools have to follow it.
+        expect(store.selection.value).toEqual({ kind: 'clip', id: 'b' });
+
+        expect(store.moveClipToTrack('b', { kind: 'base' }, 0)).toBe(true);
+        expect(store.manifest.value.clips.map((c) => c.id)).toEqual(['b', 'a']);
+        expect(store.manifest.value.videoTracks).toEqual([]);
+        // One undo step each, and nothing else in between.
+        expect(undoAll()).toBe(2);
+      });
+
+      it('refuses to empty the base track, and says why', () => {
+        load({ clips: [clip('a', 0, 4000)] });
+
+        expect(store.moveClipToTrack('a', { kind: 'new', index: 0 }, 0)).toBe(false);
+        expect(store.toast.value?.text).toBe('A video needs at least one clip');
+        expect(undoAll()).toBe(0);
+      });
+
+      it('refuses a layer past the cap, and says so', () => {
+        const room = MAX_VIDEO_TRACKS - 1;
+        for (let i = 0; i < room; i++) store.addVideoTrack(clip(`c${i}`, 0, 3000));
+
+        expect(store.moveClipToTrack('b', { kind: 'new', index: 0 }, 0)).toBe(false);
+        expect(store.toast.value?.text).toBe(`You can have ${MAX_VIDEO_TRACKS} videos on screen at once`);
+      });
+
+      it('deletes one segment of a layer that holds several', () => {
+        load({ videoTracks: [track([clip('c', 0, 3000), clip('d', 0, 3000)])] });
+        store.select({ kind: 'clip', id: 'c' });
+
+        store.deleteSelectedClip();
+
+        // The layer stays: only the segment the customer had selected has gone.
+        expect(store.videoTrack.value?.clips.map((c) => c.id)).toEqual(['d']);
+      });
+
+      it('takes the layer and its arrangement off with its last segment', () => {
+        load({ videoTracks: [track([clip('c', 0, 3000)])] });
+        store.applyLayoutPreset('vt', 'splitTopBottom', 'Top and bottom');
+        store.select({ kind: 'clip', id: 'c' });
+
+        store.deleteSelectedClip();
+
+        expect(store.manifest.value.videoTracks).toEqual([]);
+        // A base left in half the frame with nothing beside it is a black band nobody asked for.
+        expect(store.manifest.value.clips.every((c) => !('rect' in c))).toBe(true);
+      });
     });
   });
 

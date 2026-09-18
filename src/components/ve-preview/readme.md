@@ -14,9 +14,12 @@ Nothing here is a rendering of its own. The video is the ORIGINAL clips on one `
 per video track with the filter as CSS, and each layer is the PNG `OverlayBitmaps` rasterised for
 it - so where a layer sits here, at the size it shows, is where the finished video has it.
 
-Two elements at the most, and the second one is only written out while the post has a second
-track: a phone decodes two video streams at once and the feed behind this editor may already hold
-one, which is the whole reason [MAX_VIDEO_TRACKS] is two.
+Two elements at the most, and the second one is only written out while the post has a layer over
+the base track: a phone decodes two video streams at once and the feed behind this editor may
+already hold one. That is a LIVE PREVIEW limit and not the manifest's - [MAX_VIDEO_TRACKS] layers
+can be built on the timeline and every one of them is composited by the render - so with more than
+two videos on the frame this shows the base and the front-most layer, and the rest are seen in the
+finished video rather than here.
 
 It is also the editor's player: the store forwards every play, pause and seek here. `seek`, `play`
 and `pause` are therefore plain methods and not `@Method()`s, because a `@Method()` has to return

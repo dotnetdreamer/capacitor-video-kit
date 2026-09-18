@@ -462,8 +462,8 @@ export class VeToolbar {
     const store = this.ctx.store;
     return {
       kind: 'clip',
-      label: 'Second video tools',
-      collapse: this.deselect('Close second video tools'),
+      label: 'Video layer tools',
+      collapse: this.deselect('Close video layer tools'),
       tiles: [
         { id: 'layout', label: 'Layout', icon: 'grid-outline', run: () => store.openPanel('layout') },
         { id: 'crop', label: 'Crop', icon: 'crop-outline', run: () => store.openCrop() },
@@ -489,7 +489,9 @@ export class VeToolbar {
           icon: 'swap-horizontal-outline',
           run: () => void this.ctx.media.replaceSelectedClip(),
         },
-        { id: 'delete', label: 'Remove', icon: 'trash-outline', run: () => store.removeVideoTrack(trackId) },
+        // The segment, not the whole layer: a layer can hold a sequence of them now. The store takes
+        // the layer off when this was its last one, which is where the arrangement is undone too.
+        { id: 'delete', label: 'Remove', icon: 'trash-outline', run: () => store.deleteSelectedClip() },
       ],
     };
   }

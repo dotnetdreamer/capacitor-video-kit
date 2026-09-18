@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 
 import type { Filmstrip } from '../../state/editor.types';
 import {
+  DROP_CANCEL_PX,
   durationChip,
+  dropTargetAt,
   frameUrl,
   nearestSnap,
   rulerLabel,
   rulerStepMs,
   segmentTiles,
   touchDistance,
+  type DropRow,
 } from './timeline-geometry';
 
 /**
@@ -222,5 +225,64 @@ describe('touchDistance', () => {
   it('is zero until there are two fingers', () => {
     expect(touchDistance([])).toBe(0);
     expect(touchDistance([touch(0, 0)])).toBe(0);
+  });
+});
+
+/*
+ * The vertical half of a lifted segment: which video layer the finger is over, and which gap between
+ * two of them would open a layer that is not there yet.
+ *
+ * A timeline with a 56 px filmstrip at the top and two 40 px layer rows under it, 8 px apart, which
+ * is what the component lays out at its default sizes.
+ */
+const ROWS: DropRow[] = [
+  { trackId: null, top: 100, bottom: 156 },
+  { trackId: 'vt-1', top: 164, bottom: 204 },
+  { trackId: 'vt-2', top: 212, bottom: 252 },
+];
+
+describe('dropTargetAt', () => {
+  it('lands on the row the finger is over', () => {
+    expect(dropTargetAt(120, ROWS)).toEqual({ kind: 'base' });
+    expect(dropTargetAt(180, ROWS)).toEqual({ kind: 'track', trackId: 'vt-1' });
+    expect(dropTargetAt(230, ROWS)).toEqual({ kind: 'track', trackId: 'vt-2' });
+  });
+
+  it('opens a layer in the gap under a row, counting the base track as row 0', () => {
+    // Between the filmstrip and the first layer: a new layer directly under the base track.
+    expect(dropTargetAt(160, ROWS)).toEqual({ kind: 'new', index: 0 });
+    expect(dropTargetAt(208, ROWS)).toEqual({ kind: 'new', index: 1 });
+  });
+
+  it('borrows a few pixels from the rows on each side of a gap', () => {
+    // The gap itself is 8 px, which no thumb can hit. The foot of the row above it and the head of
+    // the row below both mean the gap, or a new layer could only ever be made past the last row.
+    expect(dropTargetAt(150, ROWS)).toEqual({ kind: 'new', index: 0 });
+    expect(dropTargetAt(170, ROWS)).toEqual({ kind: 'new', index: 0 });
+    expect(dropTargetAt(145, ROWS)).toEqual({ kind: 'base' });
+    expect(dropTargetAt(175, ROWS)).toEqual({ kind: 'track', trackId: 'vt-1' });
+  });
+
+  it('reads everything below the last row as a layer at the bottom of the stack', () => {
+    // A finger carried down past the lanes has said which way it is going; a drag that stops
+    // working the further it is carried is a drag that reads as broken.
+    expect(dropTargetAt(300, ROWS)).toEqual({ kind: 'new', index: 2 });
+    expect(dropTargetAt(9000, ROWS)).toEqual({ kind: 'new', index: 2 });
+  });
+
+  it('is nothing at all once the segment is lifted clear above the stack', () => {
+    expect(dropTargetAt(100 - DROP_CANCEL_PX - 1, ROWS)).toBeNull();
+    // Just inside it is still the base track: the row a finger is a little above is the row it is on.
+    expect(dropTargetAt(100 - DROP_CANCEL_PX + 1, ROWS)).toEqual({ kind: 'base' });
+  });
+
+  it('has nowhere to put anything with no rows measured', () => {
+    expect(dropTargetAt(120, [])).toBeNull();
+  });
+
+  it('opens the first layer of a post that has none', () => {
+    const only: DropRow[] = [{ trackId: null, top: 100, bottom: 156 }];
+    expect(dropTargetAt(120, only)).toEqual({ kind: 'base' });
+    expect(dropTargetAt(200, only)).toEqual({ kind: 'new', index: 0 });
   });
 });

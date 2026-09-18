@@ -15,9 +15,11 @@ import {
   emptyManifest,
   findClip,
   findOverlay,
+  findVideoTrack,
   findVoiceover,
   joinWithNext,
   moveClip,
+  moveClipToTrack,
   moveLayer,
   moveVoiceover,
   neutralAdjust,
@@ -45,6 +47,7 @@ import {
   trackIdOfClip,
   trimClip,
   uniqueClipKeys,
+  type ClipDropTarget,
   type ClipFramingPatch,
   type EditAdjust,
   type EditClip,
@@ -184,8 +187,30 @@ export class EditorStore {
    */
   readonly canAddClip = computed(() => uniqueClipKeys(this.manifest.value).length < this.maxClips.value);
 
-  /** The second video layer, or null while the post is the one video it has always been. */
-  readonly videoTrack = computed(() => this.manifest.value.videoTracks[0] ?? null);
+  /**
+   * Every extra video layer, NEAREST THE BASE TRACK FIRST - the order the timeline draws its rows
+   * in, top to bottom, and the drawing order back to front.
+   *
+   * Sorted rather than taken as it comes, because `z` is what the render reads and the array order
+   * is only ever a reflection of it. The two agree everywhere the ops touch them; sorting is what
+   * keeps a hand-built manifest from drawing its rows in one order and its frame in another.
+   */
+  readonly videoTrackRows = computed(() => [...this.manifest.value.videoTracks].sort((a, b) => a.z - b.z));
+  /** The layer nearest the base track, or null while the post is the one video it opened as. */
+  readonly videoTrack = computed(() => this.videoTrackRows.value[0] ?? null);
+  /**
+   * The layer the Layout sheet arranges: the one the selected segment is on, or the layer nearest
+   * the base track when the selection is elsewhere.
+   *
+   * [videoTrack] was that answer while a post could hold one layer over the base. With several it is
+   * a sheet quietly arranging a layer the customer is not looking at, which is the wrong kind of
+   * surprise for a tool whose whole job is where the pictures go.
+   */
+  readonly layoutTrack = computed(() => {
+    const selected = this.selectedClipTrackId.value;
+    const rows = this.videoTrackRows.value;
+    return (selected ? rows.find((track) => track.id === selected) : null) ?? rows[0] ?? null;
+  });
   /**
    * Whether another video layer would go past [MAX_VIDEO_TRACKS], which counts the base track. The
    * cap is there so an absurd edit fails with something readable rather than at the encoder, and it
@@ -581,6 +606,15 @@ export class EditorStore {
   deleteSelectedClip(): void {
     const clip = this.selectedClip.value;
     if (!clip) return;
+    // The LAST segment of a layer takes the layer with it, and the arrangement that layer was part
+    // of has to go in the same undo step: a base left in half the frame with nothing beside it is a
+    // black band nobody asked for. `removeVideoTrack` is the one call that knows a split screen is
+    // being ended rather than edited, so the delete is handed to it.
+    const trackId = this.selectedClipTrackId.value;
+    if (trackId && findVideoTrack(this.manifest.value, trackId)?.clips.length === 1) {
+      this.removeVideoTrack(trackId);
+      return;
+    }
     if (!this.commit('Delete', (m) => removeClip(m, clip.id))) {
       this.showToast('A video needs at least one clip');
       this.haptic('warning');
@@ -709,6 +743,43 @@ export class EditorStore {
     this.closePanel();
     this.select(null);
     this.haptic('light');
+  }
+
+  /**
+   * Carries a segment off the layer it is on and onto another, or onto a layer of its own opened
+   * between two rows - the drop that ends a long press dragged down the timeline.
+   *
+   * `atMs` is where the segment was let go on the output timeline. A new layer keeps it; a layer
+   * that is already there is a sequence with no gaps in it, so the drop lands on the nearest
+   * boundary instead. Returns whether anything moved.
+   */
+  moveClipToTrack(clipId: string, target: ClipDropTarget, atMs: number): boolean {
+    const m = this.manifest.value;
+    if (trackIdOfClip(m, clipId) === null && m.clips.length <= 1) {
+      this.showToast('A video needs at least one clip');
+      this.haptic('warning');
+      return false;
+    }
+    if (target.kind === 'new' && this.videoTracksFull.value && !this.aloneOnItsLayer(clipId)) {
+      this.showToast(`You can have ${MAX_VIDEO_TRACKS} videos on screen at once`);
+      this.haptic('warning');
+      return false;
+    }
+    const newTrackId = this.newId('vt');
+    if (!this.commit('Move to layer', (mm) => moveClipToTrack(mm, clipId, target, atMs, newTrackId))) return false;
+    this.select({ kind: 'clip', id: clipId });
+    this.haptic('light');
+    return true;
+  }
+
+  /**
+   * Whether this segment is the whole of the layer it is on, so carrying it off takes the layer
+   * with it. Such a move needs no room at the cap: one layer goes as another arrives.
+   */
+  private aloneOnItsLayer(clipId: string): boolean {
+    const trackId = trackIdOfClip(this.manifest.value, clipId);
+    if (typeof trackId !== 'string') return false;
+    return findVideoTrack(this.manifest.value, trackId)?.clips.length === 1;
   }
 
   /** Where the second video lands on the output timeline. Live; wrap in begin/endGesture. */
