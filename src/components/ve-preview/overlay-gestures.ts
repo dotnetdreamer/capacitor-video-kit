@@ -8,6 +8,7 @@ import {
   isOverlayVisibleAt,
   type ClipFramingPatch,
   type EditOverlay,
+  type EditPlacement,
   type EditRect,
 } from '../../editor';
 import {
@@ -129,7 +130,7 @@ export interface Transformable {
   /** Its box: width as a fraction of the frame's, and its width / height as drawn. */
   widthFrac: number;
   aspect: number;
-  /** Clockwise, as CSS means it. A clip has no rotation of its own, so it is always 0. */
+  /** Clockwise, as CSS means it, for a layer and for a clip alike. */
   rotationDeg: number;
   /** A second tap opens it for typing. Only a text layer does. */
   isText: boolean;
@@ -284,8 +285,10 @@ type ClipMode = 'rect' | 'crop';
 interface ClipGrip {
   id: string;
   mode: ClipMode;
-  rect0: EditRect;
+  rect0: EditPlacement;
   crop0: EditRect;
+  /** The angle the fingers landed on, so a twist adds to it rather than starting from upright. */
+  rot0: number;
   source: FrameBox;
 }
 
@@ -781,7 +784,7 @@ export class OverlayGestures {
     gesture.lastAngle = angle;
 
     if (gesture.grip) {
-      this.twistClip(gesture.grip, dist / gesture.dist0);
+      this.twistClip(gesture.grip, dist / gesture.dist0, gesture.turned);
       return;
     }
 
@@ -809,16 +812,31 @@ export class OverlayGestures {
    * on the frame and a SMALLER window on the source - the same fingers, the opposite arithmetic,
    * which is why the mode is decided once when the fingers land and never re-read mid-pinch.
    *
-   * A clip is never turned. The manifest has nowhere to put a rotation for one, and a video that
-   * came out a degree off its axis because a pinch wobbled would be a bug, not a feature.
+   * Turning the fingers turns the video, the same way it turns a layer and through the same
+   * `snapRotation`, which is what answers the objection this method used to carry: a pinch that
+   * wobbles a degree off the axis snaps back to it rather than posting a video a degree crooked.
+   * Only a twist that passed the snap threshold, or one that moved the clip off the angle it
+   * started at, earns the guide - a plain resize must not draw one.
+   *
+   * The CROP mode is never turned. Turning the window sampled out of the source is a different
+   * operation on different pixels, and no engine implements one, which is why the contract puts
+   * the angle on the placement rectangle and not on a crop.
    */
-  private twistClip(grip: ClipGrip, factor: number): void {
-    this.setGuides(NO_GUIDES);
-    const patch: ClipFramingPatch =
-      grip.mode === 'crop'
-        ? { crop: scaleRect(grip.crop0, 1 / factor, MIN_CROP) }
-        : { rect: scaleRect(grip.rect0, factor, MIN_CLIP_RECT) };
-    this.queue({ kind: 'clip', id: grip.id, patch });
+  private twistClip(grip: ClipGrip, factor: number, turned: number): void {
+    if (grip.mode === 'crop') {
+      this.setGuides(NO_GUIDES);
+      this.queue({ kind: 'clip', id: grip.id, patch: { crop: scaleRect(grip.crop0, 1 / factor, MIN_CROP) } });
+      return;
+    }
+    const rotation = snapRotation(grip.rot0 + turned);
+    const rect = scaleRect(grip.rect0, factor, MIN_CLIP_RECT, rotation.value);
+    const showSnap = rotation.snapped && (Math.abs(turned) > SNAP_DEG || rotation.value !== grip.rot0);
+    this.setGuides({
+      x: false,
+      y: false,
+      rotation: showSnap ? { cx: rect.x + rect.w / 2, cy: rect.y + rect.h / 2, deg: rotation.value } : null,
+    });
+    this.queue({ kind: 'clip', id: grip.id, patch: { rect } });
   }
 
   /* ========================================================================================= */
@@ -1003,7 +1021,7 @@ export class OverlayGestures {
       cy: rect.y + rect.h / 2,
       widthFrac: rect.w,
       aspect: (rect.w / rect.h) * FRAME_ASPECT,
-      rotationDeg: 0,
+      rotationDeg: rect.rotationDeg ?? 0,
       isText: false,
     };
   }
@@ -1031,7 +1049,9 @@ export class OverlayGestures {
     const crop0 = orWhole(clip.crop);
     const rect0 = orWhole(clip.rect);
     const picture = pictureBox(this.store.sourceAspect.value, crop0, rect0, this.store.clipFit(clip));
-    return { id, mode, rect0, crop0, source: sourceFrameBox(picture, crop0) };
+    // The angle is read once, here, for the same reason the mode is: a twist adds to where the
+    // fingers landed, so re-reading it mid-pinch would compound the turn on every frame.
+    return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source: sourceFrameBox(picture, crop0) };
   }
 
   /** A tap on nothing: it puts the selection down, or plays and pauses when there is none. */

@@ -75,6 +75,10 @@ interface VideoView extends BoxView {
   clipPath: string;
   /** The layer's own, over the whole of it. The base track's is always 1. */
   opacity: number;
+  /** `none` for an upright layer, so nothing is composited that does not have to be. */
+  transform: string;
+  /** What the transform turns ABOUT, in the element's own box; see [videoView]. */
+  transformOrigin: string;
 }
 
 function sameBox(a: BoxView, b: BoxView): boolean {
@@ -82,7 +86,14 @@ function sameBox(a: BoxView, b: BoxView): boolean {
 }
 
 function sameView(a: VideoView, b: VideoView): boolean {
-  return sameBox(a, b) && a.objectFit === b.objectFit && a.clipPath === b.clipPath && a.opacity === b.opacity;
+  return (
+    sameBox(a, b) &&
+    a.objectFit === b.objectFit &&
+    a.clipPath === b.clipPath &&
+    a.opacity === b.opacity &&
+    a.transform === b.transform &&
+    a.transformOrigin === b.transformOrigin
+  );
 }
 
 /** Whether two layers would be DRAWN the same. `sourceMs` is left out on purpose: it moves with the
@@ -1034,6 +1045,11 @@ function placement(view: VideoView, filter: string): { [key: string]: string } {
     'object-fit': view.objectFit,
     'clip-path': view.clipPath,
     opacity: String(view.opacity),
+    // After the clip, which is what the render does: the picture is cut to its rectangle and the
+    // result is turned as one piece. A transform applies to the already clipped element, so the
+    // two agree without either having to know about the other.
+    transform: view.transform,
+    'transform-origin': view.transformOrigin,
   };
 }
 
@@ -1058,13 +1074,38 @@ function videoView(layer: PreviewVideoLayer | null, sourceAspect: number, postFi
   const fit = layer?.fit ?? postFit;
   const opacity = layer?.opacity ?? 1;
   const dest = orWhole(layer?.rect);
+  const turn = dest.rotationDeg ?? 0;
+  const transform = turn ? `rotate(${turn}deg)` : 'none';
   if (!(sourceAspect > 0) || (!layer?.crop && !layer?.rect)) {
-    return { ...percent(dest), objectFit: fit, clipPath: 'none', opacity };
+    // The element IS the rectangle here, so its own centre is the rectangle's centre.
+    return { ...percent(dest), objectFit: fit, clipPath: 'none', opacity, transform, transformOrigin: '50% 50%' };
   }
   const source = sourceFrameBox(pictureBox(sourceAspect, layer.crop, layer.rect, fit), layer.crop);
   // `fill` and not the layer's own fit: the box above IS the source's shape, to the pixel, so there
   // is nothing left for a fit to do and anything but `fill` would letterbox it twice.
-  return { ...percent(source), objectFit: 'fill', clipPath: clipTo(source, layer.rect), opacity };
+  return {
+    ...percent(source),
+    objectFit: 'fill',
+    clipPath: clipTo(source, layer.rect),
+    opacity,
+    transform,
+    // The RECTANGLE's centre, not the element's, and that distinction is the whole of this. A
+    // cropped or filled clip is given an element BIGGER than the rectangle it is drawn in, with
+    // the overhang cut off by `clipPath`, so turning about the element's own middle would swing
+    // the picture around a point that is not where the render turns it. The contract is explicit:
+    // the fit is measured in the upright rectangle and the fitted result is turned about THAT
+    // rectangle's centre. Expressed here as a fraction of the element, because that is the box
+    // `transform-origin` measures against.
+    transformOrigin: originIn(source, layer.rect),
+  };
+}
+
+/** Where a rectangle's centre falls inside an element's box, as the percentages CSS wants. */
+function originIn(element: FrameBox, rect: FrameBox | null | undefined): string {
+  if (!rect) return '50% 50%';
+  const x = (rect.x + rect.w / 2 - element.x) / element.w;
+  const y = (rect.y + rect.h / 2 - element.y) / element.h;
+  return `${pct(x)}% ${pct(y)}%`;
 }
 
 /** Where a layer's picture lands on the frame; see [VePreview.basePicture]. */

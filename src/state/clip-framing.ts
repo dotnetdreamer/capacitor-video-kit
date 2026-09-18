@@ -1,4 +1,4 @@
-import { DEFAULT_OUTPUT, clamp, type EditFit, type EditRect } from '../editor';
+import { DEFAULT_OUTPUT, clamp, type EditFit, type EditPlacement, type EditRect } from '../editor';
 
 /**
  * Where a cropped clip lands on the frame, in the editor's own coordinates.
@@ -50,8 +50,15 @@ export interface FrameBox {
   h: number;
 }
 
-/** A rectangle, or the whole of whatever it would have been a part of. */
-export function orWhole(rect: EditRect | null | undefined): EditRect {
+/**
+ * A rectangle, or the whole of whatever it would have been a part of.
+ *
+ * Typed as a placement so a clip's angle survives the call. A crop is passed through here too and
+ * simply never carries one, which is what the wire contract says: a `rotationDeg` arriving on a
+ * crop is to be ignored, because turning the window sampled out of a source is a different
+ * operation from turning the picture that window produces.
+ */
+export function orWhole(rect: EditPlacement | null | undefined): EditPlacement {
   return rect ?? WHOLE_RECT;
 }
 
@@ -102,21 +109,36 @@ export function sourceFrameBox(picture: FrameBox, crop: EditRect | null | undefi
   return { x: picture.x - kept.x * w, y: picture.y - kept.y * h, w, h };
 }
 
-/** A rectangle of the size given, centred where it is asked for and held inside the frame. */
-export function placeRect(cx: number, cy: number, w: number, h: number): EditRect {
+/**
+ * A rectangle of the size given, centred where it is asked for and held inside the frame.
+ *
+ * The angle is carried rather than computed: a turned rectangle is still held inside the frame by
+ * its UPRIGHT box, which is deliberate. Clamping the turned corners instead would make a rectangle
+ * shrink as it spins, and a customer turning a video expects it to turn, not to resize.
+ */
+export function placeRect(cx: number, cy: number, w: number, h: number, rotationDeg = 0): EditPlacement {
   const width = clamp(w, 0, 1);
   const height = clamp(h, 0, 1);
-  return {
+  const placed: EditPlacement = {
     x: round4(clamp(cx - width / 2, 0, 1 - width)),
     y: round4(clamp(cy - height / 2, 0, 1 - height)),
     w: round4(width),
     h: round4(height),
   };
+  // Left OFF when upright, never written as a zero, because absent is what the byte comparison
+  // against the pre-rotation output depends on and what keeps a clip on the engines' fast path.
+  if (rotationDeg) placed.rotationDeg = round(rotationDeg, 1);
+  return placed;
 }
 
-/** The same rectangle somewhere else, held inside the frame - a pan, with its size untouched. */
-export function slideRect(rect: EditRect, x: number, y: number): EditRect {
-  return placeRect(x + rect.w / 2, y + rect.h / 2, rect.w, rect.h);
+function round(value: number, places: number): number {
+  const k = 10 ** places;
+  return Math.round(value * k) / k;
+}
+
+/** The same rectangle somewhere else, held inside the frame - a pan, with its size and angle untouched. */
+export function slideRect(rect: EditPlacement, x: number, y: number): EditPlacement {
+  return placeRect(x + rect.w / 2, y + rect.h / 2, rect.w, rect.h, rect.rotationDeg ?? 0);
 }
 
 /**
@@ -125,13 +147,13 @@ export function slideRect(rect: EditRect, x: number, y: number): EditRect {
  * at that point instead of quietly changing its shape - the shape is the customer's aspect choice
  * and a pinch must never overwrite it.
  */
-export function scaleRect(rect: EditRect, factor: number, min: number): EditRect {
+export function scaleRect(rect: EditPlacement, factor: number, min: number, rotationDeg?: number): EditPlacement {
   const cx = rect.x + rect.w / 2;
   const cy = rect.y + rect.h / 2;
   const grow = Math.min(1 / rect.w, 1 / rect.h);
   const shrink = Math.max(min / rect.w, min / rect.h);
   const k = clamp(factor, Math.min(shrink, grow), grow);
-  return placeRect(cx, cy, rect.w * k, rect.h * k);
+  return placeRect(cx, cy, rect.w * k, rect.h * k, rotationDeg ?? rect.rotationDeg ?? 0);
 }
 
 /**
