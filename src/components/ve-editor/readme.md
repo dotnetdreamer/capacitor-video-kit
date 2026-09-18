@@ -65,6 +65,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 | `--ve-danger`        | Delete, and recording                                                                       |
 | `--ve-dim`           | Secondary text: a caption, a total, an unselected tab                                       |
 | `--ve-faint`         | Text and marks that are present but not being read: a disabled button, the timeline's ticks |
+| `--ve-frame-edge`    | The hairline around the video frame, which is where the finished post is cut                |
 | `--ve-lane-effect`   | The timeline lane colour for an effect layer                                                |
 | `--ve-lane-image`    | The timeline lane colour for an image layer                                                 |
 | `--ve-lane-ink`      | Text on a lane, dark because every lane colour is light                                     |
@@ -102,6 +103,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 - [ve-adjust-sheet](../ve-adjust-sheet)
 - [ve-crop-sheet](../ve-crop-sheet)
 - [ve-layout-sheet](../ve-layout-sheet)
+- [ve-quality-sheet](../ve-quality-sheet)
 - [ve-speed-sheet](../ve-speed-sheet)
 - [ve-volume-sheet](../ve-volume-sheet)
 - [ve-opacity-sheet](../ve-opacity-sheet)
@@ -125,6 +127,7 @@ graph TD;
   ve-editor --> ve-adjust-sheet
   ve-editor --> ve-crop-sheet
   ve-editor --> ve-layout-sheet
+  ve-editor --> ve-quality-sheet
   ve-editor --> ve-speed-sheet
   ve-editor --> ve-volume-sheet
   ve-editor --> ve-opacity-sheet
@@ -149,6 +152,7 @@ graph TD;
   ve-layout-sheet --> ve-sheet
   ve-layout-sheet --> ve-slider
   ve-layout-sheet --> ve-icon
+  ve-quality-sheet --> ve-sheet
   ve-speed-sheet --> ve-sheet
   ve-speed-sheet --> ve-slider
   ve-volume-sheet --> ve-sheet

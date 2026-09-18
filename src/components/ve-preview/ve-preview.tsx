@@ -5,7 +5,7 @@ import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { OVERLAY_BASE, isOverlayVisibleAt, type EditFit } from '../../editor';
-import { FRAME_ASPECT, orWhole, pictureBox, sourceFrameBox, type FrameBox } from '../../state/clip-framing';
+import { orWhole, pictureBox, sourceFrameBox, type FrameBox } from '../../state/clip-framing';
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
@@ -319,7 +319,7 @@ export class VePreview implements EditorPlayer {
         });
         continue;
       }
-      const box = layerBox(overlay, bitmap, store.outputWidth);
+      const box = layerBox(overlay, bitmap, store.outputWidth.value);
       if (!box) continue;
       views.push({
         id: overlay.id,
@@ -368,7 +368,7 @@ export class VePreview implements EditorPlayer {
     if (!overlay) return this.clipSelection();
     if (overlay.kind === 'effect') return null;
     const bitmap = store.bitmaps.value.get(overlay.id);
-    const box = bitmap ? layerBox(overlay, bitmap, store.outputWidth) : null;
+    const box = bitmap ? layerBox(overlay, bitmap, store.outputWidth.value) : null;
     if (!bitmap || !box) return null;
     const stage = this.stageSize.value;
     const shift = (handle: SelectionHandle): string => {
@@ -415,7 +415,7 @@ export class VePreview implements EditorPlayer {
     const onScreen = this.shownBase.value?.clipId === clip.id || this.shownExtra.value?.clipId === clip.id;
     const stage = this.stageSize.value;
     // The box in the frame's own pixels, which is what a handle's offset is measured in.
-    const box = { widthFrac: rect.w, aspect: (rect.w / rect.h) * FRAME_ASPECT };
+    const box = { widthFrac: rect.w, aspect: (rect.w / rect.h) * store.frameAspect.value };
     const centre = { cx: rect.x + rect.w / 2, cy: rect.y + rect.h / 2, rotationDeg: turn };
     const shift = (handle: SelectionHandle): string => {
       if (!stage) return 'translate(0, 0)';
@@ -431,7 +431,7 @@ export class VePreview implements EditorPlayer {
       width: rect.w * 100,
       // A ratio of two numbers rather than a pair of pixel sizes: the frame is not square, so a
       // rectangle that is half the frame wide and half of it tall is not a square on screen.
-      aspect: `${rect.w * FRAME_ASPECT} / ${rect.h}`,
+      aspect: `${rect.w * store.frameAspect.value} / ${rect.h}`,
       transform: layerTransform(turn),
       iconTransform: `rotate(${-turn}deg)`,
       shiftDelete: shift('delete'),
@@ -512,11 +512,11 @@ export class VePreview implements EditorPlayer {
    * video draws exactly what it drew before there were two.
    */
   private readonly baseBox = computedWith<VideoView>(
-    () => videoView(this.shownBase.value, this.baseAspect.value, this.postFit.value),
+    () => videoView(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameView,
   );
   private readonly extraBox = computedWith<VideoView>(
-    () => videoView(this.shownExtra.value, this.extraAspect.value, this.postFit.value),
+    () => videoView(this.shownExtra.value, this.extraAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameView,
   );
 
@@ -527,11 +527,11 @@ export class VePreview implements EditorPlayer {
    * because the render colours a clip's frames before they are letterboxed.
    */
   private readonly basePicture = computedWith<BoxView>(
-    () => pictureOf(this.shownBase.value, this.baseAspect.value, this.postFit.value),
+    () => pictureOf(this.shownBase.value, this.baseAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameBox,
   );
   private readonly extraPicture = computedWith<BoxView>(
-    () => pictureOf(this.shownExtra.value, this.extraAspect.value, this.postFit.value),
+    () => pictureOf(this.shownExtra.value, this.extraAspect.value, this.postFit.value, this.ctx.store.frameAspect.value),
     sameBox,
   );
 
@@ -857,6 +857,13 @@ export class VePreview implements EditorPlayer {
           <div
             key="stage"
             class={{ pv__stage: true, 'pv__stage--full': store.fullscreen.value }}
+            /*
+              The frame's shape, as the two numbers its own rules are written in. A custom property
+              rather than an `aspect-ratio` set from here, because the stage's WIDTH is derived from
+              it as well - it may be no wider than the height allows - and a stylesheet that was
+              handed only the finished ratio could not work the other one out.
+            */
+            style={{ '--pv-frame-w': String(store.output.value.width), '--pv-frame-h': String(store.output.value.height) }}
             ref={this.keepStage}
           >
             {/*
@@ -1197,7 +1204,7 @@ function placement(view: VideoView, filter: string): { [key: string]: string } {
  * one of these: the rectangle, the crop and the fit are the same fields, read from the same
  * manifest, and a second copy of this arithmetic is a second place for the two to disagree.
  */
-function videoView(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit): VideoView {
+function videoView(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit, frameAspect: number): VideoView {
   const fit = layer?.fit ?? postFit;
   const opacity = layer?.opacity ?? 1;
   const dest = orWhole(layer?.rect);
@@ -1207,7 +1214,7 @@ function videoView(layer: PreviewVideoLayer | null, sourceAspect: number, postFi
     // The element IS the rectangle here, so its own centre is the rectangle's centre.
     return { ...percent(dest), objectFit: fit, clipPath: 'none', opacity, transform, transformOrigin: '50% 50%' };
   }
-  const source = sourceFrameBox(pictureBox(sourceAspect, layer.crop, layer.rect, fit), layer.crop);
+  const source = sourceFrameBox(pictureBox(sourceAspect, layer.crop, layer.rect, fit, frameAspect), layer.crop);
   // `fill` and not the layer's own fit: the box above IS the source's shape, to the pixel, so there
   // is nothing left for a fit to do and anything but `fill` would letterbox it twice.
   return {
@@ -1236,8 +1243,8 @@ function originIn(element: FrameBox, rect: FrameBox | null | undefined): string 
 }
 
 /** Where a layer's picture lands on the frame; see [VePreview.basePicture]. */
-function pictureOf(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit): BoxView {
-  const box = pictureBox(sourceAspect, layer?.crop, layer?.rect, layer?.fit ?? postFit);
+function pictureOf(layer: PreviewVideoLayer | null, sourceAspect: number, postFit: EditFit, frameAspect: number): BoxView {
+  const box = pictureBox(sourceAspect, layer?.crop, layer?.rect, layer?.fit ?? postFit, frameAspect);
   // What is ON SCREEN, so `cover` inside a rectangle stops at the rectangle's edge rather than
   // running on across the frame - the render clips it there and the tints have to agree.
   return percent(layer?.rect ? intersect(box, layer.rect) : box);

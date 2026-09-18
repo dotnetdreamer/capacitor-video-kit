@@ -90,7 +90,18 @@
  * wins the `max()`, and each circle stands 12px clear of the picture's edge beside it.
  */
 .ve__round {
-  --ve-frame-w: min(calc(100cqw - var(--ve-stage-gutter)), calc(100cqh * 9 / 16));
+  /*
+   * The frame's width on screen, worked out the same way the preview works out its own: whichever
+   * of the two limits bites first. The two numbers are the POST's, written on the stage by the
+   * component, so a canvas turned on its side moves these circles with it; the fallback is the
+   * upright post this editor was built for.
+   */
+  --ve-frame-w-px: 720;
+  --ve-frame-h-px: 1280;
+  --ve-frame-w: min(
+    calc(100cqw - var(--ve-stage-gutter)),
+    calc(100cqh * var(--ve-frame-w-px) / var(--ve-frame-h-px))
+  );
   /* Half the frame, then out past its edge by the circle's own width and the 12px of air. */
   --ve-round-x: max(12px, calc(50% - var(--ve-frame-w) / 2 - 56px));
 
@@ -125,6 +136,43 @@
 
 .ve__round--next:disabled {
   opacity: 0.5;
+}
+
+/*
+ * The finished post's size, at the top of the canvas between the two circles.
+ *
+ * Centred rather than tucked beside one of them, because it is the only thing up there that is a
+ * STATEMENT rather than a way out: Back and Next are where a customer's thumbs already are, and
+ * this reads as a caption on the picture under it until they want to change it.
+ */
+.ve__quality {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  margin-top: 6px;
+  padding: 0 8px 0 12px;
+  border: 0;
+  border-radius: 16px;
+  background: rgba(58, 58, 58, 0.85);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ve__quality:active {
+  transform: translateX(-50%) scale(0.94);
+}
+
+.ve__quality ve-icon {
+  font-size: 14px;
 }
 
 /* --------------------------------------------------------------------------------- transport */

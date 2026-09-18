@@ -3,6 +3,9 @@ package net.dotnetdreamer.choisy.videocomposer
 import android.Manifest
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -17,6 +20,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
+import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
@@ -753,6 +757,78 @@ class VideoComposerPlugin : Plugin() {
                 .put("container", "mp4")
                 .put("voiceRecording", true),
         )
+    }
+
+    /**
+     * Which of the frames an editor would like to offer this phone's encoder will actually take.
+     *
+     * Asked of `MediaCodec` rather than assumed, because this is exactly the thing that differs
+     * between two phones running the same Android: every device at this minSdk has an H.264 encoder
+     * (it is a CDD requirement, which is why [capabilities] probes nothing), and what that encoder
+     * will do at 4K60 is a property of the chip in it.
+     *
+     * `areSizeAndRateSupported` is the question in one call and it is the right one: a size the
+     * encoder accepts at 30 fps may be beyond it at 60, and offering a customer a rung that fails
+     * at the end of their editing is the failure this exists to prevent. Sizes are tried BOTH WAYS
+     * ROUND, because an encoder advertises its capability in landscape and a portrait post asks for
+     * the same pixels standing up.
+     *
+     * Never rejects. A frame nothing can take is a row that says so, with a sentence a customer can
+     * read, which is what the ladder greys out.
+     */
+    @PluginMethod
+    fun encodeSupport(call: PluginCall) {
+        val frames = call.getArray("frames") ?: JSArray()
+        val answers = JSArray()
+        val capabilities = avcEncoderCapabilities()
+        for (i in 0 until frames.length()) {
+            val frame = frames.optJSONObject(i) ?: continue
+            val width = frame.optInt("width", 0)
+            val height = frame.optInt("height", 0)
+            val fps = frame.optInt("fps", 30)
+            val answer = JSObject().put("width", width).put("height", height).put("fps", fps)
+            when {
+                width <= 0 || height <= 0 -> answer.put("supported", false).put("reason", "That is not a frame.")
+                capabilities == null ->
+                    answer.put("supported", false).put("reason", "This phone has no H.264 encoder.")
+                // Either way round: the encoder states its limits in landscape, and a portrait post
+                // is the same pixels turned through a right angle.
+                capabilities.areSizeAndRateSupported(width, height, fps.toDouble()) ||
+                    capabilities.areSizeAndRateSupported(height, width, fps.toDouble()) ->
+                    answer.put("supported", true)
+                else ->
+                    answer
+                        .put("supported", false)
+                        .put("reason", "${minOf(width, height)}P at ${fps}fps is more than this phone's encoder can take.")
+            }
+            answers.put(answer)
+        }
+        call.resolve(JSObject().put("frames", answers))
+    }
+
+    /**
+     * What this phone's H.264 encoder can do, or null for the phone that somehow has none.
+     *
+     * The first ENCODER that offers AVC. `MediaCodecList.REGULAR_CODECS` leaves out the ones that
+     * are only there for special cases, which is what an editor wants to ask about, and the list is
+     * walked rather than `findEncoderForFormat`ed because a format needs a size before it can be
+     * asked - and the size is the question.
+     */
+    private fun avcEncoderCapabilities(): MediaCodecInfo.VideoCapabilities? {
+        return try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                .asSequence()
+                .filter { it.isEncoder }
+                .mapNotNull { info ->
+                    info.supportedTypes
+                        .firstOrNull { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true) }
+                        ?.let { runCatching { info.getCapabilitiesForType(it).videoCapabilities }.getOrNull() }
+                }
+                .firstOrNull()
+        } catch (error: Exception) {
+            Log.w(TAG, "could not read the encoder's capabilities", error)
+            null
+        }
     }
 
     /**

@@ -19,6 +19,42 @@ export interface VideoEditorHost {
   media?: EditorMediaHost;
   render?: EditorRenderHost;
   platform?: EditorPlatformHost;
+  /** What the finished post may be: which shapes, which resolutions, which rates. */
+  output?: EditorOutputOptions;
+}
+
+/**
+ * What this app allows the editor to offer for the finished post.
+ *
+ * It is the host's decision and not this package's, because the two apps using this editor want
+ * different things: one posts to a feed with a 100MB ceiling and has no business offering 4K, and
+ * the other builds 4K because that is the whole point of it. The editor used to answer that by
+ * quietly holding the bitrate down to one app's upload limit, which made the second app's 4K a
+ * bigger, softer 1080p and gave nobody anything to read about why.
+ *
+ * So the app says what it allows, in the plainest terms it has - a list of rungs - and the editor
+ * offers exactly those. What the DEVICE can encode is a separate question and is still asked of the
+ * device: an app may offer 4K on a phone that cannot encode it, and that chip is greyed out with
+ * its own reason.
+ *
+ * Every field is optional and an absent one means "all of them", so a host that says nothing gets
+ * the whole ladder, which is what every host got before this existed.
+ */
+export interface EditorOutputOptions {
+  /** Ids from `OUTPUT_QUALITIES`, in any order; the editor shows them smallest first. */
+  qualities?: readonly string[];
+  /** Frame rates from `OUTPUT_FPS`. */
+  fps?: readonly number[];
+  /** Shapes. An app whose feed is vertical may offer `['9:16']` and show no shape row at all. */
+  aspects?: readonly ('9:16' | '16:9')[];
+  /**
+   * The frame a post starts at, when the manifest it opens with does not name one.
+   *
+   * It must be one of the frames this host allows; one that is not is ignored in favour of the
+   * smallest rung that is, because a post that starts on a frame its own editor will not offer is a
+   * post whose quality sheet opens with nothing lit.
+   */
+  initial?: { width: number; height: number; fps: number };
 }
 
 /**
@@ -141,6 +177,19 @@ export class RenderFailedError extends Error {
   }
 }
 
+/**
+ * What one frame of a resolution ladder came back as. The plugin's `EncodeSupport` in every field
+ * that matters, restated here so the editor's host contract does not depend on the composer's.
+ */
+export interface EditorEncodeSupport {
+  width: number;
+  height: number;
+  fps: number;
+  supported: boolean;
+  /** Why not, written to be SHOWN: a greyed chip with nothing beside it reads as a broken app. */
+  reason?: string;
+}
+
 export interface EditorRenderHost {
   /** False greys nothing: the editor still edits, and Next hands back the manifest unrendered. */
   isSupported(): Promise<boolean>;
@@ -152,6 +201,17 @@ export interface EditorRenderHost {
    * only has to call `toComposeSpec` with the same raster context and run it.
    */
   render(request: RenderRequest): Promise<EditorSource>;
+
+  /**
+   * Which of these frames this device can actually encode.
+   *
+   * Optional, and a host that leaves it out is taken at its word that it can encode anything it is
+   * asked for - which is what every host meant before a customer could choose the frame at all.
+   * A host that HAS an answer should give it: a resolution offered and then refused at the end of
+   * the render is the one failure this question exists to prevent, and it is discovered after the
+   * editing rather than before it.
+   */
+  encodeSupport?(frames: readonly { width: number; height: number; fps: number }[]): Promise<readonly EditorEncodeSupport[]>;
 }
 
 export interface RenderRequest {
@@ -272,6 +332,15 @@ export interface ResolvedEditorHost {
   media: EditorMediaHost;
   render: EditorRenderHost | null;
   platform: ResolvedPlatformHost;
+  /** Every field filled in, so nothing downstream has to ask what an absent one meant. */
+  output: ResolvedOutputOptions;
+}
+
+export interface ResolvedOutputOptions {
+  qualities: readonly string[];
+  fps: readonly number[];
+  aspects: readonly ('9:16' | '16:9')[];
+  initial: { width: number; height: number; fps: number };
 }
 
 export interface ResolvedPlatformHost {

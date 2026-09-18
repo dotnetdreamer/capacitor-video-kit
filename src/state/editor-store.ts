@@ -1,6 +1,10 @@
 import { computed, signal } from '@preact/signals-core';
 import {
   DEFAULT_OUTPUT,
+  aspectOf,
+  qualityOf,
+  sameOutput,
+  type EditOutput,
   MAX_LAYERS,
   MAX_VIDEO_TRACKS,
   MIN_LAYER_MS,
@@ -1218,8 +1222,43 @@ export class EditorStore {
     this.host.platform.haptic(kind);
   }
 
+  /**
+   * The frame the post is rendered at: its shape, its size and its rate.
+   *
+   * A signal and no longer a constant. Everything that measures a SHAPE reads [frameAspect] and
+   * everything that measures a SIZE in pixels reads [outputWidth], and both follow the customer's
+   * choice the moment it is made - the preview's own box, a layer's bitmap, the picture-in-picture
+   * presets, and what a clip's rectangle means.
+   */
+  readonly output = computed<EditOutput>(() => this.manifest.value.output);
+
+  /** Width / height of the frame. What turns a fraction of it into a shape on screen. */
+  readonly frameAspect = computed(() => {
+    const output = this.output.value;
+    return output.height > 0 ? output.width / output.height : DEFAULT_OUTPUT.width / DEFAULT_OUTPUT.height;
+  });
+
   /** Output width in pixels, for sizing bitmaps in the preview. */
-  readonly outputWidth = DEFAULT_OUTPUT.width;
+  readonly outputWidth = computed(() => this.output.value.width);
+
+  /** The frame as one of the two shapes a customer picks between. */
+  readonly outputAspect = computed(() => aspectOf(this.output.value));
+
+  /** The rung of the resolution ladder the frame is on. */
+  readonly outputQuality = computed(() => qualityOf(this.output.value));
+
+  /**
+   * Chooses the frame. One undo step, because a shape and a size are one decision to the customer
+   * even when they change them one control at a time.
+   *
+   * Nothing else in the manifest is touched. Every rectangle and every layer centre is a FRACTION
+   * of the frame, so they all follow it: a layer halfway across a portrait post is halfway across
+   * the landscape one, which is what a customer moving between the two expects to see.
+   */
+  setOutput(output: EditOutput, label = 'Quality'): void {
+    if (sameOutput(this.manifest.value.output, output)) return;
+    this.commit(label, (m) => ({ ...m, output }));
+  }
 
   /**
    * Called by the shell when the editor leaves the document. Only the toast timer outlives the

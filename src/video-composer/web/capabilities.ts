@@ -101,6 +101,47 @@ export async function webCapabilities(): Promise<CapabilitiesResult> {
 }
 
 /**
+ * Whether this browser can encode a frame of exactly this size and rate.
+ *
+ * A probe per size, cached per size, because that is the question: `renderSupport` negotiates the
+ * codec at the DEFAULT frame and its answer says nothing about 4K, where the same browser may have
+ * no encoder at all. Mediabunny asks the platform rather than reading a user agent, so this is the
+ * real answer for this device.
+ *
+ * The recorder engine is the fallback and has no size negotiation of its own: `MediaRecorder` takes
+ * whatever the canvas is, and a canvas that big is the limit rather than the encoder. It is capped
+ * at 1080p here for a reason a customer would agree with - the recorder runs in REAL TIME, and
+ * four times the pixels on a browser already reduced to this is a wait nobody wants - and the
+ * reason is said rather than left as a grey chip.
+ */
+export async function encodableAt(width: number, height: number, fps: number): Promise<{ supported: boolean; reason?: string }> {
+  const key = `${width}x${height}@${fps}`;
+  const known = perSize.get(key);
+  if (known) return known;
+  const answer = probeSize(width, height, fps);
+  perSize.set(key, answer);
+  return answer;
+}
+
+const perSize = new Map<string, Promise<{ supported: boolean; reason?: string }>>();
+
+async function probeSize(width: number, height: number, fps: number): Promise<{ supported: boolean; reason?: string }> {
+  const support = await renderSupport();
+  if (!support.supported) return { supported: false, reason: support.reason };
+
+  if (support.engine === 'recorder') {
+    if (Math.min(width, height) > 1080) {
+      return { supported: false, reason: 'This browser records in real time and cannot manage more than 1080P.' };
+    }
+    return { supported: true };
+  }
+
+  const at = await probeWebCodecs(width, height, fps);
+  if (at) return { supported: true };
+  return { supported: false, reason: `This browser has no encoder for ${Math.min(width, height)}P.` };
+}
+
+/**
  * Whether a voiceover can be taken here. Both halves are needed and neither implies the other: a
  * page served over plain http has `MediaRecorder` and no `getUserMedia`, and a browser can expose
  * the microphone and still refuse to encode what comes out of it.

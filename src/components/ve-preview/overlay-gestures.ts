@@ -12,7 +12,6 @@ import {
   type EditRect,
 } from '../../editor';
 import {
-  FRAME_ASPECT,
   MIN_CLIP_RECT,
   MIN_CROP,
   orWhole,
@@ -976,7 +975,7 @@ export class OverlayGestures {
     if (!handle) return null;
     const overlay = this.store.selectedOverlay.value;
     const bitmap = overlay ? this.store.bitmaps.value.get(overlay.id) : undefined;
-    const box = overlay && bitmap ? layerBox(overlay, bitmap, this.store.outputWidth) : null;
+    const box = overlay && bitmap ? layerBox(overlay, bitmap, this.store.outputWidth.value) : null;
     if (!overlay || !box) return handle;
     const rect = this.stage.getBoundingClientRect();
     const mine = pressBelongsToLayer(
@@ -1015,7 +1014,7 @@ export class OverlayGestures {
       const overlay = overlays[i];
       if (overlay.kind === 'effect' || !this.isShown(overlay)) continue;
       const bitmap = this.store.bitmaps.value.get(overlay.id);
-      const box = bitmap ? layerBox(overlay, bitmap, this.store.outputWidth) : null;
+      const box = bitmap ? layerBox(overlay, bitmap, this.store.outputWidth.value) : null;
       if (box && hitsLayer(px, py, rect.width, rect.height, overlay, box)) {
         return {
           id: overlay.id,
@@ -1045,7 +1044,7 @@ export class OverlayGestures {
       cx: rect.x + rect.w / 2,
       cy: rect.y + rect.h / 2,
       widthFrac: rect.w,
-      aspect: (rect.w / rect.h) * FRAME_ASPECT,
+      aspect: (rect.w / rect.h) * this.store.frameAspect.value,
       rotationDeg: rect.rotationDeg ?? 0,
       isText: false,
     };
@@ -1073,7 +1072,7 @@ export class OverlayGestures {
     if (!clip) return null;
     const crop0 = orWhole(clip.crop);
     const rect0 = orWhole(clip.rect);
-    const picture = pictureBox(this.store.sourceAspect.value, crop0, rect0, this.store.clipFit(clip));
+    const picture = pictureBox(this.store.sourceAspect.value, crop0, rect0, this.store.clipFit(clip), this.store.frameAspect.value);
     // The angle is read once, here, for the same reason the mode is: a twist adds to where the
     // fingers landed, so re-reading it mid-pinch would compound the turn on every frame.
     return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source: sourceFrameBox(picture, crop0) };

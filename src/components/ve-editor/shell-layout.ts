@@ -25,6 +25,7 @@ export const PANEL_LAYOUT: Readonly<Record<EditorPanel, 'compact' | 'tall'>> = {
   adjust: 'compact',
   crop: 'compact',
   layout: 'compact',
+  quality: 'compact',
   effects: 'compact',
   speed: 'compact',
   volume: 'compact',

@@ -1,0 +1,93 @@
+/*
+ * Three rows of chips and two lines of text, inside the 320px a compact sheet is given. Everything
+ * shared with the other sheets - the centring, the horizontal clip - comes from `sheet-common.css`;
+ * only the padding and the chips are this sheet's own, because no two sheets agree on either.
+ */
+.qs {
+  padding: 4px 20px;
+}
+
+.qs__row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+/*
+ * The button is the 44px touch target and the pill inside it is what shows.
+ *
+ * `font-family` is named because a form control inside a shadow root inherits nothing from the page
+ * and no reset reaches in here: left out, every chip is set in the platform's own UI font while the
+ * lines under them are not.
+ */
+.qs__chip {
+  flex: 1 1 0;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 6px 4px;
+  border: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+  border-radius: 10px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.qs__chip--on {
+  border-color: var(--ve-accent, #a6ff2e);
+  color: var(--ve-accent, #a6ff2e);
+}
+
+/*
+ * A rung this device cannot encode. Dimmed rather than hidden, because a ladder that is missing its
+ * top two rungs on one phone and not on another looks like two different apps; the line under the
+ * row says which and why.
+ */
+.qs__chip:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* The shape chip's little diagram: the frame it stands for, at a glance. */
+.qs__shape {
+  width: 11px;
+  height: 18px;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+}
+
+.qs__shape--wide {
+  width: 22px;
+  height: 13px;
+}
+
+.qs__hint {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+.qs__chip--on .qs__hint {
+  color: inherit;
+}
+
+.qs__size {
+  margin: 2px 0 0;
+  text-align: center;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+.qs__note {
+  margin: 4px 0 0;
+  text-align: center;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--ve-faint, rgba(255, 255, 255, 0.35));
+}

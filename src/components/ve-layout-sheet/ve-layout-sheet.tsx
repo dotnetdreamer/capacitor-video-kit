@@ -5,7 +5,7 @@ import { closeWhenGone } from '../../bridge/deferred-effect';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { sameRect, type LayoutPresetId } from '../../editor';
 import { percentLabel } from '../ve-slider/slider-geometry';
-import { LAYOUT_CHIPS, matchLayoutPreset, type LayoutChip } from './layout-chips';
+import { layoutChips, matchLayoutPreset, type LayoutChip } from './layout-chips';
 
 /**
  * Where the two videos sit on the frame: split screen, a corner inset, or one over the other.
@@ -94,13 +94,17 @@ export class VeLayoutSheet {
     const trackRect = track.clips[0]?.rect ?? null;
     if (clips.some(clip => !sameRect(clip.rect, baseRect))) return null;
     if (track.clips.some(clip => !sameRect(clip.rect, trackRect))) return null;
-    return matchLayoutPreset(baseRect, trackRect);
+    return matchLayoutPreset(baseRect, trackRect, store.frameAspect.value);
   }
 
   render() {
     return this.watcher.run(() => {
       const track = this.ctx.store.layoutTrack.value;
       const activeId = this.activePreset();
+      // Drawn for the frame the post is on: the corner insets are square in pixels, so their
+      // diagrams are a different shape once the customer turns the canvas on its side.
+      const chips = layoutChips(this.ctx.store.frameAspect.value);
+      const output = this.ctx.store.output.value;
 
       return (
         <Host>
@@ -108,7 +112,7 @@ export class VeLayoutSheet {
             {track ? (
               <div class="sheet__content ls">
                 <div class="ls__presets" role="group" aria-label="Layout">
-                  {LAYOUT_CHIPS.map(chip => (
+                  {chips.map(chip => (
                     <button
                       type="button"
                       key={chip.id}
@@ -122,7 +126,11 @@ export class VeLayoutSheet {
                         The frame with both rectangles in it, so the row can be read without anyone
                         having to work out what "top left" means to a video that is already on screen.
                       */}
-                      <span class="ls__frame" aria-hidden="true">
+                      <span
+                        class="ls__frame"
+                        aria-hidden="true"
+                        style={{ '--ls-frame-w': String(output.width), '--ls-frame-h': String(output.height) }}
+                      >
                         <span class="ls__box ls__box--base" style={{ left: `${chip.base.x}%`, top: `${chip.base.y}%`, width: `${chip.base.w}%`, height: `${chip.base.h}%` }}></span>
                         <span
                           class="ls__box ls__box--track"

@@ -1,7 +1,6 @@
 import type { ComposeClip, ComposeOverlay, ComposePlacement, ComposeRect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
 
 import {
-  DEFAULT_OUTPUT,
   MIN_LAYER_MS,
   clamp,
   isFullFrameRect,
@@ -60,7 +59,7 @@ const UNKNOWN_TRACK_END_MS = 3_600_000;
  * sticker that cannot be loaded.
  *
  * @param uriByKey the file each clip key refers to (`file://` or `content://`).
- * @param raster the host's fonts, stickers and file URLs. Its `output` must be the frame this spec
+ * @param raster the host's fonts, stickers and file URLs. Its `output` must be `manifest.output`, the frame this spec
  *   renders (`DEFAULT_OUTPUT`), because every `wPx`/`hPx` is measured against it.
  */
 export async function toComposeSpec(
@@ -122,8 +121,8 @@ export async function toComposeSpec(
     pendingPostId: ids.pendingPostId,
     clips,
     output: {
-      ...DEFAULT_OUTPUT,
-      videoBitrate: videoBitrateFor(totalMs),
+      ...manifest.output,
+      videoBitrate: videoBitrateFor(manifest.output),
       audioBitrate: 128_000,
     },
     filter: resolveFilterOps(manifest),

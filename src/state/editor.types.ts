@@ -22,7 +22,8 @@ export type EditorPanel =
   | 'speed'
   | 'volume'
   | 'opacity'
-  | 'voiceover';
+  | 'voiceover'
+  | 'quality';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the

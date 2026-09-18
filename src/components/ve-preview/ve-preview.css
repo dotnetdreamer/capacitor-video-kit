@@ -22,8 +22,15 @@
  */
 .pv__stage {
   position: relative;
-  width: min(calc(100cqw - var(--ve-stage-gutter, 128px)), calc(100cqh * 9 / 16));
-  aspect-ratio: 9 / 16;
+  /*
+   * The frame's own two numbers, written on the element by the component; the fallback is the
+   * portrait post this editor was built for, so a `ve-preview` rendered before the first paint - or
+   * one used outside `ve-editor` - still comes out 9:16 rather than square.
+   */
+  --pv-frame-w: 720;
+  --pv-frame-h: 1280;
+  width: min(calc(100cqw - var(--ve-stage-gutter, 128px)), calc(100cqh * var(--pv-frame-w) / var(--pv-frame-h)));
+  aspect-ratio: var(--pv-frame-w) / var(--pv-frame-h);
   margin: 0 auto;
   /* Every touch on the stage is ours: drags, pinches and taps. The browser must not scroll or zoom. */
   touch-action: none;
@@ -33,7 +40,7 @@
 }
 
 .pv__stage--full {
-  width: min(100cqw, calc(100cqh * 9 / 16));
+  width: min(100cqw, calc(100cqh * var(--pv-frame-w) / var(--pv-frame-h)));
 }
 
 /*

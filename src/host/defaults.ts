@@ -1,6 +1,17 @@
+import {
+  DEFAULT_OUTPUT,
+  OUTPUT_FPS,
+  OUTPUT_QUALITIES,
+  aspectOf,
+  normaliseOutput,
+  outputFor,
+  qualityOf,
+} from '../editor';
+
 import { setEditorDebug } from './debug';
 import type {
   EditorInsets,
+  EditorOutputOptions,
   EditorKeyboardHost,
   EditorMediaHost,
   EditorSource,
@@ -8,6 +19,7 @@ import type {
   PickedImage,
   ReleaseRequest,
   ResolvedEditorHost,
+  ResolvedOutputOptions,
   ThumbnailRequest,
   VideoEditorHost,
 } from './host.types';
@@ -52,7 +64,43 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       measureInsets: platform?.measureInsets?.bind(platform) ?? null,
       debug: platform?.debug ?? false,
     },
+    output: resolveOutputOptions(host?.output),
   };
+}
+
+/**
+ * What the editor may offer for the finished post, with every absence filled in.
+ *
+ * An absent list means ALL of them, which is what every host meant before it could say otherwise.
+ * A list that names nothing this package has is treated as absent too rather than leaving the
+ * quality sheet with an empty row: a typo in an app's configuration should cost it the setting, not
+ * the feature.
+ */
+function resolveOutputOptions(options?: EditorOutputOptions): ResolvedOutputOptions {
+  const qualities = keep(
+    OUTPUT_QUALITIES.map((one) => one.id),
+    options?.qualities,
+  );
+  const fps = keep([...OUTPUT_FPS], options?.fps);
+  const aspects = keep(['9:16', '16:9'] as const, options?.aspects);
+  // The host's own starting frame, or the smallest thing it allows - never a frame its own editor
+  // would not offer, which would open the quality sheet with nothing lit.
+  const wanted = options?.initial ? normaliseOutput(options.initial) : DEFAULT_OUTPUT;
+  const allowed =
+    qualities.includes(qualityOf(wanted).id) && fps.includes(wanted.fps) && aspects.includes(aspectOf(wanted));
+  return {
+    qualities,
+    fps,
+    aspects,
+    initial: allowed ? wanted : outputFor(aspects[0], qualities[0], fps[0]),
+  };
+}
+
+/** The package's own list, narrowed to what the host asked for, in the package's order. */
+function keep<T>(all: readonly T[], wanted: readonly T[] | undefined): T[] {
+  if (!wanted?.length) return [...all];
+  const kept = all.filter((one) => wanted.includes(one));
+  return kept.length > 0 ? kept : [...all];
 }
 
 /** A browser picker already hands back a blob URL, which is loadable as it stands. */

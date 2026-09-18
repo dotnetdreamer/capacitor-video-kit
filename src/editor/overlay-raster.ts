@@ -11,6 +11,7 @@
  */
 
 import {
+  DEFAULT_OUTPUT,
   OVERLAY_BASE,
   type EditOverlay,
   type ImageOverlay,
@@ -169,16 +170,22 @@ export async function rasteriseOverlay(overlay: EditOverlay, ctx: RasterContext)
  * rounded so a pinch that settles within a thousandth reuses what is there. An effect's key has no
  * scale at all: it always covers the whole frame.
  */
-export function overlayRasterKey(overlay: EditOverlay): string {
+export function overlayRasterKey(overlay: EditOverlay, outputWidth: number = DEFAULT_OUTPUT.width): string {
   const scale = Math.round(overlay.scale * 1000) / 1000;
+  // The frame's WIDTH, because that is what every layer's size is a fraction of: the same sticker
+  // at the same scale is 245px across a 720 post and 734px across a 4K one. Without it here, a
+  // customer who chose a bigger frame kept the bitmaps drawn for the smaller one and posted a video
+  // whose text was soft - the one part of the picture that is drawn rather than filmed.
+  const frame = Math.round(outputWidth);
   switch (overlay.kind) {
     case 'text':
-      return JSON.stringify(['text', overlay.text, overlay.styleId, overlay.color, overlay.effect, overlay.align, scale]);
+      return JSON.stringify(['text', overlay.text, overlay.styleId, overlay.color, overlay.effect, overlay.align, scale, frame]);
     case 'sticker':
-      return JSON.stringify(['sticker', overlay.emoji, overlay.assetId, scale]);
+      return JSON.stringify(['sticker', overlay.emoji, overlay.assetId, scale, frame]);
     case 'image':
-      return JSON.stringify(['image', overlay.uri, scale]);
+      return JSON.stringify(['image', overlay.uri, scale, frame]);
     case 'effect':
+      // An effect is the whole frame at any size: it carries no bitmap of its own to redraw.
       return JSON.stringify(['effect', overlay.effectId]);
   }
 }

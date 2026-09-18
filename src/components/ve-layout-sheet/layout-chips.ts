@@ -1,4 +1,4 @@
-import { LAYOUT_PRESETS, sameRect, type EditRect, type LayoutPresetId } from '../../editor';
+import { layoutPresets, sameRect, type EditRect, type LayoutPreset, type LayoutPresetId } from '../../editor';
 import { orWhole } from '../../state/clip-framing';
 
 /**
@@ -33,13 +33,22 @@ function percentOf(rect: EditRect | undefined): ChipBox {
   return { x: box.x * 100, y: box.y * 100, w: box.w * 100, h: box.h * 100 };
 }
 
-/** The presets never change, so the diagrams are laid out once rather than per repaint. */
-export const LAYOUT_CHIPS: readonly LayoutChip[] = LAYOUT_PRESETS.map(preset => ({
-  id: preset.id,
-  label: preset.label,
-  base: percentOf(preset.base),
-  track: percentOf(preset.track),
-}));
+/**
+ * The diagrams, for a frame of this shape.
+ *
+ * A function and no longer a constant computed once: a corner inset is square in PIXELS, so the
+ * fractions that draw it differ between a portrait post and a landscape one, and a row of diagrams
+ * worked out at load time would go on showing the portrait ones after the customer had changed the
+ * shape. The row asks for them per repaint, which is a handful of multiplications.
+ */
+export function layoutChips(frameAspect: number): readonly LayoutChip[] {
+  return layoutPresets(frameAspect).map((preset: LayoutPreset) => ({
+    id: preset.id,
+    label: preset.label,
+    base: percentOf(preset.base),
+    track: percentOf(preset.track),
+  }));
+}
 
 /**
  * The preset a pair of rectangles is, or null for an arrangement none of them names - which a crop
@@ -51,8 +60,12 @@ export const LAYOUT_CHIPS: readonly LayoutChip[] = LAYOUT_PRESETS.map(preset => 
  * lost. A post saved by a build whose Swap moved the rectangles as well as the clips arrives in
  * exactly that state, and so does anyone who frames the two layers by hand.
  */
-export function matchLayoutPreset(baseRect: EditRect | null | undefined, trackRect: EditRect | null | undefined): LayoutPresetId | null {
-  const preset = LAYOUT_PRESETS.find(
+export function matchLayoutPreset(
+  baseRect: EditRect | null | undefined,
+  trackRect: EditRect | null | undefined,
+  frameAspect: number,
+): LayoutPresetId | null {
+  const preset = layoutPresets(frameAspect).find(
     candidate => (sameRect(candidate.base, baseRect) && sameRect(candidate.track, trackRect)) || (sameRect(candidate.base, trackRect) && sameRect(candidate.track, baseRect)),
   );
   return preset?.id ?? null;

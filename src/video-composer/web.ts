@@ -4,6 +4,8 @@ import { describe, extensionOf, fileUri, putFile, resolve, safeSegment } from '.
 
 import type {
   CapabilitiesResult,
+  EncodeFrame,
+  EncodeSupport,
   CleanupOptions,
   ComposeSpec,
   JobIdOptions,
@@ -19,7 +21,7 @@ import type {
   VoiceRecordingResult,
 } from './definitions';
 import type { VideoComposerPlugin } from './plugin';
-import { webCapabilities } from './web/capabilities';
+import { encodableAt, webCapabilities } from './web/capabilities';
 import { cancelJob, cleanupPendingPost, jobState, startJob, sweepJobs } from './web/jobs';
 import { probeMedia } from './web/media';
 import { validateSpec } from './web/spec';
@@ -125,6 +127,16 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
 
   capabilities(): Promise<CapabilitiesResult> {
     return webCapabilities();
+  }
+
+  async encodeSupport({ frames }: { frames: EncodeFrame[] }): Promise<{ frames: EncodeSupport[] }> {
+    const answers = await Promise.all(
+      (frames ?? []).map(async (frame) => {
+        const { supported, reason } = await encodableAt(frame.width, frame.height, frame.fps);
+        return { ...frame, supported, ...(reason ? { reason } : {}) };
+      }),
+    );
+    return { frames: answers };
   }
 
   /**

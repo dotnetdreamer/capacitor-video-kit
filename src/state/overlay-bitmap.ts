@@ -39,13 +39,35 @@ interface StaleLayer {
  */
 export class OverlayBitmaps {
   /** The one context the editor draws with. The render builds its own from the same factory. */
-  readonly rasterContext: RasterContext;
+  /**
+   * The context the CURRENT frame is drawn with.
+   *
+   * Rebuilt whenever the frame changes rather than made once, because `output` is what every
+   * layer's pixel size is worked out from: a sticker is a fraction of the frame's WIDTH, so the
+   * same layer is a different bitmap on a 720 post and a 4K one.
+   */
+  get rasterContext(): RasterContext {
+    const width = this.store.outputWidth.value;
+    if (!this.context || this.context.output.width !== width) {
+      this.context = createEditorRasterContext(this.host, this.store.manifest.value.output);
+    }
+    return this.context;
+  }
+
+  private context: RasterContext | null = null;
 
   /**
-   * Only a new overlays array wakes this. Trims, filters and sound replace the manifest but keep
-   * its `overlays` by reference, and should not cost a pass.
+   * What wakes a pass: a new overlays array, or a new frame to draw them for.
+   *
+   * The array BY REFERENCE, because trims, filters and sound replace the manifest and keep it, and
+   * should not cost a pass. The frame's width beside it because it is the other half of what a
+   * bitmap is: the same layer at the same scale is a different number of pixels on a 4K post, and a
+   * pass woken only by the array would have left every layer drawn for the frame before last.
    */
-  private readonly overlays = computed(() => this.store.manifest.value.overlays);
+  private readonly work = computed(() => ({
+    overlays: this.store.manifest.value.overlays,
+    width: this.store.outputWidth.value,
+  }));
 
   private busy = false;
   private rerun = false;
@@ -66,9 +88,8 @@ export class OverlayBitmaps {
 
   constructor(
     private readonly store: EditorStore,
-    host: ResolvedEditorHost,
+    private readonly host: ResolvedEditorHost,
   ) {
-    this.rasterContext = createEditorRasterContext(host);
 
     /*
      * `subscribe` rather than an `effect` whose body opens with a bare `this.overlays.value;`.
@@ -88,7 +109,7 @@ export class OverlayBitmaps {
      * here: `schedule()` either starts the one pass or marks that another is wanted, and the pass
      * itself is what does the work.
      */
-    this.stopWatching = this.overlays.subscribe(() => this.schedule());
+    this.stopWatching = this.work.subscribe(() => this.schedule());
   }
 
   /**
@@ -142,7 +163,8 @@ export class OverlayBitmaps {
     const overlays = this.store.manifest.value.overlays;
     this.forgetRemoved(new Set(overlays.map((overlay) => overlay.id)));
 
-    const layers: StaleLayer[] = overlays.map((overlay) => ({ overlay, key: overlayRasterKey(overlay) }));
+    const width = this.store.outputWidth.value;
+    const layers: StaleLayer[] = overlays.map((overlay) => ({ overlay, key: overlayRasterKey(overlay, width) }));
     for (const { overlay, key } of layers) {
       if (this.seenKeys.get(overlay.id) !== key) {
         this.seenKeys.set(overlay.id, key);
@@ -202,7 +224,7 @@ export class OverlayBitmaps {
     if (!current) return;
     // An undo during the draw can have put the layer back to the look its existing bitmap was drawn
     // for; the bitmap just finished is for a state that no longer exists and must not replace it.
-    if (this.store.bitmaps.value.get(id)?.key === overlayRasterKey(current)) return;
+    if (this.store.bitmaps.value.get(id)?.key === overlayRasterKey(current, this.store.outputWidth.value)) return;
 
     const bitmap: OverlayBitmap = { ...raster, key, scale: drawn.scale };
     // A signal write repaints the preview by itself, even this far after an image load resolved.

@@ -1,6 +1,7 @@
 import Capacitor
 import Foundation
 import UIKit
+import VideoToolbox
 
 /// The bridge surface of the video composer. Argument reading, rejections and event forwarding
 /// only: every decision lives in `ComposeSpecParser`, `JobRegistry`, `JobFolders`, `Thumbnailer` or
@@ -28,6 +29,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "startVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "capabilities", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "encodeSupport", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "systemInsets", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "prepareJob", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cleanup", returnType: CAPPluginReturnPromise),
@@ -236,6 +238,66 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
             "container": "mp4",
             "voiceRecording": true,
         ])
+    }
+
+    /// Which of the frames an editor would like to offer this device's encoder will actually take.
+    ///
+    /// iOS has no table to read, unlike Android's `MediaCodecInfo`: the only honest way to find out
+    /// whether VideoToolbox will encode 4K60 on THIS device is to ask it for that encoder and see
+    /// whether it hands one over. So that is what happens - a compression session is created at the
+    /// size and thrown away again, which allocates nothing on the GPU because no frame is ever fed
+    /// to it and takes well under a millisecond per rung.
+    ///
+    /// The rate is not part of what a session is created with, so a frame's `fps` is carried
+    /// through untouched rather than probed: an encoder that takes a size takes it at both rates on
+    /// every device Apple ships, and the expensive half of 60 fps is the number of frames rather
+    /// than the encoder's willingness to accept them.
+    ///
+    /// Never rejects. A frame this device will not take is a row that says so, with a sentence for
+    /// the customer, which is what the ladder greys out.
+    @objc func encodeSupport(_ call: CAPPluginCall) {
+        let frames = call.getArray("frames", JSObject.self) ?? []
+        var answers: [JSObject] = []
+        for frame in frames {
+            let width = frame["width"] as? Int ?? 0
+            let height = frame["height"] as? Int ?? 0
+            let fps = frame["fps"] as? Int ?? 30
+            var answer: JSObject = ["width": width, "height": height, "fps": fps]
+            if width <= 0 || height <= 0 {
+                answer["supported"] = false
+                answer["reason"] = "That is not a frame."
+            } else if canEncode(width: width, height: height) {
+                answer["supported"] = true
+            } else {
+                answer["supported"] = false
+                answer["reason"] = "\(min(width, height))P is more than this device's encoder can take."
+            }
+            answers.append(answer)
+        }
+        call.resolve(["frames": answers])
+    }
+
+    /// Whether VideoToolbox will give us an H.264 encoder at this size, asked by asking for one.
+    ///
+    /// The session is invalidated straight away: it is the CREATION that answers the question, and
+    /// a session left open holds an encoder the rest of the system could be using.
+    private func canEncode(width: Int, height: Int) -> Bool {
+        var session: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: Int32(width),
+            height: Int32(height),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: nil,
+            refcon: nil,
+            compressionSessionOut: &session)
+        if let session {
+            VTCompressionSessionInvalidate(session)
+        }
+        return status == noErr && session != nil
     }
 
     /// How much of the WebView the system bars actually cover.

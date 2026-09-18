@@ -10,6 +10,8 @@ import type { PluginListenerHandle } from '@capacitor/core';
 
 import type {
   CapabilitiesResult,
+  EncodeFrame,
+  EncodeSupport,
   CleanupOptions,
   ComposeCompletedEvent,
   ComposeFailedEvent,
@@ -52,6 +54,25 @@ export interface VideoComposerPlugin {
   stopVoiceRecording(): Promise<VoiceRecordingResult>;
 
   capabilities(): Promise<CapabilitiesResult>;
+
+  /**
+   * Which of these frames this platform can actually encode, asked all at once.
+   *
+   * It exists because a resolution ladder is a promise an editor cannot keep on its own: a phone
+   * from four years ago has no 4K encoder, a browser without WebCodecs has whatever `MediaRecorder`
+   * will take, and the honest answer differs per device rather than per platform. An editor asks
+   * before it offers, so a customer is never given a choice that fails at the last step - after the
+   * editing, which is the worst moment to find out.
+   *
+   * One call for the whole ladder rather than one per rung: every implementation probes the same
+   * encoder for all of them, and the answers are cached for the life of the process because they
+   * cannot change while the app is running.
+   *
+   * Never rejects for an unsupported frame. A frame nothing can encode is a `supported: false` row
+   * with a reason on it, which is an answer; a rejection would be the plugin saying it could not
+   * find out, and there is no such case.
+   */
+  encodeSupport(options: { frames: EncodeFrame[] }): Promise<{ frames: EncodeSupport[] }>;
 
   /**
    * How much of the WebView the system bars cover, for a full-screen editor laying tools along the

@@ -14,7 +14,7 @@ import type { FilterOp } from '../video-composer/definitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 6;
+export const MANIFEST_VERSION = 7;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -293,12 +293,115 @@ export interface EditManifest {
   music: EditMusic | null;
   /** Sorted by `startMs`, never overlapping. */
   voiceovers: EditVoiceover[];
+  /**
+   * The frame the post is rendered at, and the frame every fraction here is a fraction OF.
+   *
+   * Always present, like [videoTracks] and for the same reason: every reader needs it, an absent
+   * one would have to be defaulted at each of them, and a post that carries [DEFAULT_OUTPUT]
+   * explicitly is the post that was always being made. A manifest written before version 7 has no
+   * `output` key and [normaliseManifest] gives it that same default, so it reopens unchanged.
+   */
+  output: EditOutput;
 }
 
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * The shape and size of the finished post.
+ *
+ * It is the frame every fraction in this manifest is a fraction OF: a clip's rectangle, a layer's
+ * centre, a crop. Changing it therefore changes what the whole post means, which is why it lives
+ * here beside them rather than being handed to the render at the end.
+ */
+export interface EditOutput {
+  width: number;
+  height: number;
+  fps: number;
+}
+
 /** 720x1280 at 30 fps - portrait, and what a vertical feed plays. */
-export const DEFAULT_OUTPUT = { width: 720, height: 1280, fps: 30 } as const;
+export const DEFAULT_OUTPUT: EditOutput = { width: 720, height: 1280, fps: 30 };
+
+/** Which way up the post is. Nothing else: a frame is one of these two shapes. */
+export type OutputAspect = '9:16' | '16:9';
+
+/**
+ * A resolution, named by its SHORT side.
+ *
+ * The short side and not the long one, because the same choice has to name a portrait frame and a
+ * landscape one: `1080p` is 1080x1920 standing up and 1920x1080 lying down, and a ladder written in
+ * long sides would have to be read backwards for one of the two.
+ */
+export interface OutputQuality {
+  id: string;
+  label: string;
+  /** The frame's shorter side in pixels. Even, as every H.264 encoder requires. */
+  shortSide: number;
+}
+
+/**
+ * What a customer may choose, smallest first.
+ *
+ * Whether a given platform can actually ENCODE each of them is a different question, asked of the
+ * composer rather than assumed here: a phone from four years ago refuses 4K, a browser without an
+ * H.264 encoder refuses everything above what its fallback can manage, and the sheet greys out what
+ * comes back unsupported instead of offering a choice that would fail at the last step.
+ */
+export const OUTPUT_QUALITIES: readonly OutputQuality[] = [
+  { id: '720p', label: '720P', shortSide: 720 },
+  { id: '1080p', label: '1080P', shortSide: 1080 },
+  { id: '2.7k', label: '2.7K', shortSide: 1520 },
+  { id: '4k', label: '4K', shortSide: 2160 },
+];
+
+/** The frame rates on offer. 60 is smoother and twice the bitrate for the same picture. */
+export const OUTPUT_FPS = [30, 60] as const;
+
+/** The frame those three choices come to. */
+export function outputFor(aspect: OutputAspect, qualityId: string, fps: number): EditOutput {
+  const quality = OUTPUT_QUALITIES.find((one) => one.id === qualityId) ?? OUTPUT_QUALITIES[0];
+  const short = quality.shortSide;
+  // 16:9 of a 1080 short side is 1920, and both sides stay even because 16/9 of any multiple of 9
+  // is a whole number and these are all multiples of 8.
+  const long = Math.round((short * 16) / 9 / 2) * 2;
+  const upright = aspect === '9:16';
+  return { width: upright ? short : long, height: upright ? long : short, fps: nearestFps(fps) };
+}
+
+/** Which way up a frame is. A square one counts as upright, as the default is. */
+export function aspectOf(output: EditOutput): OutputAspect {
+  return output.width > output.height ? '16:9' : '9:16';
+}
+
+/** The quality a frame is on, by its short side, or the nearest one below it. */
+export function qualityOf(output: EditOutput): OutputQuality {
+  const short = Math.min(output.width, output.height);
+  let best = OUTPUT_QUALITIES[0];
+  for (const quality of OUTPUT_QUALITIES) {
+    if (quality.shortSide <= short + 1) best = quality;
+  }
+  return best;
+}
+
+function nearestFps(fps: number): number {
+  return OUTPUT_FPS.reduce((best, one) => (Math.abs(one - fps) < Math.abs(best - fps) ? one : best), OUTPUT_FPS[0]);
+}
+
+/** A frame read off a stored post or a host's props, held to something an engine can encode. */
+export function normaliseOutput(value: unknown): EditOutput {
+  if (!value || typeof value !== 'object') return { ...DEFAULT_OUTPUT };
+  const raw = value as Record<string, unknown>;
+  // Even sides, because H.264 refuses an odd one and the failure comes at the end of the render.
+  const width = evenWithin(num(raw['width'], DEFAULT_OUTPUT.width));
+  const height = evenWithin(num(raw['height'], DEFAULT_OUTPUT.height));
+  return { width, height, fps: nearestFps(num(raw['fps'], DEFAULT_OUTPUT.fps)) };
+}
+
+/** The sides a frame may have: not zero, not larger than the tallest rung of the ladder, and even. */
+function evenWithin(value: number): number {
+  const longest = Math.round((OUTPUT_QUALITIES[OUTPUT_QUALITIES.length - 1].shortSide * 16) / 9);
+  return Math.round(clamp(value, 16, longest) / 2) * 2;
+}
 
 /**
  * The size of each layer kind at `scale` 1, as fractions of the OUTPUT width. The rasteriser draws
@@ -438,17 +541,57 @@ export const TEXT_COLORS = [
   '#4b1b5a',
 ];
 
-/** The client-side upload ceiling a render has to stay under. */
+/**
+ * A ceiling one particular host happens to have, kept only because an app may want the number.
+ *
+ * It is NOT applied to anything here. A render size is the host's policy and not this package's:
+ * one app posts to a server with a 100MB limit and offers 720p and 1080p, another builds 4K for a
+ * different purpose entirely, and a bitrate quietly held down to somebody else's ceiling would make
+ * the second app's 4K a bigger, softer 1080p. What a host allows is [EditorOutputOptions], and the
+ * editor offers exactly that.
+ */
 export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /**
- * Enough bitrate to look good, never so much that the finished file cannot be uploaded. The cap
- * only bites on long timelines: at 30 seconds the ladder is still above 4 Mbps.
+ * Enough bitrate to make a frame of THIS size look like the source, and nothing to do with how big
+ * the resulting file is. A host that has a size limit expresses it by choosing which rungs of the
+ * ladder to offer, which is a decision it can explain to its customer; a bitrate secretly reduced
+ * to fit somebody's upload endpoint is one nobody can see and everybody blames the encoder for.
  */
-export function videoBitrateFor(totalMs: number): number {
-  const seconds = Math.max(1, totalMs / 1000);
-  const budget = Math.floor((0.85 * MAX_UPLOAD_BYTES * 8) / seconds);
-  return Math.max(1_200_000, Math.min(4_000_000, budget));
+export function videoBitrateFor(output: EditOutput = DEFAULT_OUTPUT): number {
+  return Math.max(1_200_000, idealBitrate(output));
+}
+
+/**
+ * Bits per pixel per frame: what H.264 needs to keep a frame of THIS size looking like the source.
+ *
+ * A rate is a property of the frame and not a number that can be fixed once. 4 Mbps is generous at
+ * 720x1280 and is a smear at 4K, which is the whole reason this exists: the old ceiling was a
+ * constant, and offering a customer 4K while handing the encoder a 720p budget would have given
+ * them a bigger, softer video and called it higher quality.
+ *
+ * A twelfth of a bit per pixel is around the knee of the curve for H.264 at these sizes: 2.3 Mbps
+ * at 720x1280/30, 5.2 at 1080x1920/30, 41 at 4K/60.
+ */
+const BITS_PER_PIXEL = 1 / 12;
+
+function idealBitrate(output: EditOutput): number {
+  const pixels = Math.max(1, output.width * output.height);
+  return Math.round(pixels * Math.max(1, output.fps) * BITS_PER_PIXEL);
+}
+
+/**
+ * Roughly how big the finished file will be, for the sheet to show before anyone commits to it.
+ *
+ * Video plus the 128 kbps of audio every spec carries, which is small enough at these rates to be
+ * noise and large enough on a long post to be worth not pretending about. It is an estimate in the
+ * honest sense: a still shot comes out well under it and a handheld one in a busy room comes close,
+ * because that is what a bitrate MEANS to an encoder that is allowed to spend less.
+ */
+export function estimatedBytes(totalMs: number, output: EditOutput): number {
+  const seconds = Math.max(0, totalMs / 1000);
+  const bits = (videoBitrateFor(output) + 128_000) * seconds;
+  return Math.round(bits / 8);
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -909,6 +1052,11 @@ export function normalisePlacement(value: unknown): EditPlacement | undefined {
   return deg % 360 === 0 ? rect : { ...rect, rotationDeg: deg };
 }
 
+/** Whether two frames are the same frame. */
+export function sameOutput(a: EditOutput, b: EditOutput): boolean {
+  return a.width === b.width && a.height === b.height && a.fps === b.fps;
+}
+
 /** A rectangle's angle in clockwise degrees, with an absent one counting as upright. */
 export function rectRotationDeg(rect: EditPlacement | null | undefined): number {
   return rect?.rotationDeg ?? 0;
@@ -994,6 +1142,7 @@ export function emptyManifest(): EditManifest {
     overlays: [],
     music: null,
     voiceovers: [],
+    output: { ...DEFAULT_OUTPUT },
   };
 }
 
@@ -1138,6 +1287,10 @@ export function normaliseManifest(input: unknown): EditManifest {
     overlays,
     music,
     voiceovers: voiceovers.sort((a, b) => a.startMs - b.startMs),
+    // Absent is [DEFAULT_OUTPUT], which is the frame every manifest written before version 7 was
+    // rendered at - so one of those reopens at the size it was always going to be, and its
+    // fractions go on meaning what they meant.
+    output: normaliseOutput(raw['output']),
   };
 }
 
@@ -1227,6 +1380,10 @@ export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips' | 'videoTrac
  */
 export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<string, number>): boolean {
   if (manifest.clips.length !== 1) return false;
+  // A frame that is not this package's own is a render by itself. Posting the file on disk instead
+  // would hand back the shape and the size THAT happens to be, which is the one thing a customer
+  // who chose a frame said it was not.
+  if (!sameOutput(manifest.output, DEFAULT_OUTPUT)) return false;
   // A second layer is two pictures at once, which no single file on disk is, however little was
   // done to the clip underneath it.
   if (manifest.videoTracks.length > 0) return false;

@@ -390,6 +390,25 @@ export interface CapabilitiesResult {
   voiceRecording?: boolean;
 }
 
+/** One frame an editor would like to offer: the size and the rate, with no bitrate decided yet. */
+export interface EncodeFrame {
+  width: number;
+  height: number;
+  fps: number;
+}
+
+/**
+ * Whether this platform can encode that frame, and a sentence for a customer when it cannot.
+ *
+ * `reason` is written to be SHOWN. A resolution that is greyed out with nothing beside it reads as
+ * a bug in the app, and "4K is more than this phone's encoder can take" reads as the truth, which
+ * is a better thing for someone to be told before they spend a minute editing.
+ */
+export interface EncodeSupport extends EncodeFrame {
+  supported: boolean;
+  reason?: string;
+}
+
 export interface SystemInsetsResult {
   /** CSS pixels of the WebView covered by the status bar. */
   top: number;

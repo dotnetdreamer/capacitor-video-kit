@@ -52,14 +52,19 @@
 }
 
 /*
- * The output's own 9:16, so a half of the frame looks like a half of the video and not like a half
- * of some other shape - the whole point of drawing the layout rather than naming it.
+ * The output's OWN shape, so a half of the frame looks like a half of the video and not like a half
+ * of some other shape - the whole point of drawing the layout rather than naming it. The two
+ * numbers come from the sheet, which reads them off the post; the fallback is the upright frame
+ * this editor was built for.
  */
 .ls__frame {
+  --ls-frame-w: 720;
+  --ls-frame-h: 1280;
   position: relative;
   display: block;
-  width: 26px;
-  height: 46px;
+  /* The longer side is 46px whichever side that is, so neither shape overruns the chip. */
+  width: min(46px, calc(46px * var(--ls-frame-w) / var(--ls-frame-h)));
+  height: min(46px, calc(46px * var(--ls-frame-h) / var(--ls-frame-w)));
   border: 1px solid currentColor;
   border-radius: 3px;
   overflow: hidden;

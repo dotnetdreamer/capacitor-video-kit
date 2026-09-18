@@ -45,11 +45,16 @@ export interface LayoutPreset {
 }
 
 /**
- * The output frame's shape, which is what makes a picture-in-picture window actually square. A
- * square in output pixels is not a square in the 0..1 coordinates a rectangle is stored in, and on
- * a 720x1280 post the difference is a window nearly twice as tall as it is wide.
+ * The output frame's shape, for a post nobody has chosen one for. It is what makes a
+ * picture-in-picture window actually square: a square in output pixels is not a square in the 0..1
+ * coordinates a rectangle is stored in, and on a 720x1280 post the difference is a window nearly
+ * twice as tall as it is wide.
+ *
+ * Passed in wherever it is used rather than read from here, because the frame is a choice now. The
+ * same corner inset that is square on a portrait post is a squat letterbox on a landscape one if
+ * the arithmetic goes on believing this number.
  */
-const FRAME_ASPECT = DEFAULT_OUTPUT.width / DEFAULT_OUTPUT.height;
+const DEFAULT_FRAME_ASPECT = DEFAULT_OUTPUT.width / DEFAULT_OUTPUT.height;
 
 /** The side of a picture-in-picture window, as a fraction of the frame's WIDTH. */
 const PIP_SIDE = 0.36;
@@ -62,9 +67,9 @@ const PIP_INSET = 0.04;
  * the one along the top or bottom edge looks the same size as the one down the side rather than
  * being stretched by the frame it is on.
  */
-function pipRect(right: boolean, bottom: boolean): EditPlacement {
-  const h = round4(PIP_SIDE * FRAME_ASPECT);
-  const insetY = round4(PIP_INSET * FRAME_ASPECT);
+function pipRect(right: boolean, bottom: boolean, frameAspect: number): EditPlacement {
+  const h = round4(PIP_SIDE * frameAspect);
+  const insetY = round4(PIP_INSET * frameAspect);
   return {
     x: right ? round4(1 - PIP_INSET - PIP_SIDE) : PIP_INSET,
     y: bottom ? round4(1 - insetY - h) : insetY,
@@ -77,30 +82,33 @@ function pipRect(right: boolean, bottom: boolean): EditPlacement {
  * Every arrangement a customer can pick, in the order a picker shows them. `full` comes first
  * because it is where a post starts and what every other one is a departure from.
  */
-export const LAYOUT_PRESETS: LayoutPreset[] = [
-  { id: 'full', label: 'Full frame' },
-  {
-    id: 'splitTopBottom',
-    label: 'Top and bottom',
-    base: { x: 0, y: 0, w: 1, h: 0.5 },
-    track: { x: 0, y: 0.5, w: 1, h: 0.5 },
-    fit: 'cover',
-  },
-  {
-    id: 'splitLeftRight',
-    label: 'Side by side',
-    base: { x: 0, y: 0, w: 0.5, h: 1 },
-    track: { x: 0.5, y: 0, w: 0.5, h: 1 },
-    fit: 'cover',
-  },
-  { id: 'pipTL', label: 'Corner top left', track: pipRect(false, false), fit: 'cover' },
-  { id: 'pipTR', label: 'Corner top right', track: pipRect(true, false), fit: 'cover' },
-  { id: 'pipBL', label: 'Corner bottom left', track: pipRect(false, true), fit: 'cover' },
-  { id: 'pipBR', label: 'Corner bottom right', track: pipRect(true, true), fit: 'cover' },
-];
+export function layoutPresets(frameAspect: number = DEFAULT_FRAME_ASPECT): LayoutPreset[] {
+  return [
+    { id: 'full', label: 'Full frame' },
+    {
+      id: 'splitTopBottom',
+      label: 'Top and bottom',
+      base: { x: 0, y: 0, w: 1, h: 0.5 },
+      track: { x: 0, y: 0.5, w: 1, h: 0.5 },
+      fit: 'cover',
+    },
+    {
+      id: 'splitLeftRight',
+      label: 'Side by side',
+      base: { x: 0, y: 0, w: 0.5, h: 1 },
+      track: { x: 0.5, y: 0, w: 0.5, h: 1 },
+      fit: 'cover',
+    },
+    { id: 'pipTL', label: 'Corner top left', track: pipRect(false, false, frameAspect), fit: 'cover' },
+    { id: 'pipTR', label: 'Corner top right', track: pipRect(true, false, frameAspect), fit: 'cover' },
+    { id: 'pipBL', label: 'Corner bottom left', track: pipRect(false, true, frameAspect), fit: 'cover' },
+    { id: 'pipBR', label: 'Corner bottom right', track: pipRect(true, true, frameAspect), fit: 'cover' },
+  ];
+}
 
-export function layoutPreset(id: LayoutPresetId): LayoutPreset {
-  return LAYOUT_PRESETS.find((preset) => preset.id === id) ?? LAYOUT_PRESETS[0];
+export function layoutPreset(id: LayoutPresetId, frameAspect?: number): LayoutPreset {
+  const presets = layoutPresets(frameAspect);
+  return presets.find((preset) => preset.id === id) ?? presets[0];
 }
 
 /**
@@ -126,7 +134,9 @@ export function applyLayoutPreset(
 ): EditManifest {
   const track = findVideoTrack(manifest, trackId);
   if (!track) return manifest;
-  const preset = layoutPreset(presetId);
+  // The manifest's own frame: a corner inset is square in PIXELS, and the fractions that make it so
+  // are different on a portrait post and a landscape one.
+  const preset = layoutPreset(presetId, manifest.output.width / manifest.output.height);
   // Spelled `null` rather than passed straight through: a framing patch reads `null` as "put this
   // back the way it was", and a preset with no rectangle of its own is asking for exactly that.
   const fit = preset.fit ?? null;

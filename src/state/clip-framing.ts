@@ -40,15 +40,15 @@ export const MIN_CROP = 0.1;
  */
 export const MIN_CLIP_RECT = 0.12;
 
-/** The output frame's shape, which is what `contain` and `cover` letterbox against. */
-const FRAME_W = DEFAULT_OUTPUT.width;
-const FRAME_H = DEFAULT_OUTPUT.height;
-
 /**
- * The frame's own width / height. A box given in fractions of the frame is square in FRACTIONS long
- * before it is square on screen, so anything measuring a shape has to put this back in.
+ * The frame's own width / height, for a post nobody has chosen a shape for.
+ *
+ * A box given in fractions of the frame is square in FRACTIONS long before it is square on screen,
+ * so anything measuring a SHAPE has to put this back in. It is passed in wherever that happens
+ * rather than read from here, because the frame is a choice: the same rectangle is a different
+ * shape on a 9:16 post and a 16:9 one, and a constant would have quietly drawn the old one.
  */
-export const FRAME_ASPECT = FRAME_W / FRAME_H;
+export const DEFAULT_FRAME_ASPECT = DEFAULT_OUTPUT.width / DEFAULT_OUTPUT.height;
 
 /** A box on the frame, in fractions of it. The same four numbers an [EditRect] holds. */
 export interface FrameBox {
@@ -84,6 +84,7 @@ export function pictureBox(
   crop: EditRect | null | undefined,
   rect: EditRect | null | undefined,
   fit: EditFit,
+  frameAspect: number = DEFAULT_FRAME_ASPECT,
 ): FrameBox {
   const dest = orWhole(rect);
   if (!(sourceAspect > 0)) return { ...dest };
@@ -91,15 +92,18 @@ export function pictureBox(
   // The cropped picture's shape. A crop that is wider than it is tall, as a fraction of the source,
   // makes the picture wider than the source was.
   const aspect = sourceAspect * (kept.w / kept.h);
-  const destW = dest.w * FRAME_W;
-  const destH = dest.h * FRAME_H;
+  // The frame's width and height in any units at all, as long as their ratio is right: everything
+  // below divides back out by the same two numbers, so a frame of `frameAspect` by 1 gives the same
+  // answer as one of 720 by 1280 and needs no pixel count to be known here.
+  const destW = dest.w * frameAspect;
+  const destH = dest.h;
   const w = fit === 'cover' ? Math.max(destW, destH * aspect) : Math.min(destW, destH * aspect);
   const h = w / aspect;
   return {
-    x: dest.x + (destW - w) / 2 / FRAME_W,
-    y: dest.y + (destH - h) / 2 / FRAME_H,
-    w: w / FRAME_W,
-    h: h / FRAME_H,
+    x: dest.x + (destW - w) / 2 / frameAspect,
+    y: dest.y + (destH - h) / 2,
+    w: w / frameAspect,
+    h,
   };
 }
 

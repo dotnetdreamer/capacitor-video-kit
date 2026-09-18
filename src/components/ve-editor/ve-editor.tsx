@@ -2,7 +2,7 @@ import { Component, Element, Event, type EventEmitter, Host, Prop, State } from 
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { isUntouched, reconcileManifest, uniqueClipKeys, type EditManifest } from '../../editor';
+import { isUntouched, normaliseOutput, qualityOf, reconcileManifest, uniqueClipKeys, type EditManifest } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import { resolveEditorHost } from '../../host/defaults';
 import { installEditorFonts } from '../../host/fonts';
@@ -295,7 +295,18 @@ export class VeEditor {
       sources.map(source => source.key),
       store.durations.value,
     );
-    store.load(sources, store.durations.value, manifest);
+    /*
+     * A post that has never been given a frame starts on the host's, not on this package's.
+     *
+     * Tested on the INCOMING manifest rather than the reconciled one, because reconciling fills the
+     * default in: by the time it comes back there is no way to tell a post that asked for 720x1280
+     * from one that never said. A post stepped back into keeps the frame it was edited at, which is
+     * the whole reason the field is on the manifest.
+     */
+    const chosen = (this.manifest as { output?: unknown } | undefined)?.output
+      ? manifest
+      : { ...manifest, output: normaliseOutput(store.host.output.initial) };
+    store.load(sources, store.durations.value, chosen);
     this.loading = false;
 
     // Filmstrips are a nicety that arrives while the customer is already editing, one source at a time.
@@ -540,6 +551,10 @@ export class VeEditor {
     this.onBack();
   };
 
+  private readonly onQuality = (): void => {
+    this.store.openPanel('quality');
+  };
+
   /**
    * Renders the edit and hands the finished video over. A single untouched clip skips the encode
    * entirely and goes up as it is, which is faster and kinder to the picture.
@@ -732,8 +747,18 @@ export class VeEditor {
 
   private renderStage(ctx: EditorContext, layout: 'main' | 'compact' | 'tall', fullscreen: boolean) {
     const chromeShowing = !fullscreen && layout !== 'tall';
+    const output = ctx.store.output.value;
     return (
-      <div class="ve__stage" key="stage">
+      /*
+        The frame's own two numbers, for the rules that place the round buttons just outside it.
+        They used to be written into the stylesheet as `9 / 16`, which put both circles over the
+        picture the moment a customer turned the canvas on its side.
+      */
+      <div
+        class="ve__stage"
+        key="stage"
+        style={{ '--ve-frame-w-px': String(output.width), '--ve-frame-h-px': String(output.height) }}
+      >
         {/*
          * Keyed, like everything else in this column. The preview's player reads its media elements
          * once and never again, so a `<ve-preview>` the vdom matched to a different position and
@@ -751,6 +776,21 @@ export class VeEditor {
             onClick={this.onBackTap}
           >
             <ve-icon name="chevron-back" />
+          </button>
+        ) : null}
+        {/*
+          The finished post's shape and size, where a customer looks for it: on the canvas, beside
+          the button that takes them out of the editor with it. It reads as a statement of what they
+          are about to make - `1080P` - and opens the sheet that changes it.
+
+          Not a tile in the tool row. It was one, and it was the eleventh of thirteen in a row that
+          scrolls: a decision about the whole post sat off the right-hand edge behind Adjust, which
+          is not where anybody would think to look for it.
+        */}
+        {chromeShowing ? (
+          <button key="quality" type="button" class="ve__quality" onClick={this.onQuality}>
+            <span>{qualityOf(ctx.store.output.value).label}</span>
+            <ve-icon name="chevron-down" />
           </button>
         ) : null}
         {chromeShowing ? (
@@ -856,6 +896,8 @@ export class VeEditor {
         return <ve-crop-sheet key="crop" class="ve__sheet" ctx={ctx} />;
       case 'layout':
         return <ve-layout-sheet key="layout" class="ve__sheet" ctx={ctx} />;
+      case 'quality':
+        return <ve-quality-sheet key="quality" class="ve__sheet" ctx={ctx} />;
       case 'speed':
         return <ve-speed-sheet key="speed" class="ve__sheet" ctx={ctx} />;
       case 'volume':
