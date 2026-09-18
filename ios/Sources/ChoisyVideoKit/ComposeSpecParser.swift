@@ -18,11 +18,12 @@ import Foundation
 /// everything after it holds its first error instead of throwing it (see `heldError`).
 enum ComposeSpecParser {
     static let maxOverlays = 30
-    /// `MAX_VIDEO_TRACKS` from the manifest, the BASE track INCLUDED, so at most one entry in
-    /// `tracks`. It is a hardware decoder budget rather than a matter of taste - a mid-range phone
-    /// decodes two video streams at once and the feed behind the editor may already hold one - so a
-    /// spec asking for more is refused here rather than quietly truncated to what will play.
-    static let maxVideoTracks = 2
+    /// `MAX_VIDEO_TRACKS` from the manifest, the BASE track INCLUDED, so at most fifteen entries in
+    /// `tracks`. It is NOT a decoder budget: this parser feeds the export, which composites offline
+    /// with nothing racing a frame deadline, and the live preview keeps a budget of its own that is
+    /// a different number in a different file. The ceiling is here only so that an absurd spec meets
+    /// a readable refusal instead of a device running out of codecs halfway through a render.
+    static let maxVideoTracks = 16
     static let minSpeed = 0.25
     static let maxSpeed = 4.0
     static let pngDataURLPrefix = "data:image/png;base64,"
@@ -151,7 +152,7 @@ enum ComposeSpecParser {
                     // would fail specs the Android build accepts.
                     fit: c.fit == Fit.cover.rawValue ? .cover : .contain,
                     crop: clampRect(c.crop),
-                    rect: clampRect(c.rect))
+                    rect: clampPlacement(c.rect))
     }
 }
 
@@ -182,6 +183,16 @@ private func clampRect(_ r: RectDTO?) -> ComposeRect? {
     // picture in it rather than an error, and `Placement` already answers a zero-sized source with
     // a black frame, which is the same thing both engines do for a clip that contributes nothing.
     return ComposeRect(x: x, y: y, w: min(r.w, 1 - x), h: min(r.h, 1 - y))
+}
+
+/// The same four numbers through the same clamp, with the angle carried across untouched.
+///
+/// The angle is deliberately NOT clamped and NOT wrapped into a single turn: 720 is a legal spec and
+/// sin/cos reduce it. Nor does the clamp above extend to it, because a turned rectangle legitimately
+/// puts its corners outside the frame and the frame is what crops them.
+private func clampPlacement(_ r: RectDTO?) -> ComposePlacement? {
+    guard let r, let box = clampRect(r) else { return nil }
+    return ComposePlacement(x: box.x, y: box.y, w: box.w, h: box.h, rotationDeg: r.rotationDeg)
 }
 
 // MARK: - org.json-lenient readers
@@ -243,6 +254,10 @@ private extension KeyedDecodingContainer {
     /// `crop` and `rect` are the same shape with the same failures, so they share one reader.
     /// `name` is the field's own name and is spliced in front of the leaf path the rectangle threw,
     /// which is how `w` becomes `crop.w` before the clip loop turns it into `clips[0].crop.w`.
+    ///
+    /// Sharing the reader means a `rotationDeg` is READABLE on a crop as well, and `clampRect` drops
+    /// it there. Turning the region sampled out of the source is a different operation on different
+    /// pixels, one neither engine performs and the builder never asks for.
     ///
     /// Absent, or explicitly null, is nil and stays nil all the way to the renderer. So is a value
     /// that is present but not an object at all: Android's `optJSONObject` returns null for a
@@ -329,8 +344,14 @@ private struct ComposeSpecDTO: Decodable {
             // The COUNT before a single track is parsed, exactly as the overlays' cap is, so a spec
             // sending three layers whose first is also broken reports the cap and not the layer.
             // The cap counts the base track, which is why it is one fewer here.
+            // Refused rather than truncated, and Android's wording to the character: a caller
+            // asking for four layers believes it is getting four, and the port tests compare these
+            // messages literally.
             if (trackArray.count ?? 0) > ComposeSpecParser.maxVideoTracks - 1 {
-                throw SpecError("tracks")
+                throw SpecError(
+                    "tracks",
+                    "invalid_spec:tracks at most \(ComposeSpecParser.maxVideoTracks - 1) extra video tracks"
+                )
             }
             var decoded: [TrackDTO] = []
             while !trackArray.isAtEnd {
@@ -463,8 +484,11 @@ private struct RectDTO: Decodable {
     let y: Double
     let w: Double
     let h: Double
+    /// Raw and unclamped. nil is upright, and only `clampPlacement` keeps it: on a crop it is
+    /// dropped.
+    let rotationDeg: Double?
 
-    private enum K: String, CodingKey { case x, y, w, h }
+    private enum K: String, CodingKey { case x, y, w, h, rotationDeg }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -479,6 +503,10 @@ private struct RectDTO: Decodable {
         if w <= 0 { throw SpecError("w") }
         h = c.double(.h, 0)
         if h <= 0 { throw SpecError("h") }
+        // `number` rather than `double`, because absent has to stay absent all the way to the plan:
+        // it is what the builder tests to leave the rotation out of the transform entirely. That
+        // also drops a NaN or an infinity to upright rather than carrying one into a CGAffineTransform.
+        rotationDeg = c.number(.rotationDeg)
     }
 }
 

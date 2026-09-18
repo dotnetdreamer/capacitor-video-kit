@@ -59,6 +59,23 @@ class RenderPlan private constructor(
          */
         val reframed: Boolean,
         /**
+         * How far this clip's rectangle is TURNED, in the degrees GL counts: counter-clockwise,
+         * which is the wire's clockwise negated - the same flip [OverlayPlacement.rotationGlDeg]
+         * makes, so a turned video and a turned sticker agree on which way round is which.
+         *
+         * 0 is a picture that stands exactly as it was drawn, and it is what every clip of every
+         * spec written before the angle existed comes out as. Like [reframed] it is settled HERE,
+         * once, so the transform is built with no rotation in it at all rather than with a rotation
+         * of nothing: a whole number of turns collapses to 0 for that reason, being the same upright
+         * rectangle by the manifest's own definition.
+         *
+         * A clip on an extra layer always carries 0, whatever its rectangle asked for. Its
+         * rectangle has become its frame, so turning it inside that frame would only cut its own
+         * corners off; the layer is turned where it is placed instead - see
+         * [LayerPlacement.rotationGlDeg].
+         */
+        val rotationGlDeg: Float,
+        /**
          * The frame this clip's picture is drawn into, in real pixels. A clip on the base track
          * draws into the output frame itself, which is what every clip did before layers existed.
          * A clip on an extra track draws into a frame the size of its own `rect`, and the
@@ -133,6 +150,15 @@ class RenderPlan private constructor(
         val endUs: Long,
         val anchorX: Float,
         val anchorY: Float,
+        /**
+         * How far the layer is turned about that anchor, counter-clockwise as GL counts - see
+         * [PlannedClip.rotationGlDeg], which is the same number for a clip on the base track.
+         *
+         * The compositor turns the layer's whole picture about its own centre in OUTPUT pixels,
+         * which is what makes the fit a property of the upright rectangle: the picture was already
+         * fitted into the rectangle when the layer was drawn, and what turns is the finished result.
+         */
+        val rotationGlDeg: Float,
     )
 
     data class OverlayPlacement(
@@ -312,6 +338,7 @@ class RenderPlan private constructor(
                 gain = gain,
                 removeAudio = gain <= 0f || !sourceHasAudio,
                 reframed = clip.crop != null || clip.rect != null,
+                rotationGlDeg = rotationGlDegOf(clip.rect),
                 frame = frame,
             )
         }
@@ -348,7 +375,10 @@ class RenderPlan private constructor(
 
             for (clip in track.clips) {
                 if (cursorUs >= totalUs) break
-                val rect = clip.rect ?: FULL_FRAME
+                // The four numbers alone: they size the layer and anchor it, and the angle is not
+                // theirs to answer for. It travels on the placement instead, because a layer is
+                // turned where the compositor puts it and not inside its own texture.
+                val rect = clip.rect?.bounds ?: FULL_FRAME
                 // The layer is drawn at the size of the rectangle it goes in, so the compositor can
                 // place it one output pixel per layer pixel and needs nothing but its centre. The
                 // pixel floor is only there so that a hand-built spec cannot ask for a texture with
@@ -368,8 +398,9 @@ class RenderPlan private constructor(
                 placements += LayerPlacement(
                     startUs = cursorUs,
                     endUs = cursorUs + item.outDurUs,
-                    anchorX = 2f * (rect.x + rect.w / 2f) - 1f,
-                    anchorY = 1f - 2f * (rect.y + rect.h / 2f),
+                    anchorX = centreNdcX(rect),
+                    anchorY = centreNdcY(rect),
+                    rotationGlDeg = rotationGlDegOf(clip.rect),
                 )
                 cursorUs += item.outDurUs
             }
@@ -452,7 +483,11 @@ class RenderPlan private constructor(
          */
         fun sourceWindow(clip: Clip, output: Output, inputWidth: Int, inputHeight: Int): Rect {
             val crop = clip.crop ?: FULL_FRAME
-            val rect = clip.rect ?: FULL_FRAME
+            // The rectangle's four numbers and not its angle, because the fit is measured BEFORE
+            // the turn, in the upright rectangle, and the whole fitted result is turned afterwards
+            // as one piece. Measuring it against the turned rectangle's bounding box instead would
+            // swell and shrink the picture as the customer spun it.
+            val rect = clip.rect?.bounds ?: FULL_FRAME
 
             // One pixel floors everywhere, so a hand-built spec cannot divide by zero below and
             // turn the matrix into NaN, which would show up as a black clip and nothing else.
@@ -496,8 +531,42 @@ class RenderPlan private constructor(
             )
         }
 
+        /**
+         * The centre of a rectangle in normalised device coordinates: origin centre, y UP, edges at
+         * -1 and 1.
+         *
+         * One function because there is one flip. The web counts from the top-left with y down and
+         * GL counts from the middle with y up, and a layer's anchor, the pivot a turn happens about
+         * and the centre of a source window are the same arithmetic on three different rectangles.
+         * Two copies of it could disagree, and a picture turned about a point half a frame from
+         * where it was placed is not a bug anyone reads off the code.
+         */
+        fun centreNdcX(rect: Rect): Float = 2f * (rect.x + rect.w / 2f) - 1f
+
+        fun centreNdcY(rect: Rect): Float = 1f - 2f * (rect.y + rect.h / 2f)
+
         /** What an absent `crop` or `rect` means: all of it. */
         private val FULL_FRAME = Rect(0f, 0f, 1f, 1f)
+
+        /**
+         * The wire's angle as GL counts angles, or 0 for a picture that is not turned at all.
+         *
+         * Three readings collapse to 0, and each has to. An ABSENT angle, which is every clip the
+         * editor has ever sent. A non-finite one, which is the second line of defence behind the
+         * parser and keeps a NaN out of a matrix that would otherwise blacken the whole clip. And a
+         * whole number of turns, which is the same upright rectangle by the manifest's own
+         * definition and would otherwise be resampled through a transform whose cosine is a
+         * rounding error away from 1.
+         *
+         * The sign is [OverlayPlacement.rotationGlDeg]'s, for the same reason: the wire counts
+         * CLOCKWISE as CSS `rotate()` does, and a positive z-rotation in a y-up frame turns
+         * counter-clockwise.
+         */
+        private fun rotationGlDegOf(rect: Placement?): Float {
+            val deg = rect?.rotationDeg ?: return 0f
+            if (!deg.isFinite()) return 0f
+            return if (deg % 360f == 0f) 0f else -deg
+        }
 
         /**
          * Music is laid out as explicit repetitions rather than with `setIsLooping`, which repeats

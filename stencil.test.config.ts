@@ -26,17 +26,29 @@ export const config: Config = {
   /*
    * One target, into a directory nothing publishes or reads, because no targets at all is not the
    * same thing: Stencil answers an empty list with its default `www` target, which in `--prod`
-   * asks for a workbox install it does not have and fails the build before a single test runs.
+   * asks for a workbox install it does not have - which is what `serviceWorker: null` settles.
    *
-   * This is the cheapest of the real targets to produce and the only one the editor's own compile
-   * needs to be exercised end to end. The directory is in .gitignore and in `npm run clean`.
+   * This is what the browser tests actually run. `vitest-setup.ts` registers the package from the
+   * build below, and it used to register it from the published `dist/` - the one directory this
+   * config exists never to write. Every `.cmp.test.ts` therefore ran whatever `npm run build` had
+   * last left there, so a component edited or reverted since made no difference to a single
+   * assertion, and a fix could land with tests beside it that passed just as well without it.
+   * Emitted here, what the tests drive is what the build that runs immediately before them has
+   * just compiled out of the working tree.
+   *
+   * The LAZY build, because it is what the tests were written against: `componentOnReady()` is a
+   * lazy build method, every browser test awaits it to know a first render has happened, and a
+   * `dist-custom-elements` build does not have it - the `?.()` they call it through would silently
+   * do nothing and the assertions would run against an element that has not rendered.
+   * The directory is in .gitignore and in `npm run clean`.
    */
   outputTargets: [
     {
-      type: 'dist-custom-elements',
-      dir: '.stencil-test-build',
-      customElementsExportBehavior: 'single-export-module',
-      externalRuntime: false,
+      type: 'www',
+      dir: '.stencil-test-build/www',
+      buildDir: 'build',
+      serviceWorker: null,
+      empty: true,
     },
   ],
 };

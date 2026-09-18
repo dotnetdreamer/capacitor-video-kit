@@ -93,6 +93,16 @@ function videos(preview: HTMLElement): HTMLVideoElement[] {
   return [...preview.querySelectorAll('video')];
 }
 
+/** Where an element actually is on the screen, which is the only honest answer about a layout. */
+function box(video: HTMLVideoElement): DOMRect {
+  return video.getBoundingClientRect();
+}
+
+/** Whether `over` hides `under` completely: every edge of one outside or on the edges of the other. */
+function covers(over: DOMRect, under: DOMRect): boolean {
+  return over.left <= under.left && over.top <= under.top && over.right >= under.right && over.bottom >= under.bottom;
+}
+
 /**
  * Stands in for a loaded element and writes down every seek the preview asks of it.
  *
@@ -325,5 +335,75 @@ describe('ve-preview adding a second video while paused', () => {
     // can have made this element present anything is the one a fresh source always gets.
     expect(store.playheadMs.value).toBe(0);
     expect(files.of(extraEl).at[0]).toBe(0);
+  });
+});
+
+describe('ve-preview after the page has been away', () => {
+  /*
+   * The tests above go through Add video, which is how the bug was found: the picker's page-away
+   * and an edit arriving on the same tap. These two take the edit away. The page goes and comes
+   * back, nothing about the post has changed, and the only thing in the package that can ask either
+   * element for anything at that moment is [onPageShown] and the revive behind it.
+   */
+  it('points the base element at its source again, with no edit to prompt it', async () => {
+    const files = standInForFiles();
+    standIns.push(files);
+    const { preview } = await mount(false);
+    const baseEl = videos(preview)[0];
+    await until('the base to load its clip', () => files.of(baseEl).loads.length > 0);
+    await until('that load to end on a frame', () => files.of(baseEl).at.length > 0);
+    await frames(3);
+    const settled = files.of(baseEl).loads.length;
+
+    await pageAway();
+
+    // A load and not a seek: WebKit throws a hidden page's paused element's decoded frame away and
+    // answers every seek afterwards by presenting nothing, so the source has to go on again.
+    await until('the base to be pointed at its source again', () => files.of(baseEl).loads.length > settled);
+  });
+
+  it('points the second layer at its source again too', async () => {
+    const files = standInForFiles();
+    standIns.push(files);
+    const { preview } = await mount();
+    const extraEl = videos(preview)[1];
+    await until('the second layer to load its clip', () => files.of(extraEl).loads.length > 0);
+    await frames(3);
+    const settled = files.of(extraEl).loads.length;
+
+    await pageAway();
+
+    await until('the second layer to be pointed at its source again', () => files.of(extraEl).loads.length > settled);
+  });
+});
+
+describe('ve-preview swapping the two videos', () => {
+  /*
+   * Swap is the one operation that moves a layer's clips to the OTHER layer, and the preview draws
+   * the second element over the first one always - that is the z order, the base track being 0 with
+   * nothing below it, in the preview exactly as in both native renders. So a swap that carried each
+   * arrangement along with the clips that were in it put the picture covering the whole frame on
+   * top: a corner inset then sat behind it, drawn and invisible, and the customer watched one of
+   * their two videos vanish. It is a browser test because that is where a box is a measurement.
+   */
+  it('leaves the inset on top, rather than behind the layer that fills the frame', async () => {
+    const { store, preview } = await mount();
+    store.applyLayoutPreset('track-1', 'pipBR', 'Corner bottom right');
+    await frames(3);
+
+    const wasInset = box(videos(preview)[1]);
+    expect(covers(box(videos(preview)[0]), wasInset)).toBe(true);
+
+    store.swapTrackZ('track-1');
+    await frames(3);
+
+    const [under, over] = videos(preview).map(box);
+    // The element written out last is painted over the other one, so an element that covers it
+    // leaves nothing of the layer beneath on screen.
+    expect(covers(over, under)).toBe(false);
+    // And it really is a swap: the inset is where it was, with the other source in it now.
+    expect(covers(under, over)).toBe(true);
+    expect(over.width).toBeCloseTo(wasInset.width, 1);
+    expect(over.left).toBeCloseTo(wasInset.left, 1);
   });
 });

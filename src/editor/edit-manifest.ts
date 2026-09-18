@@ -14,7 +14,7 @@ import type { FilterOp } from '../video-composer/definitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 4;
+export const MANIFEST_VERSION = 5;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -28,6 +28,37 @@ export interface EditRect {
   y: number;
   w: number;
   h: number;
+}
+
+/**
+ * Where a clip's picture is drawn: a rectangle that may also be TURNED.
+ *
+ * `rotationDeg` is the overlay convention and nothing new. Same name, same clockwise degrees CSS
+ * `rotate()` means, same place in the order: a layer is positioned, sized, and then turned. Two
+ * native engines and the preview already draw a sticker that way, so a video layer that turns the
+ * same way is maths all three of them already have.
+ *
+ * It turns about the rectangle's CENTRE, in OUTPUT PIXELS. The centre is the only origin a drag
+ * survives: a corner origin swings the picture around a point that moves with `x` and `y`, so a
+ * layer turned and then dragged would land where neither the finger nor the rectangle asked for.
+ * Output pixels rather than the 0..1 the rectangle is stored in, because normalised space is
+ * stretched by the frame it describes - on a 720x1280 post a square window turned 45 degrees comes
+ * out a rhombus if the angle is applied in those coordinates, and the preview turns it in CSS
+ * pixels where it does not.
+ *
+ * The fit is measured BEFORE the turn, in the upright rectangle, and the fitted result is turned as
+ * one piece. `contain` and `cover` therefore mean exactly what they mean with no angle at all, and
+ * the picture keeps its size while a two-finger gesture spins it. Fitting into the turned
+ * rectangle's bounding box instead would make the video swell and shrink as it is turned, which is
+ * a thing no customer asked a rotate gesture for. `cover` still clips to the rectangle, in the
+ * rectangle's own turned frame.
+ *
+ * Absent and a whole number of turns are the same upright rectangle, and a rectangle only reaches
+ * the wire when it says something (see [isFullFrameRect]), so a clip nobody turned costs nothing.
+ */
+export interface EditPlacement extends EditRect {
+  /** Clockwise, as CSS means it - the units and the sense of [OverlayCommon.rotationDeg]. */
+  rotationDeg?: number;
 }
 
 export interface EditClip {
@@ -53,10 +84,18 @@ export interface EditClip {
    */
   crop?: EditRect;
   /**
-   * Where the cropped picture is drawn on the output frame. Absent is the whole frame, and the fit
-   * then letterboxes exactly as it always did. Present, the fit applies WITHIN this rectangle.
+   * Where the cropped picture is drawn on the output frame, and at what angle. Absent is the whole
+   * frame the right way up, and the fit then letterboxes exactly as it always did. Present, the fit
+   * applies WITHIN this rectangle.
+   *
+   * The angle lives on the rectangle rather than beside it so the two can never be half set: there
+   * is nothing to turn a clip about until it is placed, and a layout preset carries an
+   * arrangement's tilt in the numbers it already carries its position in, with nothing for any
+   * engine to learn. `crop` stays the plain [EditRect] on purpose - turning the part of the SOURCE
+   * that is sampled is a different operation on different pixels, and a field honoured in one
+   * position and ignored in the other is how two engines start disagreeing.
    */
-  rect?: EditRect;
+  rect?: EditPlacement;
   /**
    * This segment's own fit, for a clip placed in a `rect` that wants filling while the rest of the
    * timeline is letterboxed. Absent means the manifest's [EditManifest.fit], which is still what a
@@ -66,15 +105,16 @@ export interface EditClip {
 }
 
 /**
- * A second layer of video, so two clips can be on screen at once - split screen and picture in
- * picture. Its clips are a flat SEQUENCE exactly like [EditManifest.clips]: they play one after
- * another and never overlap EACH OTHER. Overlap happens BETWEEN tracks and nowhere else, because a
- * track is what each engine can actually hold - one `EditedMediaItemSequence` on Android, one
- * `AVMutableCompositionTrack` on iOS, both of them non-overlapping by definition.
+ * Another layer of video, so several clips can be on screen at once - split screen, picture in
+ * picture, and any collage in between. Its clips are a flat SEQUENCE exactly like
+ * [EditManifest.clips]: they play one after another and never overlap EACH OTHER. Overlap happens
+ * BETWEEN tracks and nowhere else, because a track is what each engine can actually hold - one
+ * `EditedMediaItemSequence` on Android, one `AVMutableCompositionTrack` on iOS, both of them
+ * non-overlapping by definition.
  *
- * Where the two layers sit on the frame is not a property of the track: it is each clip's own
- * [EditClip.rect], which version 3 already renders. A layout preset is therefore nothing more than
- * a pair of rectangles written onto the clips of the two tracks.
+ * Where a layer sits on the frame is not a property of the track: it is each clip's own
+ * [EditClip.rect], which version 3 already renders and which version 5 can also turn. A layout
+ * preset is therefore nothing more than rectangles written onto the clips of the tracks.
  */
 export interface EditVideoTrack {
   /** Unique within the manifest, and echoed back by the native engines on a failure. */
@@ -203,10 +243,10 @@ export interface EditManifest {
    */
   clips: EditClip[];
   /**
-   * Extra video layers over `clips`, at most [MAX_VIDEO_TRACKS] - 1 of them. Empty is the whole of
-   * what every manifest written before version 4 could say, and empty is what [toComposeSpec]
-   * turns back into a spec with no `tracks` key at all - which is what lets every engine keep the
-   * single-sequence path it takes today.
+   * Extra video layers over `clips`, at most [MAX_VIDEO_TRACKS] - 1 of them, bottom to top by `z`.
+   * Empty is the whole of what every manifest written before version 4 could say, and empty is
+   * what [toComposeSpec] turns back into a spec with no `tracks` key at all - which is what lets
+   * every engine keep the single-sequence path it takes today.
    *
    * An array rather than an optional key, unlike a clip's crop: there is no wire fast path to
    * protect here (the emptiness is tested when the spec is built, once) and every reader would
@@ -256,12 +296,24 @@ export const OVERLAY_BASE = {
 export const MAX_LAYERS = 30;
 
 /**
- * How many video layers may be on screen at once, the BASE TRACK INCLUDED - so two means the base
- * plus one. A decoder budget rather than a matter of taste: a mid-range Android decodes two video
- * streams at once and the feed behind the editor modal may already be holding one, and the preview
- * has to play every layer at the same time as the exporter has to decode them.
+ * How many video layers a post may hold, the BASE TRACK INCLUDED - so sixteen is the base and
+ * fifteen more. How many pictures belong on the frame is the customer's to decide, and this number
+ * is not an opinion about it.
+ *
+ * It used to be a playback budget, and that was the wrong place for one. The EXPORT composites
+ * offline: nothing there is racing a frame deadline, a layer that costs more only makes the render
+ * take longer, and neither engine has a structural reason to stop at two. What the LIVE PREVIEW can
+ * decode at once is a real limit, but it is a different number in a different place. It belongs to
+ * the preview, which is where a dropped frame is actually felt and which is free to show a still
+ * for a layer it cannot play while the render still draws every one of them.
+ *
+ * A ceiling stays because the parsers need one to refuse with. A spec asking for hundreds of layers
+ * is a caller bug, and it has to come back as a sentence naming the limit rather than as an
+ * out-of-memory kill with nothing in the log to read. Sixteen is where absurdity starts rather than
+ * where a phone starts to struggle: a collage a person builds by hand on a phone screen does not
+ * reach it, and a spec past it was not built by a person.
  */
-export const MAX_VIDEO_TRACKS = 2;
+export const MAX_VIDEO_TRACKS = 16;
 
 /** The shortest a clip segment may become. */
 export const MIN_CLIP_MS = 200;
@@ -719,6 +771,9 @@ function isIdentityOp(op: FilterOp): boolean {
  * rather than being squashed against it. Squashing is the other reading of "clamp so `x + w <= 1`",
  * and it turns a crop dragged all the way to the right edge into a zero-width one - a black frame,
  * and a shape the native parsers refuse.
+ *
+ * Four numbers and nothing else, so this stays the reader for a crop. A placement's angle comes
+ * back from [normalisePlacement] instead, because nothing turns the part of a source that is kept.
  */
 export function normaliseRect(value: unknown): EditRect | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -737,11 +792,45 @@ export function normaliseRect(value: unknown): EditRect | undefined {
 }
 
 /**
+ * A placement rectangle brought inside the frame with its angle kept, or `undefined` for anything
+ * that is not one. The four numbers are [normaliseRect]'s, and the angle is held at the same four
+ * decimals they are.
+ *
+ * The angle is NOT wrapped into a single turn. An overlay's is not either, a gesture spun twice
+ * round keeps its total that way, and every engine reduces the angle itself the moment it takes a
+ * sine of it. An upright angle is dropped rather than stored as 0, so a rectangle turned and put
+ * back is the rectangle it was before anybody touched it, down to its keys.
+ */
+export function normalisePlacement(value: unknown): EditPlacement | undefined {
+  const rect = normaliseRect(value);
+  if (!rect) return undefined;
+  const deg = round4(num((value as Record<string, unknown>)['rotationDeg'], 0));
+  return deg % 360 === 0 ? rect : { ...rect, rotationDeg: deg };
+}
+
+/** A rectangle's angle in clockwise degrees, with an absent one counting as upright. */
+export function rectRotationDeg(rect: EditPlacement | null | undefined): number {
+  return rect?.rotationDeg ?? 0;
+}
+
+/**
+ * Whether a rectangle stands exactly as it was drawn. Any whole number of turns does, which is why
+ * this is a question rather than a comparison against 0.
+ */
+export function isUprightRect(rect: EditPlacement | null | undefined): boolean {
+  return rectRotationDeg(rect) % 360 === 0;
+}
+
+/**
  * Whether a rectangle covers the whole frame, which is the same thing as not having one. Absent
  * answers true, so a caller can ask this one question instead of two.
+ *
+ * A TURNED rectangle never does, whatever its four numbers say: the whole frame at an angle shows
+ * black in the corners, which is a picture the customer asked for and not an absence.
  */
-export function isFullFrameRect(rect: EditRect | null | undefined): boolean {
+export function isFullFrameRect(rect: EditPlacement | null | undefined): boolean {
   if (!rect) return true;
+  if (!isUprightRect(rect)) return false;
   return (
     rect.x <= FULL_FRAME_EPSILON &&
     rect.y <= FULL_FRAME_EPSILON &&
@@ -751,17 +840,18 @@ export function isFullFrameRect(rect: EditRect | null | undefined): boolean {
 }
 
 /** Whether two rectangles say the same thing, with absent and full-frame counting as the same. */
-export function sameRect(a: EditRect | null | undefined, b: EditRect | null | undefined): boolean {
+export function sameRect(a: EditPlacement | null | undefined, b: EditPlacement | null | undefined): boolean {
   if (isFullFrameRect(a) && isFullFrameRect(b)) return true;
   if (!a || !b) return false;
-  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h && rectRotationDeg(a) === rectRotationDeg(b);
 }
 
 /**
- * Whether a segment is framed at all - cropped, placed in a rectangle, or fitted differently from
- * the rest of the post. A whole-frame crop or rectangle is not: it renders exactly as no crop does,
- * [toComposeSpec] leaves it off the wire for that reason, and [isUntouched] has to agree or a
- * customer who opened the crop tool and changed nothing would pay for a re-encode.
+ * Whether a segment is framed at all - cropped, placed in a rectangle, turned in one, or fitted
+ * differently from the rest of the post. A whole-frame crop or upright whole-frame rectangle is
+ * not: it renders exactly as no crop does, [toComposeSpec] leaves it off the wire for that reason,
+ * and [isUntouched] has to agree or a customer who opened the crop tool and changed nothing would
+ * pay for a re-encode.
  */
 export function isClipFramed(clip: EditClip, manifestFit: EditFit = 'contain'): boolean {
   if (!isFullFrameRect(clip.crop)) return true;
@@ -817,6 +907,12 @@ export function emptyManifest(): EditManifest {
  * no second video track, and an empty `videoTracks` is the whole of what one video layer ever
  * meant. The migration is the empty array, and [toComposeSpec] turns that back into a spec with no
  * `tracks` key - byte for byte the spec version 3 produced.
+ *
+ * Version 4 to version 5 adds nothing for the third time: a version-4 manifest simply has no angle
+ * on any placement rectangle, and absent is upright, which is the only thing a rectangle could be
+ * before. A `rotationDeg` of 0 is not written onto anything. It would be the same picture, a
+ * different spec, and the end of the byte-for-byte guarantee that lets a single untouched clip be
+ * posted without a re-encode.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1077,7 +1173,7 @@ function readClips(value: unknown, usedIds: Set<string>): EditClip[] {
     // structured clone and read as "framed" to anything checking with `in`.
     const crop = normaliseRect(c?.crop);
     if (crop) clip.crop = crop;
-    const rect = normaliseRect(c?.rect);
+    const rect = normalisePlacement(c?.rect);
     if (rect) clip.rect = rect;
     const fit = readFit(c?.fit);
     if (fit) clip.fit = fit;

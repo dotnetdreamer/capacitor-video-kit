@@ -35,6 +35,34 @@ export interface ComposeRect {
 }
 
 /**
+ * Where a clip's picture is drawn: a rectangle that may also be TURNED.
+ *
+ * `rotationDeg` is `ComposeOverlay.rotationDeg` in every respect that matters to an engine - the
+ * same clockwise degrees CSS `rotate()` means, the same sign flip where a platform's frame is y-up,
+ * the same position at the end of the placement maths - so a layer turns with the transform each
+ * engine already builds for a sticker.
+ *
+ * It turns about the rectangle's CENTRE, computed in OUTPUT PIXELS. The centre because that is the
+ * only origin a drag survives; output pixels because normalised space is stretched by the frame,
+ * and an angle applied in 0..1 coordinates shears a square window into a rhombus on a 720x1280
+ * post. An engine therefore resolves the rectangle to pixels first and turns it there, which is
+ * also what the preview's CSS does.
+ *
+ * `fit` is measured BEFORE the turn, in the upright rectangle, and the fitted result is turned as
+ * one piece. The picture keeps its size while it is turned, `contain` and `cover` mean what they
+ * mean with no angle at all, and `cover` still clips to the rectangle in the rectangle's own turned
+ * frame. Fitting into the turned rectangle's bounding box instead would make the video swell and
+ * shrink as it turns.
+ *
+ * Absent is upright, and the builder never writes a `rotationDeg` of 0: a missing key is what tells
+ * an engine there is no turn to make, exactly as a missing `rect` tells it there is no placement.
+ */
+export interface ComposePlacement extends ComposeRect {
+  /** CLOCKWISE degrees about the rectangle's CENTRE, matching CSS `rotate()`. Absent is upright. */
+  rotationDeg?: number;
+}
+
+/**
  * One segment of the output timeline. Split and duplicate are expressed as two entries pointing at
  * the same `uri` with different `inMs`/`outMs`; reorder is simply the array order.
  */
@@ -61,30 +89,38 @@ export interface ComposeClip {
    */
   crop?: ComposeRect;
   /**
-   * Where the cropped picture is drawn on the output frame. Absent is the whole frame, and `fit`
-   * then letterboxes exactly as today. Present, `fit` applies WITHIN this rectangle: the rectangle
-   * is the "frame" as far as contain and cover are concerned.
+   * Where the cropped picture is drawn on the output frame, and at what angle. Absent is the whole
+   * frame the right way up, and `fit` then letterboxes exactly as today. Present, `fit` applies
+   * WITHIN this rectangle: the rectangle is the "frame" as far as contain and cover are concerned.
    *
    * The order every engine has to agree on is: orient the source frame, CROP it to `crop`, fit the
-   * result into `rect` with `fit`, then the colour matrix, then the overlays. Absent crop and absent
-   * rect together are exactly the old path, and each engine is expected to take that path unchanged
+   * result into `rect` with `fit`, TURN that fitted rectangle about its own centre by
+   * `rect.rotationDeg`, then the colour matrix, then the overlays. Absent crop and absent rect
+   * together are exactly the old path, and each engine is expected to take that path unchanged
    * rather than fold the new maths into the old - checked once when the plan is built, never per
-   * frame.
+   * frame. A `rect` with no `rotationDeg` is the version-3 path in the same way, with no rotation
+   * in the transform at all.
+   *
+   * `crop` is a plain `ComposeRect` and carries no angle. The two fields are the same shape and
+   * every parser reads them with one reader, so a `rotationDeg` arriving on a `crop` is to be
+   * IGNORED rather than acted on: turning the region sampled out of the source is a different
+   * operation on different pixels, and the builder never emits one there.
    */
-  rect?: ComposeRect;
+  rect?: ComposePlacement;
 }
 
 /**
- * One layer of video. Its own clips are a flat SEQUENCE, exactly like [ComposeSpec.clips]: they
- * play one after another and never overlap EACH OTHER. Overlap happens BETWEEN tracks, and that is
- * the whole reason tracks exist rather than a start time on the clip - one track maps 1:1 onto an
- * `EditedMediaItemSequence` on Android and onto one `AVMutableCompositionTrack` on iOS, and both of
- * those hold items that do not overlap. Packing overlapping clips into sequences would otherwise
- * have to happen inside each engine, where two manifests that look the same to a customer could
- * pack differently and quietly disagree about which clip fixes the output's length.
+ * One extra layer of video. Its own clips are a flat SEQUENCE, exactly like [ComposeSpec.clips]:
+ * they play one after another and never overlap EACH OTHER. Overlap happens BETWEEN tracks, and
+ * that is the whole reason tracks exist rather than a start time on the clip - one track maps 1:1
+ * onto an `EditedMediaItemSequence` on Android and onto one `AVMutableCompositionTrack` on iOS, and
+ * both of those hold items that do not overlap. Packing overlapping clips into sequences would
+ * otherwise have to happen inside each engine, where two manifests that look the same to a customer
+ * could pack differently and quietly disagree about which clip fixes the output's length.
  *
- * A layer's clips are placed by their own [ComposeClip.rect], which is how split screen and
- * picture in picture are expressed: no new geometry, the layout presets simply write rectangles.
+ * A layer's clips are placed by their own [ComposeClip.rect], which is how split screen, picture in
+ * picture and any free arrangement of several videos are all expressed: no new geometry, a layout
+ * preset or a drag simply writes rectangles.
  */
 export interface ComposeTrack {
   /** Stable id from the manifest; echoed on a failure alongside `clipKey`. */
@@ -196,9 +232,14 @@ export interface ComposeSpec {
    * Extra video layers drawn over `clips`, bottom to top by `z`. Absent or empty is exactly today,
    * and every engine is expected to decide that ONCE when it builds its plan rather than per frame
    * - the same discipline `crop` and `rect` ask for. At most `MAX_VIDEO_TRACKS` layers including
-   * the base, so at most one entry here for now; a spec with more is rejected. That cap is a
-   * hardware decoder budget rather than a matter of taste - a mid-range phone decodes two video
-   * streams at once and the feed behind the editor may already hold some.
+   * the base, so at most `MAX_VIDEO_TRACKS - 1` entries here; a spec with more is rejected rather
+   * than truncated.
+   *
+   * That cap is not a decoder budget. A render composites offline, where nothing is racing a frame
+   * deadline, so an engine has no structural reason to stop at two and is expected to draw every
+   * layer it is given. The cap is there so that an absurd spec fails with a sentence a developer
+   * can read instead of an out-of-memory kill, and the number a device can actually PLAY at once is
+   * the live preview's business, not this contract's.
    *
    * A secondary track's clips contribute audio exactly as base clips do, through their own
    * `volume`/`muted` and the spec-level `originalMuted`/`originalVolume`.

@@ -38,11 +38,15 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Turns a [RenderPlan] into the Media3 objects that actually do the work.
  *
- * The shape is one video sequence per layer - any extra layer's clips, top layer first, then the
+ * The shape is one video sequence per layer - every extra layer's clips, top layer first, then the
  * base track's - plus at most one audio-only sequence for music and one for voiceovers. Concurrent
  * sequences are how Media3 mixes and how it composites, so neither "background music over the
  * clips' own sound" nor "a second video over the first" needs a mixer of ours. Why the base comes
  * last rather than first is written out in [toComposition], where the order is decided.
+ *
+ * Nothing here is written for a particular NUMBER of layers: the list the plan hands over is what
+ * the sequences are built from and what the compositor is indexed by, so fifteen layers take the
+ * same code two do.
  */
 @OptIn(UnstableApi::class)
 object CompositionBuilder {
@@ -70,21 +74,27 @@ object CompositionBuilder {
         // TOP LAYER FIRST and the base LAST, which is the order Media3 1.11.1 actually draws in.
         // DefaultCompositorGlProgram.drawFrame walks its frame list from the END backwards, blending
         // each one over what is already there, and DefaultVideoCompositor.getFramesToComposite puts
-        // the PRIMARY input at the head of that list; the primary is whichever input registered
-        // first, Transformer registers each input under its sequence's index, and Media3 itself
-        // assumes sequence 0 gets there first - `maybeComposite` reads the primary's frame out of
-        // that list BY the primary's input index, which only lands on the primary when the index is
-        // zero. So the first sequence is blended LAST and ends up on top, and an extra layer
-        // registered after the base would be painted under the base and never seen at all, the base
-        // being opaque and the size of the whole frame. Registering the layers in front of the base
-        // is therefore the only arrangement that honours "the extra track is drawn on top".
+        // the PRIMARY input at the head of that list and then appends every other input in
+        // ASCENDING input-id order - it walks `inputSources`, a SparseArray, by position, and a
+        // SparseArray holds its keys sorted. So the frame list is the sequences in registration
+        // order and the blend runs backwards along it: sequence i is drawn OVER sequence i + 1, for
+        // as many sequences as there are, which is what makes an ordered list of layers the whole of
+        // the stacking. The primary is whichever input registered first, Transformer registers each
+        // input under its sequence's index, and Media3 itself assumes sequence 0 gets there first -
+        // `maybeComposite` reads the primary's frame out of that list BY the primary's input index,
+        // which only lands on the primary when the index is zero. So the first sequence is blended
+        // LAST and ends up on top, and an extra layer registered after the base would be painted
+        // under the base and never seen at all, the base being opaque and the size of the whole
+        // frame. Registering the layers in front of the base is therefore the only arrangement that
+        // honours "the extra track is drawn on top".
         //
         // That moves the primary from the base to the top layer, and the primary is also what the
         // output is measured by: the compositor emits one frame per primary frame, stamped with the
         // primary's timestamp, and stops when the primary's stream ends. The base would then decide
-        // nothing. `layerSequence` is what makes that safe - every layer sequence is padded with
-        // gaps to exactly the base's length, so whichever layer is primary runs from 0 to the end
-        // of the base and no further. Rule 1 is kept by the padding and rule 3 by the order.
+        // nothing. `layerSequence` is what makes that safe - EVERY layer sequence is padded with
+        // gaps to exactly the base's length, however many there are, so whichever layer is primary
+        // runs from 0 to the end of the base and no further. Rule 1 is kept by the padding and rule
+        // 3 by the order.
         //
         // The PRICE of that order is the output's cadence, and it is a real limit rather than an
         // oversight. `maybeComposite` emits exactly one frame per primary frame and stamps it with
@@ -139,7 +149,8 @@ object CompositionBuilder {
         // Asked once, here, and never per frame: a spec with no extra layers gets no compositor
         // settings object at all, which is the composition Media3 has been handed all along. The
         // compositor is given the layers in REGISTRATION order, because the input id it is asked
-        // about is the sequence's index in the list above.
+        // about is the sequence's index in the list above - which is why this takes `layers` and
+        // not the plan's own bottom-to-top list, whatever their length.
         if (layers.isNotEmpty()) {
             builder.setVideoCompositorSettings(LayerCompositor(output, layers))
         }
@@ -316,7 +327,7 @@ object CompositionBuilder {
         // Crop followed by a Presentation. The frame both of them work against is the clip's own:
         // the output frame on the base track, and the layer's rectangle on any other.
         val geometry: Effect = if (planned.reframed) {
-            Reframe(clip, planned.frame)
+            Reframe(clip, planned.frame, planned.rotationGlDeg)
         } else {
             Presentation.createForWidthAndHeight(
                 planned.frame.width,
@@ -428,27 +439,73 @@ object CompositionBuilder {
      * of coordinates: the window is 0..1 with y DOWN, NDC is -1..1 with y UP, the same flip the
      * overlay anchors get.
      *
+     * The TURN comes after all of that and is the only part that is not a window: the window and
+     * the fit are measured in the upright rectangle, and what turns is the finished result. It is
+     * applied here, on the base track, because a base clip's rectangle is a part of the output
+     * frame and the frame is what crops its corners. A clip on an extra layer is turned by the
+     * compositor instead - see [LayerCompositor] - because its rectangle IS its frame, and a
+     * rectangle turned inside itself would cut its own corners off.
+     *
      * The matrix is rebuilt in [configure] because the window depends on the source's pixel size,
      * and [configure] is where Media3 finally knows it. It is rebuilt rather than recomputed per
      * frame because nothing in it moves: [getMatrix] hands back the same instance every frame, as
      * Media3's own `Crop` does, and Media3 copies it into a float array before drawing.
      */
-    private class Reframe(private val clip: Clip, private val frame: Output) : MatrixTransformation {
+    private class Reframe(
+        private val clip: Clip,
+        private val frame: Output,
+        /** Counter-clockwise, as GL counts, and 0 for a clip that stands as it was drawn. */
+        private val rotationGlDeg: Float,
+    ) : MatrixTransformation {
 
         private val matrix = Matrix()
 
         override fun configure(inputWidth: Int, inputHeight: Int): Size {
             val window = RenderPlan.sourceWindow(clip, frame, inputWidth, inputHeight)
-            val centreX = 2f * (window.x + window.w / 2f) - 1f
-            val centreY = 1f - 2f * (window.y + window.h / 2f)
+            val centreX = RenderPlan.centreNdcX(window)
+            val centreY = RenderPlan.centreNdcY(window)
             matrix.reset()
             // Put the window's centre on the origin, then open it out until its sides are the
             // frame's: an NDC side of 2 spans a window side of w, so the scale is 1 / w.
             matrix.postTranslate(-centreX, -centreY)
             matrix.postScale(1f / window.w, 1f / window.h)
+            // A SECOND step rather than something folded into the two lines above, so that a clip
+            // which is not turned - every clip of every spec written before the angle existed -
+            // leaves with exactly the transform it has always had. The angle can only have come off
+            // a rectangle, so there is always one to turn about when there is an angle at all.
+            val placement = clip.rect
+            if (rotationGlDeg != 0f && placement != null) {
+                turn(placement)
+            }
             // The window has the frame's aspect ratio by construction, so declaring the frame's
             // size here scales the picture without stretching it.
             return Size(frame.width, frame.height)
+        }
+
+        /**
+         * The picture as it stands, turned about the rectangle's own centre in OUTPUT PIXELS.
+         *
+         * Pixels, not the normalised fractions the rectangle is stored in: NDC is not square - x
+         * spans the frame's width and y its height - so an angle applied to it straight would shear
+         * a square window into a rhombus on a 720x1280 post, where the preview, which turns it in
+         * CSS pixels, would not. Stretching x by the frame's aspect ratio first makes the units
+         * square, and that IS turning it in pixels.
+         *
+         * Nothing clamps the result. A turned rectangle legitimately hangs its corners outside the
+         * frame, and GL discards whatever the matrix pushes past the frame's edges, which is the
+         * same crop the customer sees in the preview.
+         */
+        private fun turn(placement: Placement) {
+            val pivotX = RenderPlan.centreNdcX(placement.bounds)
+            val pivotY = RenderPlan.centreNdcY(placement.bounds)
+            val aspect = frame.width.toFloat() / frame.height.toFloat()
+            matrix.postTranslate(-pivotX, -pivotY)
+            matrix.postScale(aspect, 1f)
+            // Android's `Matrix` turns counter-clockwise in a y-UP frame, which is the frame these
+            // vertices are in, so the plan's already-negated degrees go in as they are.
+            matrix.postRotate(rotationGlDeg)
+            matrix.postScale(1f / aspect, 1f)
+            matrix.postTranslate(pivotX, pivotY)
         }
 
         override fun getMatrix(presentationTimeUs: Long): Matrix = matrix
@@ -466,6 +523,11 @@ object CompositionBuilder {
      * it goes in. That leaves the centre as the whole of the placement, which is the same
      * arithmetic iOS does when it turns the rectangle into a destination CGRect, said in the one
      * form Media3 accepts.
+     *
+     * A turned layer is turned HERE rather than in its own texture, because its rectangle is its
+     * texture's frame: turning it inside that frame would cut its corners off, and the corners of a
+     * turned rectangle are exactly what has to survive. Turned here, the only thing that crops them
+     * is the output frame.
      *
      * A layer's `startMs` is LAID OUT, in the layer's own sequence, and this gate only hides what
      * the layout leaves behind - see `layerSequence`. The two gaps that pad a layer to the base's
@@ -506,6 +568,16 @@ object CompositionBuilder {
             private val placed: List<OverlaySettings> = track.placements.map {
                 StaticOverlaySettings.Builder()
                     .setBackgroundFrameAnchor(it.anchorX, it.anchorY)
+                    // The turn, in the one place that can make it: the layer's picture is already
+                    // drawn at its rectangle's size, and this is where that rectangle is put on the
+                    // output frame. `OverlayMatrixProvider` sandwiches the rotation between the
+                    // layer's own aspect matrix and that matrix's inverse, so the turn happens in
+                    // the layer's PIXEL space about its centre, and the aspect matrix that follows
+                    // maps a layer pixel onto exactly one output pixel - which is the contract's
+                    // "about the rectangle's centre, in output pixels", said in Media3's own terms.
+                    // The degrees are counter-clockwise here for the same reason they are on a
+                    // sticker: `Matrix.rotateM` about +z turns counter-clockwise in a y-up frame.
+                    .setRotationDegrees(it.rotationGlDeg)
                     // The track's opacity multiplies the picture's own alpha, which for a video
                     // frame is 1 everywhere, so this IS the track's opacity on the output.
                     .setAlphaScale(track.opacity)

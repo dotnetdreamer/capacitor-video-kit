@@ -20,6 +20,7 @@ class CompositionBuilderTest {
         inMs: Long = 0,
         outMs: Long = 2_000,
         speed: Float = 1f,
+        rect: Placement? = null,
     ) = Clip(
         key = key,
         uri = "file:///$key.mp4",
@@ -30,7 +31,7 @@ class CompositionBuilderTest {
         muted = false,
         fit = Fit.CONTAIN,
         crop = null,
-        rect = null,
+        rect = rect,
     )
 
     private fun spec(clips: List<Clip>, tracks: List<Track> = emptyList()) = ComposeSpec(
@@ -99,6 +100,84 @@ class CompositionBuilderTest {
         assertEquals(layer.placements[0].endUs - layer.placements[0].startUs, itemOutUs)
         assertEquals(plan.totalUs, itemOutUs + gapUs)
         assertEquals(RenderPlan.PlannedTrack.HIDDEN, layer.visibleIndexAt(itemOutUs))
+    }
+
+    /** A layer of its own, whose clip is the only one that long, so the sequences can be told apart. */
+    private fun layer(id: String, key: String, outMs: Long, z: Int, rect: Placement? = null) =
+        Track(id, listOf(clip(key, outMs = outMs, rect = rect)), 0, z, 1f)
+
+    private fun probes(vararg keys: String) =
+        keys.associate { "file:///$it.mp4" to probe(2_000) }
+
+    @Test
+    fun `every layer is registered ahead of the base, top one first`() {
+        // Media3 blends its compositor's frame list from the END backwards, so sequence i is drawn
+        // over sequence i + 1 for as many sequences as there are. Registering the layers in
+        // descending z and the base last is therefore the whole of "higher z draws on top", and it
+        // is worth pinning with more than two of them, where an ordering mistake has somewhere to
+        // hide. The clips are told apart by their length, because a stubbed Uri is null on the JVM.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    layer("top", "b", 500, z = 3),
+                    layer("bottom", "c", 700, z = 1),
+                    layer("middle", "d", 900, z = 2),
+                ),
+            ),
+            probes("a", "b", "c", "d"),
+        )
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        assertEquals(4, sequences.size)
+        assertEquals(
+            listOf(500_000L, 900_000L, 700_000L, 2_000_000L),
+            sequences.map { clippingOf(it.editedMediaItems[0]).endPositionUs },
+        )
+    }
+
+    @Test
+    fun `every layer sequence is padded to the base's length, however many there are`() {
+        // The first sequence registered is Media3's primary input and the composited video ends
+        // when the primary's stream does, so whichever layer ends up primary has to run the whole
+        // length of the base. That is the padding's job, and it is every layer's padding and not
+        // just the first one's.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    layer("top", "b", 500, z = 3),
+                    layer("bottom", "c", 700, z = 1),
+                    layer("middle", "d", 900, z = 2),
+                ),
+            ),
+            probes("a", "b", "c", "d"),
+        )
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        for (sequence in sequences.take(plan.tracks.size)) {
+            val clipping = clippingOf(sequence.editedMediaItems[0])
+            val tailUs = sequence.editedMediaItems[1].durationUs
+            assertEquals(plan.totalUs, clipping.endPositionUs - clipping.startPositionUs + tailUs)
+        }
+    }
+
+    @Test
+    fun `a layer's turn reaches the compositor as the angle it will be drawn at`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    layer("pip", "b", 2_000, z = 1, rect = Placement(0.5f, 0.5f, 0.4f, 0.4f, 45f)),
+                ),
+            ),
+            probes("a", "b"),
+        )
+        val settings = CompositionBuilder.toComposition(plan, emptyList(), null).videoCompositorSettings
+        // Input 0 is the layer, registered ahead of the base, and its angle is the wire's clockwise
+        // 45 negated: Media3 turns an overlay counter-clockwise about +z, as GL does.
+        assertEquals(-45f, settings.getOverlaySettings(0, 0L).rotationDegrees, 1e-6f)
+        // The base is composited exactly as it arrives, which for a spec with no layers at all is
+        // the only thing there is.
+        assertEquals(0f, settings.getOverlaySettings(1, 0L).rotationDegrees, 0f)
     }
 
     @Test

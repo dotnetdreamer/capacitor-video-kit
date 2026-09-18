@@ -1,16 +1,19 @@
-import type { ComposeClip, ComposeOverlay, ComposeRect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
+import type { ComposeClip, ComposeOverlay, ComposePlacement, ComposeRect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
 
 import {
   DEFAULT_OUTPUT,
   MIN_LAYER_MS,
   clamp,
   isFullFrameRect,
+  isUprightRect,
+  rectRotationDeg,
   resolveFilterOps,
   totalDurationMs,
   videoBitrateFor,
   type EditClip,
   type EditFit,
   type EditManifest,
+  type EditPlacement,
   type EditRect,
 } from './edit-manifest';
 import { overlayEndMs } from './edit-ops';
@@ -191,14 +194,14 @@ function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<st
     // which is every clip of every manifest written before framing existed.
     fit: edit.fit ?? manifestFit,
   };
-  // Set only when they say something. A crop of the whole frame and a rectangle covering the whole
-  // frame are both "what the renderer did before crops existed", and every engine tests for the
-  // ABSENCE of these fields once, when it builds its plan, to keep taking that path with no extra
-  // work per frame. Writing a full-frame rectangle here would be the same picture at a real cost,
-  // and it would stop an untouched clip producing the spec it produces today.
+  // Set only when they say something. A crop of the whole frame and an upright rectangle covering
+  // the whole frame are both "what the renderer did before crops existed", and every engine tests
+  // for the ABSENCE of these fields once, when it builds its plan, to keep taking that path with no
+  // extra work per frame. Writing a full-frame rectangle here would be the same picture at a real
+  // cost, and it would stop an untouched clip producing the spec it produces today.
   const crop = wireRect(edit.crop);
   if (crop) clip.crop = crop;
-  const rect = wireRect(edit.rect);
+  const rect = wirePlacement(edit.rect);
   if (rect) clip.rect = rect;
   return clip;
 }
@@ -209,4 +212,17 @@ function wireRect(rect: EditRect | undefined): ComposeRect | undefined {
   // Copied field by field rather than passed through, so nothing a host happened to hang on its
   // own rectangle object rides across the bridge with it.
   return { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+}
+
+/**
+ * Where the picture is drawn, and the angle it is turned to, for a segment that says something
+ * about either. A whole-frame rectangle standing upright says nothing and goes no further.
+ */
+function wirePlacement(rect: EditPlacement | undefined): ComposePlacement | undefined {
+  const wire = wireRect(rect);
+  if (!wire) return undefined;
+  // The key is left off for an upright rectangle rather than sent as 0, for the reason the whole
+  // rectangle is left off for a clip nobody framed: a missing key is what tells every engine it has
+  // no rotation to fold into its transform, and it is checked once when the plan is built.
+  return isUprightRect(rect) ? wire : { ...wire, rotationDeg: rectRotationDeg(rect) };
 }

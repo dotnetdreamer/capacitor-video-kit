@@ -178,7 +178,8 @@ describe('ve-layout-sheet', () => {
 
     expect(store.manifest.value.clips[0].clipKey).toBe('clip-b');
     expect(store.videoTrack.value?.clips[0].clipKey).toBe('clip-a');
-    // The pair is matched either way round, so the arrangement still reads as the one it is.
+    // The two layers are drawn in the same two rectangles as before, so the arrangement the row
+    // is showing has not changed at all: only which video is in which half of it.
     await until('the chip to stay lit', () => chip(sheet, 'Top and bottom').getAttribute('aria-pressed') === 'true');
   });
 

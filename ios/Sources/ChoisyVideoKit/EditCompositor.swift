@@ -49,20 +49,51 @@ struct EditLayer {
     /// but a nil.
     let dst: CGRect?
 
+    /// How far `dst` is turned, in RADIANS, already negated into Core Image's y-UP space and ready
+    /// to hand to `CGAffineTransform(rotationAngle:)`.
+    ///
+    /// nil is a clip that stands exactly as it was drawn, and nil is what reaches `render` for every
+    /// spec written before the angle existed. Decided HERE, once per plan, never per frame: it is
+    /// what keeps an untouched clip on the arithmetic it has always taken.
+    let spin: CGFloat?
+
     /// The opacity of the whole layer this clip belongs to. The base track is 1, which `Alpha`
     /// hands straight back, so the common frame pays nothing for the feature.
     let opacity: Double
 
     init(trackID: CMPersistentTrackID, orientation: CGImagePropertyOrientation, fit: Fit,
-         crop: ComposeRect?, rect: ComposeRect?, opacity: Double, render: CGSize) {
+         crop: ComposeRect?, rect: ComposePlacement?, opacity: Double, render: CGSize) {
         self.trackID = trackID
         self.orientation = orientation
         self.fit = fit
         self.crop = crop
         // `render` is what `vc.renderSize` is set to, and the render context the compositor is
-        // handed is built from that, so this is the same rectangle `render` measures per frame.
-        self.dst = rect.map { Placement.destination($0, in: CGRect(origin: .zero, size: render)) }
+        // handed is built from that, so this is the same rectangle `render` measures per frame. The
+        // rectangle is resolved into PIXELS before anything turns it, because an angle applied to
+        // the normalised fractions would shear a square window into a rhombus on a 720x1280 frame
+        // while the preview, which turns it in CSS pixels, would not.
+        self.dst = rect.map { Placement.destination($0.bounds, in: CGRect(origin: .zero, size: render)) }
+        self.spin = EditLayer.spin(of: rect)
         self.opacity = opacity
+    }
+
+    /// The angle as Core Image wants it, or nil for a picture that is not turned at all.
+    ///
+    /// Two things collapse to nil, and both have to: an ABSENT angle, which is every clip the editor
+    /// has ever sent, and a whole number of turns, which is the same upright rectangle by the
+    /// manifest's own definition and would otherwise be resampled through a transform whose cosine
+    /// is a rounding error away from 1.
+    ///
+    /// The sign is `OverlayBitmap`'s, for the same reason: the wire's degrees run CLOCKWISE as CSS
+    /// `rotate()` does, while a positive angle in a y-up space turns counter-clockwise. A turned
+    /// video and a turned sticker have to agree, and this is the line that makes them.
+    private static func spin(of rect: ComposePlacement?) -> CGFloat? {
+        // `isFinite` is the second line of defence behind the parser, which already answers nil for
+        // a NaN: a non-finite angle here would put a NaN into the transform and take the frame with
+        // it, and NaN fails the whole-turn test below rather than passing it.
+        guard let deg = rect?.rotationDeg, deg.isFinite,
+              deg.truncatingRemainder(dividingBy: 360) != 0 else { return nil }
+        return -CGFloat(deg) * .pi / 180
     }
 }
 
@@ -243,7 +274,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             // this feature; the absence was decided when the instruction was built, and all that is
             // left here is the coalesce.
             guard let picture = Placement.placed(pic, crop: layer.crop, into: layer.dst ?? rect,
-                                                 fit: layer.fit) else { continue }
+                                                 fit: layer.fit, spin: layer.spin) else { continue }
             image = Alpha.scaled(picture, by: layer.opacity).composited(over: image)
         }
 
@@ -327,8 +358,15 @@ enum Placement {
     /// clip with neither carries `crop == nil` and `dst` equal to the whole render frame, and that
     /// is not an approximation of the old arithmetic, it is the same arithmetic: `dst.minX` and
     /// `dst.minY` are zero and add nothing, and `dst.width`/`dst.height` ARE the render size.
+    ///
+    /// `spin` turns the finished rectangle about its own centre and is the LAST thing to happen
+    /// here, which is what makes the fit a property of the upright rectangle: fitting into the
+    /// turned rectangle's bounding box instead would swell and shrink the picture as the customer
+    /// spins it. It is also why the clip to `dst` happens before the turn rather than after, so
+    /// `cover` still overflows into the rectangle's own edges and is cut there, and the cut travels
+    /// with the picture.
     static func placed(_ frame: CIImage, crop: ComposeRect?, into dst: CGRect,
-                       fit: Fit) -> CIImage? {
+                       fit: Fit, spin: CGFloat?) -> CIImage? {
         // CROP FIRST, against the frame's own extent, and with the same y flip `destination` does
         // and for the same reason: `crop.y` is measured from the TOP of the picture while
         // `extent.minY` is its bottom. Cropping rather than transforming keeps the source pixels
@@ -355,7 +393,7 @@ enum Placement {
         let tx = dst.minX + (dst.width - src.width * s) / 2
         let ty = dst.minY + (dst.height - src.height * s) / 2
 
-        return picture
+        let upright = picture
             .transformed(by: normalise
                 .concatenating(CGAffineTransform(scaleX: s, y: s))
                 .concatenating(CGAffineTransform(translationX: tx, y: ty)))
@@ -363,6 +401,17 @@ enum Placement {
             // and a picture placed on half the frame must not spill over the other half. With no
             // rect the destination IS the whole frame and this is the line that was always here.
             .cropped(to: dst)
+
+        // Every clip that is not turned leaves by this line, with the transform it has always had.
+        guard let spin else { return upright }
+
+        // About the rectangle's CENTRE: to the origin, turn, and back. Concatenation is A-then-B, so
+        // this reads top to bottom as it happens, exactly as `OverlayBitmap` builds its own. The
+        // corners may now hang outside the output frame, and that is correct - the frame crops them,
+        // which is why nothing clamps the angle against the room left.
+        return upright.transformed(by: CGAffineTransform(translationX: -dst.midX, y: -dst.midY)
+            .concatenating(CGAffineTransform(rotationAngle: spin))
+            .concatenating(CGAffineTransform(translationX: dst.midX, y: dst.midY)))
     }
 }
 

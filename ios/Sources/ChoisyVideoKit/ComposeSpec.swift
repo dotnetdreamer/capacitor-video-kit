@@ -27,6 +27,32 @@ struct ComposeRect: Sendable {
     let h: Double
 }
 
+/// Where a clip's picture is drawn: a rectangle that may also be TURNED.
+///
+/// The four numbers are a `ComposeRect`'s and carry every one of its guarantees, because the parser
+/// clamps them through the same code. What is new is the angle, and it is the angle
+/// `ComposeOverlay.rotationDeg` already carries in every respect that matters: CLOCKWISE degrees as
+/// CSS `rotate()` means them, about the rectangle's CENTRE, and NOT clamped, because a caller may
+/// legitimately send 720 and sin/cos reduce it.
+///
+/// nil is upright, which is what every spec written before this field means. It stays nil rather
+/// than becoming a 0 for the same reason `ComposeClip.crop` stays nil: the builder asks this ONCE,
+/// when the plan is built, to decide whether a rotation belongs in the transform at all, and a 0
+/// written here would put a rotation nobody asked for into every one of those specs.
+struct ComposePlacement: Sendable {
+    let x: Double
+    let y: Double
+    let w: Double
+    let h: Double
+    let rotationDeg: Double?
+
+    /// The four numbers on their own, for the placement maths, which resolves a rectangle into
+    /// output pixels and knows nothing about angles. The turn is applied to the result of that, in
+    /// pixels: applied to these normalised fractions instead it would shear a square window into a
+    /// rhombus on any frame that is not square.
+    var bounds: ComposeRect { ComposeRect(x: x, y: y, w: w, h: h) }
+}
+
 struct ComposeClip: Sendable {
     /// The SEGMENT id from the edit manifest, not the host clip key. It is echoed back verbatim as
     /// `clipKey` on a failure and JS maps it back to its own clip with `hostKeyForSegment`.
@@ -46,10 +72,17 @@ struct ComposeClip: Sendable {
     /// exactly what the compositor's fast path tests for, and a default written here would quietly
     /// take every one of those specs off it.
     let crop: ComposeRect?
-    /// Where the cropped picture is drawn on the OUTPUT frame. nil is the whole frame and `fit`
-    /// then letterboxes as it always has; present, `fit` applies WITHIN this rectangle, which is
-    /// the "frame" as far as contain and cover are concerned. nil for the same reason as `crop`.
-    let rect: ComposeRect?
+    /// Where the cropped picture is drawn on the OUTPUT frame, and at what angle. nil is the whole
+    /// frame upright and `fit` then letterboxes as it always has; present, `fit` applies WITHIN this
+    /// rectangle, which is the "frame" as far as contain and cover are concerned. nil for the same
+    /// reason as `crop`.
+    ///
+    /// The order every engine agrees on: orient the source, CROP to `crop`, fit the result into this
+    /// rectangle with `fit`, TURN that fitted rectangle about its own centre by `rotationDeg`, then
+    /// the colour matrix, then the overlays. The fit is measured BEFORE the turn, in the upright
+    /// rectangle, so the picture keeps its size as the customer spins it instead of swelling to fill
+    /// a growing bounding box.
+    let rect: ComposePlacement?
 }
 
 /// One extra layer of video over `ComposeSpec.clips`, drawn in its clips' own rectangles.
@@ -72,7 +105,9 @@ struct ComposeTrack: Sendable {
     /// Where this layer's FIRST clip lands on the OUTPUT timeline. Before that instant the layer
     /// contributes nothing at all - not a black frame, nothing - and the base shows through.
     let startMs: Int64
-    /// Higher draws later, so on top. The base track is 0 and a tie breaks on spec order.
+    /// Higher draws later, so on top. The base track is 0 and a tie breaks on spec order. It is the
+    /// whole of the ordering now that a post may hold fifteen of these: with one layer z was
+    /// reliably 1 and nothing depended on reading it.
     let z: Int
     /// 0...1 over the whole layer, already clamped, multiplied into whatever each clip carries.
     let opacity: Double
@@ -156,9 +191,9 @@ struct ComposeSpec: Sendable {
     /// nil is a spec with no `tracks` key at all, which is every spec written before this feature
     /// and every spec a single-layer edit still sends. It stays nil rather than becoming an empty
     /// array for the same reason `ComposeClip.crop` stays nil: the builder asks this ONCE to decide
-    /// whether it has two timelines to merge, and a default written here would put every spec ever
-    /// sent onto the merging path. An empty array means the same thing and takes the same path; the
-    /// two are told apart only because the wire tells them apart.
+    /// whether it has more than one timeline to merge, and a default written here would put every
+    /// spec ever sent onto the merging path. An empty array means the same thing and takes the same
+    /// path; the two are told apart only because the wire tells them apart.
     let tracks: [ComposeTrack]?
     let output: ComposeOutput
     /// A bare array, exactly as `definitions.ts` declares it. There is no wrapper object with an
@@ -205,8 +240,9 @@ struct SpecError: Error, LocalizedError {
     let path: String
     let message: String
 
-    /// `detail` is only ever passed for the one Android exception that carries a custom message,
-    /// `filter[i].op unknown op '<op>'`.
+    /// `detail` is only ever passed for the two Android exceptions that carry a custom message,
+    /// `filter[i].op unknown op '<op>'` and the video track cap. Both are compared literally by the
+    /// port tests, so the wording here is Android's wording and not a paraphrase of it.
     init(_ path: String, _ detail: String? = nil) {
         self.path = path
         self.message = detail ?? "invalid_spec:\(path)"

@@ -1,8 +1,8 @@
-import { DEFAULT_OUTPUT, round4, type EditFit, type EditManifest, type EditRect } from './edit-manifest';
+import { DEFAULT_OUTPUT, round4, type EditFit, type EditManifest, type EditPlacement } from './edit-manifest';
 import { findVideoTrack, patchClip } from './edit-ops';
 
 /**
- * Where the two video layers sit on the frame, as a handful of named arrangements.
+ * Where two video layers sit on the frame, as a handful of named arrangements.
  *
  * A preset is nothing but a pair of rectangles: the base track's clips get one, the extra layer's
  * clips get the other, and every engine draws them with the [EditClip.rect] and [EditClip.fit] it
@@ -12,7 +12,11 @@ import { findVideoTrack, patchClip } from './edit-ops';
  *
  * TypeScript only for that reason: the native side is handed rectangles and never hears the name of
  * the arrangement they came from, so a preset added here reaches the render without a single line
- * of Kotlin or Swift.
+ * of Kotlin or Swift. A preset that wants a tilt is the same story, because the angle is one more
+ * number on the rectangle it is already writing.
+ *
+ * These are a starting point and a way back, not the arrangements a post may have. A customer drags
+ * and turns a layer wherever they want it from here, which writes the same rectangles by hand.
  */
 
 export type LayoutPresetId =
@@ -28,13 +32,14 @@ export interface LayoutPreset {
   id: LayoutPresetId;
   label: string;
   /**
-   * Where the base track's clips are drawn. ABSENT is the whole frame, the same absence a clip's
-   * own [EditClip.rect] means it by, so a preset that covers the frame is stored as no rectangle at
-   * all and the post keeps the path it takes when nobody has framed anything.
+   * Where the base track's clips are drawn, and at what angle. ABSENT is the whole frame standing
+   * upright, the same absence a clip's own [EditClip.rect] means it by, so a preset that covers the
+   * frame is stored as no rectangle at all and the post keeps the path it takes when nobody has
+   * framed anything.
    */
-  base?: EditRect;
-  /** Where the extra layer's clips are drawn. Absent is the whole frame, as above. */
-  track?: EditRect;
+  base?: EditPlacement;
+  /** Where the extra layer's clips are drawn. Absent is the whole frame upright, as above. */
+  track?: EditPlacement;
   /** The fit both layers are given. Absent hands them back to the post's own [EditManifest.fit]. */
   fit?: EditFit;
 }
@@ -57,7 +62,7 @@ const PIP_INSET = 0.04;
  * the one along the top or bottom edge looks the same size as the one down the side rather than
  * being stretched by the frame it is on.
  */
-function pipRect(right: boolean, bottom: boolean): EditRect {
+function pipRect(right: boolean, bottom: boolean): EditPlacement {
   const h = round4(PIP_SIDE * FRAME_ASPECT);
   const insetY = round4(PIP_INSET * FRAME_ASPECT);
   return {
@@ -109,6 +114,10 @@ export function layoutPreset(id: LayoutPresetId): LayoutPreset {
  * difference between a post that renders the way a one-layer post always has and one that carries
  * the same picture through the framing maths on every frame. [toComposeSpec] only leaves a
  * rectangle off the wire when the manifest has none to send.
+ *
+ * Clearing is also how an arrangement a customer dragged and turned by hand is put back: the angle
+ * lives on the rectangle, so a rectangle that goes takes the angle with it and there is no second
+ * field left behind saying a layer is tilted when nothing is placed anywhere.
  */
 export function applyLayoutPreset(
   manifest: EditManifest,

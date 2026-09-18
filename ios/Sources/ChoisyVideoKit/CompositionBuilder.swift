@@ -237,8 +237,15 @@ enum CompositionBuilder {
             params.append(p)
         }
 
-        // At most one of these today, because the parser refuses a spec that asks for more layers
-        // than the decoder budget allows. The loop costs nothing and keeps the cap in one place.
+        // Fifteen of these at the outside, which is where the parser stops counting. Each one gets
+        // its own composition track and its own audio track, and nothing here is written for a
+        // particular number of them: what makes N layers work rather than two is that the layers
+        // array below is what the instructions are cut from.
+        //
+        // Nothing counts decoders either. A device that cannot open one more fails the export
+        // through the AVError taxonomy in `Exporter`, with a code and a message, which is the honest
+        // answer: the count is the customer's, and refusing a layout up front that this phone might
+        // well have rendered is not.
         for track in spec.tracks ?? [] {
             guard let extra = try await addLayer(track, to: comp, cache: cache,
                                                  audio: spec.audio, totalMs: totalMs) else { continue }
@@ -452,9 +459,9 @@ enum CompositionBuilder {
                               entries: entries), params)
     }
 
-    /// One clip of one layer as the compositor sees it. The rectangle is resolved into render
-    /// pixels HERE, at build time, so that a clip carrying neither a crop nor a rect costs the
-    /// compositor nothing but a nil test per frame.
+    /// One clip of one layer as the compositor sees it. The rectangle and its angle are resolved
+    /// into render pixels and radians HERE, at build time, so that a clip carrying neither a crop
+    /// nor a rect costs the compositor nothing but a nil test per frame.
     private static func editLayer(_ e: TimelineEntry, of layer: LayerTimeline,
                                   plan: RenderPlan) -> EditLayer {
         EditLayer(trackID: layer.trackID,
@@ -475,8 +482,11 @@ enum CompositionBuilder {
     /// can describe.
     private static func merged(_ layers: [LayerTimeline], totalMs: Int64,
                                plan: RenderPlan) -> [EditInstruction] {
-        // Bottom to top by z, and a tie breaks on the order the spec listed them in. The base is
-        // first in this array and carries z 0, so it stays under anything that ties with it.
+        // Bottom to top by z, and a tie breaks on the order the spec listed them in, which is what
+        // `ComposeTrack.z` promises. The base is first in this array and carries z 0, so it stays
+        // under anything that ties with it. This is the whole of the ordering: with one extra layer
+        // z was reliably 1 and any sort would have done, and with fifteen it is the only thing
+        // saying which picture is on top.
         let ordered = layers.enumerated()
             .sorted { $0.element.z == $1.element.z ? $0.offset < $1.offset : $0.element.z < $1.element.z }
             .map { $0.element }

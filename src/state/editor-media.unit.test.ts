@@ -1,4 +1,4 @@
-import { MAX_LAYERS, emptyManifest, type EditClip, type EditManifest } from '../editor';
+import { MAX_LAYERS, MAX_VIDEO_TRACKS, emptyManifest, type EditClip, type EditManifest } from '../editor';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
@@ -105,16 +105,22 @@ describe('EditorMedia', () => {
   describe('adding a second video layer', () => {
     it('takes the source back out when the edit had no room for it', async () => {
       store.maxClips.value = 10;
-      // One layer already fills the cap, so the store refuses the second and the source it was
-      // picked for has nothing left referring to it.
+      // The layers already on the post fill the cap, so the store refuses the next one and the
+      // source it was picked for has nothing left referring to it.
       store.load(sources, new Map(), {
         ...base,
-        videoTracks: [{ id: 'vt', clips: [clip('c', 0, 3000)], startMs: 0, z: 1, opacity: 1 }],
+        videoTracks: Array.from({ length: MAX_VIDEO_TRACKS - 1 }, (_, i) => ({
+          id: `vt${i}`,
+          clips: [clip(`c${i}`, 0, 3000)],
+          startMs: 0,
+          z: i + 1,
+          opacity: 1,
+        })),
       });
 
       expect(await media.addVideoTrack()).toBeNull();
       expect(store.clips.value).toEqual(sources);
-      expect(store.toast.value?.text).toBe('You can have 2 videos on screen at once');
+      expect(store.toast.value?.text).toBe(`You can have ${MAX_VIDEO_TRACKS} videos on screen at once`);
     });
   });
 

@@ -23,6 +23,37 @@ enum class Fit { CONTAIN, COVER }
  */
 data class Rect(val x: Float, val y: Float, val w: Float, val h: Float)
 
+/**
+ * Where a clip's picture is drawn: a rectangle that may also be TURNED.
+ *
+ * The four numbers are a [Rect]'s and carry every one of its guarantees, because the parser clamps
+ * them through the same reader. What is new is the angle, and it is the angle [Overlay.rotationDeg]
+ * already carries in every respect that matters: CLOCKWISE degrees as CSS `rotate()` means them,
+ * about the rectangle's CENTRE, and NOT clamped, because a caller may legitimately send 720 and
+ * sin/cos reduce it.
+ *
+ * Null is upright, which is what every spec written before this field means. It stays null rather
+ * than becoming a 0 for the same reason [Clip.crop] stays null: the plan asks this ONCE, when it is
+ * built, to decide whether a rotation belongs in the transform at all, and a 0 written here would
+ * put a rotation nobody asked for into every one of those specs.
+ */
+data class Placement(
+    val x: Float,
+    val y: Float,
+    val w: Float,
+    val h: Float,
+    val rotationDeg: Float?,
+) {
+
+    /**
+     * The four numbers on their own, for the placement maths, which resolves a rectangle into
+     * output pixels and knows nothing about angles. The turn is applied to the RESULT of that, in
+     * pixels: applied to these normalised fractions it would shear a square window into a rhombus
+     * on any frame that is not square.
+     */
+    val bounds: Rect get() = Rect(x, y, w, h)
+}
+
 data class Clip(
     val key: String,
     val uri: String,
@@ -39,15 +70,22 @@ data class Clip(
      */
     val crop: Rect? = null,
     /**
-     * Where the cropped picture is drawn on the output frame. Null is the whole frame, and [fit]
-     * then letterboxes exactly as it did before this field existed. Present, [fit] applies WITHIN
-     * this rectangle: the rectangle is the "frame" as far as contain and cover are concerned.
+     * Where the cropped picture is drawn on the output frame, and at what angle. Null is the whole
+     * frame upright, and [fit] then letterboxes exactly as it did before this field existed.
+     * Present, [fit] applies WITHIN this rectangle: the rectangle is the "frame" as far as contain
+     * and cover are concerned.
      *
-     * Null is not the same as `Rect(0f, 0f, 1f, 1f)` even though the two describe the same picture.
-     * Null is what the fast path in [CompositionBuilder] tests for, and that path is the promise
-     * that a clip which asks for neither field renders byte for byte as it did before.
+     * The order every engine agrees on: orient the source, CROP to [crop], fit the result into this
+     * rectangle with [fit], TURN that fitted rectangle about its own centre by
+     * [Placement.rotationDeg], then the colour matrix, then the overlays. The fit is measured BEFORE
+     * the turn, in the upright rectangle, so the picture keeps its size as the customer spins it
+     * instead of swelling to fill a growing bounding box.
+     *
+     * Null is not the same as `Placement(0f, 0f, 1f, 1f, null)` even though the two describe the
+     * same picture. Null is what the fast path in [CompositionBuilder] tests for, and that path is
+     * the promise that a clip which asks for neither field renders byte for byte as it did before.
      */
-    val rect: Rect? = null,
+    val rect: Placement? = null,
 )
 
 /**
@@ -67,7 +105,11 @@ data class Track(
     val clips: List<Clip>,
     /** Where this track's first clip lands on the OUTPUT timeline. Before it, the base shows. */
     val startMs: Long,
-    /** Higher draws later, so on top. The base track is 0 and ties break on array order. */
+    /**
+     * Higher draws later, so on top. The base track is 0 and ties break on array order. It is the
+     * whole of the ordering now that a post may hold fifteen of these: with one layer z was
+     * reliably 1 and nothing depended on reading it.
+     */
     val z: Int,
     /** 0..1 over the whole track, multiplied into whatever the clip already has. */
     val opacity: Float,
@@ -156,9 +198,9 @@ data class ComposeSpec(
      * is built rather than per frame - the same discipline [Clip.crop] and [Clip.rect] ask for, and
      * what keeps a single untouched clip posted without a re-encode at all.
      *
-     * At most [ComposeSpecParser.MAX_VIDEO_TRACKS] layers INCLUDING the base, so at most one entry
-     * here; the parser refuses a longer list rather than truncating it. The cap is a hardware
-     * decoder budget rather than a matter of taste.
+     * At most [ComposeSpecParser.MAX_VIDEO_TRACKS] layers INCLUDING the base; the parser refuses a
+     * longer list rather than truncating it. The cap is not a decoder budget - see there for what
+     * it is and is not.
      *
      * A track's clips contribute audio exactly as the base track's do, through their own volume and
      * the spec-level [Audio.originalMuted] and [Audio.originalVolume].

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   MAX_LAYERS,
+  MAX_VIDEO_TRACKS,
   emptyManifest,
   findOverlay,
   removeClip,
@@ -732,20 +733,37 @@ describe('EditorStore', () => {
     });
 
     describe('the actions', () => {
-      it('adds a layer, selects its clip, and refuses a second one', () => {
+      it('adds a layer and selects its clip', () => {
         const id = store.addVideoTrack(clip('c', 0, 3000));
 
         expect(id).toBeTruthy();
         expect(store.videoTrack.value?.clips.map((c) => c.id)).toEqual(['c']);
-        expect(store.videoTracksFull.value).toBe(true);
+        expect(store.videoTracksFull.value).toBe(false);
         expect(store.selection.value).toEqual({ kind: 'clip', id: 'c' });
         expect(store.selectedClipTrackId.value).toBe(id);
         expect(store.dirty.value).toBe(true);
-
-        expect(store.addVideoTrack(clip('d', 0, 1000))).toBeNull();
-        expect(store.manifest.value.videoTracks.length).toBe(1);
-        expect(store.toast.value?.text).toBe('You can have 2 videos on screen at once');
         expect(undoAll()).toBe(1);
+      });
+
+      it('refuses the layer that would go past the cap, and says so', () => {
+        // Counted from MAX_VIDEO_TRACKS rather than written out, because the number is a ceiling on
+        // absurdity and is expected to move again; what this test is about is the refusal.
+        const room = MAX_VIDEO_TRACKS - 1;
+        for (let i = 0; i < room; i++) expect(store.addVideoTrack(clip(`c${i}`, 0, 3000))).toBeTruthy();
+
+        expect(store.videoTracksFull.value).toBe(true);
+        expect(store.addVideoTrack(clip('over', 0, 1000))).toBeNull();
+        expect(store.manifest.value.videoTracks.length).toBe(room);
+        expect(store.toast.value?.text).toBe(`You can have ${MAX_VIDEO_TRACKS} videos on screen at once`);
+        // Every layer that was accepted is a step of its own, and the refusal is not a step at all.
+        expect(undoAll()).toBe(room);
+      });
+
+      it('stacks each new layer over the one before it', () => {
+        store.addVideoTrack(clip('c', 0, 3000));
+        store.addVideoTrack(clip('d', 0, 3000));
+
+        expect(store.manifest.value.videoTracks.map((t) => t.z)).toEqual([1, 2]);
       });
 
       it('lays the two out, and takes the arrangement away with the layer', () => {

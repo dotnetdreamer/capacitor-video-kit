@@ -9,6 +9,7 @@ import {
   MIN_SPEED,
   clamp,
   isFullFrameRect,
+  normalisePlacement,
   normaliseRect,
   sameRect,
   totalDurationMs,
@@ -17,6 +18,7 @@ import {
   type EditManifest,
   type EditMusic,
   type EditOverlay,
+  type EditPlacement,
   type EditRect,
   type EditVideoTrack,
   type EditVoiceover,
@@ -123,6 +125,9 @@ export function setClipSpeed(manifest: EditManifest, clipId: string, speed: numb
   return patchClip(manifest, clipId, { speed: Math.round(clamp(speed, MIN_SPEED, MAX_SPEED) * 100) / 100 });
 }
 
+/** What an absent rectangle already means, spelled out for the one op that has to turn it. */
+const WHOLE_FRAME: EditRect = { x: 0, y: 0, w: 1, h: 1 };
+
 /**
  * How a segment is framed, as a patch. `null` is the instruction to go back to the default, and it
  * is a different thing from leaving the key out, which is the instruction to change nothing - the
@@ -131,7 +136,7 @@ export function setClipSpeed(manifest: EditManifest, clipId: string, speed: numb
  */
 export interface ClipFramingPatch {
   crop?: EditRect | null;
-  rect?: EditRect | null;
+  rect?: EditPlacement | null;
   fit?: EditFit | null;
 }
 
@@ -140,9 +145,32 @@ export function setClipCrop(manifest: EditManifest, clipId: string, crop: EditRe
   return patchClip(manifest, clipId, { crop });
 }
 
-/** Where the segment is drawn on the output frame, 0..1. `null` is the whole frame, as it always was. */
-export function setClipRect(manifest: EditManifest, clipId: string, rect: EditRect | null): EditManifest {
+/**
+ * Where the segment is drawn on the output frame, 0..1, and at what angle. `null` is the whole
+ * frame the right way up, as it always was.
+ *
+ * Position, size and angle in one call because a free-canvas gesture settles all three at once: a
+ * pinch that turns as it moves is one thing the customer did, so it is one op, one undo step, and
+ * one comparison against what was there before.
+ */
+export function setClipRect(manifest: EditManifest, clipId: string, rect: EditPlacement | null): EditManifest {
   return patchClip(manifest, clipId, { rect });
+}
+
+/**
+ * Turns the segment where it stands, clockwise, about its rectangle's centre - the units and the
+ * sense a layer's own `rotationDeg` already has.
+ *
+ * A segment with no rectangle is turned in the one it is drawn in anyway, the whole frame, because
+ * that is the picture the customer has their fingers on. Back at upright the rectangle goes with
+ * the angle: an angle is the only reason a whole-frame rectangle is ever worth storing, so a clip
+ * turned and put straight again is the unframed clip it was, and it posts without a re-encode as it
+ * did before anybody touched it.
+ */
+export function setClipRotation(manifest: EditManifest, clipId: string, rotationDeg: number): EditManifest {
+  const clip = findClip(manifest, clipId);
+  if (!clip) return manifest;
+  return patchClip(manifest, clipId, { rect: { ...(clip.rect ?? WHOLE_FRAME), rotationDeg } });
 }
 
 /** This segment's own fit. `null` hands it back to the whole post's [EditManifest.fit]. */
@@ -151,10 +179,11 @@ export function setClipFit(manifest: EditManifest, clipId: string, fit: EditFit 
 }
 
 /**
- * Back to the whole source drawn over the whole frame, fitted the way the rest of the post is -
- * the "Reset" a crop tool offers, and precisely the state every manifest written before version 3
- * is already in. All three fields go together because a rectangle without the fit that was chosen
- * for it is not a state a customer ever asked for.
+ * Back to the whole source drawn upright over the whole frame, fitted the way the rest of the post
+ * is - the "Reset" a crop tool offers, and precisely the state every manifest written before
+ * version 3 is already in. All three fields go together because a rectangle without the fit that
+ * was chosen for it is not a state a customer ever asked for, and the angle goes with the rectangle
+ * it turns.
  */
 export function resetClipFraming(manifest: EditManifest, clipId: string): EditManifest {
   return patchClip(manifest, clipId, { crop: null, rect: null, fit: null });
@@ -312,13 +341,12 @@ export function findVideoTrack(manifest: EditManifest, trackId: string): EditVid
 }
 
 /**
- * Starts a second layer of video with one clip on it. Null once [MAX_VIDEO_TRACKS] layers are on
- * the post, the base track counted: the cap is a decoder budget rather than a matter of taste, and
- * refusing is the only honest answer to it - a layer accepted and silently dropped is a customer
- * waiting for a picture that never arrives.
+ * Starts another layer of video with one clip on it. Null once [MAX_VIDEO_TRACKS] layers are on the
+ * post, the base track counted: refusing is the only honest answer to a cap, because a layer
+ * accepted and silently dropped is a customer waiting for a picture that never arrives.
  *
- * The layer arrives UNPLACED, covering the frame like any other clip, and [applyLayoutPreset] is
- * what arranges the two. Placing it here would be this function guessing which arrangement the
+ * The layer arrives UNPLACED, covering the frame like any other clip, and a layout preset or a drag
+ * is what puts it somewhere. Placing it here would be this function guessing which arrangement the
  * customer wanted before they had said.
  */
 export function addVideoTrack(manifest: EditManifest, clip: EditClip, trackId: string): EditManifest | null {
@@ -327,8 +355,10 @@ export function addVideoTrack(manifest: EditManifest, clip: EditClip, trackId: s
     id: trackId,
     clips: [clip],
     startMs: 0,
-    // One above whatever is already there, so no two layers ever share a place in the drawing order.
-    z: manifest.videoTracks.length + 1,
+    // One above the highest layer there is, so a new one always arrives on top and no two ever
+    // share a place in the drawing order. Counting the layers instead is not enough once a layer
+    // from the middle can be taken off: the next one added would land on a `z` still in use.
+    z: manifest.videoTracks.reduce((top, existing) => Math.max(top, existing.z), 0) + 1,
     opacity: 1,
   };
   return { ...manifest, videoTracks: [...manifest.videoTracks, track] };
@@ -362,16 +392,21 @@ export function setTrackOpacity(manifest: EditManifest, trackId: string, opacity
 }
 
 /**
- * Puts the extra layer under the base, or back over it - the one control over the drawing order a
- * customer gets while there are two layers.
+ * Puts a layer under the base, or back over it - the one control over the drawing order a customer
+ * gets between the base track and a layer sitting on it.
  *
- * Done by moving the CLIPS between the two layers rather than by a `z` of its own. Each clip
- * carries its own rectangle with it, so every picture stays exactly where it was on the frame and
- * the only thing that changes is which of them is drawn over the other: a swap of `z` in every way
- * anybody can see, with `z` itself left saying what the native parsers are allowed to assume, that
- * the base track is 0 and nothing is ever below it. The alternative is a layer at `z` -1, and then
- * four engines have to agree about a layer beneath the bottom one for a feature that is two
- * rectangles.
+ * Done by moving the CLIPS between the two layers rather than by a `z` of its own, with `z` itself
+ * left saying what the native parsers are allowed to assume, that the base track is 0 and nothing is
+ * ever below it. The alternative is a layer at `z` -1, and then four engines have to agree about a
+ * layer beneath the bottom one for a feature that is two rectangles.
+ *
+ * Each layer keeps its own rectangle and the PICTURES exchange them, which is what a customer means
+ * by Swap: the video that was the inset is the big one underneath, and the one that filled the frame
+ * is the inset over it. Carrying each rectangle along with its clips instead is a swap of `z` that
+ * is right on paper and invisible or ruinous on the frame, because the arrangement swaps with the
+ * pictures and lands back where it started: two halves of a split screen come out exactly where they
+ * already were, and a corner inset goes UNDER a layer covering the whole frame, which is a customer
+ * tapping Swap and watching one of their two videos disappear.
  *
  * The base track is what fixes how long the post runs, so swapping two layers of different lengths
  * changes it. Nothing else can be true while the base is the bottom layer, and it is the reason
@@ -382,9 +417,31 @@ export function swapTrackZ(manifest: EditManifest, trackId: string): EditManifes
   if (!track || manifest.clips.length === 0) return manifest;
   return {
     ...manifest,
-    clips: track.clips,
-    videoTracks: manifest.videoTracks.map((t) => (t.id === trackId ? { ...t, clips: manifest.clips } : t)),
+    clips: drawnIn(track.clips, manifest.clips[0].rect),
+    videoTracks: manifest.videoTracks.map((t) =>
+      t.id === trackId ? { ...t, clips: drawnIn(manifest.clips, track.clips[0]?.rect) } : t,
+    ),
   };
+}
+
+/**
+ * These clips drawn where the layer they are moving to is drawn.
+ *
+ * A layer's rectangle is its first clip's, which is the same answer the layout row reads to decide
+ * which arrangement is lit: a preset is written onto every clip of a layer at once, so they agree
+ * unless one of them has been framed by hand, and then the first one is what the layer is on.
+ * Absence is carried through as absence rather than as a whole-frame rectangle, because that is the
+ * difference between a post that renders the way a post with one layer always has and one that
+ * carries the framing maths on every frame.
+ */
+function drawnIn(clips: readonly EditClip[], rect: EditClip['rect']): EditClip[] {
+  return clips.map((clip) => {
+    if (rect) return { ...clip, rect };
+    if (!clip.rect) return clip;
+    const moved = { ...clip };
+    delete moved.rect;
+    return moved;
+  });
 }
 
 function patchTrack(
@@ -663,8 +720,19 @@ export function removeVoiceover(manifest: EditManifest, id: string): EditManifes
  */
 function withFraming(clip: EditClip, patch: ClipFramingPatch): EditClip {
   const next: EditClip = { ...clip };
-  if ('crop' in patch) setRect(next, 'crop', patch.crop);
-  if ('rect' in patch) setRect(next, 'rect', patch.rect);
+  if ('crop' in patch) {
+    const crop = worthKeeping(patch.crop ? normaliseRect(patch.crop) : undefined);
+    if (crop) next.crop = crop;
+    else delete next.crop;
+  }
+  if ('rect' in patch) {
+    // Read as a placement, so a gesture that turned the clip as it moved it keeps its angle. The
+    // crop above is read as a plain rectangle for the reason [EditClip.rect] gives: turning what is
+    // sampled out of the source is a different operation that no engine performs.
+    const rect = worthKeeping(patch.rect ? normalisePlacement(patch.rect) : undefined);
+    if (rect) next.rect = rect;
+    else delete next.rect;
+  }
   if ('fit' in patch) {
     if (patch.fit) next.fit = patch.fit;
     else delete next.fit;
@@ -672,12 +740,14 @@ function withFraming(clip: EditClip, patch: ClipFramingPatch): EditClip {
   return next;
 }
 
-function setRect(clip: EditClip, key: 'crop' | 'rect', value: EditRect | null | undefined): void {
-  const normalised = value ? normaliseRect(value) : undefined;
-  // A crop of the whole frame is no crop. Storing it would cost the render its fast path and would
-  // make [isUntouched] send a clip nobody changed through a re-encode.
-  if (normalised && !isFullFrameRect(normalised)) clip[key] = normalised;
-  else delete clip[key];
+/**
+ * A rectangle worth storing, or `undefined` for one that says nothing. A crop of the whole frame is
+ * no crop, and an upright rectangle over the whole frame is no placement. Storing either would cost
+ * the render its fast path and would make [isUntouched] send a clip nobody changed through a
+ * re-encode.
+ */
+function worthKeeping<T extends EditRect>(rect: T | undefined): T | undefined {
+  return rect && !isFullFrameRect(rect) ? rect : undefined;
 }
 
 /**

@@ -45,11 +45,11 @@ export const LAYOUT_CHIPS: readonly LayoutChip[] = LAYOUT_PRESETS.map(preset => 
  * The preset a pair of rectangles is, or null for an arrangement none of them names - which a crop
  * of one of the clips can leave behind, and which is a perfectly good state to be in.
  *
- * The two rectangles are matched either way round, because Swap exchanges the layers' clips and
- * with them their rectangles: a top-and-bottom split with the videos the other way up is still a
- * top-and-bottom split, and leaving no chip lit after a Swap would say the arrangement had been
- * lost. The diagram then shows the pair the other way round from the frame, which is what the Swap
- * button under it is for.
+ * The two rectangles are matched either way round, because an arrangement is the same arrangement
+ * with its two rectangles exchanged: a top-and-bottom split with the halves the other way up is
+ * still a top-and-bottom split, and leaving no chip lit for it would say the arrangement had been
+ * lost. A post saved by a build whose Swap moved the rectangles as well as the clips arrives in
+ * exactly that state, and so does anyone who frames the two layers by hand.
  */
 export function matchLayoutPreset(baseRect: EditRect | null | undefined, trackRect: EditRect | null | undefined): LayoutPresetId | null {
   const preset = LAYOUT_PRESETS.find(

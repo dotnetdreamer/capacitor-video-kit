@@ -250,14 +250,29 @@ export class VideoHold {
     this.cancel = () => clearTimeout(timer);
   }
 
+  /**
+   * Takes the hold away, DOWN.
+   *
+   * Lowering here rather than only cancelling the pending reveal, because the signal belongs to the
+   * component and outlives this object: the follower's hold is destroyed on every remove of the
+   * second video and on every undo of adding one, and a hold destroyed while it was up left that
+   * signal on. The canvas the NEXT hold is handed is then a fresh one, born with the class that
+   * shows it, blank, over the whole frame - and it can never come down, because the new hold has
+   * not been raised and [lower] returns at its first line for good.
+   */
   destroy(): void {
     this.destroyed = true;
-    this.cancel?.();
-    this.cancel = null;
+    this.done();
   }
 
   private done(): void {
+    // The reveal was armed with a presented-frame callback AND the timer behind it, and only one of
+    // the two has brought us here. An orphaned frame callback does not expire: it waits for the
+    // element's next presented frame, which on a paused element means the next play - a whole hold
+    // or more later - and then lowers whichever hold is up by then, a frame early and black.
+    const cancel = this.cancel;
     this.cancel = null;
+    cancel?.();
     this.raised = false;
     this.setHolding(false);
   }

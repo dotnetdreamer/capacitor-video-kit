@@ -52,6 +52,7 @@ import {
   type EditManifest,
   type EditMusic,
   type EditOverlay,
+  type EditPlacement,
   type EditRect,
   type EditVoiceover,
   type EffectOverlay,
@@ -96,8 +97,11 @@ export interface PreviewVideoLayer {
   clipKey: string;
   /** Where in the SOURCE file this playhead lands, trim and speed already applied. */
   sourceMs: number;
-  /** Null is the whole frame, which is what every post before this was. */
-  rect: EditRect | null;
+  /**
+   * Where the picture goes and the angle it is turned to. Null is the whole frame standing upright,
+   * which is what every post before this was.
+   */
+  rect: EditPlacement | null;
   crop: EditRect | null;
   fit: EditFit;
   opacity: number;
@@ -183,8 +187,9 @@ export class EditorStore {
   /** The second video layer, or null while the post is the one video it has always been. */
   readonly videoTrack = computed(() => this.manifest.value.videoTracks[0] ?? null);
   /**
-   * Whether another video layer would go past [MAX_VIDEO_TRACKS], which counts the base track - so
-   * one extra layer fills it. The cap is a decoder budget, not a matter of taste.
+   * Whether another video layer would go past [MAX_VIDEO_TRACKS], which counts the base track. The
+   * cap is there so an absurd edit fails with something readable rather than at the encoder, and it
+   * is not an opinion about how many pictures belong on the frame.
    */
   readonly videoTracksFull = computed(() => this.manifest.value.videoTracks.length >= MAX_VIDEO_TRACKS - 1);
 

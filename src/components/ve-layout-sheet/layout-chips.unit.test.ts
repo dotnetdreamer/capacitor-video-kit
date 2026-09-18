@@ -45,12 +45,12 @@ describe('matchLayoutPreset', () => {
     expect(matchLayoutPreset(preset.base, preset.track)).toBe('splitTopBottom');
   });
 
-  it('finds it the other way round too, because Swap exchanges the rectangles of the two layers', () => {
+  it('finds it the other way round too, an arrangement being the same one with its halves exchanged', () => {
     const preset = layoutPreset('splitLeftRight');
     expect(matchLayoutPreset(preset.track, preset.base)).toBe('splitLeftRight');
   });
 
-  it('keeps a corner inset lit after a swap, the base being the one over the whole frame', () => {
+  it('keeps a corner inset lit with the base in the corner, which is a post an older build saved', () => {
     const preset = layoutPreset('pipBR');
     expect(matchLayoutPreset(preset.track, preset.base)).toBe('pipBR');
   });

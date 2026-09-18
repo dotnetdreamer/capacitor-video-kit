@@ -19,11 +19,14 @@ object ComposeSpecParser {
     const val MAX_OVERLAYS = 30
 
     /**
-     * How many video layers may be on screen at once, the BASE TRACK INCLUDED - so two means the
-     * base plus one entry in `tracks`. A decoder budget rather than a matter of taste: a mid-range
-     * phone decodes two video streams at once, and the feed behind the editor may hold one already.
+     * How many video layers a post may hold, the BASE TRACK INCLUDED - so sixteen means the base
+     * plus fifteen entries in `tracks`. It is NOT a decoder budget: this parser feeds the export,
+     * which composites offline with nothing racing a frame deadline, and the live preview keeps a
+     * budget of its own that is a different number in a different file. The ceiling is here only so
+     * that an absurd spec meets a readable refusal instead of a device running out of codecs
+     * halfway through a render.
      */
-    const val MAX_VIDEO_TRACKS = 2
+    const val MAX_VIDEO_TRACKS = 16
 
     private const val PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 
@@ -38,12 +41,14 @@ object ComposeSpecParser {
         }
 
         val tracksJson = json.optJSONArray("tracks") ?: JSONArray()
-        // Refused rather than truncated: a caller asking for three layers believes it is getting
-        // three, and a post silently missing one of them is not the post it asked to make.
+        // Refused rather than truncated: a caller asking for four layers believes it is getting
+        // four, and a post silently missing one of them is not the post it asked to make. The
+        // wording is compared literally by the iOS port tests, so it is one string on both engines
+        // down to the plural.
         if (tracksJson.length() > MAX_VIDEO_TRACKS - 1) {
             throw SpecException(
                 "tracks",
-                "invalid_spec:tracks at most ${MAX_VIDEO_TRACKS - 1} extra video track",
+                "invalid_spec:tracks at most ${MAX_VIDEO_TRACKS - 1} extra video tracks",
             )
         }
         val tracks = (0 until tracksJson.length()).map { i ->
@@ -102,7 +107,7 @@ object ComposeSpecParser {
             muted = o.optBoolean("muted", false),
             fit = if (o.optString("fit", "contain") == "cover") Fit.COVER else Fit.CONTAIN,
             crop = o.rectOrNull("crop", "$path.crop"),
-            rect = o.rectOrNull("rect", "$path.rect"),
+            rect = o.placementOrNull("rect", "$path.rect"),
         )
     }
 
@@ -152,6 +157,36 @@ object ComposeSpecParser {
         optJSONObject(key)?.let { parseRect(it, path) }
 
     /**
+     * The same four numbers through the same clamp, with the angle carried across untouched.
+     *
+     * The angle is read HERE and not in [parseRect], which is why a `rotationDeg` sent on a crop is
+     * ignored rather than acted on: turning the region sampled out of the source is a different
+     * operation on different pixels, one neither engine performs and the builder never asks for.
+     */
+    private fun JSONObject.placementOrNull(key: String, path: String): Placement? =
+        optJSONObject(key)?.let {
+            val box = parseRect(it, path)
+            Placement(box.x, box.y, box.w, box.h, it.rotationDegOrNull())
+        }
+
+    /**
+     * The turn a rectangle stands at, straight off the wire.
+     *
+     * Absent stays absent, because absent is what the plan tests to leave the rotation out of the
+     * transform entirely, and an unreadable or non-finite angle joins it there rather than carrying
+     * a NaN into a matrix that would blacken the whole clip. Nothing else is done to it: it is not
+     * clamped and not wrapped into a single turn, because 720 is a legal spec and sin and cos
+     * reduce it themselves.
+     */
+    private fun JSONObject.rotationDegOrNull(): Float? {
+        if (!has("rotationDeg")) return null
+        val deg = optDouble("rotationDeg", Double.NaN)
+        if (deg.isNaN()) return null
+        val f = deg.toFloat()
+        return if (f.isFinite()) f else null
+    }
+
+    /**
      * The split this file is built on, applied to a rectangle: a rectangle with no area is a shape
      * error and fails loudly, one that hangs off the edge of the frame is an out-of-range value and
      * is clamped back inside it.
@@ -173,6 +208,8 @@ object ComposeSpecParser {
         // The origin first, then each side against whatever room the origin left, so a rectangle
         // that overhangs the right edge keeps its position and loses the overhang rather than
         // sliding back inwards - reversing that would silently move a crop the customer placed.
+        // The clamp stops at the four numbers and never reaches an angle: a turned rectangle
+        // legitimately puts its corners outside the frame, and the frame is what crops them.
         return Rect(x = x, y = y, w = w.coerceAtMost(1f - x), h = h.coerceAtMost(1f - y))
     }
 

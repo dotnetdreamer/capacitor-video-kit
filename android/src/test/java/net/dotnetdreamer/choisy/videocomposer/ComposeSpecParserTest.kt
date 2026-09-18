@@ -145,6 +145,63 @@ class ComposeSpecParserTest {
     }
 
     @Test
+    fun `a rectangle with no angle keeps the angle absent too`() {
+        // The same promise one level down: the plan tests this for null to leave the rotation out
+        // of the transform altogether, so a rectangle that says nothing about an angle must not
+        // arrive carrying a 0.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(0.0, 0.0, 1.0, 0.5))
+        }
+        assertNull(ComposeSpecParser.parse(json).clips[0].rect!!.rotationDeg)
+    }
+
+    @Test
+    fun `an angle is carried across untouched, and is not clamped or wrapped`() {
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("rect", rectJson(0.0, 0.0, 1.0, 0.5).put("rotationDeg", 745.5))
+        }
+        // 720 of that is two whole turns, and reducing it here would be this parser deciding
+        // something sin and cos decide for nothing.
+        assertEquals(745.5f, ComposeSpecParser.parse(json).clips[0].rect!!.rotationDeg!!, 1e-4f)
+    }
+
+    @Test
+    fun `an angle on a crop is ignored`() {
+        // One reader serves both fields, so the key is READABLE here; acting on it would be a
+        // different operation on different pixels, and no engine performs it.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("crop", rectJson(0.0, 0.0, 0.5, 0.5).put("rotationDeg", 30.0))
+        }
+        val crop = ComposeSpecParser.parse(json).clips[0].crop!!
+        assertEquals(Rect(0f, 0f, 0.5f, 0.5f), crop)
+    }
+
+    @Test
+    fun `an unreadable angle is upright rather than a NaN in the matrix`() {
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("rect", rectJson(0.0, 0.0, 1.0, 0.5).put("rotationDeg", "sideways"))
+        }
+        assertNull(ComposeSpecParser.parse(json).clips[0].rect!!.rotationDeg)
+    }
+
+    @Test
+    fun `a turned rectangle is clamped in its four numbers and not in its angle`() {
+        // A turned rectangle legitimately puts its corners outside the frame - the frame crops them
+        // - so the clamp that brings x and y back inside 0..1 stops where the angle starts.
+        val json = minimalJson().apply {
+            getJSONArray("clips").getJSONObject(0)
+                .put("rect", rectJson(0.75, 0.0, 0.5, 1.0).put("rotationDeg", -540.0))
+        }
+        val rect = ComposeSpecParser.parse(json).clips[0].rect!!
+        assertEquals(0.75f, rect.x, 1e-6f)
+        assertEquals(0.25f, rect.w, 1e-6f)
+        assertEquals(-540f, rect.rotationDeg!!, 1e-4f)
+    }
+
+    @Test
     fun `crop and rect parse`() {
         val json = minimalJson().apply {
             getJSONArray("clips").getJSONObject(0)
@@ -307,12 +364,29 @@ class ComposeSpecParserTest {
     }
 
     @Test
-    fun `more layers than the decoder budget are rejected rather than truncated`() {
-        // The cap counts the base track, so as many extra layers as the cap allows in total is
-        // always one too many.
+    fun `as many layers as the cap allows are all kept`() {
+        // The cap counts the base track, so one fewer than it is what `tracks` may hold. Nothing in
+        // the parser, the plan or the builder is written for a particular number of them.
+        val tracks = org.json.JSONArray()
+        repeat(ComposeSpecParser.MAX_VIDEO_TRACKS - 1) { i -> tracks.put(trackJson("t$i", "b")) }
+        val spec = ComposeSpecParser.parse(minimalJson().apply { put("tracks", tracks) })
+        assertEquals(ComposeSpecParser.MAX_VIDEO_TRACKS - 1, spec.tracks.size)
+    }
+
+    @Test
+    fun `more layers than the cap allows are rejected rather than truncated`() {
+        // A caller asking for this many believes it is getting this many, and a post silently
+        // missing one of them is not the post it asked to make. The message is compared literally
+        // by the iOS port tests, so the plural is part of the contract and not a nicety.
         val tracks = org.json.JSONArray()
         repeat(ComposeSpecParser.MAX_VIDEO_TRACKS) { i -> tracks.put(trackJson("t$i", "b")) }
-        expectInvalid("tracks") { put("tracks", tracks) }
+        try {
+            ComposeSpecParser.parse(minimalJson().apply { put("tracks", tracks) })
+            fail("expected invalid_spec:tracks")
+        } catch (e: SpecException) {
+            assertEquals("tracks", e.path)
+            assertEquals("invalid_spec:tracks at most 15 extra video tracks", e.message)
+        }
     }
 
     @Test

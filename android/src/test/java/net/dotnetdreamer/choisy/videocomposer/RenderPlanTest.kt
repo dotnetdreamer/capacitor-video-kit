@@ -26,8 +26,12 @@ class RenderPlanTest {
         uri: String = "file:///$key.mp4",
         fit: Fit = Fit.CONTAIN,
         crop: Rect? = null,
-        rect: Rect? = null,
+        rect: Placement? = null,
     ) = Clip(key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect)
+
+    /** Where a picture is drawn, standing as it was drawn unless a test says otherwise. */
+    private fun place(x: Float, y: Float, w: Float, h: Float, rotationDeg: Float? = null) =
+        Placement(x, y, w, h, rotationDeg)
 
     private fun track(
         clips: List<Clip>,
@@ -216,7 +220,7 @@ class RenderPlanTest {
     private fun window(
         fit: Fit = Fit.CONTAIN,
         crop: Rect? = null,
-        rect: Rect? = null,
+        rect: Placement? = null,
         sourceW: Int = 1_000,
         sourceH: Int = 1_000,
     ) = RenderPlan.sourceWindow(clip("a", fit = fit, crop = crop, rect = rect), output, sourceW, sourceH)
@@ -235,7 +239,7 @@ class RenderPlanTest {
                 listOf(
                     clip("a"),
                     clip("b", crop = Rect(0.25f, 0.25f, 0.5f, 0.5f)),
-                    clip("c", rect = Rect(0f, 0f, 1f, 0.5f)),
+                    clip("c", rect = place(0f, 0f, 1f, 0.5f)),
                 ),
             ),
             emptyMap(),
@@ -265,9 +269,9 @@ class RenderPlanTest {
     fun `a rect fits the picture within itself rather than within the frame`() {
         // The top half of a 9:16 frame is 720x640, so a square source lands 640x640 inside it with
         // pillarboxing of its own, and the bottom half of the output is off the source entirely.
-        assertRect(-0.0625f, 0f, 1.125f, 2f, window(rect = Rect(0f, 0f, 1f, 0.5f)))
+        assertRect(-0.0625f, 0f, 1.125f, 2f, window(rect = place(0f, 0f, 1f, 0.5f)))
         // Cover fills that same half and loses the top and bottom of the source instead.
-        assertRect(0f, 0.0555556f, 1f, 1.7777778f, window(fit = Fit.COVER, rect = Rect(0f, 0f, 1f, 0.5f)))
+        assertRect(0f, 0.0555556f, 1f, 1.7777778f, window(fit = Fit.COVER, rect = place(0f, 0f, 1f, 0.5f)))
     }
 
     @Test
@@ -276,8 +280,48 @@ class RenderPlanTest {
         // output frame seen from the source - twice its size, with the source at the far corner.
         assertRect(
             -1f, -1f, 2f, 2f,
-            window(rect = Rect(0.5f, 0.5f, 0.5f, 0.5f), sourceW = 360, sourceH = 640),
+            window(rect = place(0.5f, 0.5f, 0.5f, 0.5f), sourceW = 360, sourceH = 640),
         )
+    }
+
+    @Test
+    fun `the source window is the upright rectangle's, whatever the angle`() {
+        // The fit is measured BEFORE the turn and the fitted result is turned as one piece, so an
+        // angle must not reach this arithmetic at all. Fitting into the turned rectangle's bounding
+        // box instead would swell and shrink the picture as the customer spun it.
+        val upright = window(rect = place(0f, 0f, 1f, 0.5f))
+        val turned = window(rect = place(0f, 0f, 1f, 0.5f, rotationDeg = 37f))
+        assertEquals(upright, turned)
+    }
+
+    @Test
+    fun `a turn reaches the plan as the counter-clockwise degrees GL counts`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", rect = place(0.1f, 0.1f, 0.5f, 0.5f, rotationDeg = 30f)))),
+            mapOf("file:///a.mp4" to probe(2_000)),
+        )
+        // The wire counts clockwise, as CSS does, and a positive z-rotation in a y-up frame turns
+        // the other way - the same flip an overlay's angle takes two fields above.
+        assertEquals(-30f, plan.clips[0].rotationGlDeg, 1e-6f)
+        assertTrue(plan.clips[0].reframed)
+    }
+
+    @Test
+    fun `a rectangle nobody turned carries no turn at all`() {
+        // Three readings have to collapse to the same 0, because the transform is built with no
+        // rotation in it for that value and a whole turn IS the upright rectangle.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a"),
+                    clip("b", rect = place(0f, 0f, 1f, 0.5f)),
+                    clip("c", rect = place(0f, 0f, 1f, 0.5f, rotationDeg = -720f)),
+                    clip("d", rect = place(0f, 0f, 1f, 0.5f, rotationDeg = Float.NaN)),
+                ),
+            ),
+            emptyMap(),
+        )
+        for (planned in plan.clips) assertEquals(0f, planned.rotationGlDeg, 0f)
     }
 
     /* ------------------------------------------------------------------------------------- */
@@ -484,7 +528,7 @@ class RenderPlanTest {
             spec(
                 listOf(clip("a")),
                 tracks = listOf(
-                    track(listOf(clip("b", fit = Fit.COVER, rect = Rect(0f, 0.5f, 1f, 0.5f)))),
+                    track(listOf(clip("b", fit = Fit.COVER, rect = place(0f, 0.5f, 1f, 0.5f)))),
                 ),
             ),
             mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000)),
@@ -506,7 +550,7 @@ class RenderPlanTest {
     fun `a layer clip keeps its crop and measures it against the layer's own frame`() {
         // The picture-in-picture preset: a square in OUTPUT pixels, 0.36 of the frame's width, in
         // the top-left corner. Both sides come out at 259 px, which is what makes it a square.
-        val pip = Rect(0.04f, 0.0225f, 0.36f, 0.2025f)
+        val pip = place(0.04f, 0.0225f, 0.36f, 0.2025f)
         val plan = RenderPlan.build(
             spec(
                 listOf(clip("a")),
@@ -526,6 +570,29 @@ class RenderPlanTest {
         // Anchored at the centre of the square, which is its inset plus half its side.
         assertEquals(2f * (0.04f + 0.18f) - 1f, plan.tracks[0].placements[0].anchorX, 1e-6f)
         assertEquals(1f - 2f * (0.0225f + 0.10125f), plan.tracks[0].placements[0].anchorY, 1e-6f)
+    }
+
+    @Test
+    fun `a layer is turned where it is placed, not inside its own frame`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a")),
+                tracks = listOf(
+                    track(listOf(clip("b", rect = place(0.5f, 0.5f, 0.5f, 0.5f, rotationDeg = 45f)))),
+                ),
+            ),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000)),
+        )
+        val layer = plan.tracks[0]
+        // The rectangle has become the layer's frame, so a turn applied inside it would cut the
+        // layer's own corners off. The compositor turns the finished layer about its anchor
+        // instead, and the clip that draws it stands as it was drawn.
+        assertEquals(-45f, layer.placements[0].rotationGlDeg, 1e-6f)
+        assertEquals(0f, layer.clips[0].rotationGlDeg, 0f)
+        assertNull(layer.clips[0].clip.rect)
+        // The anchor is still the rectangle's centre: a turn moves the picture, never the pivot.
+        assertEquals(0.5f, layer.placements[0].anchorX, 1e-6f)
+        assertEquals(-0.5f, layer.placements[0].anchorY, 1e-6f)
     }
 
     @Test
@@ -551,26 +618,33 @@ class RenderPlanTest {
     }
 
     @Test
-    fun `layers are ordered bottom to top by z`() {
-        // The parser allows one extra layer today; the ordering is worth pinning here, where two
-        // can still be handed over, because it is the rule and not the cap that decides what is
-        // drawn over what.
+    fun `layers are ordered bottom to top by z, and a tie keeps the order it arrived in`() {
+        // With one extra layer z was reliably 1 and any sort would have done. With fifteen of them
+        // it is the only thing saying which picture is on top, and a tie is reachable: the editor
+        // hands out one above the highest z, so two layers can only share a place after a removal
+        // from the middle.
         val plan = RenderPlan.build(
             spec(
                 listOf(clip("a")),
                 tracks = listOf(
-                    track(listOf(clip("b")), id = "high", z = 2),
-                    track(listOf(clip("c")), id = "low", z = 1),
+                    track(listOf(clip("b")), id = "high", z = 9),
+                    track(listOf(clip("c")), id = "tie-first", z = 3),
+                    track(listOf(clip("d")), id = "tie-second", z = 3),
+                    track(listOf(clip("e")), id = "low", z = 1),
                 ),
             ),
             mapOf(
                 "file:///a.mp4" to probe(2_000),
                 "file:///b.mp4" to probe(2_000),
                 "file:///c.mp4" to probe(2_000),
+                "file:///d.mp4" to probe(2_000),
+                "file:///e.mp4" to probe(2_000),
             ),
         )
-        assertEquals("low", plan.tracks[0].id)
-        assertEquals("high", plan.tracks[1].id)
+        assertEquals(
+            listOf("low", "tie-first", "tie-second", "high"),
+            plan.tracks.map { it.id },
+        )
         // The plan says bottom to top and CompositionBuilder registers the sequences in reverse,
         // because Media3 blends its compositor inputs from the LAST registered to the first. The
         // last entry here is therefore the first sequence in the composition.
