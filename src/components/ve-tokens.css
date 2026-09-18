@@ -36,6 +36,7 @@
    * @prop --ve-lane-music: The timeline lane colour for music
    * @prop --ve-lane-voice: The timeline lane colour for a voiceover
    * @prop --ve-lane-ink: Text on a lane, dark because every lane colour is light
+   * @prop --ve-frame-edge: The hairline around the video frame, which is where the finished post is cut
    * @prop --ve-stage-gutter: What the preview keeps free either side of the video for Back and Next, together
    * @prop --ve-chrome-max: How wide a row of chrome runs before it stops growing and centres itself
    * @prop --ve-transport-max: The same for the clock and transport row, which wants to stay tighter
@@ -56,6 +57,14 @@
   --ve-cta: var(--choisy-cta-bg, #a6ff2e);
   --ve-cta-text: var(--choisy-cta-text, #1a1a2e);
   --ve-danger: #ff4d6a;
+  /*
+   * The edge of the video frame. It is drawn at all because the frame is black, the page behind it
+   * is black, and a video placed off the edge is cut off at a line the customer otherwise has to
+   * infer from where the picture stops - which tells them nothing at all on a clip that is letterboxed
+   * or one pushed half off the frame. Faint on purpose: it marks the boundary of the post and must
+   * not read as part of it.
+   */
+  --ve-frame-edge: rgba(255, 255, 255, 0.22);
 
   /* One colour per kind of layer, so a glance at the timeline tells text from music. */
   --ve-lane-text: #f5a8ff;

@@ -398,6 +398,9 @@ describe('ve-preview on a free canvas', () => {
     expect(video.width).toBeCloseTo(stage.width * 0.5, 0);
     // And the frame is what cuts it off, so nothing of it is painted beside the video.
     expect(getComputedStyle(frame).overflow).toBe('hidden');
+    // The edge it is cut at is drawn, over the video rather than under it: on a black page against
+    // a black frame there is otherwise nothing to say where the finished post ends.
+    expect(getComputedStyle(frame, '::after').borderTopWidth).toBe('1px');
   });
 
   /*

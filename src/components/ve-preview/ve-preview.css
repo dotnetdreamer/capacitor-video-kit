@@ -64,6 +64,26 @@
   background: var(--ve-bg, #000);
 }
 
+/*
+ * The frame's own edge: the line the finished post is cut at.
+ *
+ * A pseudo-element and not a border or an inset shadow, and each for its own reason. A BORDER would
+ * be inside the frame's box and so inside the coordinate space every layer and every clip rectangle
+ * is a fraction OF, moving the picture a pixel away from where the render puts it. An INSET SHADOW
+ * paints between the background and the children, so both `<video>` elements would cover it. This
+ * is the last thing in the frame and the only positioned child without a rectangle of its own, so
+ * it paints over the video, it is cut to the frame's own radius by `overflow: hidden`, and it takes
+ * no touch: every child in here is `pointer-events: none` for the reason `touch-action` is declared.
+ */
+.pv__frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--ve-frame-edge, rgba(255, 255, 255, 0.22));
+  border-radius: inherit;
+  pointer-events: none;
+}
+
 .pv__video {
   position: absolute;
   /*
