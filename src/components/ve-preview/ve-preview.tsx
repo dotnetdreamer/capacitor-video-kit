@@ -663,7 +663,16 @@ export class VePreview implements EditorPlayer {
   private measureStage(stage: HTMLElement): void {
     const rect = stage.getBoundingClientRect();
     if (rect.width <= 0) return;
+    const was = this.stageSize.value;
     this.stageSize.value = { width: rect.width, height: rect.height, bounds: chromeBounds(stage, rect) };
+    // A stage that changes size moves both pictures without changing one number [repaintMoved]
+    // compares: every box in the frame is a PERCENTAGE of this rectangle, so opening a sheet - which
+    // is what shrinks the stage - leaves the views identical and the elements somewhere else on
+    // screen. A paused element does nothing about that by itself; see [repaintPaused].
+    if (was && (was.width !== rect.width || was.height !== rect.height)) {
+      this.player?.repaintBase();
+      this.player?.repaintExtra();
+    }
   }
 
   /* ========================================================================================= */

@@ -17,6 +17,7 @@ import {
   VideoHold,
   applyClipAudio,
   clipsSilenced,
+  onPageShown,
   posterFor,
   previewSrc,
   repaintPaused,
@@ -194,6 +195,9 @@ export class PreviewPlayer implements EditorPlayer {
     this.listen(this.video, 'timeupdate', () => {
       if (!this.video.paused) this.follow();
     });
+    // A picker, a phone call or the home button takes the page away, and the paused elements'
+    // pictures with it; see [onPageShown] and [revive].
+    this.unlisten.push(onPageShown(() => this.revive()));
   }
 
   /* ========================================================================================= */
@@ -327,6 +331,26 @@ export class PreviewPlayer implements EditorPlayer {
   repaintExtra(): void {
     if (this.destroyed) return;
     this.follower?.repaint();
+  }
+
+  /**
+   * Puts the picture back after the page has been away; [onPageShown] is where what takes it is
+   * written down.
+   *
+   * The source is FORGOTTEN rather than seeked, which is the whole of the fix: forgetting it is what
+   * makes `goTo` load it again, and a load is one of the two things that gives a purged element a
+   * picture back. The load ends in a forced seek to the playhead like every other, so what arrives is
+   * the frame the customer was left looking at.
+   *
+   * An element that is playing has lost nothing - playing is the other thing that restores it, and
+   * WebKit has already done it by the time this runs - so it is left alone rather than stalled by a
+   * load it does not need.
+   */
+  private revive(): void {
+    if (this.destroyed || !this.video.paused) return;
+    this.loadedKey = null;
+    this.goTo(this.store.playheadMs.value, false);
+    this.follower?.revive();
   }
 
   destroy(): void {
