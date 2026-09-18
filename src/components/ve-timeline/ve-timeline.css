@@ -540,14 +540,13 @@
   }
 
   /*
-   * And the closed one for as long as it is being pulled - named on each of the parts as well as on
-   * the content, because a rule on a descendant beats what it would otherwise inherit.
+   * A segment and a lane are things to take hold of rather than things to press: dragging one
+   * either carries it to another time or pulls the whole timeline along under it, and both of those
+   * are the open hand, not the pointing finger. Only the real buttons keep the finger.
    */
-  .tl--scrubbing .tl__content,
-  .tl--scrubbing .seg,
-  .tl--scrubbing .item,
-  .tl--scrubbing .handle {
-    cursor: grabbing;
+  .seg,
+  .item {
+    cursor: grab;
   }
 
   /* An edge that can be pulled says which way it goes. */
@@ -555,11 +554,40 @@
     cursor: ew-resize;
   }
 
-  .seg,
-  .item,
+  .item--add-sound,
   .tl__mute,
   .tl__add {
     cursor: pointer;
+  }
+
+  /*
+   * And for as long as anything IS being dragged, the whole timeline takes that drag's cursor.
+   *
+   * Every part is named rather than left to inherit from `.tl`, because a rule on a descendant
+   * beats an inherited value - the lane under the pointer would otherwise keep its open hand
+   * through the whole of its own move. The buttons are in the list for the same reason: a drag
+   * holds the pointer captured, so it passes over them without them being what is being dragged.
+   */
+  .tl--drag-move,
+  .tl--drag-move .tl__content,
+  .tl--drag-move .seg,
+  .tl--drag-move .item,
+  .tl--drag-move .handle,
+  .tl--drag-move .item--add-sound,
+  .tl--drag-move .tl__mute,
+  .tl--drag-move .tl__add {
+    cursor: grabbing;
+  }
+
+  .tl--drag-resize,
+  .tl--drag-resize .tl__content,
+  .tl--drag-resize .seg,
+  .tl--drag-resize .item,
+  .tl--drag-resize .handle,
+  .tl--drag-resize .item--add-sound,
+  .tl--drag-resize .tl__mute,
+  .tl--drag-resize .tl__add {
+    cursor: ew-resize;
   }
 
   /* The add button is white, so the only way its hover can go is down. */
