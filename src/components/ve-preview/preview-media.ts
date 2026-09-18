@@ -167,6 +167,12 @@ export class VideoHold {
   private cancel: (() => void) | null = null;
   private raised = false;
   private destroyed = false;
+  /**
+   * Whether the canvas holds a frame from some earlier raise. It is what lets a raise that cannot
+   * copy a FRESH frame still put something over the element instead of letting black through; see
+   * [raise]. Once true it stays true - the canvas is never cleared, only drawn over.
+   */
+  private hasFrame = false;
 
   /**
    * @param safetyMs how long a raised hold may stay up with nothing coming to lower it; see [raise].
@@ -185,29 +191,19 @@ export class VideoHold {
    * black. `drawImage` from a `capacitor://` or remote video taints the canvas, but tainting only
    * blocks readback and this canvas is never read, so a tainted one displays perfectly.
    *
-   * A frame is only there to copy once `readyState` has one; before that (the very first clip of a
-   * session) there is nothing on screen to preserve and black is what the frame already shows, so
-   * the hold is skipped rather than raised over a blank canvas.
+   * A frame is only there to copy once `readyState` has one. When there is not one - the element is
+   * already part way through a load - the canvas is left holding whatever the LAST raise put on it
+   * and that is shown instead. It is a frame or two stale and it is replaced within about a tenth of
+   * a second, which is a far better answer than the black it covers: crossing a cut while the
+   * element has not settled is exactly what a scrub over a clip boundary does, several times a
+   * second, and every one of those used to flash.
+   *
+   * Only the very first load of a session finds an empty canvas, and there black is what the frame
+   * already shows, so the hold is skipped rather than raised over a blank one.
    */
   raise(): void {
     if (this.destroyed) return;
-    const video = this.video;
-    if (video.readyState < 2 /* HAVE_CURRENT_DATA */ || !video.videoWidth || !video.videoHeight) {
-      return;
-    }
-    // Intrinsic size, so `object-fit: contain` letterboxes the canvas exactly as it letterboxes the
-    // video and the held frame does not jump a pixel when it appears.
-    if (this.canvas.width !== video.videoWidth) this.canvas.width = video.videoWidth;
-    if (this.canvas.height !== video.videoHeight) this.canvas.height = video.videoHeight;
-    const ctx = this.canvas.getContext('2d');
-    if (!ctx) return;
-    try {
-      ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
-    } catch {
-      // A frame that cannot be copied is not worth failing a clip change over; the old behaviour
-      // (black for the length of the load) is what happens, which is no worse than before.
-      return;
-    }
+    if (!this.copyFrame() && !this.hasFrame) return;
     this.cancel?.();
     this.raised = true;
     this.setHolding(true);
@@ -217,6 +213,50 @@ export class VideoHold {
     // of, sized by its owner to outlast every watchdog it has.
     const safety = setTimeout(() => this.done(), this.safetyMs);
     this.cancel = () => clearTimeout(safety);
+  }
+
+  /**
+   * Copies the frame the element is settled on, ready for a raise that will not be able to.
+   *
+   * A raise can only copy while the element still HAS a frame, and during a scrub across a cut it
+   * never does: each crossing arrives with the element already part way through the seek the last
+   * crossing asked for. The canvas would then never be written at all, and every crossing would
+   * show black. This is called from the other end - wherever the element has just settled on a
+   * frame - so that there is always a recent one to fall back on.
+   *
+   * Does nothing while a hold is up: that frame is the one being shown, and replacing it with
+   * whatever the element has part way through its load is how a hold starts flickering.
+   */
+  prime(): void {
+    if (this.destroyed || this.raised) return;
+    this.copyFrame();
+  }
+
+  /**
+   * Copies what is on the element into the canvas, and says whether there was anything to copy.
+   *
+   * Intrinsic size, so `object-fit: contain` letterboxes the canvas exactly as it letterboxes the
+   * video and the held frame does not jump a pixel when it appears.
+   */
+  private copyFrame(): boolean {
+    const video = this.video;
+    if (video.readyState < 2 /* HAVE_CURRENT_DATA */ || !video.videoWidth || !video.videoHeight) {
+      return false;
+    }
+    if (this.canvas.width !== video.videoWidth) this.canvas.width = video.videoWidth;
+    if (this.canvas.height !== video.videoHeight) this.canvas.height = video.videoHeight;
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) return false;
+    try {
+      ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
+    } catch {
+      // `drawImage` from a `capacitor://` or remote video taints the canvas, but tainting only
+      // blocks readback and this canvas is never read, so a tainted one displays perfectly. A frame
+      // that genuinely cannot be copied leaves whatever the last raise put there.
+      return false;
+    }
+    this.hasFrame = true;
+    return true;
   }
 
   /**
@@ -273,6 +313,9 @@ export class VideoHold {
     const cancel = this.cancel;
     this.cancel = null;
     cancel?.();
+    // The hold is coming down because the new frame is on screen, so this is the best moment there
+    // is to stock the canvas for the next one - and the cheapest, once per clip change.
+    this.copyFrame();
     this.raised = false;
     this.setHolding(false);
   }

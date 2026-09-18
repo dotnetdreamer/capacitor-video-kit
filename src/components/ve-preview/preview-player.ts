@@ -504,7 +504,9 @@ export class PreviewPlayer implements EditorPlayer {
       this.goTo(next, this.isPlaying());
       return;
     }
-    // Settled on the frame that was asked for, so the held one has done its job.
+    // Settled on the frame that was asked for, so the held one has done its job - and this frame is
+    // what the NEXT clip change will hold up while its own source loads.
+    this.hold.prime();
     this.hold.lower();
     if (!this.video.paused) this.syncAudio(this.store.playheadMs.value, true);
   }

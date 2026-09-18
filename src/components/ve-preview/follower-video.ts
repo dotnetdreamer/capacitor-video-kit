@@ -74,8 +74,14 @@ export class FollowerVideo {
     this.listen('loadedmetadata', () => this.apply(true));
     // Either of these means the new source has a frame up, which is when the held one has done its
     // job. The element is only ever moved from here, so neither can fire for anything else.
-    this.listen('loadeddata', () => this.hold.lower());
-    this.listen('seeked', () => this.hold.lower());
+    this.listen('loadeddata', () => {
+      this.hold.prime();
+      this.hold.lower();
+    });
+    this.listen('seeked', () => {
+      this.hold.prime();
+      this.hold.lower();
+    });
     this.listen('error', () => this.onError());
   }
 
