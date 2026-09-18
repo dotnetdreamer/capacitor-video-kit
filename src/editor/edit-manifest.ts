@@ -14,7 +14,7 @@ import type { FilterOp } from '../video-composer/definitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 5;
+export const MANIFEST_VERSION = 6;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -253,6 +253,23 @@ export interface EditManifest {
    * otherwise have to write `?? []` around a list that is conceptually always there.
    */
   videoTracks: EditVideoTrack[];
+  /**
+   * How long the post runs when that is MORE than the base track, in output ms. 0 is "as long as the
+   * base track", which is what every manifest written before version 6 meant and what a post nobody
+   * has pulled the end of still means.
+   *
+   * The base track used to be the whole answer, and that made the timeline as long as the footage on
+   * its bottom row: a layer could be placed anywhere the base already reached and nowhere else. A
+   * customer wanting a second video to play AFTER the first had nothing to drag it onto. So the post
+   * gets a length of its own, and past the base track's last frame the picture is BLACK - which is
+   * exactly what every engine already draws in the gaps a layer leaves, so there is no new kind of
+   * frame here, only a new place to find one.
+   *
+   * Never shorter than the base track: the base is the spine of the post and a length that cut it
+   * off would be a trim nobody asked for, made by dragging something else. [setPostDuration] holds
+   * that floor, and the readers below take the larger of the two rather than trusting the number.
+   */
+  durationMs: number;
   /** Id from [FILTER_PRESETS]. */
   filterId: string;
   /** 0..1, how far the preset is applied. */
@@ -314,6 +331,16 @@ export const MAX_LAYERS = 30;
  * reach it, and a spec past it was not built by a person.
  */
 export const MAX_VIDEO_TRACKS = 16;
+
+/**
+ * The longest a post may run, tail and all: half an hour.
+ *
+ * A ceiling on absurdity rather than an opinion about length, like [MAX_VIDEO_TRACKS]. The end of
+ * the timeline is dragged, and a drag with nothing to stop it can be carried for as long as a finger
+ * holds at the edge of the screen - so there has to be a number, and it has to be one no post a
+ * person builds by hand on a phone will ever reach.
+ */
+export const MAX_POST_MS = 30 * 60 * 1000;
 
 /** The shortest a clip segment may become. */
 export const MIN_CLIP_MS = 200;
@@ -880,6 +907,7 @@ export function emptyManifest(): EditManifest {
     version: MANIFEST_VERSION,
     clips: [],
     videoTracks: [],
+    durationMs: 0,
     filterId: 'none',
     filterIntensity: 1,
     adjust: neutralAdjust(),
@@ -1020,6 +1048,10 @@ export function normaliseManifest(input: unknown): EditManifest {
     version: MANIFEST_VERSION,
     clips,
     videoTracks,
+    // Not clamped to the clips here: a stored tail shorter than the base track is simply a tail
+    // nobody can see, and `totalDurationMs` takes the larger of the two anyway. Clamping would need
+    // the sequence sum computed twice on every read of every stored edit to change nothing.
+    durationMs: Math.max(0, Math.round(num(raw['durationMs'], 0))),
     filterId: typeof raw['filterId'] === 'string' ? raw['filterId'] : base.filterId,
     filterIntensity: clamp(num(raw['filterIntensity'], 1), 0, 1),
     adjust: { ...neutralAdjust(), ...(raw['adjust'] ?? {}) },
@@ -1082,12 +1114,21 @@ export function reconcileManifest(
   return { ...current, clips: [...kept, ...added], videoTracks };
 }
 
-/** How long the finished video runs, after every trim and speed change. */
-export function totalDurationMs(manifest: Pick<EditManifest, 'clips'>): number {
-  return manifest.clips.reduce(
-    (sum, clip) => sum + Math.max(0, clip.outMs - clip.inMs) / (clip.speed || 1),
-    0,
-  );
+/** How long a SEQUENCE of segments runs, after every trim and speed change. */
+export function clipsDurationMs(clips: readonly EditClip[]): number {
+  return clips.reduce((sum, clip) => sum + Math.max(0, clip.outMs - clip.inMs) / (clip.speed || 1), 0);
+}
+
+/**
+ * How long the finished video runs: the base track, or the tail a customer has pulled past it.
+ *
+ * Takes the larger of the two rather than trusting [EditManifest.durationMs], so a manifest built by
+ * hand, or one whose base track has grown since the end was last dragged, cannot ask for an output
+ * that cuts its own base track off. A caller measuring one TRACK passes `{ clips }` on its own and
+ * gets the sequence sum, which is what a track's length has always been.
+ */
+export function totalDurationMs(manifest: Pick<EditManifest, 'clips'> & Partial<Pick<EditManifest, 'durationMs'>>): number {
+  return Math.max(clipsDurationMs(manifest.clips), Math.max(0, manifest.durationMs ?? 0));
 }
 
 /**

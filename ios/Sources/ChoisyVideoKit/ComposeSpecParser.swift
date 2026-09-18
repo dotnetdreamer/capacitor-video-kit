@@ -127,6 +127,7 @@ enum ComposeSpecParser {
         return ComposeSpec(jobId: d.jobId,
                            pendingPostId: d.pendingPostId,
                            clips: clips,
+                           durationMs: d.durationMs,
                            tracks: tracks,
                            output: output,
                            filter: d.filter,
@@ -291,6 +292,9 @@ private struct ComposeSpecDTO: Decodable {
     let overlays: [OverlayDTO]
     let audio: AudioDTO
     let posterAtMs: Int64
+    /// 0 for a spec with no `durationMs` key, which is every spec written before the tail existed
+    /// and every spec a post nobody has stretched still sends.
+    let durationMs: Int64
 
     /// The first error found in `filter`, `overlays` or `audio`, held rather than thrown so that
     /// `validate` can run the `output` checks in front of it. Decoding stops at that first error,
@@ -298,7 +302,7 @@ private struct ComposeSpecDTO: Decodable {
     let heldError: SpecError?
 
     private enum K: String, CodingKey {
-        case jobId, pendingPostId, clips, tracks, output, filter, overlays, audio, posterAtMs
+        case jobId, pendingPostId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs
     }
 
     init(from decoder: Decoder) throws {
@@ -431,6 +435,7 @@ private struct ComposeSpecDTO: Decodable {
 
         heldError = held
         posterAtMs = max(0, c.long(.posterAtMs, 0))
+        durationMs = max(0, c.long(.durationMs, 0))
     }
 }
 

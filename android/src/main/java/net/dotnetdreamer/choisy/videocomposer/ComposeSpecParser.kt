@@ -79,6 +79,7 @@ object ComposeSpecParser {
             overlays = overlays,
             audio = audio,
             posterAtMs = json.optLong("posterAtMs", 0L).coerceAtLeast(0L),
+            durationMs = json.optLong("durationMs", 0L).coerceAtLeast(0L),
             tracks = tracks,
         )
     }

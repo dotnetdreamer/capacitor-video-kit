@@ -431,6 +431,16 @@ export class VePreview implements EditorPlayer {
    * coming back into the window costs a seek rather than another load and another black flash.
    */
   private readonly extraOnScreen = computed(() => this.shownExtra.value !== null);
+  /**
+   * Whether the BASE track has a picture at this instant. False only in the tail a customer has
+   * pulled past the base track's last frame, where the post is black and whatever layer is over it
+   * is drawn on black.
+   *
+   * The element stays in the DOM and keeps its decoder, as the extra one does out of its own window:
+   * the playhead crosses this line in both directions while an edit is being made, and a teardown
+   * each way is a load and a black flash each way.
+   */
+  private readonly baseOnScreen = computed(() => this.shownBase.value !== null);
 
   /**
    * Where each `<video>` element is put inside the frame; see [videoView]. One per layer, and the
@@ -751,6 +761,7 @@ export class VePreview implements EditorPlayer {
       const base = this.baseBox.value;
       const extra = this.extraBox.value;
       const extraOn = this.extraOnScreen.value;
+      const baseOn = this.baseOnScreen.value;
       const guides = this.guides.value;
       const selection = this.selectionBox.value;
       const ph = this.placeholder.value;
@@ -789,7 +800,7 @@ export class VePreview implements EditorPlayer {
               <video
                 key="base-video"
                 ref={this.keepVideo}
-                class="pv__video"
+                class={{ pv__video: true, 'pv__video--idle': !baseOn }}
                 playsinline
                 webkit-playsinline=""
                 preload="auto"
@@ -810,7 +821,7 @@ export class VePreview implements EditorPlayer {
               <canvas
                 key="base-hold"
                 ref={this.keepHold}
-                class={{ pv__hold: true, 'pv__hold--on': this.holding.value }}
+                class={{ pv__hold: true, 'pv__hold--on': this.holding.value && baseOn }}
                 aria-hidden="true"
                 style={placement(base, css.filter)}
               ></canvas>
@@ -821,7 +832,7 @@ export class VePreview implements EditorPlayer {
                 letterboxed.
               */}
               {css.tints.length > 0 && (
-                <div key="base-tints" class="pv__tints" style={boxStyle(this.basePicture.value)}>
+                <div key="base-tints" class="pv__tints" style={boxStyle(this.basePicture.value)} hidden={!baseOn}>
                   {css.tints.map((tint, index) => (
                     <div key={index} class="pv__tint" style={{ background: tint }}></div>
                   ))}

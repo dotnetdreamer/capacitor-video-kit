@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_VIDEO_TRACKS, defaultClipEdit, emptyManifest, type EditManifest, type EditVideoTrack } from './edit-manifest';
-import { moveClip, moveClipToTrack, type ClipDropTarget } from './edit-ops';
+import {
+  MAX_POST_MS,
+  MAX_VIDEO_TRACKS,
+  defaultClipEdit,
+  emptyManifest,
+  totalDurationMs,
+  type EditManifest,
+  type EditVideoTrack,
+} from './edit-manifest';
+import { moveClip, moveClipToTrack, setPostDuration, type ClipDropTarget } from './edit-ops';
 
 /*
  * Carrying a segment off the layer it is on, which is the whole of what makes the timeline more than
@@ -188,5 +196,60 @@ describe('moveClip, on whichever row the segment is on', () => {
     expect(moveClip(m, 'b', 1)).toBe(m);
     expect(moveClip(m, 'x', 0)).toBe(m);
     expect(moveClip(m, 'nope', 0)).toBe(m);
+  });
+});
+
+/*
+ * The tail: the post running on past its base track, with a black frame where there is no footage.
+ *
+ * It is what makes a layer placeable anywhere rather than only where the base already reaches - a
+ * second video that plays AFTER the first had nowhere to be dragged to before it.
+ */
+describe('setPostDuration', () => {
+  it('pulls the end past the base track', () => {
+    const m = oneTrack();
+    expect(totalDurationMs(m)).toBe(12_000);
+
+    const longer = setPostDuration(m, 20_000);
+
+    expect(longer.durationMs).toBe(20_000);
+    expect(totalDurationMs(longer)).toBe(20_000);
+    // The base track is untouched: what the tail adds is room, not footage.
+    expect(longer.clips).toBe(m.clips);
+  });
+
+  it('never cuts into the base track', () => {
+    expect(setPostDuration(oneTrack(), 5000).durationMs).toBe(0);
+    expect(totalDurationMs(setPostDuration(oneTrack(), 5000))).toBe(12_000);
+  });
+
+  it('stores no tail at all once the end is back inside the base track', () => {
+    // 0 and "as long as the base track" are the same post, and only one of them can be the stored
+    // one, or a manifest carrying a redundant number would reach the wire as a spec that says
+    // something where today's says nothing.
+    const stretched = setPostDuration(oneTrack(), 20_000);
+    expect(setPostDuration(stretched, 12_000).durationMs).toBe(0);
+  });
+
+  it('stops at the ceiling rather than wherever a finger was carried', () => {
+    expect(setPostDuration(oneTrack(), MAX_POST_MS * 10).durationMs).toBe(MAX_POST_MS);
+  });
+
+  it('is the same manifest when nothing changes', () => {
+    const m = oneTrack();
+    expect(setPostDuration(m, 12_000)).toBe(m);
+    const stretched = setPostDuration(m, 20_000);
+    expect(setPostDuration(stretched, 20_000)).toBe(stretched);
+  });
+
+  it('gives a layer somewhere past the base track to be', () => {
+    // The whole point of the tail, in one assertion: a layer laid after the base track's last frame
+    // used to be a layer every engine cut away to nothing.
+    const m = setPostDuration(oneTrack(), 20_000);
+    const moved = moveClipToTrack(m, 'b', { kind: 'new', index: 0 }, 16_000, 'vt-new');
+
+    expect(moved!.videoTracks[0].startMs).toBe(16_000);
+    // And it still ends inside the post, which is what every engine cuts to.
+    expect(moved!.videoTracks[0].startMs).toBeLessThan(totalDurationMs(moved!));
   });
 });

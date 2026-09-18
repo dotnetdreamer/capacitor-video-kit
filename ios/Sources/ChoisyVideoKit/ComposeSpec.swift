@@ -183,8 +183,17 @@ struct ComposeAudio: Sendable {
 struct ComposeSpec: Sendable {
     let jobId: String
     let pendingPostId: String
-    /// The BASE track. It starts at 0 and ITS length is the output's length.
+    /// The BASE track. It starts at 0, and its length is the output's length unless `durationMs`
+    /// asks for more.
     let clips: [ComposeClip]
+    /// How long the output runs, when that is MORE than the base track adds up to. 0 - what every
+    /// spec written before this key said, and what a spec carrying no tail still says - means "as
+    /// long as the base track".
+    ///
+    /// Past the base track's last frame the picture is BLACK, which is not a new kind of frame for
+    /// this engine to make: `merged` already hands every instant where no layer has a clip an
+    /// instruction with no layers in it, and `EditCompositor.render` starts each frame on black.
+    let durationMs: Int64
     /// Extra layers drawn over `clips`, bottom to top by `z`. One running past the base is CUT, and
     /// one ending early leaves the base showing underneath.
     ///
@@ -219,7 +228,9 @@ struct ComposeSpec: Sendable {
             guard scaled.isFinite else { return acc }
             return acc + Int64(scaled.rounded(.toNearestOrAwayFromZero))
         }
-        return max(1, sum)
+        // The tail counts: it is output that has to be written, encoded and fitted on disk like any
+        // other, even though nothing decodes for it.
+        return max(1, max(sum, durationMs))
     }
 }
 

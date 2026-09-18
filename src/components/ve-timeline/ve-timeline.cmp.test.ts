@@ -317,3 +317,81 @@ describe('trimming and moving a layer', () => {
     expect(store.videoTrack.value!.startMs).toBe(0);
   });
 });
+
+/*
+ * The tail: the post running on past its base track, so there is somewhere to put a video that plays
+ * AFTER the footage on the bottom row rather than only beside it.
+ *
+ * Dragged at the furthest zoom out, where a twelve second post is 72 px wide and its end is on the
+ * screen: at the zoom the editor opens on, the end of this fixture is 768 px past the right edge.
+ */
+describe('the end of the post', () => {
+  const FURTHEST_OUT_PPS = 6;
+
+  function grip(tl: HTMLElement): HTMLElement {
+    const found = root(tl).querySelector<HTMLElement>('[data-hit="end"]');
+    if (!found) throw new Error('no end grip');
+    return found;
+  }
+
+  async function zoomRightOut(store: EditorStore, tl: HTMLElement): Promise<void> {
+    store.pps.value = FURTHEST_OUT_PPS;
+    await until('the end to come on screen', () => grip(tl).getBoundingClientRect().left < 330);
+  }
+
+  async function dragGrip(tl: HTMLElement, dx: number): Promise<void> {
+    const scroller = root(tl).querySelector('.tl__scroller')!;
+    const rect = grip(tl).getBoundingClientRect();
+    const from = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    pointer(grip(tl), 'pointerdown', from.x, from.y);
+    pointer(scroller, 'pointermove', from.x + dx, from.y);
+    await frames(3);
+    pointer(scroller, 'pointerup', from.x + dx, from.y);
+    await frames(2);
+  }
+
+  it('is dragged out past the base track, leaving the footage alone', async () => {
+    const { store, tl } = await mount();
+    expect(store.totalMs.value).toBe(12_000);
+    await zoomRightOut(store, tl);
+
+    // 6 px per second, so 60 px of finger is ten seconds of black on the end.
+    await dragGrip(tl, 60);
+
+    expect(store.totalMs.value).toBeCloseTo(22_000, -3);
+    expect(store.baseMs.value).toBe(12_000);
+    expect(store.manifest.value.clips).toHaveLength(3);
+  });
+
+  it('will not be dragged inside the base track', async () => {
+    const { store, tl } = await mount();
+    await zoomRightOut(store, tl);
+
+    await dragGrip(tl, -60);
+
+    expect(store.totalMs.value).toBe(12_000);
+  });
+
+  it('shows the stretch with no footage in it', async () => {
+    const { store, tl } = await mount();
+    expect(root(tl).querySelector('.tl__tail')).toBeNull();
+
+    store.setPostDuration(20_000);
+    await until('the tail', () => root(tl).querySelector('.tl__tail') !== null);
+
+    // It starts where the filmstrip stops, and runs to the end of the post.
+    const tail = root(tl).querySelector<HTMLElement>('.tl__tail')!;
+    expect(parseFloat(tail.style.width)).toBeCloseTo((8000 / 1000) * store.pps.value, 0);
+  });
+
+  it('gives a layer somewhere past the footage to be', async () => {
+    const { store } = await mount([layer('vt-1', 1, [{ id: 'seg-x', key: 'clip-x' }])]);
+    store.setPostDuration(20_000);
+
+    store.setTrackStart('vt-1', 16_000);
+
+    // Before the tail existed this clamped back to the base track's end, and a layer could only ever
+    // be placed where the footage underneath it already reached.
+    expect(store.videoTrack.value!.startMs).toBe(16_000);
+  });
+});

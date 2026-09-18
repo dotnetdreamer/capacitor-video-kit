@@ -25,6 +25,11 @@ class RenderPlan private constructor(
     /** Start of clip i on the OUTPUT timeline. */
     val prefixOutUs: LongArray,
     val totalUs: Long,
+    /**
+     * Where the base track's own footage ends. The same as [totalUs] for a post nobody has
+     * stretched, and the start of the black tail for one somebody has.
+     */
+    val baseUs: Long,
     /** False when every clip's sound is gone, which lets the video sequence skip audio entirely. */
     val videoSeqHasAudio: Boolean,
     /**
@@ -241,15 +246,15 @@ class RenderPlan private constructor(
                 planned += item
             }
 
-            // Exactly what was planned, not a floor over it. Every layer is cut to this length,
-            // every audio sequence is measured against it and every trailing gap is the difference
-            // between it and a layer's end, so a total LONGER than the clips that add up to it
-            // would hand those a room the base never fills - the same disagreement between the plan
-            // and the items that a coarser clip grid causes. A base whose whole planned length is
-            // under a millisecond is rare but reachable: a one millisecond source at MAX_SPEED
-            // plans 250 us. The floor survives only for an empty clip list, which the parser
-            // refuses and only a direct caller can produce.
-            val totalUs = if (planned.isEmpty()) MIN_CLIP_US else cursorUs
+            // What was planned, or the tail `durationMs` asks for past it. Every layer is cut to
+            // this length, every audio sequence is measured against it and every trailing gap is the
+            // difference between it and a layer's end - and the base sequence now gets a trailing
+            // gap of its own, so the room the plan hands out is room the items really fill. A base
+            // whose whole planned length is under a millisecond is rare but reachable: a one
+            // millisecond source at MAX_SPEED plans 250 us. The floor survives only for an empty
+            // clip list, which the parser refuses and only a direct caller can produce.
+            val baseUs = if (planned.isEmpty()) MIN_CLIP_US else cursorUs
+            val totalUs = max(baseUs, spec.durationMs * 1000L)
             val colorMatrix = if (spec.filter.isEmpty()) null else ColorMatrix.fold(spec.filter)
 
             val overlays = spec.overlays.map { o ->
@@ -274,6 +279,7 @@ class RenderPlan private constructor(
                 clips = planned,
                 prefixOutUs = prefix,
                 totalUs = totalUs,
+                baseUs = baseUs,
                 videoSeqHasAudio = planned.any { !it.removeAudio },
                 // Bottom to top, and `sortedBy` is stable, so two layers claiming one z keep the
                 // order the spec listed them in - which is the tie-break the contract names. A

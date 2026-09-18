@@ -184,9 +184,20 @@ data class ComposeSpec(
     val pendingPostId: String,
     /**
      * The BASE track. It always starts at 0 and ITS length is the output's length: a track in
-     * [tracks] running past it is cut, and one ending early leaves the base showing underneath.
+     * [tracks] running past the OUTPUT is cut, and one ending early leaves what is under it showing.
      */
     val clips: List<Clip>,
+    /**
+     * How long the output runs, when that is MORE than the base track adds up to. 0 - what every
+     * spec written before this field said, and what a spec carrying no tail still says - means "as
+     * long as the base track".
+     *
+     * Past the base track's last frame the picture is BLACK, which is not a new kind of frame for
+     * this engine to make: a gap item is already how a layer's lead and tail are drawn, and Media3
+     * serves one as opaque black. Everything measured against the output - a layer's cut, the music,
+     * a voiceover, the poster - is measured against the longer number, and nothing else changes.
+     */
+    val durationMs: Long = 0L,
     val output: Output,
     val filter: List<FilterOp>,
     val overlays: List<Overlay>,

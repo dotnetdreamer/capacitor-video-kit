@@ -1,5 +1,6 @@
 import {
   MAX_LAYERS,
+  MAX_POST_MS,
   MAX_SCALE,
   MAX_SPEED,
   MAX_VIDEO_TRACKS,
@@ -8,6 +9,7 @@ import {
   MIN_SCALE,
   MIN_SPEED,
   clamp,
+  clipsDurationMs,
   isFullFrameRect,
   normalisePlacement,
   normaliseRect,
@@ -353,6 +355,25 @@ export function insertClip(
   const index = afterClipId ? clips.findIndex((c) => c.id === afterClipId) : -1;
   clips.splice(index >= 0 ? index + 1 : clips.length, 0, clip);
   return { ...manifest, clips };
+}
+
+/**
+ * Pulls the end of the post past the base track, or lets it back in.
+ *
+ * Past the base track's last frame the picture is BLACK, which is the same frame every engine
+ * already draws where a layer outlasts what is under it. What the tail is FOR is somewhere to put
+ * things: a second video that plays after the first, a title card, a sound that runs on. Without it
+ * the timeline is only ever as long as the footage on its bottom row.
+ *
+ * Never shorter than the base track, and stored as 0 once it is back inside it, so a post nobody has
+ * stretched carries no tail at all and its spec is byte for byte the one this package has always
+ * produced.
+ */
+export function setPostDuration(manifest: EditManifest, durationMs: number): EditManifest {
+  const base = clipsDurationMs(manifest.clips);
+  const wanted = clamp(Math.round(durationMs), base, MAX_POST_MS);
+  const next = wanted <= base ? 0 : wanted;
+  return next === manifest.durationMs ? manifest : { ...manifest, durationMs: next };
 }
 
 /* -------------------------------------------------------------------------------------------- */

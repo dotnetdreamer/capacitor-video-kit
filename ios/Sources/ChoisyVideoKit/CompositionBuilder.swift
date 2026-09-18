@@ -214,6 +214,38 @@ enum CompositionBuilder {
             cursor = placed.end
         }
 
+        // The TAIL: the post running on past its footage, so a layer can be laid AFTER the base
+        // track rather than only beside it.
+        //
+        // A composition is as long as its longest track, and an empty range at the END of a track is
+        // a documented no-op - so the length has to be claimed with media. One frame of the last
+        // clip is appended and then SCALED across the whole tail: two operations on a range that is
+        // already in the track, rather than an insert at a time past its end whose behaviour is not
+        // worth depending on. Nothing after it ripples, because there is nothing after it.
+        //
+        // None of those pixels are ever drawn. `merged` gives every instant past the base's last
+        // ENTRY an instruction with no layers in it - the tail adds media but no entry - and
+        // `EditCompositor.render` starts each frame on black. So the tail composites to exactly the
+        // black frame Android's trailing gap leaves there, and the browser renderer with it.
+        //
+        // A failure here is not a failure of the render: the post is then as long as its footage,
+        // which is a shorter video than was asked for rather than a wrong one, and the same answer
+        // an engine that ignored the key would give.
+        let asked = ms(max(0, spec.durationMs))
+        if asked > cursor, let last = entries.last {
+            let source = last.source.videoRange
+            let frame = CMTimeMinimum(CMTime(value: 1, timescale: 30), source.duration)
+            do {
+                try video.insertTimeRange(CMTimeRange(start: source.start, duration: frame),
+                                          of: last.source.videoTrack, at: cursor)
+                video.scaleTimeRange(CMTimeRange(start: cursor, duration: frame),
+                                     toDuration: asked - cursor)
+                cursor = asked
+            } catch {
+                // Left as it was: the composition is its footage and nothing is out of place.
+            }
+        }
+
         let total = cursor
         let totalMs = max(1, msOf(total))
         // The bottom layer, and the only one whose length counts: `totalMs` is the output's length

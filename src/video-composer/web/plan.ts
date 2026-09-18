@@ -144,10 +144,12 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     clips.push(item);
   }
 
-  // Exactly what was planned, not a floor over it: every layer is cut to this length, every audio
-  // stream is measured against it, and a total LONGER than the clips that add up to it would hand
-  // those a room the base never fills.
-  const totalUs = clips.length === 0 ? MIN_CLIP_US : cursorUs;
+  // What was planned, or the tail the spec asks for past it. Every layer is cut to this length, every
+  // audio stream is measured against it, and the frames between the base track's last clip and the
+  // end are BLACK - which is the same frame the loop already draws wherever a layer outlasts what is
+  // under it, so there is nothing here the renderer did not already know how to paint.
+  const askedUs = Math.max(0, Math.round((spec.durationMs ?? 0) * 1000));
+  const totalUs = Math.max(clips.length === 0 ? MIN_CLIP_US : cursorUs, askedUs);
 
   const folded = spec.filter.length === 0 ? null : fold(spec.filter);
   const colorMatrix = folded && !isIdentity(folded) ? folded : null;
@@ -157,7 +159,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     // listed them in - the tie-break the contract names.
     .sort((a, b) => a.z - b.z)
     .map(track => planTrack(track, spec, probes, output, totalUs))
-    // A layer whose start falls past the end of the base contributes nothing anywhere.
+    // A layer whose start falls past the end of the OUTPUT contributes nothing anywhere.
     .filter(track => track.clips.length > 0);
 
   const music = planMusic(spec.audio.music, probes, totalUs);
