@@ -160,7 +160,20 @@ export class VeEditor {
   /* Life                                                                                      */
   /* ========================================================================================= */
 
-  connectedCallback() {
+  /**
+   * The editor is built HERE and not in `connectedCallback`, and the difference is the whole
+   * reason a framework wrapper works at all.
+   *
+   * Angular, and every framework that writes its bindings after it attaches, puts the element in
+   * the document BEFORE it assigns that element's properties. `host` is therefore still undefined
+   * in `connectedCallback`, so building there meant `<ve-editor [host]="...">` silently resolved
+   * to the package's browser defaults: a file input where the gallery picker belongs, no native
+   * render, no back button, and nothing at all saying so. Measured with a probe element, not
+   * guessed. Stencil runs this hook after props are set and still before the first paint, which is
+   * exactly the window this needs, so the only host that has to build the element by hand now is
+   * one that wants to.
+   */
+  componentWillLoad() {
     if (this.built) {
       if (this.destroyed) {
         debugWarn('[ve-editor] came back after being removed; the edit is gone. Create a new element.');
@@ -199,13 +212,11 @@ export class VeEditor {
      * something else.
      */
     window.addEventListener('keydown', this.onKeyDown);
-  }
 
-  componentWillLoad() {
     /*
-     * Deliberately not returned. Stencil waits for a promise handed back from here before it paints
-     * anything, so returning this one would hold the whole editor off the screen while every source
-     * is probed - which is the one moment the crescent exists for.
+     * Deliberately not awaited. Stencil waits for a promise handed back from this hook before it
+     * paints anything, so returning this one would hold the whole editor off the screen while
+     * every source is probed - which is the one moment the crescent exists for.
      */
     void this.load();
   }
