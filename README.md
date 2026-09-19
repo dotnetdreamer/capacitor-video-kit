@@ -295,8 +295,8 @@ import `../editor` relatively, which is what folding the two repositories into o
 ## The editor as web components
 
 The editor screen packaged so it can be dropped into a React, Vue or Angular application without
-carrying Angular, Ionic or Capacitor with it. Twenty two custom elements, of which a host uses
-exactly one: `<ve-editor>` is the screen, and the other twenty one are what it is made of.
+carrying Angular, Ionic or Capacitor with it. Twenty four custom elements, of which a host uses
+exactly one: `<ve-editor>` is the screen, and the other twenty three are what it is made of.
 
 | Package | What it is |
 |---|---|
@@ -467,7 +467,7 @@ document.getElementById('stage').replaceChildren(editor);
 `showResult` puts the manifest on the page and takes the editor off it, because one of those two
 events is the end of the screen and an editor left mounted is a video left playing.
 
-`defineVideoEditor()` is the only registration on the page and it defines all twenty two tags, for
+`defineVideoEditor()` is the only registration on the page and it defines all twenty four tags, for
 the reason in [conventions](#conventions-every-component-holds-to). The page prints how many it
 found along the bottom, so that claim is checked rather than asserted.
 
@@ -546,7 +546,7 @@ export function EditorScreen({ onDone }: { onDone: (result: VideoEditorResult) =
 
 Nothing registers a custom element here, in any of the three frameworks. The generated wrapper holds
 the component's own `defineCustomElement` and calls it as the module is imported, and that one call
-defines the other twenty one tags. An event is a prop named `on` plus the event, capitalised, and
+defines the other twenty three tags. An event is a prop named `on` plus the event, capitalised, and
 what the handler is given is the `CustomEvent` itself, so **the result is `event.detail`**.
 
 ### Vue
@@ -660,6 +660,14 @@ const host: VideoEditorHost = {
       });
       // The composer writes files; the WebView needs URLs it is allowed to load.
       return uris.map((uri) => Capacitor.convertFileSrc(uri));
+    },
+    sounds: {
+      list: async () => (await VideoComposer.listSounds()).sounds,
+      extract: async (source) => {
+        const out = await VideoComposer.extractAudio({ uri: source.sourcePath! });
+        return out.hasAudio ? { ...out, id: out.id!, uri: out.uri!, fileName: out.fileName!, durationMs: out.durationMs!, savedAt: out.savedAt! } : null;
+      },
+      remove: (id) => VideoComposer.deleteSound({ id }),
     },
     release: ({ kept, dropped }) => discardRecordings(kept, dropped),
     voice: {
@@ -859,7 +867,7 @@ UI package that guessed at them would be wrong in two of the three.
 
 ```ts
 editor.host = {
-  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, release, voice },
+  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, sounds, release, voice },
   render: { isSupported, render },
   platform: { fileUrl, haptic, keyboard, registerBackHandler, confirm, measureInsets, debug },
 };
@@ -878,6 +886,7 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 | `media.pickVideo`, `pickImage`, `pickAudio` | Add a clip, an overlay photo, a track | a hidden `<input type="file">` |
 | `media.probeDuration` | How long a source runs | a throwaway `<video>` and a ten second timeout |
 | `media.thumbnails` | The timeline's filmstrip | one `<video>`, seeked to each time in turn, onto one canvas |
+| `media.sounds` | The customer's kept sounds: list, extract one from a video, delete one | audio decoded in the page and kept in IndexedDB |
 | `media.release` | Give back what the edit dropped | the object URLs the default picker minted are revoked |
 | `media.voice` | Record a voiceover | the voiceover sheet does not offer itself |
 | `render` | Turn the edit into a file | Next hands back the manifest unrendered |
@@ -897,6 +906,29 @@ is an object URL and is fine; a clip from a CDN is not. A host in that position 
 
 **A picker resolves with null on a cancel and rejects on a real failure.** The editor shows a
 different thing for each, and a host that rejects on a cancel makes every picker look broken.
+
+**The sound library is three calls and the host decides where the bytes live.** `list()` answers
+with what is kept, newest first; `extract(source)` pulls the audio out of a video the EDITOR picked -
+so the library never grows a picker of its own - keeps it, and answers with the record; `remove(id)`
+deletes one. `extract` resolves with null for a video that carries no audio track, which is a fact
+about the file rather than a failure, and the editor says so plainly instead of showing an error.
+
+On a Capacitor host this is three lines over the composer, which owns the files and the records:
+
+```ts
+sounds = {
+  list: async () => (await VideoComposer.listSounds()).sounds,
+  extract: async (source) => {
+    const result = await VideoComposer.extractAudio({ uri: source.sourcePath ?? source.playbackUrl! });
+    return result.hasAudio ? { ...result, id: result.id!, uri: result.uri! } : null;
+  },
+  remove: (id) => VideoComposer.deleteSound({ id }),
+};
+```
+
+**A host with no `sounds` never opens the Sound sheet at all.** "Add sound" goes straight to
+`pickAudio`, which is what every host did before the library existed and is still the right answer
+for one with nowhere durable to put a file.
 
 **Three members stay null when the host supplied nothing, and the editor tests for null.** Not
 because there was nothing to write, but because in each case "nobody answered" means something no
@@ -1226,6 +1258,23 @@ direct question; a `job_not_found` rejection means the process itself restarted.
 untyped below. On API 35+ `startForeground` is called on the framework directly rather than through
 `ServiceCompat`, whose type mask predates `mediaProcessing` and would reduce it to "no type" - which a modern target rejects outright, leaving the render unprotected on exactly the devices that
 need it most.
+
+**The sound library is a folder, not an index.** `extractAudio` writes one `.m4a` and one `.json`
+record beside it, both named after the same id, and `listSounds` reads the folder - so nothing can
+hold a list that disagrees with what is on the disk, which is what a list kept in the WebView would
+eventually do the first time storage was cleared on one side and not the other. It lives outside
+every job folder and the sweep does not touch it: a sound is the customer's, not a job's.
+
+On Android the extraction is a **remux** - `MediaExtractor` hands over the compressed samples and
+`MediaMuxer` writes them into an MP4 of their own, so nothing is decoded and the result is bit for
+bit the sound that was in the video. iOS re-encodes to AAC, because `AVAssetExportPresetAppleM4A` is
+the only audio-only door `AVAssetExportSession` offers. A browser has no demuxer a page can reach at
+all, so the web implementation decodes with `decodeAudioData` and writes WAV: about 10 MB a minute,
+against well under one for the remux.
+
+**`prepareJob` copies a library sound rather than moving it.** It moves app-owned inputs, and a
+sound moved out of the library is a row that plays nothing from the next post onwards. Both native
+sides ask `SoundLibrary.owns` before they choose.
 
 **Colour is CSS maths, folded into one matrix**, applied in a single gamma-space fragment pass. That
 is what makes the native render and a browser preview agree by construction. The one known deviation

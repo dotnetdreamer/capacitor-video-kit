@@ -2,14 +2,20 @@ import { WebPlugin } from '@capacitor/core';
 
 import { describe, extensionOf, fileUri, putFile, resolve, safeSegment } from '../web-runtime/files';
 
+import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
+
 import type {
   CapabilitiesResult,
+  DeleteSoundOptions,
   EncodeFrame,
   EncodeSupport,
   CleanupOptions,
   ComposeSpec,
+  ExtractAudioOptions,
+  ExtractAudioResult,
   JobIdOptions,
   JobState,
+  ListSoundsResult,
   PrepareJobOptions,
   PrepareJobResult,
   ProbeOptions,
@@ -107,6 +113,56 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
     } catch (error) {
       throw coded(describe(error), 'unreadable_input');
     }
+  }
+
+  /**
+   * A browser has no demuxer a page can reach, so this decodes the video and writes the samples out
+   * as WAV: about 10 MB a minute, against well under one for the remux a phone does. It is the only
+   * door `decodeAudioData` leaves open, and it is why `keep: false` still writes a file - there is
+   * nowhere cheaper to put it.
+   */
+  async extractAudio(options: ExtractAudioOptions): Promise<ExtractAudioResult> {
+    const uri = required(options?.uri, 'uri');
+    let audio: Awaited<ReturnType<typeof extractAudio>>;
+    try {
+      audio = await extractAudio(uri);
+    } catch (error) {
+      throw coded(describe(error), 'unreadable_input');
+    }
+    if (!audio) return { hasAudio: false };
+
+    const fileName = options?.fileName || withoutExtension(nameOf(uri)) || 'Sound';
+    const saved = await saveSound(audio.blob, {
+      fileName,
+      durationMs: audio.durationMs,
+      sourceName: nameOf(uri) || undefined,
+    });
+    return {
+      hasAudio: true,
+      id: saved.id,
+      uri: saved.uri,
+      fileName: saved.fileName,
+      durationMs: saved.durationMs,
+      savedAt: saved.savedAt,
+    };
+  }
+
+  async listSounds(): Promise<ListSoundsResult> {
+    const sounds = await listSounds();
+    return {
+      sounds: sounds.map((sound) => ({
+        id: sound.id,
+        uri: sound.uri,
+        fileName: sound.fileName,
+        durationMs: sound.durationMs,
+        savedAt: sound.savedAt,
+        ...(sound.sourceName ? { sourceName: sound.sourceName } : {}),
+      })),
+    };
+  }
+
+  async deleteSound(options: DeleteSoundOptions): Promise<void> {
+    await deleteSound(required(options?.id, 'id'));
   }
 
   async startVoiceRecording(options?: StartVoiceRecordingOptions): Promise<void> {
@@ -208,6 +264,18 @@ function asVoiceError(error: unknown): Error {
  * the bridge. `WebPlugin.unavailable()` makes one with a fixed code of its own; a host that
  * branches on `error.code` needs the real one.
  */
+/** The last segment of a URI, which for a picked file is the name the customer would recognise. */
+function nameOf(uri: string): string {
+  const path = uri.split('?')[0]?.split('#')[0] ?? '';
+  return decodeURIComponent(path.slice(path.lastIndexOf('/') + 1));
+}
+
+/** `holiday.mp4` as `holiday`: a sound is not a video, and `.mp4` on one reads as a mistake. */
+function withoutExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf('.');
+  return dot > 0 ? fileName.slice(0, dot) : fileName;
+}
+
 function coded(message: string, code: string): Error {
   const error = new Error(message) as Error & { code: string };
   error.code = code;

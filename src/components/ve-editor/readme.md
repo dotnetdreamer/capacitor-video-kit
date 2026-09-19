@@ -108,6 +108,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 - [ve-volume-sheet](../ve-volume-sheet)
 - [ve-opacity-sheet](../ve-opacity-sheet)
 - [ve-voiceover-sheet](../ve-voiceover-sheet)
+- [ve-sound-sheet](../ve-sound-sheet)
 - [ve-toolbar](../ve-toolbar)
 - [ve-progress](../ve-progress)
 
@@ -132,6 +133,7 @@ graph TD;
   ve-editor --> ve-volume-sheet
   ve-editor --> ve-opacity-sheet
   ve-editor --> ve-voiceover-sheet
+  ve-editor --> ve-sound-sheet
   ve-editor --> ve-toolbar
   ve-editor --> ve-progress
   ve-timeline --> ve-icon
@@ -161,6 +163,9 @@ graph TD;
   ve-opacity-sheet --> ve-sheet
   ve-opacity-sheet --> ve-slider
   ve-voiceover-sheet --> ve-sheet
+  ve-sound-sheet --> ve-icon
+  ve-sound-sheet --> ve-sheet
+  ve-sound-sheet --> ve-spinner
   ve-toolbar --> ve-icon
   style ve-editor fill:#f9f,stroke:#333,stroke-width:4px
 ```

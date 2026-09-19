@@ -8,7 +8,7 @@ import {
 } from '../editor';
 
 import { debugWarn } from '../host/debug';
-import type { EditorSource, ResolvedEditorHost } from '../host/host.types';
+import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
 import type { EditorStore } from './editor-store';
 import type { Filmstrip } from './editor.types';
 
@@ -57,6 +57,24 @@ export class EditorMedia {
    * grey the tiles that would start a second one.
    */
   readonly busy = signal(false);
+
+  /**
+   * The customer's kept sounds, newest first, as the host last reported them. Empty until
+   * [loadSounds] has run, and empty for good on a host with no library at all.
+   */
+  readonly sounds = signal<readonly SavedSound[]>([]);
+
+  /** The list has been asked for at least once, so an empty list can be shown as an empty list. */
+  readonly soundsLoaded = signal(false);
+
+  /**
+   * A video's audio is being pulled out right now.
+   *
+   * Separate from [busy], which is every picker and greys Next: this one is what the Sound sheet
+   * puts a spinner and a sentence behind, because an extraction is the one call here that takes
+   * long enough for a customer to wonder whether they missed the button.
+   */
+  readonly extracting = signal(false);
 
   /** Filmstrips are cut one clip at a time: each batch holds a hardware decoder the preview needs. */
   private filmstripQueue: Promise<void> = Promise.resolve();
@@ -230,6 +248,20 @@ export class EditorMedia {
   /* Sound                                                                                     */
   /* ========================================================================================= */
 
+  /**
+   * The door every "Add sound" in the editor goes through: the Sound menu, the timeline's own
+   * button and the music row's Replace.
+   *
+   * A host with a library gets the Sound sheet, where extracting one is the first thing on it. A
+   * host without one gets the file picker straight away, exactly as every host did before the
+   * library existed - a sheet whose only content is one button is worse than the button.
+   */
+  openSound(): void {
+    this.store.pause();
+    if (this.host.media.sounds) this.store.openPanel('sound');
+    else void this.pickMusic();
+  }
+
   async pickMusic(): Promise<void> {
     // A second picker while the first result is still being read would commit into a manifest
     // that is about to change under it.
@@ -248,24 +280,123 @@ export class EditorMedia {
       }
       if (!picked) return;
 
-      this.landOpenTextEdit();
-      const existing = this.store.manifest.value.music;
-      this.store.setMusic(
-        {
-          uri: picked.uri,
-          fileName: picked.fileName || 'Music',
-          sourceDurationMs: picked.sourceDurationMs,
-          inMs: 0,
-          outMs: 0,
-          startMs: 0,
-          volume: existing?.volume ?? 0.8,
-          loop: true,
-          fadeOutMs: 400,
-        },
-        existing ? 'Replace sound' : 'Add sound',
-      );
+      this.useTrack(picked.uri, picked.fileName || 'Music', picked.sourceDurationMs);
     } finally {
       this.busy.value = false;
+    }
+  }
+
+  /**
+   * Puts a sound the customer already saved onto the post. No picker and no device call - the file
+   * is one the library handed over - so this is the one thing here that happens instantly.
+   */
+  useSound(sound: SavedSound): void {
+    if (this.busy.value) return;
+    this.store.pause();
+    this.landOpenTextEdit();
+    this.useTrack(sound.uri, sound.fileName || 'Sound', sound.durationMs);
+  }
+
+  /**
+   * Reads the library into [sounds]. Cheap to call again - the Sound sheet asks on every opening,
+   * because an extraction from a previous opening may have finished since.
+   *
+   * A library that will not answer leaves the list as it was and says so in the console: the sheet
+   * has a picker and an extract button on it whatever the list holds, and a red bar over a list that
+   * is empty anyway would be the only thing this told anyone.
+   */
+  async loadSounds(): Promise<void> {
+    const library = this.host.media.sounds;
+    if (!library) {
+      this.soundsLoaded.value = true;
+      return;
+    }
+    try {
+      const saved = await library.list();
+      if (this.destroyed) return;
+      this.sounds.value = [...saved];
+    } catch (error) {
+      debugWarn('[EditorMedia] sound library failed', error);
+    } finally {
+      if (!this.destroyed) this.soundsLoaded.value = true;
+    }
+  }
+
+  /**
+   * The whole of "extract from video": pick one, pull its audio out, keep it, and put it on the
+   * post. The sound stays in the library afterwards, which is the point of it - the next edit finds
+   * it in the list with no video to go looking for.
+   *
+   * Everything about it can go wrong in a way worth a different sentence: a video with no sound in
+   * it is not a failure, a cancel is not either, and neither is a library that has no room left. So
+   * each is answered here rather than folded into one "could not add sound".
+   */
+  async extractSound(): Promise<void> {
+    const library = this.host.media.sounds;
+    if (!library || this.busy.value) return;
+    this.busy.value = true;
+    try {
+      const source = await this.pickVideo();
+      if (!source) return;
+
+      this.extracting.value = true;
+      let saved: SavedSound | null;
+      try {
+        saved = await library.extract(source);
+      } catch (error) {
+        debugWarn('[EditorMedia] extract failed', source.key, error);
+        this.store.showToast("That video's sound could not be saved. Try another one.", 2400);
+        this.store.haptic('warning');
+        return;
+      } finally {
+        this.extracting.value = false;
+      }
+
+      // A silent video. Said plainly, because nothing went wrong and the customer is about to try
+      // the same video again if they are told it failed.
+      if (!saved) {
+        this.store.showToast('That video has no sound in it', 2400);
+        this.store.haptic('warning');
+        return;
+      }
+
+      // Ahead of the reload, so the new sound is in the list the moment the sheet repaints rather
+      // than after a round trip to the library. Newest first, like the library's own order.
+      const sound = saved;
+      this.sounds.value = [sound, ...this.sounds.value.filter((one) => one.id !== sound.id)];
+      this.landOpenTextEdit();
+      this.useTrack(sound.uri, sound.fileName || 'Sound', sound.durationMs);
+      void this.loadSounds();
+    } finally {
+      this.extracting.value = false;
+      this.busy.value = false;
+    }
+  }
+
+  /**
+   * Takes one sound out of the library for good.
+   *
+   * A sound the post is USING is removed from the list all the same and left on the post: the
+   * manifest holds the URI rather than the record, an undo can bring back a step that names it, and
+   * a delete that also silently pulled the music out of a post would be the customer losing two
+   * things for one tap. What they then have is a post whose track is not in their library, which is
+   * exactly what a track picked from files has always been.
+   */
+  async removeSound(id: string): Promise<void> {
+    const library = this.host.media.sounds;
+    if (!library) return;
+    const before = this.sounds.value;
+    this.sounds.value = before.filter((sound) => sound.id !== id);
+    try {
+      await library.remove(id);
+    } catch (error) {
+      debugWarn('[EditorMedia] sound delete failed', id, error);
+      if (this.destroyed) return;
+      // Put back, or the row is gone from a list whose file is still there and comes back at the
+      // next opening with no explanation.
+      this.sounds.value = before;
+      this.store.showToast('That sound could not be deleted');
+      this.store.haptic('warning');
     }
   }
 
@@ -319,6 +450,31 @@ export class EditorMedia {
    * steps, with the layer already committed and Cancel with nothing left to take back. Finishing
    * the text first lands it exactly as Done would have, and the media change follows it.
    */
+  /**
+   * Puts a track on the post, from wherever it came from.
+   *
+   * The volume is the one thing carried over from a track being replaced: it is the only field of
+   * the six the customer sets by hand, and having it reset to 80% every time a different song is
+   * tried is the difference between comparing two tracks and setting the level twice.
+   */
+  private useTrack(uri: string, fileName: string, sourceDurationMs: number): void {
+    const existing = this.store.manifest.value.music;
+    this.store.setMusic(
+      {
+        uri,
+        fileName,
+        sourceDurationMs,
+        inMs: 0,
+        outMs: 0,
+        startMs: 0,
+        volume: existing?.volume ?? 0.8,
+        loop: true,
+        fadeOutMs: 400,
+      },
+      existing ? 'Replace sound' : 'Add sound',
+    );
+  }
+
   private landOpenTextEdit(): void {
     if (this.store.textEdit.value) this.store.finishText();
   }

@@ -37,6 +37,7 @@ its name - so an icon is hidden from the accessibility tree unless it is given a
  - [ve-layout-sheet](../ve-layout-sheet)
  - [ve-preview](../ve-preview)
  - [ve-sheet](../ve-sheet)
+ - [ve-sound-sheet](../ve-sound-sheet)
  - [ve-sticker-sheet](../ve-sticker-sheet)
  - [ve-text-sheet](../ve-text-sheet)
  - [ve-timeline](../ve-timeline)
@@ -52,6 +53,7 @@ graph TD;
   ve-layout-sheet --> ve-icon
   ve-preview --> ve-icon
   ve-sheet --> ve-icon
+  ve-sound-sheet --> ve-icon
   ve-sticker-sheet --> ve-icon
   ve-text-sheet --> ve-icon
   ve-timeline --> ve-icon

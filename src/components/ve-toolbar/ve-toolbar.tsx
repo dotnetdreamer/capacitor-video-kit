@@ -264,7 +264,7 @@ export class VeToolbar {
 
   private readonly addSound = () => {
     this.closeSoundMenu();
-    void this.ctx.media.pickMusic();
+    this.ctx.media.openSound();
   };
 
   private readonly soundEffect = () => {
@@ -662,7 +662,7 @@ export class VeToolbar {
           id: 'replace',
           label: 'Replace',
           icon: 'swap-horizontal-outline',
-          run: () => void this.ctx.media.pickMusic(),
+          run: () => this.ctx.media.openSound(),
         },
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.removeMusic() },
       ],

@@ -346,6 +346,74 @@ export interface ProbeResult {
   hasVideo: boolean;
 }
 
+/**
+ * A video whose audio track is wanted on its own, and where the result should be kept.
+ *
+ * The extraction is a REMUX wherever the platform can manage one - the compressed audio is lifted
+ * out of the video's container and dropped into an `.m4a` untouched - so it costs a copy of a few
+ * megabytes rather than a decode and re-encode of a whole file. iOS re-encodes because
+ * `AVAssetExportSession` is the only door it offers to an audio-only file, and a browser has no
+ * demuxer a page can reach at all and decodes to WAV (see `web-runtime/sounds`).
+ */
+export interface ExtractAudioOptions {
+  /** `file://` or `content://`. The video to take the sound out of. */
+  uri: string;
+  /**
+   * What the file is called in the library. The source's own name without its extension by default,
+   * which is what an editor showing the result wants to print anyway.
+   */
+  fileName?: string;
+  /**
+   * True keeps the result for good, in the app's own storage, where nothing sweeps it - which is
+   * what a sound library is. False puts it in the cache beside the filmstrip frames, for a caller
+   * that only wants the audio for this edit.
+   *
+   * Defaults to true, because keeping it is the only reason this call exists.
+   */
+  keep?: boolean;
+}
+
+/**
+ * The extracted track, or `null` fields on a video with no audio in it.
+ *
+ * A silent video is not a failure - it is the commonest reason an extraction produces nothing, and
+ * a rejection would have the caller showing "something went wrong" for a perfectly good file. So
+ * `hasAudio` answers it and the caller says so plainly.
+ */
+export interface ExtractAudioResult {
+  /** False when the video carries no audio track; every other field is then absent. */
+  hasAudio: boolean;
+  /** The stable id of the kept sound, which is what `deleteSound` names. Absent when `keep` is false. */
+  id?: string;
+  /** `file://` to the produced audio file. */
+  uri?: string;
+  fileName?: string;
+  /** 0 when the track plays but reports no finite length. */
+  durationMs?: number;
+  /** Milliseconds since the epoch, as the library recorded it. */
+  savedAt?: number;
+}
+
+/** One kept sound, as the library reports it. */
+export interface SavedSoundResult {
+  id: string;
+  uri: string;
+  fileName: string;
+  durationMs: number;
+  savedAt: number;
+  /** The video it came out of, when the extraction recorded one. */
+  sourceName?: string;
+}
+
+export interface ListSoundsResult {
+  /** Newest first. */
+  sounds: SavedSoundResult[];
+}
+
+export interface DeleteSoundOptions {
+  id: string;
+}
+
 export interface ThumbnailsOptions {
   uri: string;
   /** Source-relative times. One output URI per entry, in the same order. */

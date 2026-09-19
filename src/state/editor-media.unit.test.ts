@@ -2,7 +2,13 @@ import { MAX_LAYERS, MAX_VIDEO_TRACKS, emptyManifest, type EditClip, type EditMa
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
-import type { EditorMediaHost, EditorSource, ResolvedEditorHost } from '../host/host.types';
+import type {
+  EditorMediaHost,
+  EditorSoundLibrary,
+  EditorSource,
+  ResolvedEditorHost,
+  SavedSound,
+} from '../host/host.types';
 import { EditorMedia } from './editor-media';
 import { EditorStore } from './editor-store';
 
@@ -218,6 +224,131 @@ describe('EditorMedia', () => {
 
       expect(store.manifest.value.music).toBeNull();
       expect(store.toast.value?.text).toBe("That audio file can't be used. Try an MP3 or M4A.");
+    });
+
+    it('keeps the volume the customer set when one track replaces another', async () => {
+      await media.pickMusic();
+      store.commitMusic({ volume: 0.25 }, 'Volume');
+      await media.pickMusic();
+
+      expect(store.manifest.value.music?.volume).toBe(0.25);
+    });
+  });
+
+  describe('the sound library', () => {
+    const saved: SavedSound = {
+      id: 'snd-1',
+      uri: 'file:///sounds/snd-1.m4a',
+      fileName: 'holiday',
+      durationMs: 12_000,
+      savedAt: 1_700_000_000_000,
+    };
+
+    /** A library that answers instantly, so what the editor does with each answer is what is tested. */
+    function fakeLibrary(overrides: Partial<EditorSoundLibrary> = {}): EditorSoundLibrary {
+      return {
+        list: vi.fn(async () => [saved]),
+        extract: vi.fn(async () => saved),
+        remove: vi.fn(async () => undefined),
+        ...overrides,
+      };
+    }
+
+    it('opens the sheet when the host keeps sounds, and the picker when it does not', () => {
+      open(fakeMedia({ sounds: fakeLibrary() }));
+      media.openSound();
+      expect(store.panel.value).toBe('sound');
+
+      open(fakeMedia());
+      media.openSound();
+      expect(store.panel.value).toBeNull();
+      expect(host.media.pickAudio).toHaveBeenCalled();
+    });
+
+    it('reads the library into the list', async () => {
+      open(fakeMedia({ sounds: fakeLibrary() }));
+      await media.loadSounds();
+
+      expect(media.sounds.value).toEqual([saved]);
+      expect(media.soundsLoaded.value).toBe(true);
+    });
+
+    it('leaves the list alone but settles when the library will not answer', async () => {
+      open(fakeMedia({ sounds: fakeLibrary({ list: vi.fn(async () => { throw new Error('no disk'); }) }) }));
+      await media.loadSounds();
+
+      expect(media.sounds.value).toEqual([]);
+      expect(media.soundsLoaded.value).toBe(true);
+    });
+
+    it('extracts a video\'s sound, puts it on the post and keeps it in the list', async () => {
+      const library = fakeLibrary();
+      open(fakeMedia({ sounds: library }));
+      await media.extractSound();
+
+      expect(library.extract).toHaveBeenCalledWith(expect.objectContaining({ key: 'picked' }));
+      expect(store.manifest.value.music).toMatchObject({ uri: saved.uri, fileName: 'holiday', sourceDurationMs: 12_000 });
+      expect(media.sounds.value).toEqual([saved]);
+      expect(media.extracting.value).toBe(false);
+      expect(media.busy.value).toBe(false);
+    });
+
+    it('says a silent video is silent rather than broken, and adds nothing', async () => {
+      open(fakeMedia({ sounds: fakeLibrary({ extract: vi.fn(async () => null) }) }));
+      await media.extractSound();
+
+      expect(store.manifest.value.music).toBeNull();
+      expect(store.toast.value?.text).toBe('That video has no sound in it');
+    });
+
+    it('says so when the extraction failed, and adds nothing', async () => {
+      open(fakeMedia({ sounds: fakeLibrary({ extract: vi.fn(async () => { throw new Error('no space'); }) }) }));
+      await media.extractSound();
+
+      expect(store.manifest.value.music).toBeNull();
+      expect(store.toast.value?.text).toBe("That video's sound could not be saved. Try another one.");
+      expect(media.extracting.value).toBe(false);
+    });
+
+    it('changes nothing when the customer closed the picker', async () => {
+      const library = fakeLibrary();
+      open(fakeMedia({ pickVideo: vi.fn(async () => null), sounds: library }));
+      await media.extractSound();
+
+      expect(library.extract).not.toHaveBeenCalled();
+      expect(store.manifest.value.music).toBeNull();
+    });
+
+    it('uses a saved sound without touching the device', async () => {
+      const library = fakeLibrary();
+      open(fakeMedia({ sounds: library }));
+      media.useSound(saved);
+
+      expect(store.manifest.value.music).toMatchObject({ uri: saved.uri, fileName: 'holiday' });
+      expect(store.selection.value).toEqual({ kind: 'music' });
+      expect(host.media.pickAudio).not.toHaveBeenCalled();
+    });
+
+    it('drops a deleted sound from the list and leaves the post alone', async () => {
+      const library = fakeLibrary();
+      open(fakeMedia({ sounds: library }));
+      await media.loadSounds();
+      media.useSound(saved);
+      await media.removeSound(saved.id);
+
+      expect(library.remove).toHaveBeenCalledWith('snd-1');
+      expect(media.sounds.value).toEqual([]);
+      // The post keeps the track: the manifest holds the URI, not the library's record.
+      expect(store.manifest.value.music?.uri).toBe(saved.uri);
+    });
+
+    it('puts the row back when the delete failed', async () => {
+      open(fakeMedia({ sounds: fakeLibrary({ remove: vi.fn(async () => { throw new Error('read only'); }) }) }));
+      await media.loadSounds();
+      await media.removeSound(saved.id);
+
+      expect(media.sounds.value).toEqual([saved]);
+      expect(store.toast.value?.text).toBe('That sound could not be deleted');
     });
   });
 });

@@ -1,0 +1,267 @@
+/*
+ * Two ways to bring a sound in, then everything already brought in, in one scrolling column.
+ *
+ * The frame is `flex: 1 1 0` rather than the shared `auto`, because the list under it has no height
+ * of its own: left to be sized by its content, a library of thirty sounds would grow the sheet past
+ * the screen instead of scrolling inside it. Same reason the sticker and effect sheets do it.
+ */
+.snd__frame {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+/*
+ * Not `.sheet__content`: that one centres its children in the body's height, which is right for a
+ * row of chips and wrong for a list that starts at the top and grows downwards.
+ */
+.snd__content {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 16px 16px;
+}
+
+/* ------------------------------------------------------------------------------ the two doors */
+
+.snd__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/*
+ * `font-family` is named on every button in this file for the reason the whole package names it: a
+ * form control inside a shadow root inherits nothing from the page, and no reset reaches in here.
+ */
+.snd__action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 10px 14px;
+  border: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+  border-radius: 14px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.snd__action:active {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+/*
+ * Dimmed while a picker or an extraction is already running. Both buttons go at once: the second
+ * one would be a second picker into a manifest that is about to change under it.
+ */
+.snd__action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/*
+ * The icon and the spinner take the same box, so the row does not jump by a pixel when the
+ * extraction starts. `--ve-spinner-*` are the spinner's own properties; it reads its colour from
+ * whatever it sits in.
+ */
+.snd__action-icon {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  font-size: 24px;
+  color: var(--ve-accent, #a6ff2e);
+  --ve-spinner-size: 20px;
+  --ve-spinner-thickness: 2px;
+}
+
+.snd__action-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.snd__action-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.snd__action-hint {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------------- the list */
+
+.snd__heading {
+  margin: 20px 0 8px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.snd__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A hairline between rows and none under the last one, which would read as a rule under the list. */
+.snd__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--ve-line, rgba(255, 255, 255, 0.1));
+}
+
+.snd__row:last-child {
+  border-bottom: 0;
+}
+
+.snd__play,
+.snd__bin {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-size: 18px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.snd__play[aria-pressed='true'] {
+  color: var(--ve-accent, #a6ff2e);
+}
+
+.snd__bin {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+.snd__bin:active {
+  color: var(--ve-danger, #ff4d6a);
+}
+
+/*
+ * The row itself: everything between the two icon buttons is one tap target, because choosing the
+ * sound is what a row is for and a customer aiming at a 44px strip of text will miss it.
+ *
+ * `min-width: 0` on a flex child is what lets the name below it actually ellipsis: without it the
+ * button refuses to shrink under the width of its own text and pushes the bin off the row.
+ */
+.snd__pick {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  min-height: 56px;
+  padding: 8px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.snd__pick:active .snd__name {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+.snd__name {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snd__meta {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The tick beside the track this post is already using, so the list says which one is on. */
+.snd__in-use {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--ve-accent, #a6ff2e);
+  font-size: 16px;
+}
+
+/*
+ * The second tap of a delete. Wide enough to be aimed at deliberately and in the danger colour,
+ * which is the only thing on the row that is.
+ */
+.snd__confirm {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ve-danger, #ff4d6a);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* --------------------------------------------------------------------------------- nothing yet */
+
+.snd__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 24px;
+  color: var(--ve-faint, rgba(255, 255, 255, 0.35));
+  font-size: 30px;
+  text-align: center;
+}
+
+.snd__empty p {
+  margin: 0;
+  max-width: 280px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* -------------------------------------------------------------------------------------- mouse */
+
+/* Guarded like every hover rule here: a touch device told it hovers keeps the last row tapped lit. */
+@media (hover: hover) and (pointer: fine) {
+  .snd__action:not(:disabled):hover {
+    background: var(--ve-raised-2, #3a3a3c);
+  }
+
+  .snd__bin:hover {
+    color: var(--ve-danger, #ff4d6a);
+  }
+}
+
+.snd__action:focus-visible,
+.snd__pick:focus-visible,
+.snd__play:focus-visible,
+.snd__bin:focus-visible,
+.snd__confirm:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+  border-radius: 12px;
+}

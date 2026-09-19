@@ -113,6 +113,8 @@ const TAGS = [
   've-filter-sheet',
   've-layout-sheet',
   've-opacity-sheet',
+  've-quality-sheet',
+  've-sound-sheet',
   've-speed-sheet',
   've-sticker-sheet',
   've-text-sheet',

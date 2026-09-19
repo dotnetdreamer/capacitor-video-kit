@@ -16,7 +16,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "VideoComposerPlugin"
     public let jsName = "VideoComposer"
 
-    /// Eleven entries. A method missing from this list is rejected by the bridge before this class
+    /// Fifteen entries. A method missing from this list is rejected by the bridge before this class
     /// is consulted, which is exactly what used to happen to `systemInsets`: the `@objc func` alone
     /// changes nothing. `addListener` / `removeListener` / `removeAllListeners` are special-cased
     /// by `CapacitorBridge.handleJSCall` before the list is read and stay off it.
@@ -26,6 +26,9 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getState", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "probe", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "thumbnails", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "extractAudio", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "capabilities", returnType: CAPPluginReturnPromise),
@@ -178,6 +181,74 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject(ErrorMapping.describe(error), Reject.unreadableInput)
             }
         }
+    }
+
+    // MARK: - Sound library
+
+    @objc func extractAudio(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), !uri.isEmpty else {
+            call.reject("uri is required", Reject.invalidSpec)
+            return
+        }
+        guard let url = JobFolders.fileURL(from: uri) else {
+            call.reject("unreadable uri \(uri)", Reject.unreadableInput)
+            return
+        }
+        let fileName = call.getString("fileName")
+        let keep = call.getBool("keep") ?? true
+
+        Task {
+            do {
+                guard let sound = try await SoundLibrary.extract(from: url, fileName: fileName, keep: keep) else {
+                    // No audio track. A normal answer about a normal file, so it resolves rather
+                    // than rejecting: the editor says so plainly and stays where it is.
+                    call.resolve(["hasAudio": false])
+                    return
+                }
+                var json = Self.soundJson(sound)
+                json["hasAudio"] = true
+                call.resolve(json)
+            } catch let error as SoundLibrary.SoundError {
+                switch error {
+                case let .noSpace(needed, free):
+                    call.reject("no_space need=\(needed) free=\(free)", Reject.noSpace)
+                case let .exportFailed(message):
+                    call.reject(message, Reject.unreadableInput)
+                }
+            } catch {
+                call.reject(ErrorMapping.describe(error), Reject.unreadableInput)
+            }
+        }
+    }
+
+    @objc func listSounds(_ call: CAPPluginCall) {
+        Task {
+            call.resolve(["sounds": SoundLibrary.list().map { Self.soundJson($0) }])
+        }
+    }
+
+    @objc func deleteSound(_ call: CAPPluginCall) {
+        guard let id = call.getString("id"), !id.isEmpty else {
+            call.reject("id is required", Reject.invalidSpec)
+            return
+        }
+        Task {
+            SoundLibrary.delete(id: id)
+            call.resolve()
+        }
+    }
+
+    /// One sound, in the shape `SavedSoundResult` describes. `hasAudio` is the caller's to add.
+    private static func soundJson(_ sound: SoundLibrary.Sound) -> [String: Any] {
+        var json: [String: Any] = [
+            "id": sound.id,
+            "uri": sound.url.absoluteString,
+            "fileName": sound.fileName,
+            "durationMs": sound.durationMs,
+            "savedAt": sound.savedAt,
+        ]
+        if let sourceName = sound.sourceName { json["sourceName"] = sourceName }
+        return json
     }
 
     // MARK: - Voice

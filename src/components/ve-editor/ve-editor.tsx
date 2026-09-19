@@ -872,11 +872,11 @@ export class VeEditor {
   /**
    * The open sheet, or the toolbar when nothing is open.
    *
-   * Eleven literal tags rather than a lookup, and this is the one place in the package where that
+   * Fourteen literal tags rather than a lookup, and this is the one place in the package where that
    * matters: under `dist-custom-elements` a component's generated `defineCustomElement` also defines
    * every tag it renders, transitively, and the compiler finds those tags by collecting the string
    * literals passed to `h()`. A tag produced through a variable is invisible to that analysis, so a
-   * host would define `ve-editor`, get twenty tags, and find that one sheet opens as an unknown
+   * host would define `ve-editor`, get most of the tags, and find that one sheet opens as an unknown
    * element - which lays out as nothing and throws nothing. [PANEL_LAYOUT] is what keeps the list
    * exhaustive; this switch is what makes the elements.
    */
@@ -908,6 +908,8 @@ export class VeEditor {
         // Its position must not move while a take is running: this element stops the recorder when
         // it leaves the document, and the vdom moving it would end the take with no press.
         return <ve-voiceover-sheet key="voiceover" class="ve__sheet" ctx={ctx} />;
+      case 'sound':
+        return <ve-sound-sheet key="sound" class="ve__sheet ve__sheet--tall" ctx={ctx} />;
       default:
         return <ve-toolbar key="toolbar" class="ve__toolbar" ctx={ctx} />;
     }

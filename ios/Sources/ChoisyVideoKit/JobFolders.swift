@@ -243,7 +243,12 @@ enum JobFolders {
             // copyItem and moveItem both throw when the destination exists, and a destination that
             // exists is the normal case on a retry.
             try? fm.removeItem(at: dest)
-            if isAppOwned(source) {
+            if SoundLibrary.owns(source) {
+                // A sound the customer keeps is app-owned and is still COPIED: moving it, or
+                // copying and then deleting it below, would take it out of their library the first
+                // time a post used it. See `SoundLibrary.owns`.
+                try fm.copyItem(at: source, to: dest)
+            } else if isAppOwned(source) {
                 // The whole container is one volume, so this is a rename and a failure is real.
                 try fm.moveItem(at: source, to: dest)
             } else {

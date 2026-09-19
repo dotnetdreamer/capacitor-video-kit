@@ -38,11 +38,13 @@ per size would put layout decisions inside the component.
 ### Used by
 
  - [ve-editor](../ve-editor)
+ - [ve-sound-sheet](../ve-sound-sheet)
 
 ### Graph
 ```mermaid
 graph TD;
   ve-editor --> ve-spinner
+  ve-sound-sheet --> ve-spinner
   style ve-spinner fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

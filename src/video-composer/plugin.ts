@@ -10,8 +10,12 @@ import type { PluginListenerHandle } from '@capacitor/core';
 
 import type {
   CapabilitiesResult,
+  DeleteSoundOptions,
   EncodeFrame,
   EncodeSupport,
+  ExtractAudioOptions,
+  ExtractAudioResult,
+  ListSoundsResult,
   CleanupOptions,
   ComposeCompletedEvent,
   ComposeFailedEvent,
@@ -46,6 +50,25 @@ export interface VideoComposerPlugin {
   probe(options: ProbeOptions): Promise<ProbeResult>;
 
   thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult>;
+
+  /**
+   * Pulls a video's audio track out into a file of its own and, by default, keeps it in the sound
+   * library. Rejects `unreadable_input` for a video that cannot be opened and `no_space` when the
+   * disk would not take the copy; a video with no sound in it resolves with `hasAudio: false`.
+   */
+  extractAudio(options: ExtractAudioOptions): Promise<ExtractAudioResult>;
+
+  /**
+   * Every sound kept by [extractAudio], newest first.
+   *
+   * The library IS the folder: each sound is a file and a small record beside it, so nothing can
+   * drift apart the way a list held in the WebView and files held natively would. A record whose
+   * file has gone is dropped on the way out rather than reported.
+   */
+  listSounds(): Promise<ListSoundsResult>;
+
+  /** Deletes one kept sound and its file. Silent about an id that is already gone. */
+  deleteSound(options: DeleteSoundOptions): Promise<void>;
 
   /** Asks for the microphone permission when needed. Rejects `already_recording` / `permission_denied`. */
   startVoiceRecording(options?: StartVoiceRecordingOptions): Promise<void>;

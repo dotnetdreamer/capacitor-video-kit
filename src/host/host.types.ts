@@ -98,6 +98,15 @@ export interface EditorMediaHost {
   thumbnails(request: ThumbnailRequest): Promise<string[]>;
 
   /**
+   * The sounds this customer has kept, and how one more gets in there.
+   *
+   * Absent, there is no Sound sheet at all: "Add sound" opens `pickAudio` directly, which is what
+   * every host did before this existed and is still the right answer for one with nowhere durable
+   * to put a file.
+   */
+  sounds?: EditorSoundLibrary;
+
+  /**
    * Takes back what the edit stopped using, once, immediately before the editor hands its result
    * back. Never during the edit: a clip whose every segment was deleted stays in the store so that
    * an undo can bring it back, and only the customer tapping Next settles which ones are gone.
@@ -128,6 +137,60 @@ export interface PickedAudio {
   fileName: string;
   /** 0 when the file plays but reports no finite length. */
   sourceDurationMs: number;
+}
+
+/**
+ * One track in the customer's own sound library: audio pulled out of a video, kept so that the next
+ * post can use it without going and finding that video again.
+ *
+ * It is a PickedAudio with an identity and a date on it, and the two are what the library adds:
+ * `id` is what a delete names, and `savedAt` is what the list is ordered by. The editor reads all
+ * five fields and writes none of them - a saved sound is the host's record, and the editor only
+ * ever copies its `uri` into the manifest the way a picked file's is copied.
+ */
+export interface SavedSound {
+  /** The host's own, stable for as long as the sound exists. Never shown. */
+  id: string;
+  /** Playable as it stands, or turnable into one by `platform.fileUrl`. */
+  uri: string;
+  /** What the list shows. The video it came out of, usually, with the extension taken off. */
+  fileName: string;
+  /** 0 when the file plays but reports no finite length; the row then shows no time. */
+  durationMs: number;
+  /** Milliseconds since the epoch. The list is newest first. */
+  savedAt: number;
+  /** The video the sound was taken out of, when that is worth saying under the name. */
+  sourceName?: string;
+}
+
+/**
+ * Where extracted sounds are kept between edits.
+ *
+ * The editor owns none of this for the same reason it owns no file: a library is bytes on a disk
+ * that outlive the edit, and what "a disk" is differs between a Capacitor app, a plain page and a
+ * test. So the editor asks for the list, asks for one more to be made, and asks for one to go; the
+ * host decides where any of it lives and hands back records.
+ *
+ * `extract` is the whole of the feature on this side. The editor picks the video - with the picker
+ * it already has, so the library never grows one of its own - and hands it over; the host pulls the
+ * audio track out of it, keeps the result somewhere durable, and answers with the record. It is the
+ * one call here that can take real time, and the editor shows its own progress over it.
+ *
+ * Every method REJECTS on a real failure. `extract` resolves with null only for a video that has no
+ * sound in it at all, which is a thing to say plainly rather than an error.
+ */
+export interface EditorSoundLibrary {
+  /** Newest first. An empty list is the normal state of a new install, not a failure. */
+  list(): Promise<readonly SavedSound[]>;
+
+  /**
+   * Pulls the audio out of `source`, keeps it, and answers with the record. Null when the video
+   * carries no audio track.
+   */
+  extract(source: EditorSource): Promise<SavedSound | null>;
+
+  /** Deletes one sound and its file. Silent about an id that is already gone. */
+  remove(id: string): Promise<void>;
 }
 
 export interface ThumbnailRequest {

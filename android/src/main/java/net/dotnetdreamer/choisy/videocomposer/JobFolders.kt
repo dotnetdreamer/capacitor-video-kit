@@ -180,7 +180,9 @@ object JobFolders {
         }
 
         return try {
-            if (isAppOwned(ctx, source)) {
+            // A sound the customer keeps is app-owned and must still be COPIED: moving it would
+            // take it out of their library the first time a post used it. See [SoundLibrary.owns].
+            if (isAppOwned(ctx, source) && !SoundLibrary.owns(ctx, source)) {
                 // A rename is free, but the recorder writes to external storage and filesDir is on
                 // a different volume on every device, so the copy path is the normal one.
                 if (!source.renameTo(dest)) {

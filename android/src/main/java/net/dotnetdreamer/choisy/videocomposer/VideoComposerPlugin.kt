@@ -689,6 +689,72 @@ class VideoComposerPlugin : Plugin() {
     }
 
     /* ======================================================================================== */
+    /* Sound library                                                                             */
+    /* ======================================================================================== */
+
+    @PluginMethod
+    fun extractAudio(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        val fileName = call.getString("fileName")
+        val keep = call.getBoolean("keep", true) ?: true
+
+        pluginScope.launch {
+            try {
+                val sound = SoundLibrary.extract(context.applicationContext, uri, fileName, keep)
+                // No audio track. A normal answer about a normal file, so it resolves rather than
+                // rejecting: the editor says "that video has no sound in it" and stays put.
+                if (sound == null) {
+                    call.resolve(JSObject().put("hasAudio", false))
+                    return@launch
+                }
+                call.resolve(soundJson(sound).put("hasAudio", true))
+            } catch (e: Exception) {
+                val message = ErrorMapping.describe(e)
+                val code = if (message.contains("no_space")) FailureCodes.NO_SPACE else FailureCodes.UNREADABLE_INPUT
+                call.reject(message, code)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun listSounds(call: PluginCall) {
+        pluginScope.launch {
+            val out = JSArray()
+            SoundLibrary.list(context.applicationContext).forEach { out.put(soundJson(it)) }
+            call.resolve(JSObject().put("sounds", out))
+        }
+    }
+
+    @PluginMethod
+    fun deleteSound(call: PluginCall) {
+        val id = call.getString("id")
+        if (id.isNullOrEmpty()) {
+            call.reject("id is required", INVALID_SPEC)
+            return
+        }
+        pluginScope.launch {
+            SoundLibrary.delete(context.applicationContext, id)
+            call.resolve()
+        }
+    }
+
+    /** One sound, in the shape `SavedSoundResult` describes. `hasAudio` is the caller's to add. */
+    private fun soundJson(sound: SoundLibrary.Sound): JSObject {
+        val json = JSObject()
+            .put("id", sound.id)
+            .put("uri", Uri.fromFile(sound.file).toString())
+            .put("fileName", sound.fileName)
+            .put("durationMs", sound.durationMs)
+            .put("savedAt", sound.savedAt)
+        if (sound.sourceName != null) json.put("sourceName", sound.sourceName)
+        return json
+    }
+
+    /* ======================================================================================== */
     /* Voice recording                                                                           */
     /* ======================================================================================== */
 

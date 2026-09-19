@@ -1454,8 +1454,7 @@ export class VeTimeline {
         store.toggleOriginalMuted();
         return;
       case 'add-sound':
-        store.pause();
-        void media.pickMusic();
+        media.openSound();
         return;
       case 'clip':
       // A segment on either layer selects the same way; the tools it opens differ, not the tap.

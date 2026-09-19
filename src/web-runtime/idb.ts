@@ -15,7 +15,7 @@
  */
 
 /** Bumped only to ADD a store. Anything else would need a migration, and there is nothing to migrate. */
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const DB_NAME = 'choisy-video-kit';
 
 /** Durable bytes: rendered videos, posters, and every file an upload still has to send. */
@@ -24,6 +24,13 @@ export const FILES_STORE = 'files';
 export const JOBS_STORE = 'jobs';
 /** Publish records: the whole request, its auth header and how far it got. */
 export const PUBLISH_STORE = 'publish';
+/**
+ * The customer's own sound library: one record per kept track, naming the bytes in [FILES_STORE].
+ *
+ * The only store here whose records are the customer's rather than a job's, which is why nothing
+ * sweeps it: a sound is kept until they delete it.
+ */
+export const SOUNDS_STORE = 'sounds';
 
 let opening: Promise<IDBDatabase | null> | null = null;
 
@@ -52,7 +59,7 @@ export function database(): Promise<IDBDatabase | null> {
     }
     request.onupgradeneeded = () => {
       const db = request.result;
-      for (const store of [FILES_STORE, JOBS_STORE, PUBLISH_STORE]) {
+      for (const store of [FILES_STORE, JOBS_STORE, PUBLISH_STORE, SOUNDS_STORE]) {
         if (!db.objectStoreNames.contains(store)) db.createObjectStore(store);
       }
     };

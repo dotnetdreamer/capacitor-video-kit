@@ -58,6 +58,7 @@ export type {
   EditorOutputOptions,
   EditorPlatformHost,
   EditorRenderHost,
+  EditorSoundLibrary,
   EditorSource,
   EditorVoiceHost,
   HapticKind,
@@ -69,12 +70,13 @@ export type {
   ResolvedEditorHost,
   ResolvedOutputOptions,
   ResolvedPlatformHost,
+  SavedSound,
   ThumbnailRequest,
   VideoEditorHost,
   VideoEditorResult,
 } from './host/host.types';
 export { RenderFailedError } from './host/host.types';
-export { browserMediaHost, envSafeAreaInsets, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
+export { browserMediaHost, browserSoundLibrary, envSafeAreaInsets, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
 export { installEditorFonts } from './host/fonts';
 
 /* The editor's own state, for a host that wants to read the edit or drive it from outside. */

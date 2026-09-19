@@ -23,6 +23,7 @@ export type EditorPanel =
   | 'volume'
   | 'opacity'
   | 'voiceover'
+  | 'sound'
   | 'quality';
 
 /**

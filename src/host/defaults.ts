@@ -8,18 +8,22 @@ import {
   qualityOf,
 } from '../editor';
 
+import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
+
 import { setEditorDebug } from './debug';
 import type {
   EditorInsets,
   EditorOutputOptions,
   EditorKeyboardHost,
   EditorMediaHost,
+  EditorSoundLibrary,
   EditorSource,
   PickedAudio,
   PickedImage,
   ReleaseRequest,
   ResolvedEditorHost,
   ResolvedOutputOptions,
+  SavedSound,
   ThumbnailRequest,
   VideoEditorHost,
 } from './host.types';
@@ -241,6 +245,8 @@ export function browserMediaHost(): EditorMediaHost {
       return canvasThumbnails(request);
     },
 
+    sounds: browserSoundLibrary(),
+
     /**
      * Gives back the files behind the clips the edit dropped, which in a browser means revoking
      * their object URLs: one of those holds a whole picked video in the tab for as long as the page
@@ -263,6 +269,53 @@ export function browserMediaHost(): EditorMediaHost {
       }
     },
   };
+}
+
+/**
+ * A sound library kept in the page: the audio decoded out of a video, written to IndexedDB, and
+ * still there after a reload.
+ *
+ * It is a real library rather than a stub - the sounds outlive the tab, and a page with no host at
+ * all can extract one, keep it and use it in a later edit - which is the same promise the pickers
+ * and the filmstrip above make. What it cannot do is do it cheaply: `web-runtime/sounds` says why a
+ * browser's only door to the audio inside an MP4 costs a WAV.
+ *
+ * Exported, because a host that supplies its own `media` loses every default in this file along with
+ * the ones it meant to replace, and a web application with a real render but no filesystem still
+ * wants this one:
+ *
+ * ```ts
+ * media: { ...myMediaHost, sounds: browserSoundLibrary() }
+ * ```
+ */
+export function browserSoundLibrary(): EditorSoundLibrary {
+  return {
+    async list(): Promise<readonly SavedSound[]> {
+      return await listSounds();
+    },
+
+    async extract(source: EditorSource): Promise<SavedSound | null> {
+      const src = source.playbackUrl ?? source.sourcePath ?? '';
+      if (!src) throw new Error(`there is no file behind ${source.fileName}`);
+      const audio = await extractAudio(src);
+      if (!audio) return null;
+      return await saveSound(audio.blob, {
+        fileName: withoutExtension(source.fileName) || 'Sound',
+        durationMs: audio.durationMs,
+        sourceName: source.fileName,
+      });
+    },
+
+    async remove(id: string): Promise<void> {
+      await deleteSound(id);
+    },
+  };
+}
+
+/** `holiday.mp4` as `holiday`: the library lists sounds, and `.mp4` on a sound reads as a mistake. */
+function withoutExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf('.');
+  return dot > 0 ? fileName.slice(0, dot) : fileName;
 }
 
 /**

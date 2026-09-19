@@ -7,14 +7,14 @@
 
 ## Overview
 
-The frame every editor sheet sits in, so that all eleven read as one thing: TikTok's bottom sheet,
+The frame every editor sheet sits in, so that all twelve read as one thing: TikTok's bottom sheet,
 an optional search field, then a row of "none" / tabs / tick, then the sheet's own content.
 
 It only draws the chrome. What "none", a tab or the tick mean is the host sheet's business, told
 through the events.
 
 It takes no `ctx`. Nothing here reads a signal or writes one, and a required prop that is never
-read would cost all eleven sheets a line each to hand over a store this element has no question to
+read would cost all twelve sheets a line each to hand over a store this element has no question to
 ask of. A sheet still takes its own `ctx`; it just does not pass it in here.
 
 Three of its methods exist because the sheets inside it cannot reach into this shadow root:
@@ -119,6 +119,7 @@ Type: `Promise<void>`
  - [ve-layout-sheet](../ve-layout-sheet)
  - [ve-opacity-sheet](../ve-opacity-sheet)
  - [ve-quality-sheet](../ve-quality-sheet)
+ - [ve-sound-sheet](../ve-sound-sheet)
  - [ve-speed-sheet](../ve-speed-sheet)
  - [ve-sticker-sheet](../ve-sticker-sheet)
  - [ve-text-sheet](../ve-text-sheet)
@@ -140,6 +141,7 @@ graph TD;
   ve-layout-sheet --> ve-sheet
   ve-opacity-sheet --> ve-sheet
   ve-quality-sheet --> ve-sheet
+  ve-sound-sheet --> ve-sheet
   ve-speed-sheet --> ve-sheet
   ve-sticker-sheet --> ve-sheet
   ve-text-sheet --> ve-sheet
