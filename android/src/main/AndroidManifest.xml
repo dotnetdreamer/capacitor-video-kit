@@ -13,9 +13,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <!-- Voiceover capture. Hosts usually declare this too for the WebView's getUserMedia; the
-         manifest merger de-duplicates. -->
+    <!-- Voiceover capture. Hosts usually declare these too for the WebView's getUserMedia; the
+         manifest merger de-duplicates.
+
+         BOTH are required, and MODIFY_AUDIO_SETTINGS is the one that is easy to miss. The voiceover
+         sheet reaches the microphone through `getUserMedia`, which in a Capacitor app is answered by
+         `BridgeWebChromeClient.onPermissionRequest`: for AUDIO_CAPTURE it asks the launcher for
+         MODIFY_AUDIO_SETTINGS *and* RECORD_AUDIO together, and grants the WebView only if the whole
+         request came back granted. A permission that is not declared can never be granted, so
+         leaving this one out denied the microphone to the WebView even with RECORD_AUDIO granted at
+         the OS level - `getUserMedia` rejected with "NotAllowedError: Permission denied" and the
+         take never started. It is a normal permission, so declaring it is all that is needed. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application>
         <service
