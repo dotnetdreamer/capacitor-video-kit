@@ -237,6 +237,27 @@ export class VeEditor {
     this.teardown();
   }
 
+  /**
+   * Tells Android that the accessibility tree has changed, because it does not notice on its own.
+   *
+   * An Android WebView does not rebuild the accessibility tree it hands the platform when a subtree
+   * appears inside THIS element's shadow root. Chromium's own tree is right - `<ve-alert>` is in it,
+   * unignored, with its heading and both buttons - but nothing of it reaches Android, so the
+   * question is painted on the screen and TalkBack goes on reading the editor underneath it. It is
+   * the bridge that goes stale, not the markup: measured on an API 35 emulator, the dialog was still
+   * missing fifteen seconds after it appeared.
+   *
+   * Any ARIA attribute written on an element in the PAGE's light DOM does refresh it, and this host
+   * is such an element. `aria-hidden="false"` is the default state spelled out - it tells a reader
+   * exactly what it already assumed about this element - so it changes nothing for anyone and buys
+   * the refresh. It is written only while a question is open, so each opening and each answer is one
+   * attribute change, and a frame that renders neither writes nothing.
+   */
+  componentDidRender() {
+    if (this.confirm.showing) this.el.setAttribute('aria-hidden', 'false');
+    else this.el.removeAttribute('aria-hidden');
+  }
+
   private teardown(): void {
     if (this.destroyed) return;
     this.destroyed = true;
