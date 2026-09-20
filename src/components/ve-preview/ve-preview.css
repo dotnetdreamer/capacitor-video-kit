@@ -44,6 +44,50 @@
 }
 
 /*
+ * ------------------------------------------------------- engines without container query units
+ *
+ * Container queries are Chrome 105. On anything older `container-type` is ignored AND `100cqw` /
+ * `100cqh` are invalid, so the two `width` declarations above are dropped whole - leaving the stage
+ * at its block default of `width: auto`, which is the full width of the box, with `aspect-ratio`
+ * then making it as TALL as that width implies.
+ *
+ * On a Samsung A13 (Android 12, WebView Chrome 99, 384x785 CSS) that is 384 wide and 384 * 1280/720
+ * = 683 tall inside a stage only 364 tall: the frame hangs 319px past the bottom of the stage,
+ * straight over the timeline, the toolbar and any open sheet. It is invisible - everything below
+ * paints over it - but `.pv__frame` is absolutely positioned with `pointer-events: auto`, so it
+ * still takes the taps. Measured with `elementFromPoint` through the shadow roots: a press on the
+ * Layout sheet's Done landed on `DIV.pv__frame`, not on the button.
+ *
+ * That one fact was every "unreachable Done" in this editor at once - Layout, Effects and the text
+ * sheet all put their header inside the overhang - and it left a customer on such a phone unable to
+ * confirm a sheet at all. Text was worse than the others: Back cancels it, so the words could be
+ * typed, could be seen on the frame, and could not be kept.
+ *
+ * The fallback sizes from the HOST's height instead, which an old engine resolves perfectly well
+ * because `:host` is `height: 100%` of a stage with a definite height. `aspect-ratio` then gives the
+ * width, and the gutter stays a cap so the frame still clears the Back and Next circles.
+ *
+ * It is not quite the rule above: where the CAP binds, height stays 100% and the frame squashes
+ * rather than shrinking, which is the very thing the comment on `:host` warns about. That needs a
+ * box tall and narrow enough for the gutter to bite - not a phone, where 364 tall asks for 205 of
+ * the 256 available - and a frame slightly wrong on a 2022 WebView is a far better outcome than a
+ * sheet that cannot be dismissed. Modern engines never see this block.
+ */
+@supports not (width: 1cqw) {
+  .pv__stage,
+  .pv__stage--full {
+    height: 100%;
+    width: auto;
+    max-width: calc(100% - var(--ve-stage-gutter, 128px));
+  }
+
+  /* Full screen gives the picture the whole width, so there are no circles to clear. */
+  .pv__stage--full {
+    max-width: 100%;
+  }
+}
+
+/*
  * Filled by its edges rather than by percentages, because the stage's own height comes from its
  * aspect ratio and a percentage of that is not worth relying on.
  */
