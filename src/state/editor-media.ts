@@ -231,7 +231,7 @@ export class EditorMedia {
       this.store.clips.value = [...this.store.clips.value, source];
       // The segment is looked up again by id: it may have been deleted while the picker was open.
       const replaced = this.store.commit('Replace', (m) =>
-        replaceClipSource(m, target.id, source.key, durationMs),
+        replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength),
       );
       if (!replaced) {
         this.dropUnusedSource(source);

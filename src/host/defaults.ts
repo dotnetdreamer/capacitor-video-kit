@@ -69,6 +69,7 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       debug: platform?.debug ?? false,
     },
     output: resolveOutputOptions(host?.output),
+    editing: { replaceKeepsLength: host?.editing?.replaceKeepsLength ?? true },
   };
 }
 

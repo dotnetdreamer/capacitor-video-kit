@@ -2,7 +2,7 @@ import { Component, Element, Event, type EventEmitter, Host, Prop, State } from 
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { isUntouched, normaliseOutput, qualityOf, reconcileManifest, uniqueClipKeys, type EditManifest } from '../../editor';
+import { aspectOf, isUntouched, normaliseOutput, qualityOf, reconcileManifest, uniqueClipKeys, type EditManifest } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import { resolveEditorHost } from '../../host/defaults';
 import { installEditorFonts } from '../../host/fonts';
@@ -810,7 +810,23 @@ export class VeEditor {
         */}
         {chromeShowing ? (
           <button key="quality" type="button" class="ve__quality" onClick={this.onQuality}>
+            {/*
+              All three of the sheet's decisions, not just the one. The pill used to say `720P` and
+              nothing else, so the two settings beside it in that same sheet - which way up the post
+              is, and how many frames a second it is rendered at - could only be found by opening
+              it. A 16:9 post on a phone held upright looks like a mistake until you know it is one.
+
+              The button's accessible name is now all three - `720P 16:9 30 fps` - rather than the
+              resolution alone, so anything matching on it matches the whole pill. The space in
+              `30 fps` is deliberate and is the one thing here not to tidy away: the Quality sheet's
+              own frame rate chips read `30fps` and `60fps` with no space, and without that gap a
+              test tapping a chip would land on this pill instead and toggle the sheet shut.
+            */}
             <span>{qualityOf(ctx.store.output.value).label}</span>
+            <span class="ve__quality-sep" aria-hidden="true" />
+            <span>{aspectOf(ctx.store.output.value)}</span>
+            <span class="ve__quality-sep" aria-hidden="true" />
+            <span>{ctx.store.output.value.fps} fps</span>
             <ve-icon name="chevron-down" />
           </button>
         ) : null}

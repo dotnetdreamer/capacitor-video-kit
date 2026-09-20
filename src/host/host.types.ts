@@ -21,6 +21,30 @@ export interface VideoEditorHost {
   platform?: EditorPlatformHost;
   /** What the finished post may be: which shapes, which resolutions, which rates. */
   output?: EditorOutputOptions;
+  /** The edits where more than one answer is defensible, and which one this app wants. */
+  editing?: EditorEditingOptions;
+}
+
+/**
+ * Behaviour the editor cannot settle on its own, because the right answer depends on the app.
+ *
+ * Every field is optional and an absent one takes the editor's own default, so a host that says
+ * nothing here behaves exactly as it always has.
+ */
+export interface EditorEditingOptions {
+  /**
+   * Whether Replace keeps the length of the segment it is filling. Defaults to TRUE.
+   *
+   * True treats Replace as a swap: the segment is a hole of a particular size in the sequence and
+   * the new footage is trimmed to that size, so nothing after it moves. That is what an app whose
+   * posts have a designed shape wants - swapping one shot for a longer take should not re-cut
+   * everything behind it.
+   *
+   * False takes the whole of the new file instead, which lengthens the post. An app whose posts are
+   * a loose pile of clips may prefer that: there, a segment's length is not a decision anybody made
+   * and holding onto it only throws footage away.
+   */
+  replaceKeepsLength?: boolean;
 }
 
 /**
@@ -397,6 +421,12 @@ export interface ResolvedEditorHost {
   platform: ResolvedPlatformHost;
   /** Every field filled in, so nothing downstream has to ask what an absent one meant. */
   output: ResolvedOutputOptions;
+  /** Likewise filled in. */
+  editing: ResolvedEditingOptions;
+}
+
+export interface ResolvedEditingOptions {
+  replaceKeepsLength: boolean;
 }
 
 export interface ResolvedOutputOptions {

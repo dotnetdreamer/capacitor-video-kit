@@ -175,6 +175,16 @@
   font-size: 14px;
 }
 
+/* A dot between the three settings, so they read as three answers rather than one long number. */
+.ve__quality-sep {
+  width: 3px;
+  height: 3px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
 /* --------------------------------------------------------------------------------- transport */
 
 /*

@@ -331,17 +331,38 @@ function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip
   return next;
 }
 
-/** Points a segment at a different source, keeping its speed and sound but not its trim. */
+/**
+ * Points a segment at a different source, keeping its speed and its sound.
+ *
+ * `keepLength` decides the rest, and it is the host's decision because both answers are defensible
+ * (see `EditorEditingOptions.replaceKeepsLength`):
+ *
+ * TRUE, the default, treats Replace as a SWAP. The segment is a hole of a particular size in the
+ * sequence, and the new footage is trimmed to that size, so nothing after it moves. Without this,
+ * swapping one shot for a longer take re-cuts everything behind it - which is a surprise in any
+ * post whose shape somebody chose on purpose.
+ *
+ * FALSE takes the whole of the new file, which lengthens the post. That is the right answer where a
+ * segment's length was never a decision and holding onto it would only throw footage away.
+ *
+ * Either way the trim starts at 0: there is no offset into a file nobody has seen worth guessing. A
+ * new source SHORTER than the hole gives up what is not there rather than the segment claiming
+ * frames the file does not have.
+ */
 export function replaceClipSource(
   manifest: EditManifest,
   clipId: string,
   clipKey: string,
   sourceDurationMs: number,
+  keepLength = true,
 ): EditManifest {
+  const current = keepLength ? findClip(manifest, clipId) : null;
+  const wanted = current ? current.outMs - current.inMs : sourceDurationMs;
+
   return patchClip(manifest, clipId, {
     clipKey,
     inMs: 0,
-    outMs: Math.max(MIN_CLIP_MS, Math.round(sourceDurationMs)),
+    outMs: Math.max(MIN_CLIP_MS, Math.round(Math.min(wanted, sourceDurationMs))),
   });
 }
 

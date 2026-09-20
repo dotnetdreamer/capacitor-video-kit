@@ -71,6 +71,7 @@ import {
   removeOverlay,
   removeVideoTrack,
   removeVoiceover,
+  replaceClipSource,
   resetClipFraming,
   setClipCrop,
   setClipFit,
@@ -434,14 +435,18 @@ const OPS: Record<string, Apply> = {
     return insertClip(manifest, defaultClipEdit(clipKey, num(op, 'durationMs'), id), afterClipId);
   },
 
+  /*
+   * `false`, where the editor's own Replace defaults to true.
+   *
+   * Not an oversight and not a divergence that crept in: this is a programmatic op whose caller
+   * states `sourceDurationMs` on purpose, so honouring it is the whole of what was asked. The
+   * editor's Replace is a gesture over a segment somebody already sized, which is why it keeps
+   * that size instead. Both go through the one implementation so neither can drift from it.
+   */
   replaceClipSource: (manifest, op) => {
     const clipId = str(op, 'clipId');
     requireClip(manifest, clipId);
-    return patchClip(manifest, clipId, {
-      clipKey: str(op, 'clipKey'),
-      inMs: 0,
-      outMs: Math.max(100, Math.round(num(op, 'sourceDurationMs'))),
-    });
+    return replaceClipSource(manifest, clipId, str(op, 'clipKey'), num(op, 'sourceDurationMs'), false);
   },
 
   setPostDuration: (manifest, op) => setPostDuration(manifest, num(op, 'durationMs')),
