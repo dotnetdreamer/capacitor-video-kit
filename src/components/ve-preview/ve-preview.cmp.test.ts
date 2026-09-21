@@ -902,3 +902,80 @@ describe('ve-preview on a free canvas', () => {
     expect(getComputedStyle(frame, '::after').borderTopWidth).toBe('1px');
   });
 });
+describe('ve-preview selecting a video by touching it', () => {
+  /*
+   * Touching a picture picks it up. The preview used to answer a tap on the frame by playing and
+   * pausing, which left the timeline as the only way to reach a segment at all - and no way at all
+   * to say WHICH of two overlapping pictures was meant. So the videos under the playhead are hit
+   * tested like any other layer, front to back, and the transport keeps its own button.
+   */
+
+  /** One finger, down and up in the same place, well inside the tap window. */
+  async function tapAt(preview: HTMLElement, x: number, y: number): Promise<void> {
+    const stage = preview.querySelector('.pv__stage') as HTMLElement;
+    const at = (type: string) =>
+      stage.dispatchEvent(
+        new PointerEvent(type, { pointerId: 1, isPrimary: true, clientX: x, clientY: y, bubbles: true, cancelable: true }),
+      );
+    at('pointerdown');
+    await frames(1);
+    at('pointerup');
+    await frames(2);
+  }
+
+  /** The middle of a rectangle given as fractions of the frame, in client pixels. */
+  function middleOf(preview: HTMLElement, rect: { x: number; y: number; w: number; h: number }): { x: number; y: number } {
+    const stage = (preview.querySelector('.pv__stage') as HTMLElement).getBoundingClientRect();
+    return {
+      x: stage.left + (rect.x + rect.w / 2) * stage.width,
+      y: stage.top + (rect.y + rect.h / 2) * stage.height,
+    };
+  }
+
+  const WHOLE_FRAME = { x: 0, y: 0, w: 1, h: 1 };
+
+  it('selects the video under the finger rather than playing the post', async () => {
+    const { store, preview } = await mount(false);
+    await frames(3);
+
+    const at = middleOf(preview, WHOLE_FRAME);
+    await tapAt(preview, at.x, at.y);
+
+    // The segment, not the transport. The base track carries no rectangle, so it answers for every
+    // point on the frame - which is exactly what a post nobody has laid out should do.
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-a' });
+    expect(store.playing.value).toBe(false);
+  });
+
+  it('selects the TOPMOST video where two of them overlap', async () => {
+    const { store, preview } = await mount(true);
+    // The layer takes the left half; the base keeps the whole frame underneath it.
+    store.commitClipFraming('seg-b', { rect: { x: 0, y: 0.25, w: 0.5, h: 0.5 } }, 'Move');
+    await frames(3);
+
+    const onLayer = middleOf(preview, { x: 0, y: 0.25, w: 0.5, h: 0.5 });
+    await tapAt(preview, onLayer.x, onLayer.y);
+    // `track-1` is drawn over the base, so where the two overlap the finger gets the one on top.
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-b' });
+
+    const onBase = middleOf(preview, { x: 0.5, y: 0.25, w: 0.5, h: 0.5 });
+    await tapAt(preview, onBase.x, onBase.y);
+    // Off the layer's rectangle the base is the only picture there, and it takes the touch.
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-a' });
+  });
+
+  it('leaves a second touch on the video it already selected alone', async () => {
+    const { store, preview } = await mount(false);
+    await frames(3);
+    const at = middleOf(preview, WHOLE_FRAME);
+
+    await tapAt(preview, at.x, at.y);
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-a' });
+
+    await tapAt(preview, at.x, at.y);
+    // Still held, and still paused. A finger resting on the frame in the middle of an edit must not
+    // put the selection down or set the post playing.
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-a' });
+    expect(store.playing.value).toBe(false);
+  });
+});

@@ -113,8 +113,7 @@
   },
   "workspaces": [
     "packages/react",
-    "packages/vue",
-    "packages/angular"
+    "packages/vue"
   ],
   "scripts": {
     "build": "npm run build:package && npm run build:wrappers",
@@ -122,7 +121,7 @@
     "build:plugin": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finish-build.mjs",
     "build:ui": "stencil build",
     "build:mcp": "node scripts/build-mcp.mjs",
-    "build:wrappers": "npm run build --workspace @capacitor-video-kit/react && npm run build --workspace @capacitor-video-kit/vue && npm run build --workspace @capacitor-video-kit/angular && node scripts/finish-wrappers.mjs && node scripts/module-type.mjs",
+    "build:wrappers": "npm run build --workspace @capacitor-video-kit/react && npm run build --workspace @capacitor-video-kit/vue && npm --prefix packages/angular run build && node scripts/finish-wrappers.mjs && node scripts/module-type.mjs",
     "clean": "rimraf plugin dist loader mcp www angular react vue .stencil .stencil-test-build src/components.d.ts",
     "dev": "stencil build --dev --watch --serve --config stencil.dev.config.ts",
     "watch": "npm run watch:ui & npm run watch:plugin & npm run watch:wrappers & wait",
@@ -132,10 +131,10 @@
     "prepare": "npm run build",
     "test": "stencil-test --prod --stencil-config stencil.test.config.ts",
     "test:watch": "stencil-test --prod --watch --stencil-config stencil.test.config.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.mcp-tests.json && tsc -p tsconfig.plugin-tests.json && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.mcp-tests.json && tsc -p tsconfig.plugin-tests.json && tsc -p src/tsconfig.json --noEmit && tsc -p tsconfig.tools.json && npm run typecheck --workspaces && npm --prefix packages/angular run typecheck",
     "generate": "stencil generate",
-    "clean:all": "npm run clean && npm run clean --workspaces --if-present",
-    "watch:wrappers": "npm run watch --workspace @capacitor-video-kit/react & npm run watch --workspace @capacitor-video-kit/vue & npm run watch --workspace @capacitor-video-kit/angular & wait"
+    "clean:all": "npm run clean && npm run clean --workspaces --if-present && npm --prefix packages/angular run clean",
+    "watch:wrappers": "npm run watch --workspace @capacitor-video-kit/react & npm run watch --workspace @capacitor-video-kit/vue & npm --prefix packages/angular run watch & wait"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

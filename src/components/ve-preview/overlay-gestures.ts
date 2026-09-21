@@ -661,18 +661,28 @@ export class OverlayGestures {
     }
 
     if (hit.kind === 'clip') {
-      // Already selected - that is what put it within reach - so nothing is selected here and
-      // nothing is paused: a drag pauses when it becomes a drag, and a tap stays a tap.
       const grip = this.clipGrip(hit.id, 'rect');
       if (!grip) {
         this.gesture = { kind: 'tap-empty', x0: e.clientX, y0: e.clientY, t0: now };
         return;
       }
+      /*
+       * Touching a video selects the segment it belongs to, the way every other editor does - and
+       * the only way to reach a picture-in-picture layer without hunting for its row in the
+       * timeline. The hit test above already picked the frontmost one under the finger.
+       *
+       * Selecting is ALL it does. `tap: 'none'` leaves a second touch on a segment that is already
+       * selected inert, so a finger resting on the frame in the middle of an edit cannot put the
+       * selection down or set the post playing; play and pause belong to the transport's button,
+       * which is on screen the whole time. That is also why nothing is paused here - a drag pauses
+       * when it becomes a drag, and a tap stays a tap.
+       */
+      if (!this.store.isSelected({ kind: 'clip', id: hit.id })) this.store.select({ kind: 'clip', id: hit.id });
       this.gesture = {
         kind: 'press',
         pointerId: e.pointerId,
         id: hit.id,
-        tap: 'empty',
+        tap: 'none',
         x0: e.clientX,
         y0: e.clientY,
         t0: now,
@@ -1037,12 +1047,13 @@ export class OverlayGestures {
   }
 
   /**
-   * The top-most thing under a point on the frame: a layer, or - under all of them - the selected
-   * clip's own rectangle. Effects cover the whole frame and are not grabbed.
+   * The top-most thing under a point on the frame: a layer, or - under all of them - the video the
+   * point lands on. Effects cover the whole frame and are not grabbed.
    *
-   * The clip comes last because every layer is drawn over the video and a layer's artwork must stay
-   * grabbable where it lies on top of it, and it is only there at all when the clip is SELECTED: an
-   * unselected video is the background, and a drag across it means what it has always meant.
+   * The videos come last because every layer is drawn over them and a layer's artwork must stay
+   * grabbable where it lies on top of one. Among THEMSELVES they answer top down, so the picture a
+   * customer can actually see at the point is the one that takes the touch - which is the whole of
+   * what makes a split screen or a picture in picture reachable without going to the timeline.
    */
   private hitTest(px: number, py: number, rect: DOMRect): Transformable | null {
     const overlays = this.store.manifest.value.overlays;
@@ -1064,6 +1075,16 @@ export class OverlayGestures {
         };
       }
     }
+    // Every video under the playhead, top down. `previewLayers` is the list the canvas draws, in
+    // drawing order, so walking it backwards asks the frontmost picture first and can never hand
+    // back a segment that is not on screen at this instant.
+    const layers = this.store.previewLayers.value;
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const target = this.clipTargetOf(layers[i].clipId, layers[i].rect);
+      if (hitsLayer(px, py, rect.width, rect.height, target, boxOf(target))) return target;
+    }
+    // A segment selected from the timeline while the playhead sits somewhere else is on none of the
+    // layers above, and its rectangle still has to answer the fingers that are already on it.
     const clip = this.clipTarget();
     if (clip && hitsLayer(px, py, rect.width, rect.height, clip, boxOf(clip))) return clip;
     return null;
@@ -1072,10 +1093,18 @@ export class OverlayGestures {
   /** The selected clip as something the fingers can move: the rectangle it is drawn in. */
   private clipTarget(): Transformable | null {
     const clip = this.store.selectedClip.value;
-    if (!clip) return null;
-    const rect = orWhole(clip.rect);
+    return clip ? this.clipTargetOf(clip.id, clip.rect ?? null) : null;
+  }
+
+  /**
+   * A clip's rectangle on the frame as something the fingers can move. `placement` is the segment's
+   * own [EditClip.rect], and null is the whole frame standing upright - which is what a post nobody
+   * has laid out still is, and why the base track answers for every point on the frame.
+   */
+  private clipTargetOf(id: string, placement: EditPlacement | null): Transformable {
+    const rect = orWhole(placement);
     return {
-      id: clip.id,
+      id,
       kind: 'clip',
       cx: rect.x + rect.w / 2,
       cy: rect.y + rect.h / 2,
