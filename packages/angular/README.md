@@ -77,3 +77,25 @@ is meant to reach for. Its re-export has no `.js` on it, unlike the React and Vu
 declaration flattener looks for `./generated/proxies.d.ts` and fails outright if the extension is
 there, and nothing relative survives into the published output anyway, because the package is
 flattened into one `fesm2022` bundle and one declaration file.
+
+## Why this package is not an npm workspace
+
+`packages/react` and `packages/vue` are workspaces; this one deliberately is not, and its scripts
+are driven with `npm --prefix packages/angular ...` from the root instead.
+
+A workspace's devDependencies HOIST to the repo root. This package builds with Angular, so being a
+workspace put `@angular/core` (and `rxjs`) into `<repo>/node_modules` - which is fine until an app
+installs the kit as a `file:` link. The bindings this package builds land at `<repo>/angular/`, so a
+bare `import '@angular/core'` there resolves by walking up to `<repo>/node_modules` and finds the
+BUILD's Angular rather than the app's. Two copies of Angular is two injector registries, and every
+`inject()` in the bindings then fails at runtime with NG0203.
+
+Keeping the install here means `<repo>/node_modules` carries no Angular at all, so that same import
+walks past the kit and lands on the host app's copy - the only one that may exist.
+
+    npm --prefix packages/angular install     # after cloning, or when these deps change
+    npm --prefix packages/angular run build   # what `npm run build:wrappers` calls
+
+Consumers that resolve through the link (Angular CLI with `preserveSymlinks`) get this for free.
+One that resolves at the REAL path - Vitest does - has to be told separately, with a `dedupe` on
+`@angular/*` in its own config.
