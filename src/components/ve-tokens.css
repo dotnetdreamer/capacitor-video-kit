@@ -8,9 +8,14 @@
  * would be trying to make, and it would fail silently.
  *
  * The palette is TikTok's editor on pure black: the video is the subject and the chrome around it
- * is quiet grey. The three values that carry choisy's brand name a choisy variable first and fall
- * back to the colour itself, so the app rebrands the editor by declaring `--choisy-wasabi-lime`
- * further up the tree and every other host still gets a finished palette with no setup at all.
+ * is quiet grey. Every token below is a finished colour, so a host that declares nothing gets a
+ * complete palette; a host that wants its own brand in the editor sets the `--ve-*` tokens it
+ * cares about on an ancestor of `ve-editor` and everything downstream follows.
+ *
+ * These used to name the host application's own brand variables in their fallback chains, which
+ * meant this package knew one host's stylesheet by heart and no other host could reach them
+ * without adopting those names. The direction is now the other way round: the host maps its
+ * variables onto ours.
  *
  * A new token is added here, with a default that stands on its own.
  */
@@ -53,9 +58,9 @@
   --ve-text: #fff;
   --ve-dim: rgba(255, 255, 255, 0.6);
   --ve-faint: rgba(255, 255, 255, 0.35);
-  --ve-accent: var(--choisy-wasabi-lime, #a6ff2e);
-  --ve-cta: var(--choisy-cta-bg, #a6ff2e);
-  --ve-cta-text: var(--choisy-cta-text, #1a1a2e);
+  --ve-accent: #a6ff2e;
+  --ve-cta: #a6ff2e;
+  --ve-cta-text: #1a1a2e;
   --ve-danger: #ff4d6a;
   /*
    * The edge of the video frame. It is drawn at all because the frame is black, the page behind it
@@ -71,7 +76,7 @@
   --ve-lane-sticker: #ffd66b;
   --ve-lane-image: #7cc4ff;
   --ve-lane-effect: #b99bff;
-  --ve-lane-music: var(--choisy-petrol-teal, #0b8e87);
+  --ve-lane-music: #0b8e87;
   --ve-lane-voice: #ff9f5a;
   --ve-lane-ink: #2a0a33;
 

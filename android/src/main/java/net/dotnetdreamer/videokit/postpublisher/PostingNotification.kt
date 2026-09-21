@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.postpublisher
+package net.dotnetdreamer.videokit.postpublisher
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,7 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 // Resources live in the merged module, not in this file's own package.
-import net.dotnetdreamer.choisy.videokit.R
+import net.dotnetdreamer.videokit.R
 import androidx.core.app.NotificationManagerCompat
 import androidx.work.ForegroundInfo
 
@@ -23,7 +23,7 @@ import androidx.work.ForegroundInfo
 object PostingNotification {
 
     const val NOTIFICATION_ID = 41002
-    private const val CHANNEL_ID = "choisy.posting"
+    private const val CHANNEL_ID = "videokit.posting"
 
     fun ensureChannel(ctx: Context) {
         if (Build.VERSION.SDK_INT < 26) return
@@ -32,7 +32,7 @@ object PostingNotification {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                ctx.getString(R.string.choisy_posting_channel_name),
+                ctx.getString(R.string.videokit_posting_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 setShowBadge(false)
@@ -47,9 +47,9 @@ object PostingNotification {
         val counter = if (total > 0) "$done/$total" else ""
         return NotificationCompat.Builder(ctx, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_posting)
-            .setContentTitle(ctx.getString(R.string.choisy_posting_notification_title))
+            .setContentTitle(ctx.getString(R.string.videokit_posting_notification_title))
             .setContentText(
-                ctx.getString(R.string.choisy_posting_notification_text, safePercent, counter),
+                ctx.getString(R.string.videokit_posting_notification_text, safePercent, counter),
             )
             .setProgress(100, safePercent, false)
             .setOngoing(true)

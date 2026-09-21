@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.videocomposer
+package net.dotnetdreamer.videokit.videocomposer
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals

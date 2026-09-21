@@ -19,7 +19,7 @@
     "sourceMap": false,
     "experimentalDecorators": true,
     "useDefineForClassFields": false,
-    "outDir": "dist",
+    "outDir": "../../angular",
     "rootDir": "src"
   },
   "angularCompilerOptions": {

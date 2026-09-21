@@ -1,8 +1,8 @@
 {
   "$schema": "../../node_modules/ng-packagr/ng-package.schema.json",
-  "dest": "dist",
+  "dest": "../../angular",
   "allowedNonPeerDependencies": [
-    "choisy-video-kit",
+    "@capacitor-video-kit/core",
     "@stencil/core"
   ],
   "lib": {

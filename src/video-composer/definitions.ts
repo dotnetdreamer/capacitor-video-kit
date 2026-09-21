@@ -1,5 +1,5 @@
 /**
- * `choisy-video-composer` - the native video render engine.
+ * `videokit-video-composer` - the native video render engine.
  *
  * The contract is deliberately declarative: JS hands over a fully resolved `ComposeSpec` (every
  * time in milliseconds, every URI already pointing at a file the native side can open) and the
@@ -12,7 +12,7 @@
  * destroyed while a foreground service keeps the process alive.
  *
  * The `VideoComposerPlugin` interface itself lives next door in `plugin.ts`, and only because it is
- * the one thing here that names a Capacitor type. This file is reached by `choisy-video-kit/editor`
+ * the one thing here that names a Capacitor type. This file is reached by `@capacitor-video-kit/core/editor`
  * for `ComposeSpec` and `FilterOp`, and a web host that imports that entry point has no
  * `@capacitor/core` to resolve, so a single `import type` here becomes a TS2307 inside its
  * `node_modules` the moment it compiles without `skipLibCheck`.

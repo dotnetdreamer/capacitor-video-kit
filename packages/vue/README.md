@@ -1,14 +1,14 @@
-# choisy-video-kit-vue
+# @capacitor-video-kit/core/vue
 
-Vue bindings for the Choisy video editor.
+Vue bindings for the Capacitor Video Kit editor.
 
 ```sh
-npm install ./choisy-video-kit-1.3.0.tgz ./choisy-video-kit-vue-1.3.0.tgz
+npm install ./@capacitor-video-kit/core-1.3.0.tgz ./@capacitor-video-kit/core/vue-1.3.0.tgz
 ```
 
 ```vue
 <script setup lang="ts">
-import { VeSpinner } from 'choisy-video-kit-vue';
+import { VeSpinner } from '@capacitor-video-kit/core/vue';
 </script>
 
 <template>
@@ -20,7 +20,7 @@ Both packages go in, in one command, and neither is on a registry yet, so both a
 from `npm pack`, or the checkout itself.
 
 The peers are Vue 3.4.38 or later, `@preact/signals-core`, which the editor's store is built on, and
-`choisy-video-kit` at the exact version of this package, because the two are generated together and
+`@capacitor-video-kit/core` at the exact version of this package, because the two are generated together and
 only ever match version for version. That last one is why the core package has to be on the install
 line. npm installs a missing peer by itself, which is how Vue and the signals arrive without being
 asked for, but it looks for every one of them on the registry, and this one is not there. The wrapper
@@ -28,7 +28,7 @@ on its own ends in
 
 ```
 npm error code E404
-npm error 404 Not Found - GET https://registry.npmjs.org/choisy-video-kit - Not found
+npm error 404 Not Found - GET https://registry.npmjs.org/@capacitor-video-kit/core - Not found
 ```
 
 `@stencil/core` and `@stencil/vue-output-target`, whose `defineContainer` the generated wrappers
@@ -82,8 +82,8 @@ written down here because the alternative is a consumer reading a TS2307 that na
 code nor this package and guessing.
 
 The editor's stickers and fonts are not imported by any module, so nothing bundles them. Serve a copy
-of `node_modules/choisy-video-kit/dist/components/assets` and call
-`setEditorAssetPath('/video-editor/')` from `choisy-video-kit/ui` once at startup, or the first
+of `node_modules/@capacitor-video-kit/core/dist/components/assets` and call
+`setEditorAssetPath('/video-editor/')` from `@capacitor-video-kit/core/ui` once at startup, or the first
 sticker throws. The repository readme has the copy step.
 
 Everything under `src/generated/` is written by `stencil.config.ts` on every build of the core

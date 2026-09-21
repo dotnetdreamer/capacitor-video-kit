@@ -342,7 +342,7 @@ enum JobFolders {
             do {
                 try fm.removeItem(at: folder)
             } catch {
-                NSLog("[ChoisyVideoKit] sweep could not delete %@: %@", folder.path, error.localizedDescription)
+                NSLog("[CapacitorVideoKitCore] sweep could not delete %@: %@", folder.path, error.localizedDescription)
             }
         }
         sweepCache(thumbsDir(), now: now)

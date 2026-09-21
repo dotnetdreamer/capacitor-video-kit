@@ -80,7 +80,7 @@ export async function run(pendingPostId: string, emit: PublishEmitter): Promise<
   const release = holdPageOpen(`uploading ${pendingPostId}`);
 
   try {
-    await withLock(`choisy-publish-${pendingPostId}`, async () => {
+    await withLock(`videokit-publish-${pendingPostId}`, async () => {
       const entry = await loadEntry(pendingPostId);
       if (!entry || !IN_FLIGHT.includes(entry.state.phase)) return;
       const uploaded = await sendFiles(entry, controller.signal, emit);

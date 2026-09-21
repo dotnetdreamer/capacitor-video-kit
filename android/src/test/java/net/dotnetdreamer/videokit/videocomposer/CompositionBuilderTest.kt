@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.videocomposer
+package net.dotnetdreamer.videokit.videocomposer
 
 import androidx.media3.common.MediaItem
 import org.junit.Assert.assertEquals

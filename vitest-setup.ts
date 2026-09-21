@@ -10,4 +10,4 @@
  * A plain import, because the lazy build's entry registers every tag as it is evaluated: there is
  * nothing to call, and nothing else in the bundle is wanted here.
  */
-import './.stencil-test-build/www/build/choisy-video-kit.esm.js';
+import './.stencil-test-build/www/build/capacitor-video-kit.esm.js';

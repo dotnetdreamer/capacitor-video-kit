@@ -8,7 +8,7 @@ import { editorAssetUrl, setEditorAssetPath } from './asset-path';
  * slot every copy of this package can reach is the whole design and a test that imported the
  * constant would pass just as happily if it became a module scoped variable.
  */
-const ASSET_BASE = Symbol.for('choisy.video-kit.assetBase');
+const ASSET_BASE = Symbol.for('capacitor-video-kit.assetBase');
 
 /*
  * Whether a resolved asset comes back as a path or as a whole URL is Stencil's rule, not ours: it

@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "ChoisyVideoKit",
+    name: "CapacitorVideoKitCore",
     platforms: [.iOS(.v16)],
     products: [
         .library(
-            name: "ChoisyVideoKit",
-            targets: ["ChoisyVideoKit"])
+            name: "CapacitorVideoKitCore",
+            targets: ["CapacitorVideoKitCore"])
     ],
     dependencies: [
         .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "8.0.0")
@@ -15,11 +15,11 @@ let package = Package(
     targets: [
         // Both plugin classes live in one target; Capacitor registers each @objc class separately.
         .target(
-            name: "ChoisyVideoKit",
+            name: "CapacitorVideoKitCore",
             dependencies: [
                 .product(name: "Capacitor", package: "capacitor-swift-pm"),
                 .product(name: "Cordova", package: "capacitor-swift-pm")
             ],
-            path: "ios/Sources/ChoisyVideoKit")
+            path: "ios/Sources/CapacitorVideoKitCore")
     ]
 )

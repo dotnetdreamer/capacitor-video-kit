@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.videocomposer
+package net.dotnetdreamer.videokit.videocomposer
 
 import kotlin.math.abs
 import kotlin.math.cos

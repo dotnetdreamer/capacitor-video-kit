@@ -21,7 +21,7 @@ import os
 /// since cannot, and losing the lot on a device restore is not something they would forgive.
 enum SoundLibrary {
 
-    private static let log = Logger(subsystem: "net.dotnetdreamer.choisy", category: "SoundLibrary")
+    private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "SoundLibrary")
 
     /// Refused past this, so a half-written export never becomes a row that plays nothing.
     private static let headroomBytes: Int64 = 8 * 1024 * 1024

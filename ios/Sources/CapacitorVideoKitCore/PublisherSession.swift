@@ -88,12 +88,12 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
 
     /// Fixed for the life of the app. Changing it orphans every transfer in flight when the new
     /// build lands: the system keeps delivering them to a session object that no longer exists.
-    static let identifier = "net.dotnetdreamer.choisy.postpublisher"
+    static let identifier = "net.dotnetdreamer.videokit.postpublisher"
 
     let queue: OperationQueue = {
         let q = OperationQueue()
         q.maxConcurrentOperationCount = 1
-        q.name = "net.dotnetdreamer.choisy.postpublisher"
+        q.name = "net.dotnetdreamer.videokit.postpublisher"
         return q
     }()
 

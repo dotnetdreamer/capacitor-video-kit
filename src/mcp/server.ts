@@ -23,7 +23,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } fr
 import { ToolError, createTools, type ToolDefinition } from './tools';
 
 /** What the client sees this server called. The version is the package's, filled in by the build. */
-export const SERVER_NAME = 'choisy-video-kit';
+export const SERVER_NAME = '@capacitor-video-kit/core';
 
 export interface VideoKitMcpServerOptions {
   /** Reported to the client on connect. Defaults to the version this was built from. */
@@ -47,7 +47,7 @@ export function createVideoKitMcpServer(options: VideoKitMcpServerOptions = {}):
     {
       capabilities: { tools: {} },
       instructions:
-        'This server builds and edits the video EditManifest that choisy-video-kit renders. A manifest ' +
+        'This server builds and edits the video EditManifest that @capacitor-video-kit/core renders. A manifest ' +
         'is the whole of an edit: the clips and their trims, the video layers over them, the text, ' +
         'stickers, photos and effects drawn on top, the music and voiceover, and the frame it all ' +
         'renders at.\n\n' +

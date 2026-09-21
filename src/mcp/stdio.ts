@@ -6,9 +6,9 @@
  * ```json
  * {
  *   "mcpServers": {
- *     "choisy-video-kit": {
+ *     "@capacitor-video-kit/core": {
  *       "command": "node",
- *       "args": ["/absolute/path/to/choisy-video-kit/mcp/mcp/stdio.js"]
+ *       "args": ["/absolute/path/to/@capacitor-video-kit/core/mcp/mcp/stdio.js"]
  *     }
  *   }
  * }
@@ -32,10 +32,10 @@ const VERSION = '0.0.0-dev';
 async function main(): Promise<void> {
   const server = createVideoKitMcpServer({ version: VERSION });
   await server.connect(new StdioServerTransport());
-  process.stderr.write(`choisy-video-kit MCP server ${VERSION} ready on stdio\n`);
+  process.stderr.write(`@capacitor-video-kit/core MCP server ${VERSION} ready on stdio\n`);
 }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`choisy-video-kit MCP server failed to start: ${error instanceof Error ? error.stack : String(error)}\n`);
+  process.stderr.write(`@capacitor-video-kit/core MCP server failed to start: ${error instanceof Error ? error.stack : String(error)}\n`);
   process.exitCode = 1;
 });

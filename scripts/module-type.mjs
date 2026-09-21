@@ -57,7 +57,7 @@ const MARKERS = [
   ['dist/esm', 'module'],
   ['dist/components', 'module'],
   ['dist/collection', 'module'],
-  ['dist/choisy-video-kit', 'module'],
+  ['dist/capacitor-video-kit', 'module'],
   ['dist/cjs', 'commonjs'],
 ];
 
@@ -106,11 +106,22 @@ for (const [from, to] of RENAMES) {
 let checked = 0;
 
 /*
- * `mcp` is in the list only when it is there. It is the optional half of the package and
- * `build-mcp.mjs` does not always produce it, but when it does it is `tsc` output exactly like
- * `plugin/esm` and has to hold up to the same check.
+ * Each tree is checked only when it is there, because two of them are built in a later step than
+ * this one and one is optional.
+ *
+ * `mcp` is the optional half of the package: `build-mcp.mjs` does not always produce it, but when
+ * it does it is `tsc` output exactly like `plugin/esm` and has to hold up to the same check.
+ *
+ * `angular`, `react` and `vue` are the framework wrappers, which `build:wrappers` writes after
+ * `build:package` has already run this script once. So on the first run they are absent and on the
+ * second they are checked - `build:wrappers` ends by running `finish-wrappers.mjs`, which writes
+ * the `type: module` marker each of them needs, and then this script again to prove it worked.
+ * They carry their own markers rather than appearing in MARKERS above for that reason: the
+ * directories do not exist yet at the point MARKERS is written.
  */
-const TREES = ['plugin', 'dist', 'loader', 'mcp'].filter((dir) => isDirectory(join(packageDir, dir)));
+const TREES = ['plugin', 'dist', 'loader', 'mcp', 'angular', 'react', 'vue'].filter((dir) =>
+  isDirectory(join(packageDir, dir)),
+);
 
 for (const dir of TREES) {
   for (const file of sources(join(packageDir, dir))) {

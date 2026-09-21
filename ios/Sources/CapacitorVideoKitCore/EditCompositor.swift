@@ -167,7 +167,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
 
     /// AVFoundation is explicitly allowed to call `startRequest` again before the previous request
     /// has finished, so every frame is rendered on this one serial queue.
-    private let queue = DispatchQueue(label: "net.dotnetdreamer.choisy.videokit.compositor",
+    private let queue = DispatchQueue(label: "net.dotnetdreamer.videokit.compositor",
                                       qos: .userInitiated)
 
     /// Guards `cancelled` alone. It is read on `queue` and written by whatever thread AVFoundation
@@ -193,7 +193,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             .workingColorSpace: NSNull(),   // no linearisation and no matching on the way in
             .outputColorSpace: NSNull(),    // none on the way out either
             .cacheIntermediates: false,     // 30 overlays x 30 fps otherwise pins a lot of textures
-            .name: "ChoisyEditCompositor",
+            .name: "VideoKitEditCompositor",
         ]
         // Every device and simulator this ships to has Metal; the CPU context is a last resort that
         // renders correctly and slowly rather than a crash on some future configuration.

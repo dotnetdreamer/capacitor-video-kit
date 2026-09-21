@@ -5,13 +5,13 @@
  * Three roots, which is the whole of what a host application has to arrange as well:
  *
  *   /                      this directory, the page itself
- *   /node_modules/         the app's `node_modules`, so `choisy-video-kit/...` in the import map
+ *   /node_modules/         the app's `node_modules`, so `@capacitor-video-kit/core/...` in the import map
  *                          resolves to the real files the way a bundler would resolve it
  *   /video-editor/assets/  a copy of the package's `dist/components/assets`, which is what
  *                          `setEditorAssetPath('/video-editor/')` in example.js points at
  *
  * Nothing is copied and nothing is built. The package is installed here as a self link, so
- * `node_modules/choisy-video-kit` is a symlink back to this repository and what the page loads is
+ * `node_modules/@capacitor-video-kit/core` is a symlink back to this repository and what the page loads is
  * whatever the last `npm run build:package` left in `dist/`.
  */
 import { createReadStream, statSync } from 'node:fs';
@@ -76,7 +76,7 @@ createServer((request, response) => {
  *
  * `resolve` collapses `..` before the prefix is checked, so a request for
  * `/node_modules/../../etc/passwd` lands outside the root and is refused. The symlink at
- * `node_modules/choisy-video-kit` is followed on purpose and the real path is not what is checked,
+ * `node_modules/@capacitor-video-kit/core` is followed on purpose and the real path is not what is checked,
  * because following it is the point.
  */
 function locate(path) {

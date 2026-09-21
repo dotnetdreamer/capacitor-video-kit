@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.postpublisher
+package net.dotnetdreamer.videokit.postpublisher
 
 import android.content.Context
 import android.util.Log

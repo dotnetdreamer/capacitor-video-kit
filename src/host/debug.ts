@@ -1,7 +1,7 @@
 /**
  * Whether the package says anything on the console.
  *
- * In choisy this is `AppConstant.DEBUG`, which reaches the app's environment file through an
+ * In a typical host this is `AppConstant.DEBUG`, which reaches the app's environment file through an
  * Angular package: a third-party import sitting behind a `console.warn` guard. Here it is one
  * module level boolean, set from `host.platform.debug` when the editor is handed its host, so
  * nothing the package logs can be reached without going through this file.

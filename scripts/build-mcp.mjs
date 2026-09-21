@@ -8,8 +8,8 @@
  *
  * WHAT DECIDES, in order:
  *
- *   CHOISY_VIDEO_KIT_MCP=0     never build it. Also 'false', 'off', 'no'.
- *   CHOISY_VIDEO_KIT_MCP=1     always build it, and FAIL if the SDK is not installed, because a
+ *   CAPACITOR_VIDEO_KIT_MCP=0     never build it. Also 'false', 'off', 'no'.
+ *   CAPACITOR_VIDEO_KIT_MCP=1     always build it, and FAIL if the SDK is not installed, because a
  *                              build that was told to produce the server and quietly did not is
  *                              how a missing server is discovered by the client instead.
  *   unset                      build it if the SDK resolves, and skip with a note if it does not.
@@ -34,7 +34,7 @@ const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = join(packageDir, 'mcp');
 const require = createRequire(import.meta.url);
 
-const flag = (process.env['CHOISY_VIDEO_KIT_MCP'] ?? '').trim().toLowerCase();
+const flag = (process.env['CAPACITOR_VIDEO_KIT_MCP'] ?? '').trim().toLowerCase();
 const OFF = ['0', 'false', 'off', 'no'];
 const ON = ['1', 'true', 'on', 'yes'];
 
@@ -42,7 +42,7 @@ if (OFF.includes(flag)) {
   // Removed rather than left, so that turning the flag off and rebuilding cannot leave yesterday's
   // server in the tree to be published beside today's plugin.
   rmSync(outDir, { recursive: true, force: true });
-  console.log('build-mcp: skipped, CHOISY_VIDEO_KIT_MCP is off');
+  console.log('build-mcp: skipped, CAPACITOR_VIDEO_KIT_MCP is off');
   process.exit(0);
 }
 
@@ -50,13 +50,13 @@ const sdk = hasSdk();
 if (!sdk) {
   if (ON.includes(flag)) {
     console.error(
-      'build-mcp: CHOISY_VIDEO_KIT_MCP asked for the MCP server, but @modelcontextprotocol/sdk is not\n' +
+      'build-mcp: CAPACITOR_VIDEO_KIT_MCP asked for the MCP server, but @modelcontextprotocol/sdk is not\n' +
         '           installed. It is an optional peer dependency: `npm install @modelcontextprotocol/sdk`.',
     );
     process.exit(1);
   }
   rmSync(outDir, { recursive: true, force: true });
-  console.log('build-mcp: skipped, @modelcontextprotocol/sdk is not installed (set CHOISY_VIDEO_KIT_MCP=1 to require it)');
+  console.log('build-mcp: skipped, @modelcontextprotocol/sdk is not installed (set CAPACITOR_VIDEO_KIT_MCP=1 to require it)');
   process.exit(0);
 }
 

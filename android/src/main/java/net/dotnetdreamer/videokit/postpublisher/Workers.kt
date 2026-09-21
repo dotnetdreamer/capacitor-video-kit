@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.postpublisher
+package net.dotnetdreamer.videokit.postpublisher
 
 import android.content.Context
 import androidx.work.BackoffPolicy
@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit
 object Workers {
 
     const val KEY_PENDING_POST_ID = "pendingPostId"
-    const val TAG = "choisy-post-publisher"
+    const val TAG = "videokit-post-publisher"
 
     /** Attempts per worker, counted by WorkManager across process deaths as well as failures. */
     const val MAX_ATTEMPTS = 3

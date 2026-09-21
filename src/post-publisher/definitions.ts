@@ -1,5 +1,5 @@
 /**
- * `choisy-post-publisher` - uploads a finished post's files and creates the post, natively.
+ * `videokit-post-publisher` - uploads a finished post's files and creates the post, natively.
  *
  * The reason this is not `fetch` in a service worker: the customer taps Post and immediately goes
  * back to scrolling, switches apps, or locks the phone. A WebView upload dies the moment the page

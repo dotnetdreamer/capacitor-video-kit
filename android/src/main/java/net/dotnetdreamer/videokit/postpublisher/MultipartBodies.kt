@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.postpublisher
+package net.dotnetdreamer.videokit.postpublisher
 
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody

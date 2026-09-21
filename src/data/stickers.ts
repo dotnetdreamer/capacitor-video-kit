@@ -67,7 +67,7 @@ export const STICKERS: StickerAsset[] = [
   { id: 'price-tag', label: 'Price tag', category: 'badges', keywords: ['price', 'tag', 'money', 'dollar', 'cost'] },
   { id: 'five-stars', label: '5 stars', category: 'badges', keywords: ['5', 'five', 'stars', 'rating', 'review'] },
   { id: 'open-now', label: 'Open now', category: 'badges', keywords: ['open', 'now', 'sign', 'hours'] },
-  { id: 'choisy-approved', label: 'Choisy approved', category: 'badges', keywords: ['choisy', 'approved', 'verified', 'check', 'stamp'] },
+  { id: 'verified', label: 'Verified', category: 'badges', keywords: ['verified', 'approved', 'check', 'stamp', 'badge'] },
 
   // Shapes
   { id: 'arrow-curve', label: 'Arrow', category: 'shapes', keywords: ['arrow', 'point', 'look', 'this'] },

@@ -20,7 +20,7 @@ protocol RenderEngine {
 
 enum Exporter: RenderEngine {
 
-    private static let log = Logger(subsystem: "net.dotnetdreamer.choisy", category: "Exporter")
+    private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "Exporter")
 
     /// 0.9 of the app's own 100 MiB upload ceiling. Apple documents this as a limit the session
     /// aims at and tells you to test the output, never as rate control, so it is a belt beside the
@@ -228,7 +228,7 @@ enum Exporter: RenderEngine {
 /// that stand in for a bitrate the preset engine cannot set.
 enum ResultBuilder {
 
-    private static let log = Logger(subsystem: "net.dotnetdreamer.choisy", category: "Exporter")
+    private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "Exporter")
 
     /// `totalMs` is the composition's real duration (`BuiltComposition.totalMs`), which can be less
     /// than `spec.totalOutputMs` when a clip's `outMs` was clamped to its file. It is used for the

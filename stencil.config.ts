@@ -6,7 +6,7 @@ import { vueOutputTarget, type ComponentModelConfig } from '@stencil/vue-output-
 import { requireVueComponentModels } from './build/vue-component-models';
 
 /** The name the generated wrappers import the custom elements from, so it must be what we publish. */
-const componentCorePackage = 'choisy-video-kit';
+const componentCorePackage = '@capacitor-video-kit/core';
 
 /**
  * Where `dist-custom-elements` writes, repeated on all three wrapper targets because they disagree
@@ -49,7 +49,7 @@ const external = ['@preact/signals-core'];
  * The other two went for a reason each. `dist/collection/assets` is reached by nothing:
  * `collection-manifest.json` does not mention `assets`, so a downstream Stencil build recompiling
  * the collection never looks for it. It is Stencil's own copy rather than one asked for here, so it
- * is dropped from the tarball by a negated entry in `files` instead. `dist/choisy-video-kit/assets`
+ * is dropped from the tarball by a negated entry in `files` instead. `dist/capacitor-video-kit/assets`
  * was the one a script tag got for free, because the lazy build works its base out from the script
  * it loaded; that host now serves this directory and calls `setEditorAssetPath()` like everyone
  * else, which is one line in exchange for 1.1 MB in every install including the ones that never
@@ -72,7 +72,7 @@ const copyAssetsToCustomElements = [{ src: 'assets', dest: `${customElementsDir}
 const componentModels: ComponentModelConfig[] = [];
 
 export const config: Config = {
-  namespace: 'choisy-video-kit',
+  namespace: 'capacitor-video-kit',
   /*
    * Not the root `tsconfig.json`, which is the Capacitor plugin's half of `src` and has no JSX
    * settings at all, and not `src/tsconfig.json`, which is the editor's half with its tests. The

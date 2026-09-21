@@ -1,6 +1,6 @@
 {
   /* The CommonJS half of the plugin build. Bundlers and Node ESM take `plugin/esm`; this exists so
-     a `require('choisy-video-kit')` from an older toolchain still resolves to real JavaScript. */
+     a `require('@capacitor-video-kit/core')` from an older toolchain still resolves to real JavaScript. */
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "module": "CommonJS",

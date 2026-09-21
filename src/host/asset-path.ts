@@ -6,7 +6,7 @@ import { getAssetPath } from '@stencil/core';
  *
  * A consumer ends up with more than one copy of the editor's JavaScript and there is no arranging
  * that away. The wrappers render the standalone build in `dist/components`, a script tag renders
- * the lazy build in `dist/choisy-video-kit`, and each carries its own inlined Stencil runtime
+ * the lazy build in `dist/capacitor-video-kit`, and each carries its own inlined Stencil runtime
  * with its own module scoped resources URL. Stencil's `setAssetPath` writes the runtime it was
  * imported from, so a call made through one entry point is invisible to the other, and the failure
  * is silent in the worst way: stickers 404 and the caption burned into the customer's posted video
@@ -16,7 +16,7 @@ import { getAssetPath } from '@stencil/core';
  * the realm, and every copy resolves against it. One call to `setEditorAssetPath` is seen by all of
  * them.
  */
-const ASSET_BASE = Symbol.for('choisy.video-kit.assetBase');
+const ASSET_BASE = Symbol.for('capacitor-video-kit.assetBase');
 
 /** `globalThis` is not typed with our key, and a symbol index signature is how that is spelled. */
 type AssetBaseHolder = Record<symbol, string | undefined>;
@@ -127,10 +127,10 @@ function stencilAssetUrl(relativePath: string): string {
     return getAssetPath(relativePath);
   } catch (cause) {
     throw new Error(
-      `choisy-video-kit cannot work out where its own files are served from, so "${relativePath}" ` +
+      `@capacitor-video-kit/core cannot work out where its own files are served from, so "${relativePath}" ` +
         `cannot be resolved. Nothing has called setEditorAssetPath() and this build carries no base of its ` +
         `own, which is what the standalone build behind the React, Vue and Angular wrappers always looks ` +
-        `like. Serve a copy of node_modules/choisy-video-kit/dist/components/assets and call ${CALL} ` +
+        `like. Serve a copy of node_modules/@capacitor-video-kit/core/dist/components/assets and call ${CALL} ` +
         `once, before the editor renders.`,
       { cause },
     );

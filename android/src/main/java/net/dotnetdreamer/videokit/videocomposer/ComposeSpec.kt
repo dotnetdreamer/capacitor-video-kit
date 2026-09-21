@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.videocomposer
+package net.dotnetdreamer.videokit.videocomposer
 
 /**
  * Kotlin mirror of `definitions.ts`. Deliberately plain data classes with no Android or Media3

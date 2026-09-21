@@ -115,7 +115,7 @@ describe('ve-quality-sheet', () => {
   });
 
   it('offers only the rungs this app allows, which is a different question from the device', async () => {
-    // Choisy posts to a feed with an upload limit and has no business offering 4K; another app on
+    // A social host posts to a feed with an upload limit and has no business offering 4K; another app on
     // the same editor is built for 4K and says so. The plugin decides neither - it shows what the
     // host named, and the device probe then greys out what that device cannot encode.
     const { sheet } = await mount({ ...hostRefusing4K(), output: { qualities: ['720p', '1080p'] } });

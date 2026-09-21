@@ -1,7 +1,7 @@
-# choisy-video-kit
+# @capacitor-video-kit/core
 
-One package, both halves of video in Choisy: the **native engines** that edit and encode on the
-device, and the **editor** that drives them, as framework free web components.
+One package, both halves of video on a device: the **native engines** that edit and encode, and the
+**editor** that drives them, as framework free web components.
 
 Two Capacitor plugins, both fully native:
 
@@ -24,7 +24,7 @@ handed.
 
 > ### An iOS host has to be on iOS 16, and a new Capacitor 8 app is on 15
 >
-> `Package.swift` and `ChoisyVideoKit.podspec` both declare iOS 16, and both iOS templates
+> `Package.swift` and `CapacitorVideoKitCore.podspec` both declare iOS 16, and both iOS templates
 > `@capacitor/cli` 8.5.0 unpacks, the SwiftPM one and the CocoaPods one, set
 > `IPHONEOS_DEPLOYMENT_TARGET = 15.0` in all four build configurations, the CocoaPods one adding
 > `platform :ios, '15.0'` to the Podfile as well. So a stock app stops on its first build until that
@@ -32,11 +32,11 @@ handed.
 > package manager, and neither message names the line to change.
 >
 > **SwiftPM resolves the graph and then refuses to plan the build.** `xcodebuild` fetches
-> `capacitor-swift-pm`, lists `ChoisyVideoKit` under `Resolved source packages`, and fails before the
+> `capacitor-swift-pm`, lists `CapacitorVideoKitCore` under `Resolved source packages`, and fails before the
 > first `SwiftCompile`:
 >
 > ```
-> error: The package product 'ChoisyVideoKit' requires minimum platform version 16.0 for the iOS
+> error: The package product 'CapacitorVideoKitCore' requires minimum platform version 16.0 for the iOS
 > platform, but this target supports 15.0 (in target 'CapApp-SPM' from project 'CapApp-SPM')
 > ```
 >
@@ -46,11 +46,11 @@ handed.
 > **CocoaPods stops earlier, at dependency analysis**, and names the pod rather than the platform:
 >
 > ```
-> [!] CocoaPods could not find compatible versions for pod "ChoisyVideoKit":
+> [!] CocoaPods could not find compatible versions for pod "CapacitorVideoKitCore":
 >   In Podfile:
->     ChoisyVideoKit (from `../../node_modules/choisy-video-kit`)
+>     CapacitorVideoKitCore (from `../../node_modules/@capacitor-video-kit/core`)
 >
-> Specs satisfying the `ChoisyVideoKit (from `../../node_modules/choisy-video-kit`)` dependency were
+> Specs satisfying the `CapacitorVideoKitCore (from `../../node_modules/@capacitor-video-kit/core`)` dependency were
 > found, but they required a higher minimum deployment target.
 > ```
 >
@@ -77,7 +77,7 @@ handed.
 >
 > ```
 > ld: warning: building for iOS-15.0, but linking with dylib
-> '@rpath/ChoisyVideoKit.framework/ChoisyVideoKit' which was built for newer version 16.0
+> '@rpath/CapacitorVideoKitCore.framework/CapacitorVideoKitCore' which was built for newer version 16.0
 > ```
 >
 > **Why 16 and not the 18 this package declared until it was measured.** `AVAssetExportSession`'s
@@ -99,29 +99,42 @@ handed.
 
 | Part | Source | How a consumer reaches it |
 |---|---|---|
-| The two plugin proxies | `src/plugin.ts`, `src/video-composer/`, `src/post-publisher/` | `choisy-video-kit` |
-| The edit contract, which the Swift and Kotlin engines are written against | `src/editor/` | `choisy-video-kit/editor` |
-| The editor's web components and its store | the rest of `src/` | `choisy-video-kit/ui`, `/loader`, `/dist/components/*` |
+| The two plugin proxies | `src/plugin.ts`, `src/video-composer/`, `src/post-publisher/` | `@capacitor-video-kit/core` |
+| The edit contract, which the Swift and Kotlin engines are written against | `src/editor/` | `@capacitor-video-kit/core/editor` |
+| The editor's web components and its store | the rest of `src/` | `@capacitor-video-kit/core/ui`, `/loader`, `/dist/components/*` |
 | The native engines | `ios/Sources/`, `android/src/main/` | the Capacitor CLI, on `npx cap sync` |
-| React, Vue and Angular bindings | `packages/react`, `packages/vue`, `packages/angular` | `choisy-video-kit-react` and its two siblings |
-| The MCP server, which is optional and built only when it is asked for | `src/mcp/` | `choisy-video-kit/mcp`, or `node mcp/mcp/stdio.js` |
+| React, Vue and Angular bindings | `packages/react`, `packages/vue`, `packages/angular` | `@capacitor-video-kit/core/react` and its two siblings |
+| The MCP server, which is optional and built only when it is asked for | `src/mcp/` | `@capacitor-video-kit/core/mcp`, or `node mcp/mcp/stdio.js` |
 
-One repository and, for everything but the three wrappers, one npm package. The wrappers have to be
-separate packages because a generated Stencil wrapper compiles against its framework and a package
-cannot depend on React, Vue and Angular at once; everything else is one install because a second
-copy of the edit contract is a post that renders one way on the phone and another way in the
-preview.
+One repository, one npm package. The three wrappers are built from `packages/<framework>` into
+`angular/`, `react/` and `vue/` at the root, and the exports map offers each as a subpath, so a host
+installs one thing and imports the binding for the framework it actually uses.
+
+They were three packages of their own until they were not, and what changed is the reason they were
+split: a generated Stencil wrapper compiles against its framework, and a package cannot *depend* on
+React, Vue and Angular at once. It can declare all three as **optional peers**, which is what the
+root manifest does, and an application that installs this package and has only Angular in its tree
+gets no warning about the other two and bundles neither - nothing imports `./react` unless the host
+writes that specifier. Against that, three packages cost a versioning problem that showed up every
+time: a wrapper carried a peer edge on an exact core version with nowhere to fetch it from, so
+installing one without the other ended in a 404 against a registry this package is not on.
+
+One package also means one build. The wrappers are generated from the components, so they are always
+a step behind them, and as separate packages that step was easy to skip: a host linked to a checkout
+could resolve a wrapper built from components two edits ago and nothing said so. `angular/`, `react/`
+and `vue/` are now written by this package's own `build:wrappers`, and its `prepare` runs it, so the
+tarball and the symlinked checkout carry the same thing.
 
 ## Install
 
-Nothing here is on a registry, so `npm install choisy-video-kit` resolves to nothing and the root
+Nothing here is on a registry, so `npm install @capacitor-video-kit/core` resolves to nothing and the root
 manifest is `"private": true` to keep it that way until it is. There are two honest ways in.
 
-A sibling checkout, which is what Choisy itself uses:
+A sibling checkout, which is what the applications built on this package use:
 
 ```jsonc
 // package.json in the host app
-"choisy-video-kit": "file:../../choisy-video-kit"
+"@capacitor-video-kit/core": "file:../../capacitor-video-kit"
 ```
 
 `npm install` in this repository first, whose `prepare` script leaves a built package behind, then
@@ -139,8 +152,8 @@ Or a tarball, which is what an app that is not next to this checkout gets and th
 what a published install would actually contain:
 
 ```sh
-npm pack                                      # in this repository: choisy-video-kit-1.3.0.tgz
-npm install ../path/to/choisy-video-kit-1.3.0.tgz && npx cap sync   # in the host app
+npm pack                                      # in this repository: capacitor-video-kit-core-1.3.0.tgz
+npm install ../path/to/capacitor-video-kit-core-1.3.0.tgz && npx cap sync   # in the host app
 ```
 
 Either way the host is on the hook for the iOS deployment target above, and for `@capacitor/core`,
@@ -160,19 +173,19 @@ resolved, loaded and type checked out of an `npm pack` tarball installed into a 
 
 | Specifier | What it is | Needs |
 |---|---|---|
-| `choisy-video-kit` | Both plugin proxies, their definitions and the edit contract | `@capacitor/core` |
-| `choisy-video-kit/editor` | The edit contract on its own, reaching no `registerPlugin` call and no Capacitor at all | nothing |
-| `choisy-video-kit/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath` | `@preact/signals-core` |
-| `choisy-video-kit/loader` | `defineCustomElements()`, which registers every component at once | `@preact/signals-core` |
-| `choisy-video-kit/dist/components/<tag>.js` | One component's `defineCustomElement()`, for a host that tree shakes | `@preact/signals-core` |
-| `choisy-video-kit/assets/*` | The 34 stickers and the 32 fonts, for a build step that copies them | nothing |
+| `@capacitor-video-kit/core` | Both plugin proxies, their definitions and the edit contract | `@capacitor/core` |
+| `@capacitor-video-kit/core/editor` | The edit contract on its own, reaching no `registerPlugin` call and no Capacitor at all | nothing |
+| `@capacitor-video-kit/core/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath` | `@preact/signals-core` |
+| `@capacitor-video-kit/core/loader` | `defineCustomElements()`, which registers every component at once | `@preact/signals-core` |
+| `@capacitor-video-kit/core/dist/components/<tag>.js` | One component's `defineCustomElement()`, for a host that tree shakes | `@preact/signals-core` |
+| `@capacitor-video-kit/core/assets/*` | The 34 stickers and the 32 fonts, for a build step that copies them | nothing |
 
 Both packages that column names are **optional** peer dependencies, and so is `@stencil/core`,
 which the emitted component declarations name. Optional is not laziness: no consumer wants all
 three. A Capacitor app that never renders the web editor would otherwise install 22 MB of Stencil
 and a signals library it never loads, and a React host that will never run natively would otherwise
 install a native bridge. Each of the three wrapper packages declares the ones its half needs, so a
-host that installs `choisy-video-kit-react` gets them without having to know they exist. A host that
+host that installs `@capacitor-video-kit/core/react` gets them without having to know they exist. A host that
 renders the components without a wrapper installs `@preact/signals-core` itself, and `@stencil/core`
 too if it type checks against the declarations.
 
@@ -195,7 +208,7 @@ words, and neither message names this package. Nothing in here can improve on th
 import fails while the module graph is being linked, before any of this package's code runs; the
 only way to catch it would be to make `VideoComposer` a promise, which is a worse package than a
 documented requirement. So it is documented, here and in `src/plugin.ts`: **if you are not in a
-Capacitor app, import `choisy-video-kit/editor` or `choisy-video-kit/ui`.**
+Capacitor app, import `@capacitor-video-kit/core/editor` or `@capacitor-video-kit/core/ui`.**
 
 Every entry resolves under Node ESM, under Vite and under TypeScript's `bundler`, `node16` and
 `nodenext` resolution, and every entry carries declarations. The plugin's two entries type check
@@ -203,11 +216,11 @@ with `skipLibCheck` off; the component declarations need it on, because Stencil 
 relative imports in them that `node16` rejects. `tsconfig.base.json` here turns it on for a
 different reason of the same kind, and every wrapper's readme says to turn it on too.
 
-Nothing else is reachable: `choisy-video-kit/src/...` is not an entry point, and Node answers it
+Nothing else is reachable: `@capacitor-video-kit/core/src/...` is not an entry point, and Node answers it
 with `ERR_PACKAGE_PATH_NOT_EXPORTED` rather than handing out raw TypeScript that only this
 repository's toolchain can compile.
 
-`choisy-video-kit/editor` reaches no Capacitor type either, and that is what
+`@capacitor-video-kit/core/editor` reaches no Capacitor type either, and that is what
 `src/video-composer/plugin.ts` exists for. The editor names `ComposeSpec` and `FilterOp`, which live
 in `src/video-composer/definitions.ts`, so that file is part of the subpath's declarations; the
 `VideoComposerPlugin` interface is the only thing in the composer's contract that names
@@ -215,17 +228,25 @@ in `src/video-composer/definitions.ts`, so that file is part of the subpath's de
 became `TS2307: Cannot find module '@capacitor/core'` inside the `node_modules` of every web host
 that compiles without `skipLibCheck`. The package's public surface is unchanged: `plugin.ts` is
 re-exported from `src/video-composer/index.ts` and from `src/plugin.ts`, so `VideoComposerPlugin` is
-imported from `choisy-video-kit` exactly as before.
+imported from `@capacitor-video-kit/core` exactly as before.
 
 ### What `npm pack` carries
 
-`files` carries both builds, `plugin/` and `dist/` with `loader/`, and the native sources the
-Capacitor CLI reads: `ios/Sources/`, `Package.swift`, `android/src/main/`, `android/build.gradle`
-and `android/proguard-rules.pro`. No `src/`, no tests, no configuration. A native app can install
-the tarball and `npx cap sync` it.
+`files` carries both builds, `plugin/` and `dist/` with `loader/`, the three framework wrappers as
+`angular/`, `react/` and `vue/`, and the native sources the Capacitor CLI reads: `ios/Sources/`,
+`Package.swift`, `android/src/main/`, `android/build.gradle` and `android/proguard-rules.pro`. No
+`src/`, no `packages/`, no tests, no configuration. A native app can install the tarball and
+`npx cap sync` it.
+
+The wrapper directories are why `prepare` runs the whole `build` rather than `build:package`. `npm
+pack` and `npm publish` both run `prepare`, and `build:package` starts with `clean`: a `prepare` that
+stopped there would delete `angular/`, `react/` and `vue/` and pack the three subpaths empty, with
+every other file present and nothing failing. `scripts/finish-wrappers.mjs` is the check that would
+now catch it, because the run without `--scaffold` refuses a directory the exports map names and the
+build did not fill.
 
 The app does not, and will not while this is unpublished: it installs
-`file:../../choisy-video-kit`, which npm resolves to a **symlink** at `node_modules/choisy-video-kit`
+`file:../../capacitor-video-kit`, which npm resolves to a **symlink** at `node_modules/@capacitor-video-kit/core`
 pointing back into this repository, and `files` has no say over what is visible through a symlink.
 `npx cap sync` reads `android/` and `ios/` straight out of the working tree while the app's
 TypeScript reads `plugin/` through the exports map, which is why the `prepare` script matters: the
@@ -234,7 +255,7 @@ symlink shows whatever the last build left behind.
 ## Use
 
 ```ts
-import { VideoComposer, PostPublisher } from 'choisy-video-kit';
+import { VideoComposer, PostPublisher } from '@capacitor-video-kit/core';
 
 // Take ownership of the inputs before anything depends on them.
 const { inputs } = await VideoComposer.prepareJob({ pendingPostId, inputs: [{ key, uri }] });
@@ -257,7 +278,7 @@ Full contracts: `src/video-composer/definitions.ts` plus `src/video-composer/plu
 in any framework builds an `EditManifest` and hands it to `toComposeSpec`:
 
 ```ts
-import { reconcileManifest, toComposeSpec, cssFor, filterPreset, VideoComposer } from 'choisy-video-kit';
+import { reconcileManifest, toComposeSpec, cssFor, filterPreset, VideoComposer } from '@capacitor-video-kit/core';
 
 // Start from a straight cut of the host's clips (or bring back a saved edit).
 let manifest = reconcileManifest(saved, clipKeys, durationsByKey);
@@ -281,12 +302,11 @@ await VideoComposer.compose(spec);
 | `rasteriseText`, `rasteriseArrow` | Canvas → PNG at output pixel scale, the caller's half of the overlay contract. |
 
 There is deliberately no UI in `src/editor/` itself. A host is free to build its own screen on the
-contract, and Choisy's editor did exactly that, in Angular, at
-`choisy-mobile/src/app/modules/video-editor/`, until the components below replaced it. The contract
-is what both were written against, which is why replacing one editor with the other changed no
-manifest and no render.
+contract, and the first application on this package did exactly that, in Angular, until the
+components below replaced it. The contract is what both were written against, which is why replacing
+one editor with the other changed no manifest and no render.
 
-A host that wants only the editing half imports `choisy-video-kit/editor` instead. Nothing on that
+A host that wants only the editing half imports `@capacitor-video-kit/core/editor` instead. Nothing on that
 path registers a plugin or imports `@capacitor/core` at runtime, so a web build that will never run
 natively carries no Capacitor code: Vite tree-shakes an import of one constant from it down to
 0.11 kB. The editor's own components are its first consumer, from inside this same package: they
@@ -298,52 +318,35 @@ The editor screen packaged so it can be dropped into a React, Vue or Angular app
 carrying Angular, Ionic or Capacitor with it. Twenty four custom elements, of which a host uses
 exactly one: `<ve-editor>` is the screen, and the other twenty three are what it is made of.
 
-| Package | What it is |
+| Import | What it is |
 |---|---|
-| `choisy-video-kit` | the components themselves, framework free, plus everything above |
-| `choisy-video-kit-react` | React components, generated from the components |
-| `choisy-video-kit-vue` | Vue components, generated from the components |
-| `choisy-video-kit-angular` | Angular standalone components, generated from the components |
+| `@capacitor-video-kit/core` | the native plugins, plus everything above |
+| `@capacitor-video-kit/core/ui` | the components themselves, framework free, and the store they read |
+| `@capacitor-video-kit/core/react` | React components, generated from the components |
+| `@capacitor-video-kit/core/vue` | Vue components, generated from the components |
+| `@capacitor-video-kit/core/angular` | Angular standalone components, generated from the components |
 
-All four carry one version number and move together, the way every `@ionic/*` package sits on one
-version. The three wrapper packages hold no hand written component code at all: `stencil.config.ts`
-writes their `src/generated/` directories on every build, which is why those directories are ignored
-by git.
+One install carries all five, and a host imports the one line it needs. The three wrappers hold no
+hand written component code at all: `stencil.config.ts` writes `packages/<framework>/src/generated/`
+on every build, which is why those directories are ignored by git, and `build:wrappers` compiles
+each into `angular/`, `react/` or `vue/` at the root, which the exports map points at.
 
-Each wrapper names `choisy-video-kit` as a **peer** dependency at an exact version rather than as a
-dependency at a range, and both halves of that are deliberate.
+**The wrapper and the components have to be the same build**, and being one package is what
+guarantees it. A wrapper is generated from one particular build and hard codes that build's prop and
+event names as strings, so a wrapper compiled against different components passes props that do not
+exist and misses ones that do, with no error anywhere. A second copy of the components is worse
+still: it registers the same custom element names against a registry that allows each exactly once.
 
-Exact, because a wrapper is generated from one particular build and hard codes that build's prop and
-event names as strings: a range would let npm resolve a version whose components no longer match,
-and the wrapper would pass props that do not exist and miss ones that do, with no error anywhere.
-That is what `@ionic/react`, `@ionic/vue` and `@ionic/angular` all do with `@ionic/core`.
+That used to be an exact peer dependency between four separate packages - what `@ionic/react`,
+`@ionic/vue` and `@ionic/angular` do with `@ionic/core` - and it was the rule nobody could satisfy
+here, because none of these is on a registry: the peer edge sent npm to look the core package up
+whenever its tarball was not installed first, and every such install ended in
+`404 Not Found` against `registry.npmjs.org`.
 
-A peer, because a dependency is a version npm goes and fetches, and there is nowhere to fetch this
-from: with `"choisy-video-kit": "1.3.0"` in `dependencies`, installing a wrapper tarball into an app
-ended at `404 Not Found - GET https://registry.npmjs.org/choisy-video-kit`, whatever the app already
-had installed. A peer edge is satisfied by whatever is in the tree, so **the core package has to be
-installed with the wrapper or before it**, and then the version match is checked rather than
-fetched:
-
-```sh
-npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
-            ../choisy-video-kit/choisy-video-kit-react-1.3.0.tgz
-```
-
-The wrapper on its own still stops, because npm installs a missing peer by itself and there is
-nothing to install it from, but it stops naming the edge rather than an unexplained dependency:
-
-```
-npm warn Could not resolve dependency:
-npm warn peer choisy-video-kit@"1.3.0" from choisy-video-kit-react@1.3.0
-npm error 404 Not Found - GET https://registry.npmjs.org/choisy-video-kit
-```
-
-It is also the truthful edge for a package like this one. The wrapper and the app have to hold the
-same copy of the components, because a second copy registers the same custom element names against a
-registry that allows each exactly once. The price is that a release is four packs in one go, this
-package first, and that a wrapper installed on its own says so at install time rather than at
-runtime.
+There is nothing to version-match now, so nothing to get wrong. The frameworks themselves are
+**optional peers** of this package: an application with only Angular in its tree is warned about
+neither React nor Vue, and bundles neither, because nothing here imports a framework the host has
+not asked for by writing its subpath.
 
 ## The editor's whole public surface
 
@@ -382,7 +385,7 @@ Every framework wrapper here does that for you; a plain page writes `element.sou
 no service to construct. The editor is an element: a host puts it on screen however it puts anything
 on screen, and takes it off when one of the two events arrives. What that buys is that the editor
 has no opinion at all about navigation, and navigation is the part every application does
-differently. Choisy opens it in an `ion-modal`, a React web application might route to it, and
+differently. An Ionic host opens it in an `ion-modal`, a React web application might route to it, and
 neither has to be talked out of it.
 
 The things a video editor needs that an element cannot do for itself are all in `host`, and the
@@ -417,8 +420,8 @@ It prints `http://localhost:5173`, and that page is the editor, on two of MDN's 
 no application around it. Without the build first it says so and stops, naming the file it wanted:
 
 ```
-/path/to/choisy-video-kit/dist/components/ve-editor.js is not there.
-Run "npm run build:package" in /path/to/choisy-video-kit first.
+/path/to/capacitor-video-kit/dist/components/ve-editor.js is not there.
+Run "npm run build:package" in /path/to/capacitor-video-kit first.
 ```
 
 `serve.mjs` is a static server with no dependencies: it serves the example directory, `node_modules/`
@@ -432,7 +435,7 @@ specifier:
 <script type="importmap">
   {
     "imports": {
-      "choisy-video-kit/": "/node_modules/choisy-video-kit/",
+      "@capacitor-video-kit/core/": "/node_modules/@capacitor-video-kit/core/",
       "@preact/signals-core": "/node_modules/@preact/signals-core/dist/signals-core.mjs"
     }
   }
@@ -443,8 +446,8 @@ specifier:
 and then the whole integration, which is `example.js` with its comments taken out:
 
 ```js
-import { defineCustomElement as defineVideoEditor } from 'choisy-video-kit/dist/components/ve-editor.js';
-import { installEditorFonts, setEditorAssetPath } from 'choisy-video-kit/dist/components/index.js';
+import { defineCustomElement as defineVideoEditor } from '@capacitor-video-kit/core/dist/components/ve-editor.js';
+import { installEditorFonts, setEditorAssetPath } from '@capacitor-video-kit/core/dist/components/index.js';
 
 const SOURCES = [
   { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: 'https://mdn.github.io/shared-assets/videos/flower.mp4' },
@@ -477,10 +480,10 @@ the filmstrip is cut with a canvas, and Next hands the manifest back unrendered,
 is handed no `render` host and does not go looking for one. A page that wants the browser to encode
 gives it one, exactly as a Capacitor app does - see [Web](#web).
 
-Both imports come out of `dist/components` on purpose. `choisy-video-kit/ui` is the same code
+Both imports come out of `dist/components` on purpose. `@capacitor-video-kit/core/ui` is the same code
 compiled a second time for bundlers, so a page that took the element from one and
 `setEditorAssetPath` from the other would download the editor twice. An import map also has no
-exports map to read, so it can only name real files: `choisy-video-kit/ui` is not a path that exists
+exports map to read, so it can only name real files: `@capacitor-video-kit/core/ui` is not a path that exists
 on disk, while `dist/components/index.js` is.
 
 The alternative to naming the element's own file is the lazy loader, which registers every tag at
@@ -491,8 +494,8 @@ once and fetches each component's code only when that tag turns up in the page:
   { "imports": { "@preact/signals-core": "/node_modules/@preact/signals-core/dist/signals-core.mjs" } }
 </script>
 <script type="module">
-  import { defineCustomElements } from '/node_modules/choisy-video-kit/loader/index.mjs';
-  import { installEditorFonts, setEditorAssetPath } from '/node_modules/choisy-video-kit/dist/choisy-video-kit/index.esm.js';
+  import { defineCustomElements } from '/node_modules/@capacitor-video-kit/core/loader/index.mjs';
+  import { installEditorFonts, setEditorAssetPath } from '/node_modules/@capacitor-video-kit/core/dist/capacitor-video-kit/index.esm.js';
 
   setEditorAssetPath('/video-editor/');
   defineCustomElements();
@@ -503,20 +506,19 @@ once and fetches each component's code only when that tag turns up in the page:
 The import map does not go away, because the lazy build imports the signals library by name too, and
 nothing in this package can resolve a bare specifier for a browser. The second import is that same
 lazy bundle's own entry rather than `dist/components/index.js`, so the page still holds one copy of
-the editor and not two. A host with a bundler writes `from 'choisy-video-kit/loader'` and
-`from 'choisy-video-kit/ui'` and never sees either path.
+the editor and not two. A host with a bundler writes `from '@capacitor-video-kit/core/loader'` and
+`from '@capacitor-video-kit/core/ui'` and never sees either path.
 
 ### React
 
 ```sh
-npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
-            ../choisy-video-kit/choisy-video-kit-react-1.3.0.tgz
+npm install ../capacitor-video-kit/capacitor-video-kit-core-1.3.0.tgz
 ```
 
 Once, wherever the application starts:
 
 ```ts
-import { installEditorFonts, setEditorAssetPath } from 'choisy-video-kit/ui';
+import { installEditorFonts, setEditorAssetPath } from '@capacitor-video-kit/core/ui';
 
 setEditorAssetPath('/video-editor/');
 void installEditorFonts();
@@ -525,8 +527,8 @@ void installEditorFonts();
 Then the editor is a component:
 
 ```tsx
-import { VeEditor } from 'choisy-video-kit-react';
-import type { EditorSource, VideoEditorResult } from 'choisy-video-kit/ui';
+import { VeEditor } from '@capacitor-video-kit/core/react';
+import type { EditorSource, VideoEditorResult } from '@capacitor-video-kit/core/ui';
 
 const SOURCES: EditorSource[] = [
   { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: '/media/flower.mp4' },
@@ -552,14 +554,13 @@ what the handler is given is the `CustomEvent` itself, so **the result is `event
 ### Vue
 
 ```sh
-npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
-            ../choisy-video-kit/choisy-video-kit-vue-1.3.0.tgz
+npm install ../capacitor-video-kit/capacitor-video-kit-core-1.3.0.tgz
 ```
 
 ```vue
 <script setup lang="ts">
-import { VeEditor } from 'choisy-video-kit-vue';
-import type { EditorSource, VideoEditorResult } from 'choisy-video-kit/ui';
+import { VeEditor } from '@capacitor-video-kit/core/vue';
+import type { EditorSource, VideoEditorResult } from '@capacitor-video-kit/core/ui';
 
 const sources: EditorSource[] = [
   { key: 'clip-a', fileName: 'flower.mp4', playbackUrl: '/media/flower.mp4' },
@@ -584,14 +585,13 @@ event's own name, and again the handler is given the `CustomEvent`.
 ### Angular
 
 ```sh
-npm install ../choisy-video-kit/choisy-video-kit-1.3.0.tgz \
-            ../choisy-video-kit/choisy-video-kit-angular-1.3.0.tgz
+npm install ../capacitor-video-kit/capacitor-video-kit-core-1.3.0.tgz
 ```
 
 ```ts
 import { Component } from '@angular/core';
-import { VeEditor } from 'choisy-video-kit-angular';
-import type { EditorSource, VideoEditorResult } from 'choisy-video-kit/ui';
+import { VeEditor } from '@capacitor-video-kit/core/angular';
+import type { EditorSource, VideoEditorResult } from '@capacitor-video-kit/core/ui';
 
 @Component({
   selector: 'app-editor-screen',
@@ -642,8 +642,8 @@ with the web implementations; only the pickers differ.
 import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { Keyboard } from '@capacitor/keyboard';
-import { VideoComposer } from 'choisy-video-kit';
-import type { VideoEditorHost } from 'choisy-video-kit/ui';
+import { VideoComposer } from '@capacitor-video-kit/core';
+import type { VideoEditorHost } from '@capacitor-video-kit/core/ui';
 
 const host: VideoEditorHost = {
   media: {
@@ -719,13 +719,13 @@ editor has already made every layer's bitmap current before it calls this, so th
 `EditorSource`:
 
 ```ts
-import { MissingClipError, VideoComposer, toComposeSpec, type ComposeSpec } from 'choisy-video-kit';
+import { MissingClipError, VideoComposer, toComposeSpec, type ComposeSpec } from '@capacitor-video-kit/core';
 import {
   RenderFailedError,
   createEditorRasterContext,
   resolveEditorHost,
   type EditorRenderHost,
-} from 'choisy-video-kit/ui';
+} from '@capacitor-video-kit/core/ui';
 
 /*
  * The same context the preview draws its bitmaps with, or a layer comes out in one font on screen
@@ -827,10 +827,10 @@ elements build the wrappers render has no script to look at and starts with no b
 application that never calls it is told so on the first sticker:
 
 ```
-Error: choisy-video-kit cannot work out where its own files are served from, so
+Error: @capacitor-video-kit/core cannot work out where its own files are served from, so
 "assets/stickers/fire.svg" cannot be resolved. Nothing has called setEditorAssetPath() and this build
 carries no base of its own [...] Serve a copy of
-node_modules/choisy-video-kit/dist/components/assets and call
+node_modules/@capacitor-video-kit/core/dist/components/assets and call
 setEditorAssetPath('/video-editor/') once, before the editor renders.
 ```
 
@@ -846,12 +846,12 @@ the site root.
 
 The 34 stickers and the 32 fonts are not imported by any module, so no bundler will carry them.
 There is one copy of them in the package, `dist/components/assets/`, and every host serves a copy of
-that directory whatever build it renders. `choisy-video-kit/assets/*` is the subpath to reach them
+that directory whatever build it renders. `@capacitor-video-kit/core/assets/*` is the subpath to reach them
 by, so a copy step does not have to name a build directory that may move. With Vite:
 
 ```ts
 viteStaticCopy({
-  targets: [{ src: 'node_modules/choisy-video-kit/dist/components/assets', dest: 'video-editor' }],
+  targets: [{ src: 'node_modules/@capacitor-video-kit/core/dist/components/assets', dest: 'video-editor' }],
 });
 ```
 
@@ -949,16 +949,17 @@ transparent navigation bar, which puts the toolbar under the system buttons, and
 the notch at the top after the WebView has moved down below an opaque status bar, which puts a black
 band over the video. Which of the two the app is in changes while the editor is open, because coming
 back from a system picker drops the launch's edge-to-edge flags. So the editor measures on its way
-in and again whenever the window changes size, and remembers the answer per window height. In choisy
-the implementation is `() => VideoComposer.systemInsets()`, already installed with this package,
+in and again whenever the window changes size, and remembers the answer per window height. The usual
+implementation is `() => VideoComposer.systemInsets()`, already installed with this package,
 which measures the overlap between the bars and the WebView rather than the bars themselves, so a
 WebView that already sits above them answers 0 and nothing is padded twice.
 
 **`release` is the one absence that costs something and reports nothing.** It is called once,
 immediately before the editor hands its result back, with both lists: the sources the result carries
 and the ones the edit stopped using. Both, because what a source costs and what two sources share is
-knowledge the editor does not have, since it never sees a file. In choisy the same gallery video
-picked twice is two keys and one path, so a path a kept source still reads must not be unlinked, and
+knowledge the editor does not have, since it never sees a file. In a typical gallery host the same
+video picked twice is two keys and one path, so a path a kept source still reads must not be
+unlinked, and
 that check can only be made in the host. Nothing is released during the edit: a clip whose every
 segment was deleted stays in the store so that an undo can bring it back, and only the customer
 tapping Next settles which ones are gone. Left unimplemented, every dropped clip is held until the
@@ -989,9 +990,12 @@ colour in the timeline, with `--ve-lane-ink` for the text on them; and `--ve-saf
 `--ve-safe-bottom` are the system bars, which the editor overwrites with the host's measurement when
 there is one.
 
-Three of them name a choisy variable before their own default, `--ve-accent: var(--choisy-wasabi-lime, #a6ff2e)`,
-so the application rebrands the editor by declaring its own palette further up the tree and every
-other host still gets a finished one with no setup at all.
+Every one of them is a finished colour, so a host that declares nothing gets a complete palette. A
+host that wants its brand in the editor sets the tokens it cares about on an ancestor of `ve-editor`
+- `--ve-accent: var(--my-brand-accent)` in its own stylesheet - and the rest keep their defaults.
+Four of these used to name a particular application's brand variables in their own fallback chains,
+which meant this package knew one host's stylesheet by heart and no other host could reach them
+without adopting those names; the mapping belongs in the host, and that is where it is now.
 
 Nothing else is styleable from outside, and that is deliberate. Every component but the preview is
 in a shadow root, and the preview is scoped, so a host's selectors reach into neither; no component
@@ -1055,7 +1059,7 @@ unless `@modelcontextprotocol/sdk` is installed, and **The MCP server** below is
 The two that are always there are the two the heading counts.
 
 `src/editor/` is in both, which is the point of the merge: the contract is compiled into the
-plugin's tree for `choisy-video-kit` and `choisy-video-kit/editor`, and again into the components
+plugin's tree for `@capacitor-video-kit/core` and `@capacitor-video-kit/core/editor`, and again into the components
 that read it from `../editor`. It is pure functions and frozen data with no module state, so the two
 compiled copies cannot disagree about anything but bytes. What there is exactly one of is the
 **source**, which is what the Swift and Kotlin engines are written against.
@@ -1073,7 +1077,7 @@ It's recommended to set the "main" property to: dist/index.cjs.js
 ```
 
 That warning is Stencil asking for the package root to be the component library. It cannot be:
-`require('choisy-video-kit')` has to return the two plugin proxies, and `main` is what a resolver
+`require('@capacitor-video-kit/core')` has to return the two plugin proxies, and `main` is what a resolver
 that does not read `exports` uses. Stencil offers no way to turn the check off short of dropping the
 collection output, and a wrong `main` is a worse lie than a build warning.
 
@@ -1119,17 +1123,18 @@ extension, so it is added to the emitted JavaScript afterwards.
 
 ### The wrappers resolve this package through a self link
 
-`packages/react`, `packages/vue` and `packages/angular` are npm workspaces and each names
-`choisy-video-kit` at an exact version. npm cannot satisfy that from the repository root, because
+`packages/react`, `packages/vue` and `packages/angular` are npm workspaces - private ones, which
+build into this package rather than publishing anything of their own - and each names
+`@capacitor-video-kit/core` at an exact version. npm cannot satisfy that from the repository root, because
 the root is not itself a workspace, and it goes to the registry and gets a 404 - and npm installs a
 missing peer by itself, so making the edge a peer dependency does not avoid the trip. So the root
 declares itself as a development dependency:
 
 ```jsonc
-"devDependencies": { "choisy-video-kit": "file:." }
+"devDependencies": { "@capacitor-video-kit/core": "file:." }
 ```
 
-npm answers it with a symlink at `node_modules/choisy-video-kit` pointing at `.`, each wrapper's
+npm answers it with a symlink at `node_modules/@capacitor-video-kit/core` pointing at `.`, each wrapper's
 exact edge dedupes onto it, and `npm ls --all` exits 0. The wrappers then compile against the same
 exports map a published consumer reads, rather than against a path mapping that only works here.
 
@@ -1189,9 +1194,9 @@ into pixels belongs to the device with the screen it was edited on.
 ```json
 {
   "mcpServers": {
-    "choisy-video-kit": {
+    "@capacitor-video-kit/core": {
       "command": "node",
-      "args": ["/absolute/path/to/choisy-video-kit/mcp/mcp/stdio.js"]
+      "args": ["/absolute/path/to/capacitor-video-kit/mcp/mcp/stdio.js"]
     }
   }
 }
@@ -1200,7 +1205,7 @@ into pixels belongs to the device with the screen it was edited on.
 Or inside something that already runs, with a transport of its own:
 
 ```ts
-import { createVideoKitMcpServer } from 'choisy-video-kit/mcp';
+import { createVideoKitMcpServer } from '@capacitor-video-kit/core/mcp';
 
 const server = createVideoKitMcpServer({ version: '1.3.0' });
 await server.connect(myTransport);
@@ -1221,8 +1226,8 @@ that:
 |---|---|
 | No `@modelcontextprotocol/sdk` installed | Skips it, says so in one line, and leaves no `mcp/` behind |
 | The SDK installed | Builds it |
-| `CHOISY_VIDEO_KIT_MCP=0` | Never builds it, and deletes an `mcp/` an earlier build left |
-| `CHOISY_VIDEO_KIT_MCP=1` | Builds it, and **fails** if the SDK is missing, because a build told to produce the server and quietly not doing so is how a client discovers it instead |
+| `CAPACITOR_VIDEO_KIT_MCP=0` | Never builds it, and deletes an `mcp/` an earlier build left |
+| `CAPACITOR_VIDEO_KIT_MCP=1` | Builds it, and **fails** if the SDK is missing, because a build told to produce the server and quietly not doing so is how a client discovers it instead |
 
 The SDK is an **optional peer dependency**, so the first row is what an app gets without doing
 anything. Four things keep it that way and each one is load bearing:
@@ -1231,7 +1236,7 @@ anything. Four things keep it that way and each one is load bearing:
   never compiles it. Left in, Stencil would copy it into `dist/collection`, which is published, and
   an app bundling the editor would be bundling a tool server it has no use for.
 - It is not in `tsconfig.json`'s `include` either, so the plugin build never emits it.
-- `server.ts` is the only file in the package that imports the SDK, and only `choisy-video-kit/mcp`
+- `server.ts` is the only file in the package that imports the SDK, and only `@capacitor-video-kit/core/mcp`
   reaches it. No other entry point leads there, so no bundler follows it.
 - `files` names `mcp/**` rather than `mcp/`. That is not cosmetic: Stencil's package.json validation
   resolves every non-glob entry and fails the whole build when one is missing, and this directory is
@@ -1322,19 +1327,21 @@ arrives; a 400 or a missing file is final.
 
 ### iOS
 
-**The two plugin classes are one SwiftPM target.** `Package.swift` declares `ChoisyVideoKit` and
+**The two plugin classes are one SwiftPM target.** `Package.swift` declares `CapacitorVideoKitCore` and
 Capacitor registers each `@objc` class it finds separately, so `VideoComposerPlugin` and
 `PostPublisherPlugin` ship in one library and share `JobFolders`, `PublishStore` and the error
 mapping rather than repeating them.
 
-**CocoaPods gets a hand written podspec beside `Package.swift`.** `ChoisyVideoKit.podspec` declares
+**CocoaPods gets a hand written podspec beside `Package.swift`.** `CapacitorVideoKitCore.podspec` declares
 the same single target, the same `ios/Sources/**` glob and the same iOS 16 floor, because a host that
 adds its project with `npx cap add ios --packagemanager CocoaPods` compiles exactly the Swift a
 SwiftPM host compiles. Three things in it are not choices. The name is one: the Capacitor CLI writes
-`pod 'ChoisyVideoKit', :path => ...` into the host's Podfile from the npm package name, uppercasing
-each dash separated word (`fixName` in `@capacitor/cli`), and CocoaPods then looks for a podspec of
-exactly that name at the package root, so `choisy-video-kit` can only ever be
-`ChoisyVideoKit.podspec`. The single `s.dependency 'Capacitor'` is another: `Package.swift` names the
+`pod 'CapacitorVideoKitCore', :path => ...` into the host's Podfile from the npm package name,
+dropping the `@`, treating every `/` and `-` as a word break and uppercasing each word that follows
+one (`fixName` in `@capacitor/cli`); CocoaPods then looks for a podspec of exactly that name at the
+package root, so `@capacitor-video-kit/core` can only ever be `CapacitorVideoKitCore.podspec`. The
+scope is part of it: the `/core` is what puts `Core` on the end, and a rename of the npm package is a
+rename of this file, of the SwiftPM product and of `ios/Sources/<name>/`. The single `s.dependency 'Capacitor'` is another: `Package.swift` names the
 `Capacitor` and `Cordova` products separately, while the `Capacitor` pod already depends on
 `CapacitorCordova`, whose module name is `Cordova`. And the deployment target is the third, because
 two hosts of the same package disagreeing about what it runs on is a bug that only one of them sees.
@@ -1446,8 +1453,8 @@ code, so a host written against a phone needs no second set of branches.
 
 **Reaching it.** The web implementations load through `registerPlugin`, so a plain web host that
 wants them installs `@capacitor/core` - an optional peer, and the same `VideoComposer` object a
-Capacitor app uses. The editor itself still needs none of that: `choisy-video-kit/ui` is the editor,
-`choisy-video-kit` is the plugin, and a host that only edits reaches the first one.
+Capacitor app uses. The editor itself still needs none of that: `@capacitor-video-kit/core/ui` is the editor,
+`@capacitor-video-kit/core` is the plugin, and a host that only edits reaches the first one.
 
 ## Failure codes
 
@@ -1478,31 +1485,40 @@ server** above says when and why.
 ### The two watches
 
 ```sh
-npm run dev          # one component on its own, http://localhost:3333/?tag=ve-slider
-npm run watch        # the directories a linked host reads, for an app running beside this
-npm run watch:angular  # only when a component gains or renames a prop or an event
+npm run dev      # one component on its own, http://localhost:3333/?tag=ve-slider
+npm run watch    # everything a linked host reads, for an app running beside this
 ```
 
-They are not alternatives. `npm run dev` writes `www/` and nothing else, so a host linked to this
-checkout sees none of it: the app imports `plugin/`, `dist/components/` and, through
-`choisy-video-kit-angular`, `packages/angular/dist`, and the dev harness writes to none of the
-three. It is the loop for shaping a component against the page in `src/index.html`, not for seeing a
-change land in an app.
+They are not alternatives, and picking the wrong one is the mistake this section exists for.
 
-`npm run watch` is the other one. It is `tsc --watch` over the plugin half and `stencil build
---watch` over the editor half, both writing where a full build writes, so a linked app rebuilds on
-save. A component change is on screen about six seconds after the file is saved, most of it
-Stencil's. The Angular wrappers are the exception: `packages/angular/dist` is built by ng-packagr
-rather than by Stencil, so `watch:angular` goes alongside the other two on the days a component's
-props or events change, and is dead weight on every other day.
+`npm run dev` writes `www/` and nothing else, so a host linked to this checkout sees none of it: the
+app imports `plugin/`, `dist/components/` and, through `@capacitor-video-kit/core/angular`, the
+`angular/` directory, and the dev harness writes to none of the three. It is the loop for shaping a
+component against the page in `src/index.html`, not for seeing a change land in an app. A host built
+against a checkout where only `dev` has ever run fails at resolution rather than at runtime -
+`Cannot find module '@capacitor-video-kit/core'` and then a page of cascading `implicitly has an
+'any' type` - because the directories the exports map names are simply not there.
+
+`npm run watch` is the other one, and it writes every directory a full build writes: `tsc --watch`
+over the plugin half, `stencil build --watch` over the editor half, and `watch:wrappers` over the
+three framework bindings. A component change is on screen about six seconds after the file is saved,
+most of it Stencil's.
+
+The wrappers are in that list because leaving them out was a real bug and a quiet one. Stencil's
+output targets regenerate `packages/<framework>/src/generated/` on every rebuild, which *looks* like
+the wrappers are being watched, but turning that source into `angular/`, `react/` or `vue/` is
+ng-packagr, `tsc` and Rollup respectively - none of which Stencil runs. So a watch that stopped at
+`watch:ui` served an Angular host a wrapper built from whatever the last full build left, with no
+warning, and this file used to tell you to run a second watch by hand on the days a prop or an event
+changed. It does not any more; `watch` runs all of them.
 
 **A host has to be told not to prebundle this package.** Vite's development server copies every
 dependency into a cache on startup and serves the app from that copy, which is the last full build
-of this package no matter what the watch writes afterwards. In choisy-mobile that is:
+of this package no matter what the watch writes afterwards. In an Angular host that is:
 
 ```jsonc
 // angular.json, under the serve builder
-"options": { "prebundle": { "exclude": ["choisy-video-kit", "choisy-video-kit-angular"] } }
+"options": { "prebundle": { "exclude": ["@capacitor-video-kit/core", "@capacitor-video-kit/core/angular"] } }
 ```
 
 The exclusion has one consequence worth knowing, because the error it produces names neither this
@@ -1555,7 +1571,7 @@ own: the Gradle wrapper, the SDK location and `variables.gradle` all live there.
 
 ```sh
 cd <host app>/android
-sh gradlew :choisy-video-kit:compileDebugKotlin :choisy-video-kit:testDebugUnitTest --rerun-tasks
+sh gradlew :@capacitor-video-kit/core:compileDebugKotlin :@capacitor-video-kit/core:testDebugUnitTest --rerun-tasks
 ```
 
 144 JVM tests cover the parts that fail silently: the colour matrices against the CSS spec, the
@@ -1566,8 +1582,8 @@ parsers' reject-versus-clamp boundary, the multipart wire format and the templat
 The iOS half is a Swift package and does build on its own, against the device SDK:
 
 ```sh
-xcodebuild -scheme ChoisyVideoKit -destination 'generic/platform=iOS' \
-  -derivedDataPath /tmp/choisy-video-kit-build -skipMacroValidation build
+xcodebuild -scheme CapacitorVideoKitCore -destination 'generic/platform=iOS' \
+  -derivedDataPath /tmp/capacitor-video-kit-build -skipMacroValidation build
 ```
 
 The derived data path is not decoration, and neither is removing it first. Run a second time
@@ -1626,7 +1642,7 @@ they are not reopened by accident.
     tree break reactivity silently in both directions, so `npm ls @preact/signals-core` printing
     exactly one resolved version is worth checking
   - the asset base lives on a `Symbol.for` key on `globalThis`, not in Stencil's runtime
-  - `choisy-video-kit-react` is bundled with Rollup rather than emitted by `tsc`, so that
+  - `@capacitor-video-kit/core/react` is bundled with Rollup rather than emitted by `tsc`, so that
     `@stencil/react-output-target` and the 18.4 MB of generator dependencies behind it stay out of a
     consumer's tree. The Vue and Angular packages are not bundled, because neither has the problem
   - the stickers and the fonts are published once, in `dist/components/assets`. Three byte identical

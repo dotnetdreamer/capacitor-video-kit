@@ -29,7 +29,7 @@ const MAX_CHANNELS = 2;
 /**
  * One kept sound, as it is written down.
  *
- * `fileUri` is the durable `choisy-file:` name rather than a `blob:` URL: a URL minted by the
+ * `fileUri` is the durable `videokit-file:` name rather than a `blob:` URL: a URL minted by the
  * document that saved the sound is dead by the time the record is read again, which is the whole
  * reason the two are separate fields in the first place.
  */
@@ -50,7 +50,7 @@ export interface ReadableSound extends StoredSound {
 /**
  * The audio inside `src` as a WAV blob, or null when there is no audio in it at all.
  *
- * `src` is anything [resolve] understands: a `blob:` URL from a picker, a `choisy-file:` name, an
+ * `src` is anything [resolve] understands: a `blob:` URL from a picker, a `videokit-file:` name, an
  * `http(s):` URL of this origin's own. Rejects when the bytes cannot be read or the browser cannot
  * decode them, which for a video means it cannot play it either.
  */

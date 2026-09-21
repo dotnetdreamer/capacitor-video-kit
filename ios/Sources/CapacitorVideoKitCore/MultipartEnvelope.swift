@@ -42,7 +42,7 @@ enum MultipartEnvelope {
 
         // Long enough that it cannot occur inside an mp4 by chance, and still inside the 70
         // character limit RFC 2046 puts on a boundary.
-        let boundary = "ChoisyBoundary-" + UUID().uuidString
+        let boundary = "VideoKitBoundary-" + UUID().uuidString
         let name = PublishModels.fileName(guid: uploadGuid, path: path)
 
         let out = try FileHandle(forWritingTo: dest)

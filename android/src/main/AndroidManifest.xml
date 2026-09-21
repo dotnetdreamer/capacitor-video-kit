@@ -29,7 +29,7 @@
 
     <application>
         <service
-            android:name="net.dotnetdreamer.choisy.videocomposer.RenderService"
+            android:name="net.dotnetdreamer.videokit.videocomposer.RenderService"
             android:exported="false"
             android:foregroundServiceType="mediaProcessing|dataSync" />
 

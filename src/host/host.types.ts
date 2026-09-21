@@ -82,9 +82,9 @@ export interface EditorOutputOptions {
 }
 
 /**
- * A source file as the host knows it. The host may carry its own fields on these objects (choisy
- * carries `file`, `uploaded` and the rest of its `VideoClip`); the editor never reads them and
- * hands the same objects back when the edit is done.
+ * A source file as the host knows it. The host may carry its own fields on these objects (a feed
+ * application might carry `file`, `uploaded` and the rest of its own clip type); the editor never
+ * reads them and hands the same objects back when the edit is done.
  */
 export interface EditorSource {
   /** Stable for the life of the edit. The manifest stores THIS, never a URL. */
@@ -136,7 +136,7 @@ export interface EditorMediaHost {
    * an undo can bring it back, and only the customer tapping Next settles which ones are gone.
    *
    * Both lists go over because what a source costs, and what two sources share, is knowledge the
-   * editor does not have - it never sees a file, only a key and a URL. In choisy the same gallery
+   * editor does not have - it never sees a file, only a key and a URL. In the host application the same gallery
    * video picked twice is two keys and ONE path, so a path a kept source still reads must not be
    * unlinked, and that check can only be made here.
    *
@@ -331,7 +331,7 @@ export interface EditorPlatformHost {
   /**
    * Registers the editor's own back handler and returns an unsubscribe. The handler answers whether
    * it consumed the press; false means the editor has nothing left to close and the host should do
-   * whatever it does with a back press. Defaults to registering nothing. In choisy this is
+   * whatever it does with a back press. Defaults to registering nothing. In a typical host this is
    * `platform.backButton.subscribeWithPriority(101, handler)`, where 101 beats Ionic's overlay
    * handler at 100.
    */
@@ -339,7 +339,7 @@ export interface EditorPlatformHost {
 
   /**
    * Presents a confirmation. Resolves with the `role` of the button pressed, or null on a dismiss.
-   * Defaults to the package's own alert; choisy supplies AlertController so the two alerts keep
+   * Defaults to the package's own alert; a host may supply its own AlertController so the two alerts keep
    * looking native.
    */
   confirm?(request: ConfirmRequest): Promise<string | null>;
@@ -357,7 +357,7 @@ export interface EditorPlatformHost {
    * drops the launch's edge-to-edge flags - which is why this is a measurement the editor can take
    * again rather than a number it is given once.
    *
-   * In choisy it is `() => VideoComposer.systemInsets()`, which measures the overlap between the
+   * In a typical host it is `() => VideoComposer.systemInsets()`, which measures the overlap between the
    * bars and the WebView rather than the bars themselves, so a WebView already sitting above them
    * answers 0 and nothing is padded twice. The editor asks on its way in and again whenever the
    * window changes size, and it remembers the answer per window height, so this may be a real
@@ -365,7 +365,7 @@ export interface EditorPlatformHost {
    */
   measureInsets?(): Promise<EditorInsets>;
 
-  /** Guards the package's console output, the way `AppConstant.DEBUG` does in choisy. */
+  /** Guards the package's console output, the way a host application's own debug flag does. */
   debug?: boolean;
 }
 

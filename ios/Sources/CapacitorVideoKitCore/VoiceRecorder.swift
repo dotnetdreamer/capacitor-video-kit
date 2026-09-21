@@ -45,7 +45,7 @@ actor VoiceRecorder {
 
     static let shared = VoiceRecorder()
 
-    private static let log = Logger(subsystem: "net.dotnetdreamer.choisy", category: "VoiceRecorder")
+    private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "VoiceRecorder")
 
     /// Matches Android's `MediaRecorder` configuration exactly in container and codec, so a take
     /// recorded on either platform mixes into the same timeline the same way. The `.m4a` extension

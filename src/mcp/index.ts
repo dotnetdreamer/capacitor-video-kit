@@ -1,5 +1,5 @@
 /**
- * `choisy-video-kit/mcp`: this package's editor core as an MCP server.
+ * `@capacitor-video-kit/core/mcp`: this package's editor core as an MCP server.
  *
  * An agent that can call these tools can build and change a post - lay out the base track, trim and
  * split it, put a second video over it, add text, stickers, photos and effects, place music and
@@ -11,12 +11,12 @@
  *
  * ```sh
  * # As a process, over stdio, which is what an MCP client configuration wants:
- * node node_modules/choisy-video-kit/mcp/mcp/stdio.js
+ * node node_modules/@capacitor-video-kit/core/mcp/mcp/stdio.js
  * ```
  *
  * ```ts
  * // Or inside something that already runs, with a transport of its own:
- * import { createVideoKitMcpServer } from 'choisy-video-kit/mcp';
+ * import { createVideoKitMcpServer } from '@capacitor-video-kit/core/mcp';
  *
  * const server = createVideoKitMcpServer({ version: '1.3.0' });
  * await server.connect(myTransport);

@@ -680,7 +680,7 @@ export class VeEditor {
    * A source whose every segment was deleted, and the one a Replace pointed away from, stay in the
    * store so an undo can bring them back - but they are not on the post, they are not in the result,
    * and nothing after this can reach them. Both lists go over because only the host knows what a
-   * file costs and that two keys can share one: in choisy the same gallery video picked twice is two
+   * file costs and that two keys can share one: in the host application the same gallery video picked twice is two
    * keys and ONE path, and unlinking a path a kept source still reads is the failure this call was
    * written against.
    */

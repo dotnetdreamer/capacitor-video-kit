@@ -29,7 +29,7 @@ apply plugin: 'kotlin-android'
 android {
     // One module, two Capacitor plugin classes. The Kotlin packages stay separate
     // (...videocomposer and ...postpublisher) because they share nothing but a file path.
-    namespace = "net.dotnetdreamer.choisy.videokit"
+    namespace = "net.dotnetdreamer.videokit"
     compileSdk = project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 36
     defaultConfig {
         minSdkVersion project.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 24

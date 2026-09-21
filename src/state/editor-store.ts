@@ -127,7 +127,7 @@ export interface PreviewVideoLayer {
  *    handle, a slider, a pinch). The manifest follows the finger live, and the whole gesture lands
  *    as ONE undo step when it ends - or none, if nothing actually changed.
  *
- * Every manifest change is a pure function from `choisy-video-kit`'s edit ops, so snapshots are
+ * Every manifest change is a pure function from `@capacitor-video-kit/core`'s edit ops, so snapshots are
  * shared by reference and undo is just putting an older object back.
  *
  * The high-level actions (`splitAtPlayhead`, `deleteSelection`, ...) live here rather than in the

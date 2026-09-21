@@ -10,8 +10,14 @@ import { config as published } from './stencil.config';
  * app would be resolving from the last full build while you edited the source of it.
  *
  * `stencil.dev.config.ts` is the other watch in this repository and does not overlap. That one
- * serves a component on its own at localhost:3333 and writes only `www`; this one writes the same
- * directories `npm run build` does, so a linked app picks them up.
+ * serves a component on its own at localhost:3333 and writes only `www`; this one writes the
+ * directories `stencil build` writes in a full build, so a linked app picks them up.
+ *
+ * It is not the whole of `npm run build`, and the gap is worth naming because it used to be a bug.
+ * The three wrapper generators below regenerate `packages/<framework>/src/generated/`, which looks
+ * like the wrappers are being watched, but compiling that source into `angular/`, `react/` and
+ * `vue/` is ng-packagr, `tsc` and Rollup, none of which Stencil runs. `npm run watch` therefore
+ * runs `watch:wrappers` alongside this config rather than this config alone.
  */
 
 /**

@@ -16,7 +16,7 @@ import type { Config } from '@stencil/core';
 const SERVED_DIR = 'www';
 
 export const config: Config = {
-  namespace: 'choisy-video-kit',
+  namespace: 'capacitor-video-kit',
   /* The same tsconfig the published build compiles with, so the harness cannot pass what it fails. */
   tsconfig: 'tsconfig.stencil.json',
   /*
@@ -31,7 +31,7 @@ export const config: Config = {
      * than the components: it builds an `EditorStore`, an `EditorMedia` and an `OverlayBitmaps` to
      * hand down as `ctx`, and `dist` is the only output target that compiles `src/index.ts`, the
      * package's `ui` entry where all three live, into something a browser can import. It lands
-     * beside the lazy component bundle as `choisy-video-kit/index.esm.js` and shares its chunks.
+     * beside the lazy component bundle as `capacitor-video-kit/index.esm.js` and shares its chunks.
      *
      * Adding the `www` target as well would emit a second copy of the components, and whoever
      * loaded both would be running two Stencil runtimes and two copies of the signal library
@@ -43,7 +43,7 @@ export const config: Config = {
       /*
        * Both destinations are written from one directory up, because a `dist` target resolves a
        * copy against the bundle directory it writes the components into rather than against `dir`.
-       * Spelled without the `..` they land in `www/choisy-video-kit/`, where the page is not served
+       * Spelled without the `..` they land in `www/capacitor-video-kit/`, where the page is not served
        * from and the assets are one segment from where it says they are.
        */
       copy: [

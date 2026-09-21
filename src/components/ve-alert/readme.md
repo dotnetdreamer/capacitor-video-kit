@@ -18,7 +18,7 @@ in `editor-confirm.ts` is the piece that decides between the two, and it is the 
 should be putting this element on the screen.
 
 Deliberately not `<dialog>`. `showModal()` gives a focus trap, a backdrop and top layer paint for
-free, and it is iOS 15.4 and up; choisy ships to phones older than that. There `<dialog>` is an
+free, and it is iOS 15.4 and up; this package ships to phones older than that. There `<dialog>` is an
 element the browser has never heard of: it lays out as an ordinary block wherever the shell put
 it, `showModal` is not a function, and what the customer gets is the question printed into the
 editor with nothing modal about it. So the backdrop, the focus and the escape key are done by

@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.videocomposer
+package net.dotnetdreamer.videokit.videocomposer
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,7 +8,7 @@ import android.content.Context
 import android.os.Build
 import androidx.core.app.NotificationCompat
 // Resources live in the merged module, not in this file's own package.
-import net.dotnetdreamer.choisy.videokit.R
+import net.dotnetdreamer.videokit.R
 import androidx.core.app.NotificationManagerCompat
 
 /**
@@ -22,7 +22,7 @@ import androidx.core.app.NotificationManagerCompat
 object RenderNotification {
 
     const val NOTIFICATION_ID = 41001
-    private const val CHANNEL_ID = "choisy.render"
+    private const val CHANNEL_ID = "videokit.render"
 
     fun ensureChannel(ctx: Context) {
         if (Build.VERSION.SDK_INT < 26) return
@@ -30,7 +30,7 @@ object RenderNotification {
         if (manager.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            ctx.getString(R.string.choisy_render_channel_name),
+            ctx.getString(R.string.videokit_render_channel_name),
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             setShowBadge(false)
@@ -44,8 +44,8 @@ object RenderNotification {
         val safePercent = percent.coerceIn(0, 100)
         return NotificationCompat.Builder(ctx, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_render)
-            .setContentTitle(ctx.getString(R.string.choisy_render_notification_title))
-            .setContentText(ctx.getString(R.string.choisy_render_notification_text, safePercent))
+            .setContentTitle(ctx.getString(R.string.videokit_render_notification_title))
+            .setContentText(ctx.getString(R.string.videokit_render_notification_text, safePercent))
             // Indeterminate until the first frame lands, so the bar never sits dead at zero.
             .setProgress(100, safePercent, safePercent <= 0)
             .setOngoing(true)

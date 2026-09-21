@@ -4,7 +4,7 @@ import nodeResolve from '@rollup/plugin-node-resolve';
 import { dts } from 'rollup-plugin-dts';
 
 /** The package the wrappers render, whose specifiers are the ones a consumer has to be able to resolve. */
-const core = 'choisy-video-kit';
+const core = '@capacitor-video-kit/core';
 
 /**
  * Why this package is bundled when the Vue one is not.
@@ -14,13 +14,13 @@ const core = 'choisy-video-kit';
  * in also holds the generator that wrote the wrappers, and the generator depends on `ts-morph`. A
  * plain `tsc` build leaves the bare specifier in the emitted JavaScript, which makes the whole
  * package a runtime dependency, which puts 18.4 MB across 26 packages into every application that
- * installs `choisy-video-kit-react` - and 12.2 MB of that is `@ts-morph/common`, a TypeScript
+ * installs `@capacitor-video-kit/core/react` - and 12.2 MB of that is `@ts-morph/common`, a TypeScript
  * compiler the application will never run.
  *
  * The output target offers no way to point that import somewhere else, so the specifier is
  * resolved away here instead: Rollup inlines the runtime and the `@lit/react` `createComponent` it
  * calls, and `rollup-plugin-dts` inlines the two types the wrappers name from them. Nothing else
- * is inlined. React stays a peer dependency and `choisy-video-kit` stays a dependency, because
+ * is inlined. React stays a peer dependency and `@capacitor-video-kit/core` stays a dependency, because
  * a second copy of either is a bug rather than a size problem.
  *
  * `@stencil/react-output-target` is a development dependency after this, and the published package
@@ -39,14 +39,14 @@ const inlined = ['@stencil/react-output-target', '@lit/react'];
  * The one specifier the React output target gets wrong, rewritten on the way out.
  *
  * For a component with an `@Event()`, the generator writes
- * `import { type VeAlertCustomEvent } from "choisy-video-kit"` - the bare package name, hard coded,
+ * `import { type VeAlertCustomEvent } from "@capacitor-video-kit/core"` - the bare package name, hard coded,
  * with no option to point it anywhere else. Its own Angular target writes
- * `choisy-video-kit/dist/components` for the same type, which is the specifier that is actually
+ * `@capacitor-video-kit/core/dist/components` for the same type, which is the specifier that is actually
  * right: the `Ve*CustomEvent` interfaces and every type a `@Prop` or an `@Event()` names come out of
  * `dist/components/index.d.ts`, through the `export * from '../types'` at the end of it.
  *
  * The bare name is not just a longer road to the same place. In this package the root is the
- * Capacitor plugin, so `choisy-video-kit` resolves to `plugin/esm/plugin.d.ts`, which exports none
+ * Capacitor plugin, so `@capacitor-video-kit/core` resolves to `plugin/esm/plugin.d.ts`, which exports none
  * of those types and does statically import `@capacitor/core`. A React host that installed neither
  * Capacitor nor the plugin therefore got five errors out of this package's own declarations: three
  * saying the event types do not exist, and two saying `@capacitor/core` cannot be found. It is
@@ -123,7 +123,7 @@ export default [
     onwarn,
     plugins: [nodeResolve({ exportConditions: ['import', 'default'] }), checkCoreSpecifiers()],
     output: {
-      file: 'dist/index.js',
+      file: '../../react/index.js',
       format: 'es',
       paths,
       /* `files` is `dist/`, so a map here would name a `src/` that no consumer receives. */
@@ -141,6 +141,6 @@ export default [
     input: '.build/index.d.ts',
     external,
     plugins: [dts({ includeExternal: inlined }), checkCoreSpecifiers()],
-    output: { file: 'dist/index.d.ts', format: 'es', paths },
+    output: { file: '../../react/index.d.ts', format: 'es', paths },
   },
 ];

@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.postpublisher
+package net.dotnetdreamer.videokit.postpublisher
 
 /**
  * Fills the create-post body with ids that did not exist when the caller wrote it.

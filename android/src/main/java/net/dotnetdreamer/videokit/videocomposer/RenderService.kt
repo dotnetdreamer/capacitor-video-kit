@@ -1,4 +1,4 @@
-package net.dotnetdreamer.choisy.videocomposer
+package net.dotnetdreamer.videokit.videocomposer
 
 import android.app.Service
 import android.content.Context
@@ -153,7 +153,7 @@ class RenderService : Service() {
     companion object {
         private const val TAG = "VideoComposer"
         private const val IDLE_POLL_MS = 1000L
-        const val ACTION_START = "net.dotnetdreamer.choisy.videocomposer.action.START"
+        const val ACTION_START = "net.dotnetdreamer.videokit.videocomposer.action.START"
 
         /**
          * Asked for by `compose()` while the Activity is still visible - a background start throws

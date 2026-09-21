@@ -7,10 +7,10 @@
  * a `<video>` at all. So this module keeps the bytes in IndexedDB and mints a `blob:` URL on
  * demand, and the two are tied together by a stable name that IS the durable identity:
  *
- *     choisy-file:/<folder>/<name>
+ *     videokit-file:/<folder>/<name>
  *
  * Every URI this package hands out for a file it owns is a `blob:` URL, because that is what a
- * caller can use without knowing anything about this scheme. The `choisy-file:` form is what gets
+ * caller can use without knowing anything about this scheme. The `videokit-file:` form is what gets
  * WRITTEN DOWN - in a job record, in a publish record - and [resolve] turns either one, plus an
  * `http(s):`, a `data:` and a bare path, back into bytes.
  *
@@ -20,7 +20,7 @@
 import { FILES_STORE, idbDelete, idbGet, idbKeys, idbPut } from './idb';
 
 /** What a stored file is called when it is written down rather than handed over. */
-export const FILE_SCHEME = 'choisy-file:';
+export const FILE_SCHEME = 'videokit-file:';
 
 /** Keys are echoed back to callers, so a `vo:<id>` key must not become a path separator. */
 export function safeSegment(value: string): string {
@@ -32,7 +32,7 @@ export function fileUri(folder: string, name: string): string {
   return `${FILE_SCHEME}/${safeSegment(folder)}/${safeSegment(name)}`;
 }
 
-/** The `folder` and `name` back out of a `choisy-file:` URI, or null for anything else. */
+/** The `folder` and `name` back out of a `videokit-file:` URI, or null for anything else. */
 export function parseFileUri(uri: string): { folder: string; name: string } | null {
   if (!uri.startsWith(FILE_SCHEME)) return null;
   const path = uri.slice(FILE_SCHEME.length).replace(/^\/+/, '');
@@ -129,7 +129,7 @@ export async function resolve(uri: string): Promise<Blob> {
 
 /**
  * A URL a `<video>`, an `<img>` or an `AudioContext` can load right now, for any of the same
- * forms. A `choisy-file:` URI becomes a `blob:`; everything else is already loadable and is handed
+ * forms. A `videokit-file:` URI becomes a `blob:`; everything else is already loadable and is handed
  * straight back, which is what makes this safe to run over a caller's own URLs.
  */
 export async function loadableUrl(uri: string): Promise<string> {
