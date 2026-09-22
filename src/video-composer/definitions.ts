@@ -466,6 +466,71 @@ export type SaveToGalleryFailureCode =
   | 'unsupported'
   | 'unknown';
 
+/**
+ * How much of the device's video library a host may read.
+ *
+ * `limited` is the person having chosen a few videos rather than all of them - iOS's "Select Photos"
+ * and Android 14's "Select photos and videos". The library calls work there, and simply list fewer.
+ * `unsupported` is a platform with no library to read: a browser.
+ */
+export type GalleryAccess = 'granted' | 'limited' | 'denied' | 'unsupported';
+
+export interface GalleryAccessResult {
+  access: GalleryAccess;
+}
+
+export interface ListGalleryVideosOptions {
+  /** How many of the newest to skip. Defaults to 0. */
+  offset?: number;
+  /** How many to answer with. Defaults to 60, and never more than 500. */
+  limit?: number;
+}
+
+/** One video in the device's own library. */
+export interface GalleryVideo {
+  /**
+   * The library's handle on it, for [galleryThumbnail] and [resolveGalleryVideo] and nothing else:
+   * a `content://` row on Android, a `PHAsset` local identifier on iOS. Not a file - hand
+   * [resolveGalleryVideo]'s answer to the rest of the plugin, not this.
+   */
+  id: string;
+  /** What the gallery calls it, extension included. Empty when the platform keeps no name. */
+  fileName: string;
+  /** 0 when the library has not measured it yet; `probe` always can. */
+  durationMs: number;
+}
+
+export interface ListGalleryVideosResult {
+  /** Newest first. */
+  videos: GalleryVideo[];
+  /** How many videos the library holds in all, which is what says whether there is another page. */
+  total: number;
+}
+
+export interface GalleryThumbnailOptions {
+  id: string;
+  /** The longest edge of the frame, in pixels. Defaults to 384. */
+  maxSize?: number;
+}
+
+export interface GalleryThumbnailResult {
+  /** A `file://` JPEG in a cache folder. */
+  uri: string;
+}
+
+export interface ResolveGalleryVideoOptions {
+  id: string;
+}
+
+export interface ResolveGalleryVideoResult {
+  /**
+   * What to hand `probe`, `thumbnails` and `compose` for this video. The MediaStore URI itself on
+   * Android; on iOS a copy in the app's own storage, because a photo library asset has no path.
+   */
+  uri: string;
+  fileName: string;
+}
+
 export interface ThumbnailsOptions {
   uri: string;
   /** Source-relative times. One output URI per entry, in the same order. */

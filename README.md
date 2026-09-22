@@ -1557,6 +1557,42 @@ On iOS the host's `Info.plist` needs `NSPhotoLibraryAddUsageDescription`; withou
 terminated when the permission is asked for. Android needs nothing added - the kit's manifest
 declares the pre-API-29 storage permission, capped so modern installs do not carry it.
 
+## Reading the gallery, for a host that draws its own picker
+
+The system picker answers with a set, so the order somebody tapped their clips in - the order they
+want on the timeline - is lost on the way back. A host that numbers its picks, the way phone video
+editors do, lists the library itself:
+
+```ts
+const { access } = await VideoComposer.requestGalleryAccess(); // 'granted' | 'limited' | 'denied' | 'unsupported'
+
+const { videos, total } = await VideoComposer.listGalleryVideos({ offset: 0, limit: 60 }); // newest first
+const { uri: tile } = await VideoComposer.galleryThumbnail({ id: videos[0].id }); // a cached file:// JPEG
+
+// For every pick, before it goes anywhere else in the plugin:
+const { uri, fileName } = await VideoComposer.resolveGalleryVideo({ id: videos[0].id });
+```
+
+A video's `id` is the library's handle, not a file: `resolveGalleryVideo` is what turns it into one.
+On Android that is instant - the MediaStore URI is already readable - and on iOS it copies the asset's
+video out of the photo library (from iCloud first when it lives there) into Application Support, so
+a draft that stores the path can still open it next week.
+
+`limited` is the person having chosen a few videos rather than all of them; the calls work and list
+fewer. `denied` is an answer rather than a rejection, because the fallback - the system picker -
+needs no permission. The web answers `unsupported` and refuses the other three.
+
+**The host declares the permission, not the kit.** Google Play reviews media read permissions app by
+app, so the kit does not put one on every host that only renders. Android:
+
+```xml
+<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+```
+
+iOS: `NSPhotoLibraryUsageDescription` in `Info.plist`, without which the app is terminated when
+access is asked for.
+
 ## Failure codes
 
 Composer: `unreadable_input` (blame `clipKey`), `encoder`, `muxer`, `interrupted`, `cancelled`,

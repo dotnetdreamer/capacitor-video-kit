@@ -16,7 +16,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "VideoComposerPlugin"
     public let jsName = "VideoComposer"
 
-    /// Fifteen entries. A method missing from this list is rejected by the bridge before this class
+    /// Twenty entries. A method missing from this list is rejected by the bridge before this class
     /// is consulted, which is exactly what used to happen to `systemInsets`: the `@objc func` alone
     /// changes nothing. `addListener` / `removeListener` / `removeAllListeners` are special-cased
     /// by `CapacitorBridge.handleJSCall` before the list is read and stay off it.
@@ -30,6 +30,10 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "saveToGallery", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "requestGalleryAccess", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "listGalleryVideos", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "galleryThumbnail", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "resolveGalleryVideo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "capabilities", returnType: CAPPluginReturnPromise),
@@ -268,6 +272,86 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
     }
+
+    // MARK: - Gallery library
+
+    /// Asks to read the photo library when the person has not been asked, and answers with what the
+    /// host may now see. Never rejects for a refusal: `denied` is an answer, and the host's fallback
+    /// - the system picker - needs no permission at all.
+    @objc func requestGalleryAccess(_ call: CAPPluginCall) {
+        Task {
+            call.resolve(["access": await GalleryLibrary.requestAccess()])
+        }
+    }
+
+    @objc func listGalleryVideos(_ call: CAPPluginCall) {
+        // Android clamps the same way, so a host gets the same page for the same numbers on both.
+        let offset = max(0, call.getInt("offset") ?? 0)
+        let limit = min(Self.maxGalleryPage, max(1, call.getInt("limit") ?? Self.defaultGalleryPage))
+        Task {
+            do {
+                let page = try GalleryLibrary.list(offset: offset, limit: limit)
+                call.resolve([
+                    "videos": page.videos.map { ["id": $0.id, "fileName": $0.fileName, "durationMs": $0.durationMs] },
+                    "total": page.total,
+                ])
+            } catch {
+                Self.rejectGallery(call, error)
+            }
+        }
+    }
+
+    @objc func galleryThumbnail(_ call: CAPPluginCall) {
+        guard let id = call.getString("id"), !id.isEmpty else {
+            call.reject("id is required", Reject.invalidSpec)
+            return
+        }
+        let maxSize = min(1024, max(64, call.getInt("maxSize") ?? Self.defaultGalleryThumbnail))
+        Task {
+            do {
+                let url = try await GalleryLibrary.thumbnail(id: id, maxSize: maxSize)
+                call.resolve(["uri": url.absoluteString])
+            } catch {
+                Self.rejectGallery(call, error)
+            }
+        }
+    }
+
+    /// The asset's video, copied into the app's own storage: see `GalleryLibrary` for why iOS is the
+    /// one platform that needs a copy before anything can read it.
+    @objc func resolveGalleryVideo(_ call: CAPPluginCall) {
+        guard let id = call.getString("id"), !id.isEmpty else {
+            call.reject("id is required", Reject.invalidSpec)
+            return
+        }
+        Task {
+            do {
+                let resolved = try await GalleryLibrary.resolve(id: id)
+                call.resolve(["uri": resolved.url.absoluteString, "fileName": resolved.fileName])
+            } catch {
+                Self.rejectGallery(call, error)
+            }
+        }
+    }
+
+    private static func rejectGallery(_ call: CAPPluginCall, _ error: Error) {
+        switch error {
+        case GalleryLibrary.LibraryError.permissionDenied:
+            call.reject("The photo library is not available to this app", Reject.permissionDenied)
+        case let GalleryLibrary.LibraryError.notFound(message),
+             let GalleryLibrary.LibraryError.unreadable(message):
+            call.reject(message, Reject.unreadableInput)
+        default:
+            call.reject(ErrorMapping.describe(error), Reject.unreadableInput)
+        }
+    }
+
+    /// A gallery page when the host does not say, and the most one answer carries. Match Android.
+    private static let defaultGalleryPage = 60
+    private static let maxGalleryPage = 500
+
+    /// The long edge of a gallery thumbnail when the host does not say. Matches Android.
+    private static let defaultGalleryThumbnail = 384
 
     /// One sound, in the shape `SavedSoundResult` describes. `hasAudio` is the caller's to add.
     private static func soundJson(_ sound: SoundLibrary.Sound) -> [String: Any] {

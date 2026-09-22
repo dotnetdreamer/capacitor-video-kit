@@ -62,6 +62,12 @@ import kotlin.math.min
         Permission(alias = VideoComposerPlugin.MICROPHONE, strings = [Manifest.permission.RECORD_AUDIO]),
         // Only ever asked for below API 29; from there the gallery insert is scoped and free.
         Permission(alias = VideoComposerPlugin.STORAGE, strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE]),
+        // Reading the gallery, for a host that draws its own. Two names for one grant because
+        // Android 13 split the storage permission by media type, and asking for the wrong one is
+        // not a smaller grant but one the system never prompts for. Neither is declared in the
+        // kit's manifest: see [GalleryLibrary] for why that is the host's to do.
+        Permission(alias = VideoComposerPlugin.GALLERY_VIDEO, strings = [Manifest.permission.READ_MEDIA_VIDEO]),
+        Permission(alias = VideoComposerPlugin.GALLERY_STORAGE, strings = [Manifest.permission.READ_EXTERNAL_STORAGE]),
     ],
 )
 class VideoComposerPlugin : Plugin() {
@@ -817,6 +823,115 @@ class VideoComposerPlugin : Plugin() {
     }
 
     /* ======================================================================================== */
+    /* Gallery library                                                                           */
+    /* ======================================================================================== */
+
+    /**
+     * Asks to read the device's videos when that has not been settled yet, and answers with what
+     * the host may now see. Never rejects for a refusal: `denied` is an answer, and the host's
+     * fallback - the system picker - needs no permission at all.
+     */
+    @PluginMethod
+    fun requestGalleryAccess(call: PluginCall) {
+        val alias = galleryAlias()
+        if (getPermissionState(alias) == PermissionState.GRANTED) {
+            answerGalleryAccess(call)
+            return
+        }
+        requestPermissionForAlias(alias, call, "galleryPermissionCallback")
+    }
+
+    @PermissionCallback
+    private fun galleryPermissionCallback(call: PluginCall) {
+        answerGalleryAccess(call)
+    }
+
+    private fun answerGalleryAccess(call: PluginCall) {
+        call.resolve(JSObject().put("access", galleryAccess()))
+    }
+
+    @PluginMethod
+    fun listGalleryVideos(call: PluginCall) {
+        if (galleryAccess() == "denied") {
+            call.reject("The video library is not available to this app", PERMISSION_DENIED)
+            return
+        }
+        val offset = (call.getInt("offset") ?: 0).coerceAtLeast(0)
+        val limit = (call.getInt("limit") ?: DEFAULT_GALLERY_PAGE).coerceIn(1, MAX_GALLERY_PAGE)
+
+        pluginScope.launch {
+            try {
+                val page = GalleryLibrary.list(context.applicationContext, offset, limit)
+                val videos = JSArray()
+                page.videos.forEach { videos.put(galleryVideoJson(it)) }
+                call.resolve(JSObject().put("videos", videos).put("total", page.total))
+            } catch (e: SecurityException) {
+                call.reject(ErrorMapping.describe(e), PERMISSION_DENIED)
+            } catch (e: Exception) {
+                call.reject(ErrorMapping.describe(e), FailureCodes.UNREADABLE_INPUT)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun galleryThumbnail(call: PluginCall) {
+        val id = call.getString("id")
+        if (id.isNullOrEmpty()) {
+            call.reject("id is required", INVALID_SPEC)
+            return
+        }
+        val maxSize = (call.getInt("maxSize") ?: DEFAULT_GALLERY_THUMBNAIL).coerceIn(64, 1024)
+
+        pluginScope.launch {
+            try {
+                val file = GalleryLibrary.thumbnail(context.applicationContext, id, maxSize)
+                call.resolve(JSObject().put("uri", Uri.fromFile(file).toString()))
+            } catch (e: SecurityException) {
+                call.reject(ErrorMapping.describe(e), PERMISSION_DENIED)
+            } catch (e: Exception) {
+                call.reject(ErrorMapping.describe(e), FailureCodes.UNREADABLE_INPUT)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun resolveGalleryVideo(call: PluginCall) {
+        val id = call.getString("id")
+        if (id.isNullOrEmpty()) {
+            call.reject("id is required", INVALID_SPEC)
+            return
+        }
+
+        pluginScope.launch {
+            try {
+                val video = GalleryLibrary.resolve(context.applicationContext, id)
+                if (video == null) {
+                    call.reject("that video is no longer in the library", FailureCodes.UNREADABLE_INPUT)
+                    return@launch
+                }
+                call.resolve(JSObject().put("uri", video.id).put("fileName", video.fileName))
+            } catch (e: SecurityException) {
+                call.reject(ErrorMapping.describe(e), PERMISSION_DENIED)
+            } catch (e: Exception) {
+                call.reject(ErrorMapping.describe(e), FailureCodes.UNREADABLE_INPUT)
+            }
+        }
+    }
+
+    /** What this Android calls the right to read the device's videos. */
+    private fun galleryAlias(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) GALLERY_VIDEO else GALLERY_STORAGE
+
+    private fun galleryAccess(): String =
+        GalleryLibrary.access(context, getPermissionState(galleryAlias()) == PermissionState.GRANTED)
+
+    private fun galleryVideoJson(video: GalleryLibrary.Video): JSObject =
+        JSObject()
+            .put("id", video.id)
+            .put("fileName", video.fileName)
+            .put("durationMs", video.durationMs)
+
+    /* ======================================================================================== */
     /* Voice recording                                                                           */
     /* ======================================================================================== */
 
@@ -1078,6 +1193,17 @@ class VideoComposerPlugin : Plugin() {
 
         const val MICROPHONE = "microphone"
         const val STORAGE = "storage"
+        const val GALLERY_VIDEO = "galleryVideo"
+        const val GALLERY_STORAGE = "galleryStorage"
+
+        /** A gallery page, when the host does not say. Two phone screens of a four-column grid. */
+        private const val DEFAULT_GALLERY_PAGE = 60
+
+        /** Past this a single answer over the bridge stops being cheap, and nothing needs more. */
+        private const val MAX_GALLERY_PAGE = 500
+
+        /** The long edge of a gallery thumbnail, when the host does not say. */
+        private const val DEFAULT_GALLERY_THUMBNAIL = 384
 
         private const val INVALID_SPEC = "invalid_spec"
         private const val JOB_NOT_FOUND = "job_not_found"

@@ -15,7 +15,14 @@ import type {
   EncodeSupport,
   ExtractAudioOptions,
   ExtractAudioResult,
+  GalleryAccessResult,
+  GalleryThumbnailOptions,
+  GalleryThumbnailResult,
+  ListGalleryVideosOptions,
+  ListGalleryVideosResult,
   ListSoundsResult,
+  ResolveGalleryVideoOptions,
+  ResolveGalleryVideoResult,
   CleanupOptions,
   ComposeCompletedEvent,
   ComposeFailedEvent,
@@ -93,6 +100,47 @@ export interface VideoComposerPlugin {
    * insert is scoped and needs no permission at all. Rejects with a [SaveToGalleryFailureCode].
    */
   saveToGallery(options: SaveToGalleryOptions): Promise<SaveToGalleryResult>;
+
+  /**
+   * Asks to read the device's videos when the person has not been asked yet, and answers with what
+   * the host may now see. Never rejects for a refusal - `denied` is an answer, and a host's way
+   * round it, the system picker, needs no permission at all. `unsupported` in a browser.
+   *
+   * The four gallery calls exist for a host that draws its OWN gallery. The system picker answers
+   * with a set, so the order somebody tapped their clips in - the order they want on the timeline -
+   * is lost on the way back; an app that numbers its picks has to list the library itself.
+   *
+   * THE HOST DECLARES THE PERMISSION, not the kit: `READ_MEDIA_VIDEO` (and `READ_EXTERNAL_STORAGE`
+   * capped at API 32) in the Android manifest, `NSPhotoLibraryUsageDescription` in the iOS
+   * `Info.plist`. Google Play reviews a media read permission app by app, so the kit does not put
+   * one on every host that only renders.
+   */
+  requestGalleryAccess(): Promise<GalleryAccessResult>;
+
+  /**
+   * One page of the device's videos, newest first. Rejects `permission_denied` without access and
+   * `unsupported` in a browser. Paged by position, so a video recorded between two pages moves the
+   * rest down one: a host should skip an id it has already listed.
+   */
+  listGalleryVideos(options?: ListGalleryVideosOptions): Promise<ListGalleryVideosResult>;
+
+  /**
+   * A poster frame for one listed video, from the platform's own thumbnailer - which keeps one for
+   * most of a library already - and cached on disk. Rejects `unreadable_input` for a video with no
+   * frame to give; a grid shows a plain tile for it.
+   */
+  galleryThumbnail(options: GalleryThumbnailOptions): Promise<GalleryThumbnailResult>;
+
+  /**
+   * A URI the rest of the plugin can read, for one listed video.
+   *
+   * Call it for every pick before handing the video on. On Android it is instant and copies
+   * nothing: the MediaStore URI is already readable, and stays so for as long as the host holds
+   * the grant. On iOS a library asset has no path at all, so this copies its video - from iCloud
+   * first, if that is where it lives - into the app's own storage, and can take a while for a long
+   * one. Rejects `unreadable_input` for a video that has gone from the library since it was listed.
+   */
+  resolveGalleryVideo(options: ResolveGalleryVideoOptions): Promise<ResolveGalleryVideoResult>;
 
   /** Asks for the microphone permission when needed. Rejects `already_recording` / `permission_denied`. */
   startVoiceRecording(options?: StartVoiceRecordingOptions): Promise<void>;

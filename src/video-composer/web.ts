@@ -15,13 +15,17 @@ import type {
   ComposeSpec,
   ExtractAudioOptions,
   ExtractAudioResult,
+  GalleryAccessResult,
+  GalleryThumbnailResult,
   JobIdOptions,
+  ListGalleryVideosResult,
   JobState,
   ListSoundsResult,
   PrepareJobOptions,
   PrepareJobResult,
   ProbeOptions,
   ProbeResult,
+  ResolveGalleryVideoResult,
   SaveToGalleryOptions,
   SaveToGalleryResult,
   StartVoiceRecordingOptions,
@@ -178,6 +182,28 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
        the person's now, in a folder this code will never learn the name of - so minting one would
        be the web answering a question the other platforms answer truthfully. */
     return { uri };
+  }
+
+  /*
+   * A page has no library to list: the only videos it can reach are the ones a person hands it
+   * through a file input, one pick at a time. So access says `unsupported` - an answer, which a
+   * host branches on to offer that input instead - and the three calls that would read the library
+   * refuse with the same code the native plugins use for a platform that cannot do a thing.
+   */
+  async requestGalleryAccess(): Promise<GalleryAccessResult> {
+    return { access: 'unsupported' };
+  }
+
+  async listGalleryVideos(): Promise<ListGalleryVideosResult> {
+    throw coded('a browser has no video library to list', 'unsupported');
+  }
+
+  async galleryThumbnail(): Promise<GalleryThumbnailResult> {
+    throw coded('a browser has no video library to list', 'unsupported');
+  }
+
+  async resolveGalleryVideo(): Promise<ResolveGalleryVideoResult> {
+    throw coded('a browser has no video library to list', 'unsupported');
   }
 
   async listSounds(): Promise<ListSoundsResult> {
