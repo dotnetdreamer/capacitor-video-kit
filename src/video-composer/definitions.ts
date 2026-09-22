@@ -414,6 +414,66 @@ export interface DeleteSoundOptions {
   id: string;
 }
 
+/**
+ * Which of the device's own media folders a saved video goes into.
+ *
+ * Two, because those are the two a gallery app looks in and they mean different things to the
+ * person holding the phone: `dcim` is where the camera puts things, `movies` is where everything
+ * else does. An app that wants its exports sitting beside the customer's own recordings picks
+ * `dcim`; one that wants them filed apart leaves the default.
+ *
+ * Deliberately not a free path. A gallery indexes a handful of directories and nothing else, so a
+ * string here would let a caller write somewhere nothing ever looks - which is the exact failure
+ * this whole call exists to prevent.
+ */
+export type GalleryDirectory = 'movies' | 'dcim';
+
+/** Where a finished video should land, and what it should be called once it is there. */
+export interface SaveToGalleryOptions {
+  /** The video to save: `file://` or an absolute path, as `compose` hands one back. */
+  uri: string;
+
+  /**
+   * What the video is called in the gallery, EXTENSION INCLUDED - the platforms file it by that
+   * name and a gallery prints it. Defaults to the source file's own name.
+   */
+  fileName?: string;
+
+  /**
+   * A folder inside [directory], and the album a gallery app files the video under. Left out, the
+   * video goes straight into the directory with nothing around it.
+   *
+   * Usually the app's name. A plain segment rather than a path: a separator in here is refused,
+   * because a nested folder is not something every platform can express - on iOS this is an album
+   * in the photo library, which has no folders at all.
+   */
+  album?: string;
+
+  /** Defaults to `movies`. */
+  directory?: GalleryDirectory;
+}
+
+export interface SaveToGalleryResult {
+  /**
+   * The gallery's own handle on the video, which is not a file path and is not worth parsing: a
+   * `content://` row on Android, a `ph://` local identifier on iOS, and the object URL the page was
+   * handed on the web. Useful for a follow-up share, and for saying in a log where it went.
+   */
+  uri: string;
+}
+
+/** Why a save did not happen. Narrower than a render's, because far less can go wrong. */
+export type SaveToGalleryFailureCode =
+  /** The person said no to the photo library, or the OS has it switched off for this app. */
+  | 'permission_denied'
+  /** No file at `uri`, or nothing that can be read as one. */
+  | 'unreadable_input'
+  /** The disk would not take the copy. */
+  | 'no_space'
+  /** A browser with no way to hand a file to the person, which is the only web failure. */
+  | 'unsupported'
+  | 'unknown';
+
 export interface ThumbnailsOptions {
   uri: string;
   /** Source-relative times. One output URI per entry, in the same order. */

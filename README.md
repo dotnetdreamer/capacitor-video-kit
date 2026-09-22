@@ -1528,10 +1528,42 @@ wants them installs `@capacitor/core` - an optional peer, and the same `VideoCom
 Capacitor app uses. The editor itself still needs none of that: `@capacitor-video-kit/core/ui` is the editor,
 `@capacitor-video-kit/core` is the plugin, and a host that only edits reaches the first one.
 
+## Saving the finished video to the gallery
+
+A render lands in the app's private storage, where no gallery app can see it and nobody holding
+the phone can reach it. `VideoComposer.saveToGallery` is the other end of that:
+
+```ts
+const { uri } = await VideoComposer.saveToGallery({
+  uri: stitched.sourcePath!,        // what `compose` handed back
+  fileName: 'lightsnip-20260922.mp4', // extension included; defaults to the source's own name
+  album: 'LightSnip',               // a folder in the directory, and the album a gallery shows
+  directory: 'movies',              // or 'dcim'; defaults to 'movies'
+});
+```
+
+Android inserts into MediaStore under `Movies/<album>`, which needs no permission from API 29 and
+survives the app being uninstalled. iOS creates a `PHAsset` and adds it to an album of that name.
+The web hands the file to the browser's own download, ignoring `album` and `directory` because a
+page has neither.
+
+Two traps this exists to avoid, both of which look right and are not: copying into
+`getExternalMediaDirs()` puts the video in `Android/media/<package>/`, which Android **deletes when
+the app is uninstalled**, and announcing the copy with `ACTION_MEDIA_SCANNER_SCAN_FILE` uses a
+broadcast deprecated at API 29 and ignored after it. Either one produces a save that reports
+success over a video no gallery ever shows.
+
+On iOS the host's `Info.plist` needs `NSPhotoLibraryAddUsageDescription`; without it the app is
+terminated when the permission is asked for. Android needs nothing added - the kit's manifest
+declares the pre-API-29 storage permission, capped so modern installs do not carry it.
+
 ## Failure codes
 
 Composer: `unreadable_input` (blame `clipKey`), `encoder`, `muxer`, `interrupted`, `cancelled`,
 `no_space` (carries `needBytes`), `unsupported`, `unknown`.
+
+`saveToGallery`: `permission_denied`, `unreadable_input`, `no_space`, `unsupported` (web only),
+`unknown`.
 
 Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancelled`, `unknown` - each with `phase`, an optional `httpStatus`, and `retryable`.
 

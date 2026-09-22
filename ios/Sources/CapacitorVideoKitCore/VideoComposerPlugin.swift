@@ -29,6 +29,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "extractAudio", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "saveToGallery", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopVoiceRecording", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "capabilities", returnType: CAPPluginReturnPromise),
@@ -235,6 +236,36 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         Task {
             SoundLibrary.delete(id: id)
             call.resolve()
+        }
+    }
+
+    /// Copies a finished video into the photo library. See `Gallery` for why that is the only
+    /// place on iOS where saving one means anything.
+    @objc func saveToGallery(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), !uri.isEmpty else {
+            call.reject("uri is required", Reject.invalidSpec)
+            return
+        }
+        guard let url = JobFolders.fileURL(from: uri) else {
+            call.reject("unreadable uri \(uri)", Reject.unreadableInput)
+            return
+        }
+        let fileName = call.getString("fileName")
+        let album = call.getString("album")
+
+        Task {
+            do {
+                let identifier = try await Gallery.save(url: url, fileName: fileName, album: album)
+                call.resolve(["uri": identifier])
+            } catch Gallery.GalleryError.permissionDenied {
+                call.reject("The photo library is not available to this app", Reject.permissionDenied)
+            } catch let Gallery.GalleryError.unreadable(message) {
+                call.reject(message, Reject.unreadableInput)
+            } catch let Gallery.GalleryError.saveFailed(message) {
+                call.reject(message, Reject.io)
+            } catch {
+                call.reject(ErrorMapping.describe(error), Reject.io)
+            }
         }
     }
 

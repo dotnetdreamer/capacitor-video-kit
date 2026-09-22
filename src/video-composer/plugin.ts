@@ -27,6 +27,8 @@ import type {
   PrepareJobResult,
   ProbeOptions,
   ProbeResult,
+  SaveToGalleryOptions,
+  SaveToGalleryResult,
   StartVoiceRecordingOptions,
   SystemInsetsResult,
   ThumbnailsOptions,
@@ -69,6 +71,28 @@ export interface VideoComposerPlugin {
 
   /** Deletes one kept sound and its file. Silent about an id that is already gone. */
   deleteSound(options: DeleteSoundOptions): Promise<void>;
+
+  /**
+   * Copies a finished video out of the app and into the device's own gallery.
+   *
+   * The far end of [compose], and the reason it lives here rather than in each host: a render
+   * lands in the app's private storage, where no gallery app can see it and nobody holding the
+   * phone can reach it - so an app that stops at `compose` has produced a video only it can open,
+   * which to a customer is the same as producing none. Every host was therefore writing this, and
+   * getting it wrong the same way, because the obvious answers are the broken ones. Copying into
+   * the app's external media directory puts the video somewhere Android deletes on uninstall, and
+   * announcing it with `ACTION_MEDIA_SCANNER_SCAN_FILE` uses a broadcast that has been a no-op
+   * since API 29. What this does instead is a MediaStore insert on Android and a
+   * `PHAssetCreationRequest` on iOS, which are the two things the platforms actually index.
+   *
+   * Customise it through [SaveToGalleryOptions]: which of the two media folders, which album
+   * inside it, and what the video is called once it is there. A host that wants none of that can
+   * still do its own thing - the editor never calls this, only an app does.
+   *
+   * Asks for the photo library on iOS, and for storage on Android below API 29; from API 29 the
+   * insert is scoped and needs no permission at all. Rejects with a [SaveToGalleryFailureCode].
+   */
+  saveToGallery(options: SaveToGalleryOptions): Promise<SaveToGalleryResult>;
 
   /** Asks for the microphone permission when needed. Rejects `already_recording` / `permission_denied`. */
   startVoiceRecording(options?: StartVoiceRecordingOptions): Promise<void>;

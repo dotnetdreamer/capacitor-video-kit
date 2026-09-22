@@ -2,6 +2,8 @@ import { WebPlugin } from '@capacitor/core';
 
 import { describe, extensionOf, fileUri, putFile, resolve, safeSegment } from '../web-runtime/files';
 
+import { downloadBlob } from '../web-runtime/gallery';
+
 import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
 
 import type {
@@ -20,6 +22,8 @@ import type {
   PrepareJobResult,
   ProbeOptions,
   ProbeResult,
+  SaveToGalleryOptions,
+  SaveToGalleryResult,
   StartVoiceRecordingOptions,
   SystemInsetsResult,
   ThumbnailsOptions,
@@ -145,6 +149,35 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
       durationMs: saved.durationMs,
       savedAt: saved.savedAt,
     };
+  }
+
+  /**
+   * The browser's own download, because a page has no gallery to put anything in.
+   *
+   * `directory` and `album` are read and ignored rather than refused: a caller written for a phone
+   * passes them, and rejecting a save over an option a browser has no notion of would make the web
+   * the one platform where the same call needs a branch around it.
+   */
+  async saveToGallery(options: SaveToGalleryOptions): Promise<SaveToGalleryResult> {
+    const uri = required(options?.uri, 'uri');
+
+    let blob: Blob;
+    try {
+      blob = await resolve(uri);
+    } catch (error) {
+      throw coded(describe(error), 'unreadable_input');
+    }
+
+    try {
+      downloadBlob(blob, options?.fileName || nameOf(uri) || 'video.mp4');
+    } catch (error) {
+      throw coded(describe(error), 'unsupported');
+    }
+
+    /* The URI it was handed. A page is given no handle on what it just downloaded - the file is
+       the person's now, in a folder this code will never learn the name of - so minting one would
+       be the web answering a question the other platforms answer truthfully. */
+    return { uri };
   }
 
   async listSounds(): Promise<ListSoundsResult> {

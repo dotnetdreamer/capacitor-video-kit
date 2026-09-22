@@ -7,6 +7,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
@@ -59,6 +60,8 @@ import kotlin.math.min
     name = "VideoComposer",
     permissions = [
         Permission(alias = VideoComposerPlugin.MICROPHONE, strings = [Manifest.permission.RECORD_AUDIO]),
+        // Only ever asked for below API 29; from there the gallery insert is scoped and free.
+        Permission(alias = VideoComposerPlugin.STORAGE, strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE]),
     ],
 )
 class VideoComposerPlugin : Plugin() {
@@ -742,6 +745,65 @@ class VideoComposerPlugin : Plugin() {
         }
     }
 
+    /* ======================================================================================== */
+    /* saveToGallery                                                                             */
+    /* ======================================================================================== */
+
+    /**
+     * Copies a finished video into the device's gallery. See [Gallery] for why this is a MediaStore
+     * insert rather than the two shapes every host reaches for first.
+     */
+    @PluginMethod
+    fun saveToGallery(call: PluginCall) {
+        // Asked for only where it is real. From API 29 the insert is scoped to the directory it
+        // names, so requesting there would put a storage prompt in front of a save that needs none
+        // - and the manifest caps the declaration at 28, so there would be nothing to grant.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && getPermissionState(STORAGE) != PermissionState.GRANTED) {
+            requestPermissionForAlias(STORAGE, call, "storagePermissionCallback")
+            return
+        }
+        copyToGallery(call)
+    }
+
+    @PermissionCallback
+    private fun storagePermissionCallback(call: PluginCall) {
+        if (getPermissionState(STORAGE) != PermissionState.GRANTED) {
+            call.reject("Storage permission is needed to save a video to the gallery", PERMISSION_DENIED)
+            return
+        }
+        copyToGallery(call)
+    }
+
+    private fun copyToGallery(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+
+        val fileName = call.getString("fileName")
+        val album = call.getString("album")
+        val directory = call.getString("directory")
+
+        // Off the shared plugin thread: this copies a whole video, and that thread is the one every
+        // other plugin in the app is queued behind.
+        pluginScope.launch {
+            try {
+                val saved = Gallery.save(context.applicationContext, uri, fileName, album, directory)
+                call.resolve(JSObject().put("uri", saved.toString()))
+            } catch (e: IllegalArgumentException) {
+                // An option this cannot honour is the caller's mistake, not a failed save.
+                call.reject(e.message ?: "that is not somewhere a video can be saved", INVALID_SPEC)
+            } catch (e: SecurityException) {
+                call.reject(ErrorMapping.describe(e), PERMISSION_DENIED)
+            } catch (e: Exception) {
+                val message = ErrorMapping.describe(e)
+                val code = if (message.contains("no_space")) FailureCodes.NO_SPACE else FailureCodes.UNREADABLE_INPUT
+                call.reject(message, code)
+            }
+        }
+    }
+
     /** One sound, in the shape `SavedSoundResult` describes. `hasAudio` is the caller's to add. */
     private fun soundJson(sound: SoundLibrary.Sound): JSObject {
         val json = JSObject()
@@ -1015,6 +1077,7 @@ class VideoComposerPlugin : Plugin() {
         private const val TAG = "VideoComposer"
 
         const val MICROPHONE = "microphone"
+        const val STORAGE = "storage"
 
         private const val INVALID_SPEC = "invalid_spec"
         private const val JOB_NOT_FOUND = "job_not_found"

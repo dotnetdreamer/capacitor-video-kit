@@ -27,6 +27,16 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- `saveToGallery`, and only on the phones that need asking. From API 29 the save is a
+         MediaStore insert scoped to the one directory it names, which needs no permission at all;
+         below 29 there is no scoped insert and the public Movies directory is an ordinary file the
+         app has to be allowed to write. Capped rather than declared outright, or every modern
+         install of every host would carry a storage permission it never uses - and the store
+         listing would say so. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application>
         <service
             android:name="net.dotnetdreamer.videokit.videocomposer.RenderService"

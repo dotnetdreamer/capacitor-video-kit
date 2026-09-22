@@ -237,9 +237,19 @@ export class VeFilterSheet {
 
             {filterPreset(filterId).id !== 'none' ? (
               <div class="fs__strength" key="strength">
-                <span class="fs__strength-label" aria-hidden="true">
-                  Intensity
-                </span>
+                {/*
+                  Not `aria-hidden`, though it reads like it should be: the slider beside it carries
+                  `aria-label="Filter strength"`, and hiding the word was on the reasoning that a
+                  screen reader hears the name from the control itself.
+
+                  It does not. On a current Chromium the slider reaches Android as an
+                  `android.widget.SeekBar` marked `important-for-accessibility=false` and carrying
+                  no name at all, so with this hidden the whole row - the only control for how
+                  strong the filter is - was announced as nothing whatsoever. A visible word that is
+                  also readable is the cheap half of that fix, and the half that does not depend on
+                  which WebView the app happens to be running on.
+                */}
+                <span class="fs__strength-label">Intensity</span>
                 {/*
                   No pin: the readout on the right already shows the number, and two of them chased
                   each other across the row while the knob moved.
