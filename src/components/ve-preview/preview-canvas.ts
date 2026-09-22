@@ -1,5 +1,6 @@
-import { cropStageBox, orWhole } from '../../state/clip-framing';
+import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
+import { pictureDest } from '../../video-composer/web/geometry';
 import { Painter, WHOLE_FRAME, type LayerDraw } from '../../video-composer/web/painter';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorStore } from '../../state/editor-store';
@@ -192,7 +193,7 @@ export class PreviewCanvas {
         missing = true;
         continue;
       }
-      draws.push(layerDraw(layer, video, cropping === layer.clipId ? this.store.frameAspect.value : null));
+      draws.push(layerDraw(layer, video, this.store.frameAspect.value, cropping === layer.clipId));
     }
 
     // Nothing to draw, over a post that should be showing something: KEEP what is on the canvas.
@@ -258,8 +259,8 @@ export class PreviewCanvas {
  * `z`, so the extras come out in their own order with nothing more to do.
  */
 export function orderedLayers(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer[] {
-  const base = layers.filter((layer) => layer.trackId === null);
-  return [...base, ...layers.filter((layer) => layer.trackId !== null)];
+  const base = layers.filter(layer => layer.trackId === null);
+  return [...base, ...layers.filter(layer => layer.trackId !== null)];
 }
 
 /**
@@ -278,15 +279,23 @@ export function orderedLayers(layers: readonly PreviewVideoLayer[]): PreviewVide
  * The angle comes off the rectangle either way and the painter turns the layer about that
  * rectangle's centre, so the two agree there as well.
  *
- * `cropFrameAspect` is set for the ONE segment the crop sheet is open on, and it is the exception
- * to everything above: that segment is drawn as the crop TOOL needs it rather than as the post
- * will have it - all of the source, no crop applied, on a stage that does not move while the crop
+ * An extra layer's destination is its rectangle NARROWED to the shape its picture actually comes
+ * out at - see [pictureDest]. The painter blacks a layer's own frame before drawing into it, which
+ * is right for the base track, whose bars are the post's own background with nothing underneath
+ * them, and wrong for every layer above it, where the same bars are opaque black over somebody
+ * else's video. A destination that is already the picture's shape has no bars in it to be the wrong
+ * colour, and the picture lands in exactly the same place either way, because `contain` centres it
+ * in the rectangle. A `cover` layer keeps its rectangle whole: it fills it by definition.
+ *
+ * `cropping` is set for the ONE segment the crop sheet is open on, and it is the exception to
+ * everything above: that segment is drawn as the crop TOOL needs it rather than as the post will
+ * have it - all of the source, no crop applied, on a stage that does not move while the crop
  * changes. See [cropStageBox]. Without it the tool shows the finished picture, which re-fits itself
  * on every frame of an edge drag, so the edge slides out from under the finger and the window
- * appears to do something else entirely. It is null for every other layer and whenever the sheet is
- * shut, and then the preview is exactly what the render draws.
+ * appears to do something else entirely. It is false for every other layer and whenever the sheet
+ * is shut, and then the preview is exactly what the render draws.
  */
-export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, cropFrameAspect: number | null = null): LayerDraw {
+export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, frameAspect: number = DEFAULT_FRAME_ASPECT, cropping = false): LayerDraw {
   const rotationDeg = layer.rect?.rotationDeg ?? 0;
   const common = {
     source: video,
@@ -295,8 +304,8 @@ export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, cro
     opacity: layer.opacity,
     rotationDeg,
   };
-  if (cropFrameAspect !== null && video.videoWidth > 0 && video.videoHeight > 0) {
-    const stage = cropStageBox(video.videoWidth / video.videoHeight, orWhole(layer.rect), cropFrameAspect);
+  if (cropping && video.videoWidth > 0 && video.videoHeight > 0) {
+    const stage = cropStageBox(video.videoWidth / video.videoHeight, orWhole(layer.rect), frameAspect);
     // `contain` into a box that already IS the source's shape draws all of it, exactly, with no
     // bars - so the window the sheet draws over this is a plain sub-rectangle of it.
     return { ...common, framing: { fit: 'contain' }, dest: stage };
@@ -308,9 +317,10 @@ export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, cro
       dest: WHOLE_FRAME,
     };
   }
+  const framing = { fit: layer.fit, crop: layer.crop ?? undefined };
   return {
     ...common,
-    framing: { fit: layer.fit, crop: layer.crop ?? undefined },
-    dest: layer.rect ?? WHOLE_FRAME,
+    framing,
+    dest: pictureDest(layer.rect ?? WHOLE_FRAME, framing, frameAspect, video.videoWidth, video.videoHeight),
   };
 }

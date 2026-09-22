@@ -31,12 +31,8 @@ describe('the preview compositor', () => {
   it('draws the base track first, whatever z a layer above it claims', () => {
     // The render draws the base and then the planned tracks, and both native engines do the same:
     // the base is the bottom of the stack and a layer cannot sort under it.
-    const order = orderedLayers([
-      layer({ trackId: 'under', clipId: 'a', z: -5 }),
-      layer({ trackId: null, clipId: 'base', z: 0 }),
-      layer({ trackId: 'over', clipId: 'b', z: 3 }),
-    ]);
-    expect(order.map((one) => one.clipId)).toEqual(['base', 'a', 'b']);
+    const order = orderedLayers([layer({ trackId: 'under', clipId: 'a', z: -5 }), layer({ trackId: null, clipId: 'base', z: 0 }), layer({ trackId: 'over', clipId: 'b', z: 3 })]);
+    expect(order.map(one => one.clipId)).toEqual(['base', 'a', 'b']);
   });
 
   it("keeps the base track's rectangle in its FRAMING, drawn into the whole frame", () => {
@@ -50,15 +46,41 @@ describe('the preview compositor', () => {
   });
 
   it("makes an extra layer's rectangle its DESTINATION, as the plan does", () => {
-    const draw = layerDraw(
-      layer({ trackId: 'pip', rect: { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, crop: { x: 0, y: 0, w: 0.5, h: 1 }, opacity: 0.5 }),
-      source,
-    );
-    expect(draw.dest).toEqual({ x: 0.5, y: 0.5, w: 0.5, h: 0.5 });
+    const draw = layerDraw(layer({ trackId: 'pip', rect: { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, crop: { x: 0, y: 0, w: 0.5, h: 1 }, opacity: 0.5 }), source);
+    // NARROWED to the shape the picture comes out at, not the rectangle itself. A 1920x1080 source
+    // cropped to its left half is a 960x1080 picture; contained in a rectangle half the frame each
+    // way on a 9:16 post, width is the tight axis, so the rectangle keeps its width and loses the
+    // height it was only ever going to fill with black. The picture lands in the same place either
+    // way - this is the bars going, not the video moving.
+    expect(draw.dest.x).toBeCloseTo(0.5, 6);
+    expect(draw.dest.w).toBeCloseTo(0.5, 6);
+    expect(draw.dest.h).toBeCloseTo(0.31640625, 6);
+    // Still centred in the rectangle it was given, which is what `contain` has always done.
+    expect(draw.dest.y + draw.dest.h / 2).toBeCloseTo(0.75, 6);
     // The rectangle is GONE from the framing: left on, it would place the picture inside the layer
     // a second time - the same thing `planTrack` takes it off the clip for.
     expect(draw.framing).toEqual({ fit: 'contain', crop: { x: 0, y: 0, w: 0.5, h: 1 } });
     expect(draw.opacity).toBe(0.5);
+  });
+
+  it('leaves a cover layer its whole rectangle, which it fills', () => {
+    // Nothing to narrow: `cover` reaches every edge of the rectangle by definition and what hangs
+    // over is clipped, so the layer has no bars to black out in the first place.
+    const rect = { x: 0.1, y: 0.2, w: 0.6, h: 0.3 };
+    const draw = layerDraw(layer({ trackId: 'pip', rect, fit: 'cover' }), source);
+    expect(draw.dest).toEqual(rect);
+  });
+
+  it('gives a contain layer a destination its picture fills exactly, so its bars cannot cover the base', () => {
+    // The painter blacks a layer's own frame before drawing into it. On the base that black IS the
+    // post's background; on a layer it is opaque black over whatever is underneath, which is the
+    // black box that used to appear around a picture-in-picture. A destination that is already the
+    // picture's shape has no bar left in it to be the wrong colour - so what this checks is that
+    // the two shapes are one shape.
+    const frameAspect = 9 / 16;
+    const draw = layerDraw(layer({ trackId: 'pip', rect: { x: 0, y: 0, w: 1, h: 1 } }), source, frameAspect);
+    const destAspect = (draw.dest.w * frameAspect) / draw.dest.h;
+    expect(destAspect).toBeCloseTo(source.videoWidth / source.videoHeight, 6);
   });
 
   it('carries the angle off the rectangle for either kind of layer', () => {

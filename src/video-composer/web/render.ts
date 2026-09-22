@@ -5,6 +5,7 @@ import type { ComposeFailureCode, ComposeRect, ComposeSpec } from '../definition
 import { mixdown } from './audio';
 import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
+import { pictureDest } from './geometry';
 import { decodeImage, FrameReader, probeMedia } from './media';
 import { Painter, WHOLE_FRAME, type LayerDraw } from './painter';
 import { buildPlan, clipIndexAt, sourceTimeUs, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
@@ -121,14 +122,7 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
  * One pass down the output timeline. Returns the poster, cut from the frame the spec asked for
  * rather than encoded a second time.
  */
-async function drawEveryFrame(
-  plan: RenderPlan,
-  painter: Painter,
-  sink: FrameSink,
-  layers: LayerReaders,
-  overlays: OverlayBitmaps,
-  options: RenderOptions,
-): Promise<Blob | null> {
+async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSink, layers: LayerReaders, overlays: OverlayBitmaps, options: RenderOptions): Promise<Blob | null> {
   const fps = plan.output.fps;
   const frameUs = 1_000_000 / fps;
   // CEIL, with the last frame shortened below - so the video ends exactly where the plan says and
@@ -170,7 +164,20 @@ async function drawEveryFrame(
       const clip = track.clips[visible];
       const placement = track.placements[visible];
       if (!clip || !placement) continue;
-      const draw = await layerDraw(layers, track.id, clip, atUs - placement.startUs, frameSeconds, placement.rect, track.opacity, placement.rect.rotationDeg ?? 0);
+      // The frame's shape goes with it, because an extra layer's destination narrows to the shape
+      // its picture comes out at rather than staying its whole rectangle: bars inside a layer are
+      // opaque black over the picture beneath it. See [pictureDest].
+      const draw = await layerDraw(
+        layers,
+        track.id,
+        clip,
+        atUs - placement.startUs,
+        frameSeconds,
+        placement.rect,
+        track.opacity,
+        placement.rect.rotationDeg ?? 0,
+        plan.output.width / plan.output.height,
+      );
       if (draw) draws.push(draw);
     }
 
@@ -225,19 +232,30 @@ async function layerDraw(
   dest: ComposeRect,
   opacity: number,
   rotationDeg: number,
+  /**
+   * The output's width / height, for an EXTRA layer. A layer's destination is blacked before its
+   * picture goes into it, so a destination wider than the picture is a pair of opaque bars laid
+   * over whatever is underneath - which on the base track is the post's own background and on a
+   * layer is somebody else's video. Narrowing the destination to the picture's own shape leaves no
+   * bar to be the wrong colour; see [pictureDest].
+   *
+   * Null for the base track, which is drawn into the whole frame and whose bars ARE the background.
+   */
+  extraFrameAspect: number | null = null,
 ): Promise<LayerDraw | null> {
   const reader = await layers.reader(layerId, clip.clip.uri, clip.clip.key);
   await reader.seek(sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000, frameSeconds);
   if (reader.width <= 0 || reader.height <= 0) return null;
+  // An extra layer's `rect` became its destination when the plan was built and was taken off the
+  // clip, so what is left here is the crop and the fit - which is the whole of the difference
+  // between a clip on the base track and one on a layer.
+  const framing = { fit: clip.clip.fit, crop: clip.clip.crop, rect: clip.clip.rect };
   return {
     source: reader.video,
     sourceWidth: reader.width,
     sourceHeight: reader.height,
-    // An extra layer's `rect` became its destination when the plan was built and was taken off the
-    // clip, so what is left here is the crop and the fit - which is the whole of the difference
-    // between a clip on the base track and one on a layer.
-    framing: { fit: clip.clip.fit, crop: clip.clip.crop, rect: clip.clip.rect },
-    dest,
+    framing,
+    dest: extraFrameAspect === null ? dest : pictureDest(dest, framing, extraFrameAspect, reader.width, reader.height),
     opacity,
     rotationDeg,
   };

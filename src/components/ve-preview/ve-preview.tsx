@@ -9,17 +9,7 @@ import { cropStageBox, cropWindowBox, orWhole, type FrameBox } from '../../state
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
-import {
-  NO_GUIDES,
-  OverlayGestures,
-  chromeBounds,
-  handleSpot,
-  layerBox,
-  layerTransform,
-  type ChromeBounds,
-  type SelectionHandle,
-  type SnapGuides,
-} from './overlay-gestures';
+import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPlayer } from './preview-player';
 
@@ -114,18 +104,12 @@ function sameLayerViews(a: readonly ExtraLayerView[], b: readonly ExtraLayerView
 /** Whether two layers would be DRAWN the same. `sourceMs` is left out on purpose: it moves with the
     playhead 30 times a second, and only the elements playing the layers care where it has got to. */
 function sameFraming(a: PreviewVideoLayer | null, b: PreviewVideoLayer | null): boolean {
-  return (
-    a?.clipId === b?.clipId &&
-    a?.crop === b?.crop &&
-    a?.rect === b?.rect &&
-    a?.fit === b?.fit &&
-    a?.opacity === b?.opacity
-  );
+  return a?.clipId === b?.clipId && a?.crop === b?.crop && a?.rect === b?.rect && a?.fit === b?.fit && a?.opacity === b?.opacity;
 }
 
 /** The base track's layer: the one the preview has drawn all along. */
 function baseLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | null {
-  return layers.find((layer) => layer.trackId === null) ?? null;
+  return layers.find(layer => layer.trackId === null) ?? null;
 }
 
 /**
@@ -291,11 +275,7 @@ export class VePreview implements EditorPlayer {
         recording: this.ctx.store.recordingFromMs.value !== null,
       };
     },
-    (a, b) =>
-      a.originalMuted === b.originalMuted &&
-      a.music === b.music &&
-      a.voiceovers === b.voiceovers &&
-      a.recording === b.recording,
+    (a, b) => a.originalMuted === b.originalMuted && a.music === b.music && a.voiceovers === b.voiceovers && a.recording === b.recording,
   );
 
   /**
@@ -351,7 +331,7 @@ export class VePreview implements EditorPlayer {
   private readonly placeholder = computed<PlaceholderView | null>(() => {
     const edit = this.ctx.store.textEdit.value;
     if (!edit) return null;
-    const overlay = this.overlays.value.find((o) => o.id === edit.id);
+    const overlay = this.overlays.value.find(o => o.id === edit.id);
     if (overlay?.kind !== 'text' || overlay.text.trim()) return null;
     return {
       left: overlay.cx * 100,
@@ -426,8 +406,7 @@ export class VePreview implements EditorPlayer {
     // ANY layer under the playhead, not the base and the front-most one. Every layer is composited,
     // so a segment on a middle track is on screen; asking only the front one would ghost the box
     // around a video the customer can plainly see, and take its handles away with it.
-    const onScreen =
-      this.shownBase.value?.clipId === clip.id || this.shownExtras.value.some((layer) => layer.clipId === clip.id);
+    const onScreen = this.shownBase.value?.clipId === clip.id || this.shownExtras.value.some(layer => layer.clipId === clip.id);
     const stage = this.stageSize.value;
     // The box in the frame's own pixels, which is what a handle's offset is measured in.
     const box = { widthFrac: rect.w, aspect: (rect.w / rect.h) * store.frameAspect.value };
@@ -492,14 +471,35 @@ export class VePreview implements EditorPlayer {
    */
   private readonly readExtraAspect = (event: Event): void => {
     const video = event.target as HTMLVideoElement;
-    if (!(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
     for (const [trackId, element] of this.extraEls) {
       if (element === video) {
-        this.setExtraAspect(trackId, video.videoWidth / video.videoHeight);
+        this.readAspectOf(trackId, video);
         return;
       }
     }
   };
+
+  /**
+   * One layer's shape taken off its element NOW, rather than waiting to be told.
+   *
+   * `loadedmetadata` fires once per load and never again for anybody who arrives late, and an extra
+   * layer's element is written by a RENDER - so by the time `attachExtras` runs in
+   * `componentDidRender` and puts the listener on, the element it is listening to has usually
+   * loaded already and had its one event. Nothing fires after that, the track never gets an entry
+   * in [extraAspects], and `extraAspectOf` goes on answering 0 for the life of the layer.
+   *
+   * Zero is not a harmless "not yet" - it is what the crop tool is gated on. [cropWindow] returns
+   * null for it, so no window is drawn over the picture; the crop sheet's `ready` is false, so
+   * every ratio chip is disabled; and `presetFor` answers null. The tool opens on a layer and does
+   * nothing whatsoever, which is exactly what it did.
+   *
+   * Harmless while the metadata genuinely has not landed: an element with no picture yet reports 0
+   * and is left to the event.
+   */
+  private readAspectOf(trackId: string, video: HTMLVideoElement): void {
+    if (!(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
+    this.setExtraAspect(trackId, video.videoWidth / video.videoHeight);
+  }
 
   private setExtraAspect(trackId: string, aspect: number): void {
     if (this.extraAspects.value.get(trackId) === aspect) return;
@@ -520,19 +520,14 @@ export class VePreview implements EditorPlayer {
    * depends on, so the playhead moving 30 times a second does not rebuild a box that has not changed
    * - and a crop gesture, which changes one of them on every frame, does.
    */
-  private readonly shownBase = computedWith<PreviewVideoLayer | null>(
-    () => baseLayerOf(this.ctx.store.previewLayers.value),
-    sameFraming,
-  );
+  private readonly shownBase = computedWith<PreviewVideoLayer | null>(() => baseLayerOf(this.ctx.store.previewLayers.value), sameFraming);
   /**
    * Every layer above the base one under the playhead, bottom to top - and there is no cap on how
    * many that is. Each gets an element of its own, which costs a decoder each; a post that stacks
    * more layers than the device can decode is a post the customer built, and showing them all of it
    * is the only honest thing to do with it.
    */
-  private readonly shownExtras = computed<readonly PreviewVideoLayer[]>(() =>
-    this.ctx.store.previewLayers.value.filter((layer) => layer.trackId !== null),
-  );
+  private readonly shownExtras = computed<readonly PreviewVideoLayer[]>(() => this.ctx.store.previewLayers.value.filter(layer => layer.trackId !== null));
 
   /**
    * Every extra track, bottom to top: which of its layers is under the playhead and where that
@@ -544,8 +539,8 @@ export class VePreview implements EditorPlayer {
    * boxes that have not moved.
    */
   private readonly extraViews = computedWith<readonly ExtraLayerView[]>(() => {
-    const shown = new Map(this.shownExtras.value.map((layer) => [layer.trackId as string, layer] as const));
-    return this.ctx.store.videoTrackRows.value.map((track) => {
+    const shown = new Map(this.shownExtras.value.map(layer => [layer.trackId as string, layer] as const));
+    return this.ctx.store.videoTrackRows.value.map(track => {
       const layer = shown.get(track.id) ?? null;
       return { trackId: track.id, layer };
     });
@@ -564,7 +559,7 @@ export class VePreview implements EditorPlayer {
       const target = store.cropClip.value;
       if (!target) return null;
       // The shape of the source being cropped, from whichever element is showing that segment.
-      const onExtra = this.shownExtras.value.find((layer) => layer.clipId === target.id)?.trackId ?? null;
+      const onExtra = this.shownExtras.value.find(layer => layer.clipId === target.id)?.trackId ?? null;
       const aspect = onExtra ? this.extraAspectOf(onExtra) : this.baseAspect.value;
       if (!(aspect > 0)) return null;
       // Over the STAGE, which is where the whole source is drawn while the sheet is open, and not
@@ -635,6 +630,10 @@ export class VePreview implements EditorPlayer {
     // `resize` covers the next clip being a different shape; both fire once per load, not per frame.
     video.addEventListener('loadedmetadata', this.readBaseAspect);
     video.addEventListener('resize', this.readBaseAspect);
+    // The base element is written before it has a source, so its event is still to come - but this
+    // costs a comparison and closes the same hole `attachExtras` had, for a remount onto an element
+    // that is already loaded.
+    this.readBaseAspect();
 
     const store = this.ctx.store;
     this.canvas = new PreviewCanvas(store, canvas);
@@ -645,7 +644,7 @@ export class VePreview implements EditorPlayer {
       voice,
       // The store's list and not [shownExtras], which holds its value while only `sourceMs` has
       // moved: where the layer has got to in its file is the one thing the element needs.
-      extraLayers: () => store.previewLayers.value.filter((layer) => layer.trackId !== null),
+      extraLayers: () => store.previewLayers.value.filter(layer => layer.trackId !== null),
     });
     store.attachPlayer(this);
     this.player.start();
@@ -696,7 +695,7 @@ export class VePreview implements EditorPlayer {
     this.disposers.push(
       deferredEffect(
         () => store.playing.value,
-        (playing) => this.canvas?.setPlaying(playing),
+        playing => this.canvas?.setPlaying(playing),
       ),
     );
 
@@ -718,12 +717,10 @@ export class VePreview implements EditorPlayer {
       deferredEffect(
         () => {
           const target = store.cropClip.value;
-          const onExtra = target
-            ? this.shownExtras.value.find((layer) => layer.clipId === target.id)?.trackId ?? null
-            : null;
+          const onExtra = target ? (this.shownExtras.value.find(layer => layer.clipId === target.id)?.trackId ?? null) : null;
           return onExtra ? this.extraAspectOf(onExtra) : this.baseAspect.value;
         },
-        (aspect) => {
+        aspect => {
           store.sourceAspect.value = aspect;
         },
       ),
@@ -758,6 +755,9 @@ export class VePreview implements EditorPlayer {
       this.attachedExtras.set(trackId, video);
       video.addEventListener('loadedmetadata', this.readExtraAspect);
       video.addEventListener('resize', this.readExtraAspect);
+      // And read it straight away, because the event this just subscribed to has very likely
+      // already been and gone: see [readAspectOf].
+      this.readAspectOf(trackId, video);
       this.player?.attachFollower(trackId, { video });
       this.canvas?.attach(trackId, video);
     }
@@ -876,7 +876,7 @@ export class VePreview implements EditorPlayer {
           */}
           <div
             key="stage"
-            class={{ pv__stage: true, 'pv__stage--full': store.fullscreen.value }}
+            class={{ 'pv__stage': true, 'pv__stage--full': store.fullscreen.value }}
             /*
               The frame's shape, as the two numbers its own rules are written in. A custom property
               rather than an `aspect-ratio` set from here, because the stage's WIDTH is derived from
@@ -912,17 +912,9 @@ export class VePreview implements EditorPlayer {
                 layer. They keep a real box at the corner of the frame, at zero opacity and taking
                 no touch, which is enough for every platform to go on presenting frames into them.
               */}
-              <video
-                key="base-video"
-                ref={this.keepVideo}
-                class="pv__source"
-                playsinline
-                webkit-playsinline=""
-                preload="auto"
-                aria-hidden="true"
-              ></video>
+              <video key="base-video" ref={this.keepVideo} class="pv__source" playsinline webkit-playsinline="" preload="auto" aria-hidden="true"></video>
 
-              {extras.map((view) => (
+              {extras.map(view => (
                 <video
                   key={`extra-video-${view.trackId}`}
                   ref={this.refsFor(view.trackId)}
@@ -934,16 +926,9 @@ export class VePreview implements EditorPlayer {
                 ></video>
               ))}
 
-              {this.layers.value.map((layer) =>
+              {this.layers.value.map(layer =>
                 layer.effect ? (
-                  <img
-                    key={layer.id}
-                    class="pv__effect"
-                    alt=""
-                    draggable={false}
-                    src={layer.png}
-                    style={{ opacity: String(layer.opacity) }}
-                  />
+                  <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} style={{ opacity: String(layer.opacity) }} />
                 ) : (
                   <img
                     key={layer.id}
@@ -952,12 +937,12 @@ export class VePreview implements EditorPlayer {
                     draggable={false}
                     src={layer.png}
                     style={{
-                      left: `${layer.left}%`,
-                      top: `${layer.top}%`,
-                      width: `${layer.width}%`,
+                      'left': `${layer.left}%`,
+                      'top': `${layer.top}%`,
+                      'width': `${layer.width}%`,
                       'aspect-ratio': layer.aspect,
-                      transform: layer.transform,
-                      opacity: String(layer.opacity),
+                      'transform': layer.transform,
+                      'opacity': String(layer.opacity),
                     }}
                   />
                 ),
@@ -968,10 +953,10 @@ export class VePreview implements EditorPlayer {
                   key="placeholder"
                   class="pv__placeholder"
                   style={{
-                    left: `${ph.left}%`,
-                    top: `${ph.top}%`,
+                    'left': `${ph.left}%`,
+                    'top': `${ph.top}%`,
                     'font-size': ph.fontSize,
-                    transform: ph.transform,
+                    'transform': ph.transform,
                   }}
                 >
                   Enter text
@@ -1018,11 +1003,7 @@ export class VePreview implements EditorPlayer {
               )}
 
               {this.dragging.value && (
-                <div
-                  key="trash"
-                  class={{ pv__trash: true, 'pv__trash--hot': this.trashHot.value }}
-                  aria-hidden="true"
-                >
+                <div key="trash" class={{ 'pv__trash': true, 'pv__trash--hot': this.trashHot.value }} aria-hidden="true">
                   <ve-icon name="trash-outline"></ve-icon>
                 </div>
               )}
@@ -1037,13 +1018,13 @@ export class VePreview implements EditorPlayer {
             {selection && (
               <div
                 key="select"
-                class={{ pv__select: true, 'pv__select--ghost': selection.ghost }}
+                class={{ 'pv__select': true, 'pv__select--ghost': selection.ghost }}
                 style={{
-                  left: `${selection.left}%`,
-                  top: `${selection.top}%`,
-                  width: `${selection.width}%`,
+                  'left': `${selection.left}%`,
+                  'top': `${selection.top}%`,
+                  'width': `${selection.width}%`,
                   'aspect-ratio': selection.aspect,
-                  transform: selection.transform,
+                  'transform': selection.transform,
                 }}
               >
                 {/*
@@ -1096,19 +1077,10 @@ export class VePreview implements EditorPlayer {
                       style={{ '--pv-shift': selection.shiftEdit }}
                       onClick={this.editLayer}
                     >
-                      <ve-icon
-                        name={selection.isText ? 'pencil' : 'copy-outline'}
-                        style={{ transform: selection.iconTransform }}
-                      ></ve-icon>
+                      <ve-icon name={selection.isText ? 'pencil' : 'copy-outline'} style={{ transform: selection.iconTransform }}></ve-icon>
                     </button>
                   ) : null,
-                  <div
-                    key="handle-transform"
-                    class="pv__handle pv__handle--br"
-                    data-handle="transform"
-                    aria-hidden="true"
-                    style={{ '--pv-shift': selection.shiftTransform }}
-                  >
+                  <div key="handle-transform" class="pv__handle pv__handle--br" data-handle="transform" aria-hidden="true" style={{ '--pv-shift': selection.shiftTransform }}>
                     <ve-icon name="resize-outline" style={{ transform: selection.iconTransform }}></ve-icon>
                   </div>,
                 ]}
@@ -1138,4 +1110,3 @@ function boxStyle(box: BoxView): { [key: string]: string } {
     height: `${box.height}%`,
   };
 }
-

@@ -35,12 +35,7 @@ export interface Framing {
  * overflow can go is out of the source window - so COVER narrows the crop to the destination's
  * shape instead of scaling past it. The picture that reaches the screen is the same either way.
  */
-export function sourceWindow(
-  clip: Framing,
-  frame: Frame,
-  inputWidth: number,
-  inputHeight: number,
-): ComposeRect {
+export function sourceWindow(clip: Framing, frame: Frame, inputWidth: number, inputHeight: number): ComposeRect {
   const crop = clip.crop ?? FULL_FRAME;
   const rect = clip.rect ?? FULL_FRAME;
 
@@ -137,4 +132,59 @@ export function drawRects(
  */
 export function sampleIsInside(u: number, v: number, kept: ComposeRect = FULL_FRAME): boolean {
   return u >= kept.x && u <= kept.x + kept.w && v >= kept.y && v <= kept.y + kept.h;
+}
+
+/**
+ * Where a LAYER's picture actually lands inside the rectangle it was given, in fractions of the
+ * output frame - the rectangle itself when the picture fills it, and the picture's own shape
+ * centred in it when it does not.
+ *
+ * This is what stops an extra layer from carrying black bars over the picture beneath it. A layer
+ * is drawn into its own destination and the destination is blacked before the picture goes on
+ * (see `Painter.paintLayers2d`, and the shader's alpha outside `u_kept`), which is right for the
+ * base track - its bars ARE the post's background, and there is nothing under them - and wrong for
+ * every layer above it, where the bars are opaque black over somebody else's video.
+ *
+ * The painter says it blacks them "exactly as they do natively". That is not true, and it is worth
+ * writing down because it is the reason this function exists rather than a transparent bar. Media3
+ * gives a layer a `Presentation` the size of its rectangle and letterboxes inside it, but the
+ * padding is TRANSPARENT: `BaseGlShaderProgram` clears through `GlUtil.clearFocusedBuffers`, which
+ * is `(0, 0, 0, 0)` - there is a `clearFocusedBuffersOpaque` for opaque black and Media3 does not
+ * call it here - and `LayerCompositor` then blends that texture over the base. So a letterboxed
+ * layer has ALWAYS shown the base through its bars on Android. The web was the odd one out.
+ *
+ * Rather than give the web a transparent bar of its own, take the bars away: `contain` into a
+ * destination that already IS the picture's shape draws all of it, exactly, edge to edge, and there
+ * is no bar left to be any colour. The picture on screen is identical - `contain` centres it in the
+ * rectangle either way - and what changes is only how much of the output the layer claims as its
+ * own. That lands the web on the same picture the native engines were already producing.
+ *
+ * `cover` is handed back unchanged: it fills its rectangle by definition and what hangs over is
+ * clipped, so a cover layer has no bars to begin with.
+ *
+ * `frameAspect` is the output's width / height. Everything here is a ratio, so the frame needs no
+ * pixel count - a frame of `frameAspect` by 1 gives the same answer as one of 720 by 1280.
+ */
+export function pictureDest(dest: ComposeRect, clip: Framing, frameAspect: number, inputWidth: number, inputHeight: number): ComposeRect {
+  if (clip.fit === 'cover') return dest;
+  if (!(inputWidth > 0) || !(inputHeight > 0) || !(frameAspect > 0)) return dest;
+  const crop = clip.crop ?? FULL_FRAME;
+  // The CROPPED picture's shape, which is not the source's: a crop that keeps a tall slice of a
+  // landscape video makes a tall picture, and it is the picture that has to fit.
+  const picW = Math.max(1, crop.w * inputWidth);
+  const picH = Math.max(1, crop.h * inputHeight);
+  const aspect = picW / picH;
+  // The rectangle in frame units - width in units of the frame's height, so a ratio taken against
+  // the picture's is a ratio of two shapes and not of two different frames.
+  const boxW = dest.w * frameAspect;
+  const boxH = dest.h;
+  if (!(boxW > 0) || !(boxH > 0)) return dest;
+  const w = Math.min(boxW, boxH * aspect);
+  const h = w / aspect;
+  return {
+    x: dest.x + (boxW - w) / 2 / frameAspect,
+    y: dest.y + (boxH - h) / 2,
+    w: w / frameAspect,
+    h,
+  };
 }

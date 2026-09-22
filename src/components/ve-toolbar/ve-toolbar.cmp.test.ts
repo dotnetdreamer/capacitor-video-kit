@@ -132,7 +132,7 @@ function tiles(bar: HTMLElement): HTMLButtonElement[] {
 }
 
 function ids(bar: HTMLElement): string[] {
-  return tiles(bar).map((tile) => tile.dataset.tile!);
+  return tiles(bar).map(tile => tile.dataset.tile!);
 }
 
 function tile(bar: HTMLElement, id: string): HTMLButtonElement {
@@ -154,7 +154,7 @@ function press(on: Element, key: string): void {
 }
 
 async function frames(count: number): Promise<void> {
-  for (let i = 0; i < count; i += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
+  for (let i = 0; i < count; i += 1) await new Promise(resolve => requestAnimationFrame(resolve));
 }
 
 /** Polls a frame at a time, because a repaint is Stencil's to schedule and not ours to await. */
@@ -162,7 +162,7 @@ async function until(what: string, ready: () => boolean, ms = 2000): Promise<voi
   const deadline = performance.now() + ms;
   while (!ready()) {
     if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise(resolve => requestAnimationFrame(resolve));
   }
 }
 
@@ -208,20 +208,7 @@ describe('ve-toolbar', () => {
     const { store, bar } = await mount();
 
     expect(label(bar)).toBe('Editing tools');
-    expect(ids(bar)).toEqual([
-      'edit',
-      'crop',
-      'layout',
-      'sound',
-      'text',
-      'effects',
-      'overlay',
-      'stickers',
-      'filters',
-      'adjust',
-      'magic',
-      'captions',
-    ]);
+    expect(ids(bar)).toEqual(['edit', 'crop', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
     // Nothing to step back out to, so no chevron at all.
     expect(root(bar).querySelector('.tile--collapse')).toBe(null);
 
@@ -231,10 +218,12 @@ describe('ve-toolbar', () => {
     expect(root(bar).querySelector('.tile--collapse')!.getAttribute('aria-label')).toBe('Close clip tools');
 
     // A segment on the second video layer gets a shorter row: split, join, duplicate and reorder
-    // all rearrange the base track and have nothing to rearrange here.
+    // all rearrange the base track and have nothing to rearrange here. Fill/fit IS on it, though -
+    // a layer sits on another picture, so it is the segment most likely to want filling its
+    // rectangle, and for a while it was the one segment that could not be told to.
     store.select({ kind: 'clip', id: 'seg-c' });
     await until('the video layer row', () => label(bar) === 'Video layer tools');
-    expect(ids(bar)).toEqual(['layout', 'crop', 'speed', 'volume', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'speed', 'volume', 'start-here', 'replace', 'delete']);
     expect(tile(bar, 'delete').textContent).toContain('Remove');
 
     store.select({ kind: 'overlay', id: 'ov-text' });
@@ -345,7 +334,7 @@ describe('ve-toolbar', () => {
     try {
       for (let i = 0; i < 60; i += 1) {
         store.previewOverlay('ov-sticker', { cx: 0.4 + i * 0.001 });
-        await new Promise((resolve) => requestAnimationFrame(resolve));
+        await new Promise(resolve => requestAnimationFrame(resolve));
       }
       await frames(2);
       expect(bound.count).toBe(0);
@@ -392,7 +381,7 @@ describe('ve-toolbar', () => {
 
     sound.click();
     await until('the menu', () => menuItems(bar).length === 3);
-    expect(menuItems(bar).map((item) => item.textContent!.trim())).toEqual(['Add sound', 'Sound effect', 'Voiceover']);
+    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Add sound', 'Sound effect', 'Voiceover']);
     expect(tile(bar, 'sound').getAttribute('aria-expanded')).toBe('true');
     // A tap opened it, so the focus stays on the row: taking it would show a focus ring nobody
     // asked for, and the arrow keys are for the customer who did.

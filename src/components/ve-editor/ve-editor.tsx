@@ -11,6 +11,7 @@ import {
   type EditorCancelReason,
   type EditorInsets,
   type EditorSource,
+  type RenderFailureCode,
   type VideoEditorHost,
   type VideoEditorResult,
 } from '../../host/host.types';
@@ -655,7 +656,7 @@ export class VeEditor {
   }
 
   private async onRenderFailed(error: unknown): Promise<void> {
-    const code = error instanceof RenderFailedError ? error.code : 'unknown';
+    const code = renderFailureCode(error);
     const role = await this.confirm.ask(renderFailed(code));
     if (this.destroyed) return;
 
@@ -999,4 +1000,34 @@ function isTextEntry(el: HTMLElement | null): boolean {
  */
 function isPressable(el: HTMLElement | null): boolean {
   return !!el && (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button');
+}
+
+/** The three the editor has a sentence for; anything else is the blank apology. */
+const RENDER_FAILURE_CODES: readonly RenderFailureCode[] = ['no_space', 'unreadable_input', 'unknown'];
+
+/**
+ * The failure's own code, or `unknown` for anything that does not carry one.
+ *
+ * `instanceof` cannot be the only test, though [RenderFailedError] was written on the assumption
+ * that it would be ("the one test that survives a host wrapping the rejection"). It does not
+ * survive the bundling. The editor is loaded as its own lazy chunk and the HOST is bundled by the
+ * application, so the two hold separate copies of the class: the host throws its copy, this file
+ * tests against its own, and the answer is false for an error that is exactly what it says it is.
+ *
+ * So every failure a host reported arrived here as `unknown` and every one of them got the blank
+ * apology - which is precisely what three codes and three sentences exist to avoid. A host could
+ * name a full disk or an unreadable clip all it liked and the customer was told "your edited video
+ * could not be built" either way.
+ *
+ * The NAME survives the copy, and so does the code, so those are what is read; the code is checked
+ * against the union rather than trusted, because it arrives from outside this package. `instanceof`
+ * is kept first for the host that does share this bundle, where it is the cheaper answer.
+ */
+function renderFailureCode(error: unknown): RenderFailureCode {
+  if (error instanceof RenderFailedError) return error.code;
+  const thrown = error as { name?: unknown; code?: unknown } | null | undefined;
+  if (thrown?.name !== 'RenderFailedError') return 'unknown';
+  return RENDER_FAILURE_CODES.includes(thrown.code as RenderFailureCode)
+    ? (thrown.code as RenderFailureCode)
+    : 'unknown';
 }

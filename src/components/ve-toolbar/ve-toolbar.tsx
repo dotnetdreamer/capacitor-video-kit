@@ -304,11 +304,7 @@ export class VeToolbar {
     if (index < 0) return;
     event.preventDefault();
     const last = buttons.length - 1;
-    const next =
-      event.key === 'Home' ? 0
-      : event.key === 'End' ? last
-      : event.key === 'ArrowLeft' ? Math.max(0, index - 1)
-      : Math.min(last, index + 1);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? last : event.key === 'ArrowLeft' ? Math.max(0, index - 1) : Math.min(last, index + 1);
     buttons[next].focus();
     buttons[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
@@ -500,6 +496,18 @@ export class VeToolbar {
       tiles: [
         { id: 'layout', label: 'Layout', icon: 'grid-outline', run: () => store.openPanel('layout') },
         { id: 'crop', label: 'Crop', icon: 'crop-outline', run: () => store.openCrop() },
+        // Fill or fit, on the layer row as well as the base one. A layer whose rectangle is not its
+        // source's shape is drawn `contain` inside it, and until this tile existed there was no way
+        // to say otherwise about a layer: the base row had the toggle and this row did not, so the
+        // one segment somebody is most likely to want filling - the one sitting ON another picture -
+        // was the one segment that could not be told to. `toggleFit` reads and writes the SELECTED
+        // segment's own fit, which is this one.
+        {
+          id: 'fit',
+          label: this.fitContain.value ? 'Fill' : 'Fit',
+          icon: this.fitContain.value ? 'expand-outline' : 'scan-outline',
+          run: () => store.toggleFit(),
+        },
         { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') },
         {
           id: 'volume',
@@ -623,11 +631,7 @@ export class VeToolbar {
       { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.deleteSelectedOverlay() },
     );
 
-    const label =
-      kind === 'text' ? 'Text layer tools'
-      : kind === 'sticker' ? 'Sticker tools'
-      : kind === 'image' ? 'Overlay tools'
-      : 'Effect tools';
+    const label = kind === 'text' ? 'Text layer tools' : kind === 'sticker' ? 'Sticker tools' : kind === 'image' ? 'Overlay tools' : 'Effect tools';
     return { kind: 'layer', label, collapse: this.deselect(`Close ${label.toLowerCase()}`), tiles };
   }
 
@@ -756,13 +760,7 @@ export class VeToolbar {
             onKeyDown={this.onKeydown}
           >
             {row.collapse && (
-              <button
-                type="button"
-                key="collapse"
-                class="tile tile--collapse"
-                aria-label={row.collapse.ariaLabel}
-                onClick={row.collapse.run}
-              >
+              <button type="button" key="collapse" class="tile tile--collapse" aria-label={row.collapse.ariaLabel} onClick={row.collapse.run}>
                 <ve-icon class="tile__icon" name="chevron-down"></ve-icon>
               </button>
             )}
@@ -814,13 +812,7 @@ export class VeToolbar {
                 <ve-icon name="musical-note-outline"></ve-icon>
                 <span>Add sound</span>
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                class="tb__menu-item"
-                aria-label="Sound effect, coming soon"
-                onClick={this.soundEffect}
-              >
+              <button type="button" role="menuitem" class="tb__menu-item" aria-label="Sound effect, coming soon" onClick={this.soundEffect}>
                 <ve-icon name="musical-notes-outline"></ve-icon>
                 <span>Sound effect</span>
               </button>
