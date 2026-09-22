@@ -19,6 +19,7 @@ import {
 import { overlayEndMs } from './edit-ops';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
+import { compileTransition, transitionSpans } from './transitions';
 
 export interface ComposeSpecIds {
   jobId: string;
@@ -70,7 +71,7 @@ export async function toComposeSpec(
 ): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
-  const clips: ComposeClip[] = manifest.clips.map((edit) => wireClip(edit, manifest.fit, uriByKey));
+  const clips: ComposeClip[] = baseClips(manifest, uriByKey);
 
   // Resolved here beside the base clips rather than further down, so a layer whose footage the host
   // has no file for fails before the phone has spent a second drawing bitmaps for a render that was
@@ -175,6 +176,45 @@ export async function toComposeSpec(
   if (totalMs > baseMs) spec.durationMs = totalMs;
 
   return spec;
+}
+
+/**
+ * The base track on the wire, with every transition LOWERED so no engine has to do its arithmetic.
+ *
+ * A transition overlaps two clips, and neither native sequence type can hold two items at once. So
+ * the outgoing clip is sent stopping where the incoming one starts, and the part of it that plays
+ * under the transition travels on the incoming clip as [ComposeTransition.from] - the same clip,
+ * trimmed to its last moments. The base track stays the flat sequence every engine already builds,
+ * the tails go on one extra sequence, and an engine that has never heard of transitions still
+ * renders a video of the right length with a cut where each one was.
+ *
+ * The overlap is carried in whole milliseconds of the OUTGOING clip's source, the unit the wire
+ * trims in, and [transitionSpan] measured it the same way - so the editor's timeline and the render
+ * agree about where every clip starts.
+ */
+function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>): ComposeClip[] {
+  const spans = transitionSpans(manifest.clips);
+  const wired = manifest.clips.map((edit) => wireClip(edit, manifest.fit, uriByKey));
+  return wired.map((clip, i) => {
+    const giving = spans[i + 1]?.sourceMs ?? 0;
+    const lowered: ComposeClip = giving > 0 ? { ...clip, outMs: clip.outMs - giving } : clip;
+    const span = spans[i];
+    const kind = manifest.clips[i].transitionIn?.kind;
+    const compiled = span.sourceMs > 0 && kind ? compileTransition(kind) : null;
+    if (!compiled) return lowered;
+    const outgoing = wired[i - 1];
+    lowered.transitionIn = {
+      ...structuredCloneOf(compiled),
+      // The outgoing clip whole - its sound, its speed, its framing - and only its last moments.
+      from: { ...outgoing, inMs: outgoing.outMs - span.sourceMs },
+    };
+    return lowered;
+  });
+}
+
+/** A plain copy of the cached (and frozen) compiled transition, so nothing downstream shares it. */
+function structuredCloneOf<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 /**

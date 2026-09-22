@@ -58,6 +58,7 @@ import {
 import { insertClip } from '../editor/edit-ops';
 import { EFFECT_CATEGORIES, EFFECT_PRESETS } from '../editor/effects';
 import { layoutPresets } from '../editor/layout-presets';
+import { DEFAULT_TRANSITION_MS, MAX_TRANSITION_MS, MIN_TRANSITION_MS, TRANSITIONS, TRANSITION_CATEGORIES } from '../editor/transitions';
 import { DEFAULT_TEXT_STYLE_ID, TEXT_STYLES, TEXT_STYLE_CATEGORIES } from '../data/text-styles';
 import { OP_NAMES, applyEditOps, type EditOp } from './ops';
 import { summariseManifest } from './summary';
@@ -202,6 +203,10 @@ export const OP_REFERENCE: Record<string, string> = {
   trimClip: 'clipId, inMs, outMs, sourceDurationMs - sets the part of the source this clip plays.',
   setClipSpeed: 'clipId, speed (0.25..4) - pitch is preserved.',
   setClipVolume: 'clipId, volume (0..1).',
+  setClipTransition:
+    'clipId, transition ({kind, durationMs?} or null) - how this base clip takes over from the one before it; ' +
+    'see the "transitions" section. The two clips overlap, so the post gets that much shorter.',
+  setAllTransitions: 'transition ({kind, durationMs?} or null) - the same transition on every boundary of the base track.',
   setClipMuted: 'clipId, muted - drops this clip’s sound whatever its volume says.',
   setClipFit: 'clipId, fit ("contain" | "cover" | null) - null falls back to the post’s own fit.',
   setClipCrop: 'clipId, crop ({x,y,w,h} in 0..1 of the source frame, or null for all of it).',
@@ -265,7 +270,7 @@ export const OP_REFERENCE: Record<string, string> = {
 /* The tools                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
 
-const CATALOG_SECTIONS = ['filters', 'effects', 'layouts', 'textStyles', 'output', 'ops', 'limits'] as const;
+const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'layouts', 'textStyles', 'output', 'ops', 'limits'] as const;
 type CatalogSection = (typeof CATALOG_SECTIONS)[number];
 
 /**
@@ -528,6 +533,15 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
         lines: `Full-frame effects (addEffect effectId):\n${byCategory(data)}`,
       };
     }
+    case 'transitions': {
+      const data = TRANSITIONS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
+      return {
+        data: { categories: TRANSITION_CATEGORIES, presets: data, durationMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS, default: DEFAULT_TRANSITION_MS } },
+        lines:
+          `Transitions between base clips (setClipTransition transition.kind), ${MIN_TRANSITION_MS}..${MAX_TRANSITION_MS}ms, ` +
+          `default ${DEFAULT_TRANSITION_MS}ms, and never more than half of either clip:\n${byCategory(data)}`,
+      };
+    }
     case 'layouts': {
       const data = layoutPresets().map((preset) => ({ id: preset.id, label: preset.label }));
       return {
@@ -580,6 +594,7 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
         minClipMs: MIN_CLIP_MS,
         minLayerMs: MIN_LAYER_MS,
         clipSpeed: { min: 0.25, max: 4 },
+        transitionMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS },
       };
       return {
         data,
@@ -588,7 +603,8 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
           `  manifest version ${MANIFEST_VERSION}\n` +
           `  at most ${MAX_LAYERS} layers, and ${MAX_VIDEO_TRACKS} video tracks with the base counted\n` +
           `  a post runs at most ${MAX_POST_MS}ms; a clip at least ${MIN_CLIP_MS}ms and a layer at least ${MIN_LAYER_MS}ms\n` +
-          '  clip speed is 0.25x to 4x, with pitch preserved',
+          '  clip speed is 0.25x to 4x, with pitch preserved\n' +
+          `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins`,
       };
     }
   }

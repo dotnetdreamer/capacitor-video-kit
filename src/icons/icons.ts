@@ -17,6 +17,7 @@
  */
 export type EditorIconName =
   | 'add'
+  | 'arrow-back'
   | 'arrow-down-circle-outline'
   | 'arrow-down-outline'
   | 'arrow-forward'
@@ -71,42 +72,37 @@ export type EditorIconName =
   | 'text-outline'
   | 'thermometer-outline'
   | 'time-outline'
+  | 'transition'
+  | 'transition-outline'
   | 'trash-outline'
   | 'volume-high'
   | 'volume-high-outline'
   | 'volume-mute';
 
 export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
-  'add':
-    '<path d="M256 112v288M400 256H112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  'add': '<path d="M256 112v288M400 256H112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  'arrow-back': '<path d="M244 400 100 256l144-144M120 256h292" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
   'arrow-down-circle-outline':
     '<path d="M176 262.62 256 342l80-79.38M256 330.97V170" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="M256 64C150 64 64 150 64 256s86 192 192 192 192-86 192-192S362 64 256 64Z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/>',
-  'arrow-down-outline':
-    '<path d="m112 268 144 144 144-144M256 392V100" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
-  'arrow-forward':
-    '<path d="m268 112 144 144-144 144M392 256H100" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
+  'arrow-down-outline': '<path d="m112 268 144 144 144-144M256 392V100" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
+  'arrow-forward': '<path d="m268 112 144 144-144 144M392 256H100" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
   'arrow-redo-outline':
     '<path d="M448 256 272 88v96C103.57 184 64 304.77 64 424c48.61-62.24 91.6-96 208-96v96Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="32px"/>',
   'arrow-undo-outline':
     '<path d="M240 424v-96c116.4 0 159.39 33.76 208 96 0-119.23-39.57-240-208-240V88L64 256Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="32px"/>',
   'arrow-up-circle-outline':
     '<path d="M176 249.38 256 170l80 79.38M256 181.03V342" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="M448 256c0-106-86-192-192-192S64 150 64 256s86 192 192 192 192-86 192-192Z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/>',
-  'arrow-up-outline':
-    '<path d="m112 244 144-144 144 144M256 120v292" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
+  'arrow-up-outline': '<path d="m112 244 144-144 144 144M256 120v292" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
   'ban-outline':
     '<circle cx="256" cy="256" r="208" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32"/><path fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32" d="m108.92 108.92 294.16 294.16"/>',
   'bookmark-outline':
     '<path d="M352 48H160a48 48 0 0 0-48 48v368l144-128 144 128V96a48 48 0 0 0-48-48" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'chatbox-ellipses-outline':
     '<path d="M408 64H104a56.16 56.16 0 0 0-56 56v192a56.16 56.16 0 0 0 56 56h40v80l93.72-78.14a8 8 0 0 1 5.13-1.86H408a56.16 56.16 0 0 0 56-56V120a56.16 56.16 0 0 0-56-56Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="32px"/><circle cx="160" cy="216" r="32"/><circle cx="256" cy="216" r="32"/><circle cx="352" cy="216" r="32"/>',
-  'checkmark':
-    '<path d="M416 128 192 384l-96-96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
-  'chevron-back':
-    '<path d="M328 112 184 256l144 144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
-  'chevron-down':
-    '<path d="m112 184 144 144 144-144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
-  'close':
-    '<path d="m289.94 256 95-95A24 24 0 0 0 351 127l-95 95-95-95a24 24 0 0 0-34 34l95 95-95 95a24 24 0 1 0 34 34l95-95 95 95a24 24 0 0 0 34-34Z"/>',
+  'checkmark': '<path d="M416 128 192 384l-96-96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  'chevron-back': '<path d="M328 112 184 256l144 144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
+  'chevron-down': '<path d="m112 184 144 144 144-144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
+  'close': '<path d="m289.94 256 95-95A24 24 0 0 0 351 127l-95 95-95-95a24 24 0 0 0-34 34l95 95-95 95a24 24 0 1 0 34 34l95-95 95 95a24 24 0 0 0 34-34Z"/>',
   'cloudy-outline':
     '<path d="M100.18 241.19a15.93 15.93 0 0 0 13.37-13.25C126.6 145.59 186.34 96 256 96c64.69 0 107.79 42.36 124.92 87a16.11 16.11 0 0 0 12.53 10.18C449.36 202.06 496 239.21 496 304c0 66-54 112-120 112H116c-55 0-100-27.44-100-88 0-54.43 43.89-80.81 84.18-86.81Z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="32px"/>',
   'color-fill-outline':
@@ -187,6 +183,18 @@ export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
     '<path d="M307.72 302.27a8 8 0 0 1-3.72-6.75V80a48 48 0 0 0-48-48h0a48 48 0 0 0-48 48v215.52a8 8 0 0 1-3.71 6.74 97.51 97.51 0 0 0-44.19 86.07A96 96 0 0 0 352 384a97.49 97.49 0 0 0-44.28-81.73ZM256 112v272" fill="none" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32px"/><circle cx="256" cy="384" r="48"/>',
   'time-outline':
     '<path d="M256 64C150 64 64 150 64 256s86 192 192 192 192-86 192-192S362 64 256 64Z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/><path d="M256 128v144h96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  /*
+   * The two transition glyphs are not Ionicons - it has no transition - and are drawn for this
+   * package in its grammar: the 512 box, round joins, the outline at a 32px stroke. Two triangles
+   * meeting at the centre, the bow tie every editor uses for a transition, one clip handing over to
+   * the next. The solid one is for the timeline's dot, where it is drawn a dozen pixels across and
+   * an outline that thin would be a smudge; it is filled from the host and stroked as well, so its
+   * corners come out as round as the outline's.
+   */
+  'transition':
+    '<path d="M88 128 256 256 88 384ZM424 128 256 256 424 384Z" stroke="currentColor" stroke-linejoin="round" stroke-width="48px"/>',
+  'transition-outline':
+    '<path d="M80 120 256 256 80 392ZM432 120 256 256 432 392Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'trash-outline':
     '<path d="m112 112 20 320c.95 18.49 14.4 32 32 32h184c17.67 0 30.87-13.51 32-32l20-320" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="M80 112h352" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32px"/><path d="M192 112V72h0a23.93 23.93 0 0 1 24-24h80a23.93 23.93 0 0 1 24 24h0v40M256 176v224M184 176l8 224M328 176l-8 224" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'volume-high':

@@ -307,7 +307,11 @@ export interface RenderRequest {
   sources: readonly EditorSource[];
   /** 0 to 1. Called on the host's own cadence; the editor throttles nothing. */
   onProgress(progress: number): void;
-  /** Aborts when the customer leaves the editor mid render. */
+  /**
+   * Aborts when the customer calls the export off from its screen, or the editor goes away mid
+   * render. The editor stops waiting the moment it aborts, so a host that settles afterwards - with
+   * the file or with a failure - is ignored either way.
+   */
   signal: AbortSignal;
 }
 

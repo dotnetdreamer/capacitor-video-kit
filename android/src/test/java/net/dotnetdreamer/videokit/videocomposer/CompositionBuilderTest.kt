@@ -1,7 +1,11 @@
 package net.dotnetdreamer.videokit.videocomposer
 
 import androidx.media3.common.MediaItem
+import androidx.media3.common.VideoCompositorSettings
+import androidx.media3.effect.Presentation
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.floor
 
@@ -178,6 +182,224 @@ class CompositionBuilderTest {
         // The base is composited exactly as it arrives, which for a spec with no layers at all is
         // the only thing there is.
         assertEquals(0f, settings.getOverlaySettings(1, 0L).rotationDegrees, 0f)
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+    /* Transitions                                                                             */
+    /* ------------------------------------------------------------------------------------- */
+
+    /** How Media3 1.11.1 marks a gap item (`EditedMediaItem.GAP_MEDIA_ID`, package-private). */
+    private val gapMediaId = "androidx-media3-GapMediaItem"
+
+    private fun isGap(item: androidx.media3.transformer.EditedMediaItem) = item.mediaItem.mediaId == gapMediaId
+
+    private fun dissolve(from: Clip) = Transition(
+        kind = "dissolve",
+        from = from,
+        mask = null,
+        fromTint = null,
+        toTint = null,
+        curves = TransitionCurves(floatArrayOf(0f, 1f), null, null, null),
+    )
+
+    /**
+     * Three clips with a transition at each boundary, lowered as the editor sends them: `a` stops
+     * at 1.5 s and gives its last half second to `b`, `b` stops at 1.7 s and gives 300 ms to `c`.
+     * The windows are 1.5..2.0 s and 3.2..3.5 s of a 5.2 s post.
+     */
+    private fun twoTransitions(tracks: List<Track> = emptyList()): RenderPlan = RenderPlan.build(
+        spec(
+            listOf(
+                clip("a", outMs = 1_500),
+                clip("b", outMs = 1_700).copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000))),
+                clip("c", outMs = 2_000).copy(transitionIn = dissolve(clip("b", inMs = 1_700, outMs = 2_000))),
+            ),
+            tracks = tracks,
+        ),
+        probes("a", "b", "c", "d"),
+    )
+
+    private fun transitionOf(item: androidx.media3.transformer.EditedMediaItem): TransitionEffect? =
+        item.effects.videoEffects.lastOrNull() as? TransitionEffect
+
+    @Test
+    fun `a spec with no transitions builds exactly the composition it always did`() {
+        val plan = RenderPlan.build(spec(listOf(clip("a", outMs = 1_500), clip("b"))), probes("a", "b"))
+        val composition = CompositionBuilder.toComposition(plan, emptyList(), null)
+        // One sequence, no compositor settings at all, and every item with the one geometry effect
+        // and no audio processor - the composition Media3 was handed before transitions existed.
+        assertEquals(1, composition.sequences.size)
+        assertSame(VideoCompositorSettings.DEFAULT, composition.videoCompositorSettings)
+        for (item in composition.sequences[0].editedMediaItems) {
+            assertEquals(1, item.effects.videoEffects.size)
+            assertTrue(item.effects.videoEffects[0] is Presentation)
+            assertTrue(item.effects.audioProcessors.isEmpty())
+        }
+    }
+
+    @Test
+    fun `transitions add one tails sequence right after the base, and the base stays primary`() {
+        val plan = twoTransitions()
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        assertEquals(2, sequences.size)
+        // The first sequence registered is Media3's primary, and with no layers it is still the
+        // base: its three clips, trimmed where the lowering left them.
+        assertEquals(
+            listOf(1_500_000L, 1_700_000L, 2_000_000L),
+            sequences[0].editedMediaItems.map { clippingOf(it).endPositionUs },
+        )
+        // Then the tails, under it: gap, tail, gap, tail, gap.
+        assertEquals(listOf(true, false, true, false, true), sequences[1].editedMediaItems.map { isGap(it) })
+    }
+
+    @Test
+    fun `the tails sequence tiles the output exactly, each tail on its window`() {
+        val plan = twoTransitions()
+        val tails = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[1]
+        var cursorUs = 0L
+        var tailIndex = 0
+        for (item in tails.editedMediaItems) {
+            if (isGap(item)) {
+                assertTrue(item.durationUs > 0L)
+                cursorUs += item.durationUs
+                continue
+            }
+            val tail = plan.tails[tailIndex++]
+            // Each tail starts exactly where its lead opens and runs to exactly where its window
+            // closes, so no gap frame ever stands where the gate says a tail is.
+            assertEquals(tail.itemStartUs, cursorUs)
+            assertEquals(tail.startUs - 100_000L, cursorUs)
+            val clipping = clippingOf(item)
+            assertEquals(tail.clip.inUs, clipping.startPositionUs)
+            assertEquals(tail.clip.outUs, clipping.endPositionUs)
+            val itemOutUs = floor((clipping.endPositionUs - clipping.startPositionUs) / 1.0).toLong()
+            assertEquals(tail.leadUs + tail.durUs, itemOutUs)
+            cursorUs += itemOutUs
+            assertEquals(tail.endUs, cursorUs)
+        }
+        assertEquals(plan.tails.size, tailIndex)
+        assertEquals(plan.totalUs, cursorUs)
+    }
+
+    @Test
+    fun `windows that meet still tile the output, the earlier item stopping where the next lead starts`() {
+        // `b` is all transition, so the second tail borrows the last 50 ms of the first one's item
+        // for its lead: tail, tail, back to back, with no gap between them for a hidden frame to
+        // stand in, and each item exactly as long as Media3 will measure it.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", outMs = 1_000),
+                    clip("b", outMs = 500).copy(transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_500))),
+                    clip("c").copy(transitionIn = dissolve(clip("b", inMs = 500, outMs = 1_000))),
+                ),
+            ),
+            probes("a", "b", "c"),
+        )
+        val tails = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[1]
+        assertEquals(listOf(true, false, false, true), tails.editedMediaItems.map { isGap(it) })
+        var cursorUs = 0L
+        var tailIndex = 0
+        for (item in tails.editedMediaItems) {
+            if (isGap(item)) {
+                cursorUs += item.durationUs
+                continue
+            }
+            val tail = plan.tails[tailIndex++]
+            assertEquals(tail.itemStartUs, cursorUs)
+            val clipping = clippingOf(item)
+            cursorUs += clipping.endPositionUs - clipping.startPositionUs
+            assertEquals(tail.itemEndUs, cursorUs)
+            // Both sides still read the whole window: only the item was cut.
+            assertEquals(tail.durUs, transitionOf(item)!!.durUs)
+        }
+        assertEquals(1_450_000L, plan.tails[0].itemEndUs)
+        assertEquals(plan.totalUs, cursorUs)
+    }
+
+    @Test
+    fun `the tails are drawn only while a tail is playing, and hidden over every gap`() {
+        val settings = CompositionBuilder.toComposition(twoTransitions(), emptyList(), null).videoCompositorSettings
+        // Input 0 is the base, composited as it arrives; input 1 is the tails, whose items run
+        // 1.4..2.0 s and 3.1..3.5 s - each window with its tenth of a second of lead.
+        assertEquals(1f, settings.getOverlaySettings(0, 1_750_000L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(1, 0L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(1, 1_399_999L).alphaScale, 0f)
+        assertEquals(1f, settings.getOverlaySettings(1, 1_400_000L).alphaScale, 0f)
+        assertEquals(1f, settings.getOverlaySettings(1, 1_999_999L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(1, 2_000_000L).alphaScale, 0f)
+        assertEquals(1f, settings.getOverlaySettings(1, 3_300_000L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(1, 3_500_000L).alphaScale, 0f)
+        // Full frame, where it is: the tail's own look already moved it.
+        assertEquals(0f, settings.getOverlaySettings(1, 1_750_000L).rotationDegrees, 0f)
+    }
+
+    @Test
+    fun `with layers the tails sit after the base, under it, and the top layer stays primary`() {
+        val plan = twoTransitions(tracks = listOf(layer("pip", "d", 900, z = 1)))
+        val composition = CompositionBuilder.toComposition(plan, emptyList(), null)
+        // The layer, the base, the tails.
+        assertEquals(3, composition.sequences.size)
+        assertEquals(900_000L, clippingOf(composition.sequences[0].editedMediaItems[0]).endPositionUs)
+        assertEquals(1_500_000L, clippingOf(composition.sequences[1].editedMediaItems[0]).endPositionUs)
+        assertTrue(isGap(composition.sequences[2].editedMediaItems[0]))
+        val settings = composition.videoCompositorSettings
+        // The layer keeps its gate, the base its full frame, and the tails theirs.
+        assertEquals(0f, settings.getOverlaySettings(0, 1_000_000L).alphaScale, 0f)
+        assertEquals(1f, settings.getOverlaySettings(1, 1_000_000L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(2, 1_000_000L).alphaScale, 0f)
+        assertEquals(1f, settings.getOverlaySettings(2, 1_600_000L).alphaScale, 0f)
+    }
+
+    @Test
+    fun `only the incoming clips and the tails carry a side, and both hear the window`() {
+        val plan = twoTransitions()
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        val base = sequences[0].editedMediaItems
+
+        // The first clip is untouched: one geometry effect, no processor.
+        assertEquals(null, transitionOf(base[0]))
+        assertEquals(1, base[0].effects.videoEffects.size)
+        assertTrue(base[0].effects.audioProcessors.isEmpty())
+
+        // Each incoming clip draws the incoming side over its window, AFTER its geometry, and fades
+        // its sound in over the same window - which is why a full-volume clip gets a processor.
+        for ((index, item) in base.withIndex().drop(1)) {
+            val side = transitionOf(item)!!
+            val tail = plan.tails.first { it.index == index }
+            assertEquals(TransitionRole.TO, side.role)
+            assertEquals(tail.startUs, side.startUs)
+            assertEquals(tail.durUs, side.durUs)
+            assertTrue(item.effects.videoEffects[0] is Presentation)
+            assertEquals(1, item.effects.audioProcessors.size)
+        }
+
+        // Each tail draws the outgoing side and fades its sound out.
+        val tailItems = sequences[1].editedMediaItems.filterNot { isGap(it) }
+        for ((i, item) in tailItems.withIndex()) {
+            val side = transitionOf(item)!!
+            assertEquals(TransitionRole.FROM, side.role)
+            assertEquals(plan.tails[i].startUs, side.startUs)
+            assertEquals(plan.tails[i].durUs, side.durUs)
+            assertEquals(1, item.effects.audioProcessors.size)
+        }
+    }
+
+    @Test
+    fun `a silent tail makes the tails sequence picture only`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", outMs = 1_500),
+                    clip("b").copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000).copy(muted = true))),
+                ),
+            ),
+            probes("a", "b"),
+        )
+        val tails = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[1]
+        assertEquals(setOf(androidx.media3.common.C.TRACK_TYPE_VIDEO), tails.trackTypes)
+        val loud = CompositionBuilder.toComposition(twoTransitions(), emptyList(), null).sequences[1]
+        assertTrue(loud.trackTypes.contains(androidx.media3.common.C.TRACK_TYPE_AUDIO))
     }
 
     @Test

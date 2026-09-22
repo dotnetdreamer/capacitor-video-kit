@@ -7,7 +7,21 @@ export type EditorSelection = { kind: 'clip'; id: string } | { kind: 'overlay'; 
  * The sheets that can slide up over the timeline and the toolbar. One at a time; opening one closes
  * whatever was open.
  */
-export type EditorPanel = 'text' | 'stickers' | 'effects' | 'filters' | 'adjust' | 'crop' | 'layout' | 'speed' | 'volume' | 'opacity' | 'voiceover' | 'sound' | 'quality';
+export type EditorPanel =
+  | 'text'
+  | 'stickers'
+  | 'effects'
+  | 'filters'
+  | 'adjust'
+  | 'crop'
+  | 'layout'
+  | 'speed'
+  | 'volume'
+  | 'opacity'
+  | 'voiceover'
+  | 'sound'
+  | 'quality'
+  | 'transition';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the

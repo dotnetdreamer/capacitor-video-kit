@@ -45,6 +45,84 @@ export const LANE_PITCH = 48;
 export const SEGMENT_GAP_PX = 5;
 
 /**
+ * The narrowest a segment may be drawn and still have a transition dot on either of its cuts.
+ *
+ * The dot's circle is 20 px across, so a segment much narrower than this would be all dot and no
+ * picture, and two dots on the two ends of one sliver would sit on top of each other. It is only
+ * reached at the furthest zoom out, where the dot is not the thing anybody is aiming at anyway: a
+ * pinch back in brings it back.
+ */
+export const TRANSITION_DOT_MIN_SEGMENT_PX = 26;
+
+/** One base segment as the dots read it: where it starts on the output timeline, and for how long. */
+export interface DotSlot {
+  startMs: number;
+  durationMs: number;
+}
+
+/**
+ * Where the cut in front of slot `index` is drawn, content px: the middle of the gap the segment
+ * before it leaves.
+ *
+ * Every segment but the last is drawn [SEGMENT_GAP_PX] short of its duration, so the gap the eye
+ * reads as the cut runs from the slot's start less the gap to the slot's start, and its middle is
+ * half a gap before the slot starts. The slots are already overlap-aware - a transition pulls the
+ * incoming clip in under the outgoing one and the slot starts where it now starts - so this is the
+ * cut as it is on screen, with or without a transition on it.
+ */
+export function cutX(pad: number, startMs: number, pps: number): number {
+  return pad + (startMs / 1000) * pps - SEGMENT_GAP_PX / 2;
+}
+
+/**
+ * Whether the two segments either side of the cut in front of slot `index` are both drawn wide
+ * enough to carry a dot.
+ */
+export function dotFits(slots: readonly DotSlot[], index: number, pps: number): boolean {
+  const narrower = narrowerNeighbourPx(slots, index, pps);
+  return narrower !== null && narrower >= TRANSITION_DOT_MIN_SEGMENT_PX;
+}
+
+/** The dot's finger target where there is room for it: the 44 px every other target here has. */
+export const TRANSITION_DOT_HIT_PX = 44;
+
+/** The circle a dressed cut's dot draws (22 px; a plain one is 20), which its target never undercuts. */
+export const TRANSITION_DOT_CIRCLE_PX = 22;
+
+/**
+ * How wide the dot on the cut in front of slot `index` is as a finger target, px, centred on the
+ * cut.
+ *
+ * The dot sits OVER the segments either side of the cut, so every pixel of a segment under its
+ * target is a pixel where a tap opens the transition sheet instead of selecting that segment. At
+ * the full 44 px a target reaches 19.5 px into each neighbour, and a segment with a dot on both of
+ * its cuts would need to be drawn 40 px wide before a single pixel of it answered as itself - a
+ * 0.6 s piece a split leaves is 33 px at the zoom the editor opens on, and would be a clip nobody
+ * could select. So a target reaches no further into either neighbour than a third of the narrower
+ * one's drawn width, which leaves every segment at least a third of itself, and it never shrinks
+ * below the circle it carries, so the dot that is drawn is target all the way across.
+ */
+export function dotHitWidth(slots: readonly DotSlot[], index: number, pps: number): number {
+  const narrower = narrowerNeighbourPx(slots, index, pps) ?? 0;
+  const width = SEGMENT_GAP_PX + (2 * narrower) / 3;
+  return Math.max(TRANSITION_DOT_CIRCLE_PX, Math.min(TRANSITION_DOT_HIT_PX, width));
+}
+
+/**
+ * The drawn width of the narrower of the two segments either side of the cut in front of slot
+ * `index`, or null when there is no such cut. The one before is never the last, so it always gives
+ * up its gap; the one after gives up its own unless it is the last.
+ */
+function narrowerNeighbourPx(slots: readonly DotSlot[], index: number, pps: number): number | null {
+  const before = slots[index - 1];
+  const after = slots[index];
+  if (!before || !after) return null;
+  const beforePx = (before.durationMs / 1000) * pps - SEGMENT_GAP_PX;
+  const afterPx = (after.durationMs / 1000) * pps - (index === slots.length - 1 ? 0 : SEGMENT_GAP_PX);
+  return Math.min(beforePx, afterPx);
+}
+
+/**
  * Nothing on a lane is drawn narrower than this, so even a 100 ms layer can be tapped. It has to be
  * wide enough to stay a bar and not a sliver: selection draws a 2 px white border inside it and the
  * two trim handles stand 14 px wide just outside its edges, so anything narrower than this is all

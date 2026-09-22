@@ -30,7 +30,7 @@
    * @prop --ve-text: Text and glyphs at full strength
    * @prop --ve-dim: Secondary text: a caption, a total, an unselected tab
    * @prop --ve-faint: Text and marks that are present but not being read: a disabled button, the timeline's ticks
-   * @prop --ve-accent: What marks the customer's own choice: a selected chip, a slider's fill, the render bar
+   * @prop --ve-accent: What marks the customer's own choice: a selected chip, a slider's fill, a progress bar's sweep
    * @prop --ve-cta: The one button that moves forward, Next
    * @prop --ve-cta-text: Text on that button, dark because the button is not
    * @prop --ve-danger: Delete, and recording
@@ -44,6 +44,10 @@
    * @prop --ve-lane-music-wave: The waveform drawn on the music lane
    * @prop --ve-lane-voice-wave: The waveform drawn on a voiceover lane
    * @prop --ve-lane-ink: Text on a lane, dark because every lane colour is light
+   * @prop --ve-export-bg: The page the export is shown on while the video is built, light like the screens a host shows after it
+   * @prop --ve-export-text: Text and glyphs on that page
+   * @prop --ve-export-dim: The line at the foot of that page
+   * @prop --ve-export-wash: What lies over the part of the picture that has not been built yet
    * @prop --ve-frame-edge: The hairline around the video frame, which is where the finished post is cut
    * @prop --ve-stage-gutter: What the preview keeps free either side of the video for Back and Next, together
    * @prop --ve-chrome-max: How wide a row of chrome runs before it stops growing and centres itself
@@ -65,6 +69,18 @@
   --ve-cta: #a6ff2e;
   --ve-cta-text: #1a1a2e;
   --ve-danger: #ff4d6a;
+  /*
+   * The export screen, and the one place the palette is LIGHT. The editor is black because the
+   * video is the subject; once Next is tapped nothing is being edited any more, and the screen that
+   * follows it in a host - the finished video, where it was saved - is that host's own page, which
+   * is light. So the render is drawn on the page it is about to hand over to rather than on the
+   * editor it has just left. A host with a dark page maps these onto its own tokens.
+   */
+  --ve-export-bg: #f7f7f8;
+  --ve-export-text: #111;
+  --ve-export-dim: rgba(0, 0, 0, 0.32);
+  /* Translucent, so the picture still shows through it: what is under the wash is waiting, not missing. */
+  --ve-export-wash: rgba(255, 255, 255, 0.5);
   /*
    * The edge of the video frame. It is drawn at all because the frame is black, the page behind it
    * is black, and a video placed off the edge is cut off at a line the customer otherwise has to

@@ -436,6 +436,15 @@ export class VeToolbar {
       { id: 'split', label: 'Split', icon: 'cut-outline', run: () => store.splitAtPlayhead() },
       { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') },
       {
+        id: 'transition',
+        label: 'Transition',
+        icon: 'transition-outline',
+        // One clip has no cut to put a transition on. Dimmed rather than taken away, and a tap says
+        // what is missing - the same as Delete on the last clip.
+        disabled: this.lastClip.value,
+        run: () => this.openTransition(),
+      },
+      {
         id: 'volume',
         label: 'Volume',
         icon: 'volume-high-outline',
@@ -479,6 +488,27 @@ export class VeToolbar {
       { id: 'adjust', label: 'Adjust', icon: 'options-outline', run: () => store.openPanel('adjust') },
     );
     return { kind: 'clip', label: 'Clip tools', collapse: this.deselect('Close clip tools'), tiles };
+  }
+
+  /**
+   * The Transition tile: the transition sheet on the cut INTO the selected segment, which is the
+   * dot at its left edge - or, for the first segment, which has no cut in front of it, the one at
+   * its right edge. The same sheet the dot opens, and it deselects the segment on the way, because
+   * the sheet is about a cut and not a clip.
+   */
+  private openTransition(): void {
+    const store = this.ctx.store;
+    const clip = store.selectedClip.value;
+    const slots = store.slots.value;
+    if (!clip) return;
+    if (slots.length < 2) {
+      store.showToast('Add another clip to use a transition');
+      store.haptic('light');
+      return;
+    }
+    const index = slots.findIndex(slot => slot.clip.id === clip.id);
+    if (index < 0) return;
+    store.openTransition(slots[Math.max(1, index)].clip.id);
   }
 
   /**

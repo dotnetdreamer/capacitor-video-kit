@@ -43,19 +43,6 @@ on the bar, and the overlay the bar sits in offers no way to stop a render today
 | `--ve-progress-track` | The part of the bar that is not done yet                                  |
 
 
-## Dependencies
-
-### Used by
-
- - [ve-editor](../ve-editor)
-
-### Graph
-```mermaid
-graph TD;
-  ve-editor --> ve-progress
-  style ve-progress fill:#f9f,stroke:#333,stroke-width:4px
-```
-
 ----------------------------------------------
 
 *Built with [StencilJS](https://stenciljs.com/)*

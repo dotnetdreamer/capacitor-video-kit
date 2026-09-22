@@ -12,6 +12,7 @@ export * from './raster-context';
 export * from './compose';
 export * from './overlay-raster';
 export * from './effects';
+export * from './transitions';
 
 /**
  * `toComposeSpec` returns a `ComposeSpec` and `resolveFilterOps` returns `FilterOp[]`, and both

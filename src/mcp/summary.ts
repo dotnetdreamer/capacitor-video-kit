@@ -19,6 +19,7 @@
 import {
   FILTER_PRESETS,
   aspectOf,
+  clipsDurationMs,
   qualityOf,
   resolveFilterOps,
   totalDurationMs,
@@ -51,12 +52,17 @@ export function summariseManifest(manifest: EditManifest): string {
     // the output timeline is the sum of every clip before it at its own speed. That sum is what an
     // op naming a time on the timeline is measured against, so it is what belongs here.
     for (const [index, slot] of timelineSlots(manifest).entries()) {
-      lines.push(`  ${index}. ${describeClip(slot.clip)} at ${time(slot.startMs)}`);
+      const into = slot.clip.transitionIn
+        ? slot.transitionInMs > 0
+          ? `, coming in with ${slot.clip.transitionIn.kind} over ${time(slot.transitionInMs)}`
+          : `, ${slot.clip.transitionIn.kind} asked for but the clips either side are too short, so a cut`
+        : '';
+      lines.push(`  ${index}. ${describeClip(slot.clip)} at ${time(slot.startMs)}${into}`);
     }
   }
 
   if (manifest.durationMs > 0) {
-    const baseMs = manifest.clips.reduce((sum, clip) => sum + clipDurationMs(clip), 0);
+    const baseMs = clipsDurationMs(manifest.clips);
     if (manifest.durationMs > baseMs) {
       lines.push(`  The post is held open to ${time(manifest.durationMs)}; past ${time(baseMs)} the picture is black.`);
     }

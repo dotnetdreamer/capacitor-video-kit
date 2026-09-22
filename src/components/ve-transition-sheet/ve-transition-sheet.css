@@ -1,0 +1,266 @@
+/*
+ * The Transition sheet: a row of tiles under the frame's tabs, how long the transition runs, and the
+ * offer to put it on every cut.
+ *
+ * The rhythm is budgeted against the compact sheet, which the shell caps at `min(340px, 42vh)`: the
+ * 53px head (its hairline included), 102px of tiles, a 52px duration row, a 46px band for the pill
+ * and the 6px of air under it come to 259px - a figure the sheet's browser test holds it to - which
+ * leaves the home indicator its inset on every phone the editor is tested on. On a phone short
+ * enough for 42vh to be less than that plus the inset, the frame's body scrolls - the tiles stay at
+ * the top, where the finger is, and the pill is what goes under the fold.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+/*
+ * A little air under the last row, so that on a phone with no home indicator the slider's knob does
+ * not sit on the very edge of the screen.
+ */
+.ts {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding-bottom: 6px;
+}
+
+/* ------------------------------------------------------------------------------------- tiles */
+
+/*
+ * Positioned so a tile's `offsetLeft` is measured from the row, for centring the chosen one, and a
+ * scroll container of its own so the tiles' observer can be rooted on it.
+ */
+.ts__row {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 16px 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.ts__row::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: form controls do not
+ * inherit the page's font, and no reset stylesheet reaches in here to make them.
+ */
+.ts__tile {
+  display: flex;
+  flex: 0 0 64px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 64px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ts__frame {
+  position: relative;
+  display: block;
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--ve-raised, #2c2c2e);
+  transition: transform 120ms ease;
+}
+
+.ts__tile:active .ts__frame {
+  transform: scale(0.95);
+}
+
+/*
+ * The selection ring is drawn over the picture rather than as a border, so choosing a transition
+ * does not shrink the frame inside it. A hairline of dark just inside the white keeps the ring a
+ * ring on a white frame - a flash, a dip to white.
+ */
+.ts__frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+}
+
+.ts__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * Allowed a little wider than the tile, into the gap either side of it: the longest names - Wipe
+ * down, Circle open - come to 65px in bold, and a tile that cut one short by a pixel to an ellipsis
+ * would do it exactly when it is chosen. A centred flex item overflows both sides equally, and
+ * 14px of gap leaves room for two long names side by side.
+ */
+.ts__label {
+  max-width: 76px;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ts__tile--on {
+  color: var(--ve-text, #fff);
+}
+
+.ts__tile--on .ts__frame::after {
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    inset 0 0 0 3px rgba(0, 0, 0, 0.35);
+}
+
+.ts__tile--on .ts__label {
+  font-weight: 700;
+}
+
+/* Inset, like every focus ring on a row that scrolls: the row clips anything drawn outside a tile. */
+.ts__tile:focus-visible .ts__frame {
+  outline: 2px solid var(--ve-accent, #a6ff2e);
+  outline-offset: -2px;
+}
+
+/* ---------------------------------------------------------------------------------- duration */
+
+/*
+ * The word, the slider and the number, in the filter sheet's strength row's measurements, so the
+ * two sheets' bottom rows are the same row.
+ */
+.ts__duration {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+  transition: opacity 160ms ease;
+}
+
+/* A plain cut: the row is there to say there is a length to set, and out of reach until there is. */
+.ts__duration--off {
+  opacity: 0.35;
+}
+
+.ts__duration-label {
+  flex: 0 0 auto;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ts__duration-value {
+  flex: 0 0 34px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/*
+ * The slider's own gutter is taken away, because this row already has one: the knob's overhang at
+ * either end lands in the gaps beside the word and the number.
+ */
+.ts__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+.ts__hint {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 52px;
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------------- apply all */
+
+/*
+ * A pill in the layout sheet's measurements, centred under the row. Quieter than a filled button
+ * would be, because it changes every cut of the video at once and must not read as the obvious next
+ * tap; its own undo step and the toast after it are what make it safe to try.
+ */
+.ts__apply-all {
+  align-self: center;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  margin: 2px 0 8px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+
+.ts__apply-all:active {
+  transform: scale(0.96);
+}
+
+.ts__apply-all:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+}
+
+/* ------------------------------------------------------------------------------------- mouse */
+
+.ts__tile {
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ts__tile:not(.ts__tile--on):hover {
+    color: var(--ve-text, #fff);
+  }
+
+  .ts__tile:hover .ts__frame {
+    transform: scale(1.04);
+  }
+
+  .ts__tile:active .ts__frame {
+    transform: scale(0.95);
+  }
+
+  .ts__apply-all:hover {
+    background: var(--ve-raised-2, #3a3a3c);
+  }
+}

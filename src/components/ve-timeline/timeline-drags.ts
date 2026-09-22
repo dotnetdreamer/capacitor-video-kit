@@ -30,7 +30,13 @@ export type HitKind =
   | 'end'
   | 'music-start'
   | 'music-end'
-  | 'voice';
+  | 'voice'
+  /**
+   * The white dot on a cut of the base track, named by its INCOMING clip. A tap on it is the only
+   * thing it answers: it never lifts and is never a body to drag, so a swipe that starts on it is
+   * the timeline's own scroll like a swipe anywhere else on the filmstrip.
+   */
+  | 'transition';
 
 /** A finger that is down but not yet a drag: it may still become a tap, a long press or a scroll. */
 export interface Press {

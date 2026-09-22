@@ -1,4 +1,14 @@
-import type { ComposeFit, ComposePlacement, ComposeRect, ComposeSpec, FilterOp } from '../definitions';
+import type {
+  ComposeFit,
+  ComposePlacement,
+  ComposeRect,
+  ComposeSpec,
+  ComposeTransition,
+  ComposeTransitionCurves,
+  ComposeTransitionMask,
+  ComposeTransitionSideCurves,
+  FilterOp,
+} from '../definitions';
 
 import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, placementRange } from '../../editor';
 
@@ -35,6 +45,47 @@ export { MAX_VIDEO_TRACKS };
 
 const PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
 
+/**
+ * How many samples a transition curve may carry. Two is the fewest that still make a line between
+ * the two ends of the window; 121 is three times what the catalogue sends, room for a finer recipe
+ * without letting a caller hand over a curve per frame of a two-second transition.
+ */
+export const MIN_CURVE_SAMPLES = 2;
+export const MAX_CURVE_SAMPLES = 121;
+
+const MASK_SHAPES: readonly ComposeTransitionMask['shape'][] = ['linear', 'circle', 'diamond', 'clock', 'blinds', 'split'];
+
+/**
+ * Every channel a transition may move, with the range each is CLAMPED to, in the order they are
+ * checked. The order is part of the contract rather than an accident of this file: the Kotlin and
+ * Swift parsers read the same keys in the same order, so a spec with two broken curves names the
+ * same one on every engine - and a dictionary's own key order is not something Swift keeps. See
+ * [readCurves] for where the unknown keys and the lengths come in that order.
+ *
+ * The ranges are generous on purpose. They are not taste - a slide may well travel two frames, a
+ * spin may turn ten times - they are the line past which a number is a bug rather than a look, and
+ * past which a shader starts dividing by nothing or sampling a mile off the frame.
+ */
+const LOOK_CHANNELS = [
+  ['alpha', 0, 1],
+  ['reveal', 0, 1],
+] as const satisfies readonly (readonly [keyof ComposeTransitionCurves, number, number])[];
+
+const SIDE_CHANNELS = [
+  ['x', -4, 4],
+  ['y', -4, 4],
+  ['scale', 0.01, 20],
+  ['rotation', -3600, 3600],
+  ['blur', 0, 0.5],
+  ['pixelate', 0, 0.5],
+  ['split', -0.5, 0.5],
+  ['gain', 0, 10],
+  ['tint', 0, 1],
+] as const satisfies readonly (readonly [keyof ComposeTransitionSideCurves, number, number])[];
+
+const CURVE_KEYS: readonly string[] = [...LOOK_CHANNELS.map(([name]) => name), 'from', 'to'];
+const SIDE_KEYS: readonly string[] = SIDE_CHANNELS.map(([name]) => name);
+
 /** What `compose()` rejects with for a spec that is the wrong shape. Code `invalid_spec`. */
 export class SpecError extends Error {
   constructor(
@@ -62,7 +113,19 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
   const batchId = nonEmpty(spec.batchId, 'batchId');
 
   if (!Array.isArray(spec.clips) || spec.clips.length === 0) throw new SpecError('clips');
-  const clips = spec.clips.map((clip, i) => readClip(clip, `clips[${i}]`));
+  const clips = spec.clips.map((clip, i) => {
+    const path = `clips[${i}]`;
+    const read = readClip(clip, path);
+    // A transition brings a base clip in from the one before it, so only a base clip that HAS one
+    // before it can carry one. The first clip's and every layer clip's are not read at all - not
+    // even checked - which is what the contract says an engine does with them: a stale key left on
+    // a clip that was dragged to the front is not a reason to refuse the post.
+    if (i > 0) {
+      const transition = readTransition((clip as unknown as Record<string, unknown>)['transitionIn'], `${path}.transitionIn`);
+      if (transition) read.transitionIn = transition;
+    }
+    return read;
+  });
 
   const rawTracks = spec.tracks ?? [];
   if (!Array.isArray(rawTracks)) throw new SpecError('tracks');
@@ -281,6 +344,152 @@ function readPlacement(value: unknown, path: string): ComposePlacement | undefin
   };
   const rotationDeg = finite(rect['rotationDeg'], 0);
   return rotationDeg % 360 === 0 ? placed : { ...placed, rotationDeg };
+}
+
+/**
+ * A base clip's `transitionIn`, or undefined where there is none.
+ *
+ * The split between refusing and clamping is the one the rest of this file makes. A transition
+ * that is the wrong SHAPE - a curve that is not a list of numbers, two curves of different lengths,
+ * a mask shape nobody draws, a key this engine has never heard of - is a caller bug and fails the
+ * call with its path. A number merely out of range is brought into range, because a slide that
+ * travels a little less far beats a post that cannot be made.
+ *
+ * Unknown keys INSIDE the curves are refused rather than ignored, which is stricter than anywhere
+ * else in the spec and deliberately so. A channel is a thing the picture does: an engine that
+ * silently dropped one it did not know would draw a different transition from the one the preview
+ * showed and report success, and the only way two engines cannot disagree about a channel is for
+ * neither to accept one it cannot draw.
+ *
+ * Fields are checked in a fixed order - `kind`, `from`, `curves`, `mask`, `fromTint`, `toTint` - and
+ * inside the curves in the order [readCurves] gives. It is Android's `parseTransitionIn` order, which
+ * the Swift parser follows too, so a spec with more than one thing wrong with it fails with the same
+ * path on every engine. `null` is read as absent for every optional field, as it is for `crop` and
+ * `rect`.
+ */
+function readTransition(value: unknown, path: string): ComposeTransition | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) throw new SpecError(path);
+  const kind = nonEmpty(value['kind'], `${path}.kind`);
+  // The outgoing clip's tail is a clip in every respect - its trim, speed, sound and framing - and
+  // is read by the one clip reader, so its refusals are the refusals any clip gets, at its own path.
+  // Something that is not an object at all fails as `from` itself, before that reader sees it: an
+  // array would otherwise get past the reader's own test and be refused as a missing `from.key`,
+  // where both native parsers name `from`.
+  if (!isRecord(value['from'])) throw new SpecError(`${path}.from`);
+  const from = readClip(value['from'], `${path}.from`);
+  const curves = readCurves(value['curves'], `${path}.curves`);
+
+  const transition: ComposeTransition = { kind, from, curves };
+  // Set only when present, for the reason `crop` and `rect` are: absence is what an engine tests for.
+  const mask = readMask(value['mask'], `${path}.mask`);
+  if (mask) transition.mask = mask;
+  const fromTint = readTint(value['fromTint'], `${path}.fromTint`);
+  if (fromTint) transition.fromTint = fromTint;
+  const toTint = readTint(value['toTint'], `${path}.toTint`);
+  if (toTint) transition.toTint = toTint;
+  return transition;
+}
+
+/**
+ * The sampled curves. Every curve present shares ONE length, between [MIN_CURVE_SAMPLES] and
+ * [MAX_CURVE_SAMPLES]. Two lengths would make "the sample at 40% of the window" mean two different
+ * moments, and the evaluation every engine shares has no answer for that.
+ *
+ * The order things are checked in is Android's `parseCurves`, step for step, because a spec with two
+ * things wrong with it has to be refused with the same path on every engine: `alpha`, `reveal`, then
+ * each side - `from` before `to` - its channels in [SIDE_CHANNELS] order and after them its unknown
+ * keys, then the unknown keys of the curves object itself, and LAST the lengths, every curve read
+ * held to the first one read and the first that disagrees named. Each curve's own 2..121 is checked
+ * as it is read, so a curve of one sample is named there even when an earlier curve disagrees with
+ * the first about its length.
+ */
+function readCurves(value: unknown, path: string): ComposeTransitionCurves {
+  if (!isRecord(value)) throw new SpecError(path);
+  const read: CurveRead[] = [];
+  const curves: ComposeTransitionCurves = {};
+  for (const [name, min, max] of LOOK_CHANNELS) {
+    const curve = readCurve(value[name], `${path}.${name}`, min, max, read);
+    if (curve) curves[name] = curve;
+  }
+  for (const side of ['from', 'to'] as const) {
+    const raw = value[side];
+    if (raw === undefined || raw === null) continue;
+    const sidePath = `${path}.${side}`;
+    if (!isRecord(raw)) throw new SpecError(sidePath);
+    const channels: ComposeTransitionSideCurves = {};
+    for (const [name, min, max] of SIDE_CHANNELS) {
+      const curve = readCurve(raw[name], `${sidePath}.${name}`, min, max, read);
+      if (curve) channels[name] = curve;
+    }
+    refuseUnknownKeys(raw, SIDE_KEYS, sidePath);
+    curves[side] = channels;
+  }
+  refuseUnknownKeys(value, CURVE_KEYS, path);
+  const first = read[0];
+  const odd = first && read.find(curve => curve.samples !== first.samples);
+  if (odd) throw new SpecError(odd.path);
+  return curves;
+}
+
+/** A curve that has been read, kept for the length check [readCurves] makes once they all are. */
+interface CurveRead {
+  path: string;
+  samples: number;
+}
+
+/**
+ * One curve, every sample clamped into its channel's range, and noted in `read`. Absent is
+ * undefined, not an error; anything else must be 2..121 finite numbers or it is refused at its path.
+ */
+function readCurve(value: unknown, path: string, min: number, max: number, read: CurveRead[]): number[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length < MIN_CURVE_SAMPLES || value.length > MAX_CURVE_SAMPLES || !value.every(isFiniteNumber)) {
+    throw new SpecError(path);
+  }
+  read.push({ path, samples: value.length });
+  return value.map(sample => clamp(sample, min, max));
+}
+
+/**
+ * The shape the incoming side is revealed through, with every default written out. An unknown
+ * shape is refused: a mask an engine cannot draw would reveal the incoming clip everywhere at once,
+ * which is a different transition, silently.
+ */
+function readMask(value: unknown, path: string): ComposeTransitionMask | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) throw new SpecError(path);
+  const shape = value['shape'];
+  if (typeof shape !== 'string' || !(MASK_SHAPES as readonly string[]).includes(shape)) throw new SpecError(`${path}.shape`);
+  return {
+    shape: shape as ComposeTransitionMask['shape'],
+    angleDeg: finite(value['angleDeg'], 0),
+    count: clamp(Math.round(finite(value['count'], 1)), 1, 64),
+    feather: clamp(finite(value['feather'], 0.01), 0.0005, 0.5),
+    invert: value['invert'] === true,
+  };
+}
+
+/** A tint colour, 0..1 RGB. Exactly three numbers: a fourth is not an alpha anyone asked for. */
+function readTint(value: unknown, path: string): [number, number, number] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length !== 3 || !value.every(isFiniteNumber)) throw new SpecError(path);
+  return [clamp(value[0], 0, 1), clamp(value[1], 0, 1), clamp(value[2], 0, 1)];
+}
+
+function refuseUnknownKeys(value: Record<string, unknown>, known: readonly string[], path: string): void {
+  for (const key of Object.keys(value)) {
+    if (!known.includes(key)) throw new SpecError(`${path}.${key}`);
+  }
+}
+
+/** A plain object: not null, and not an array, which `typeof` would call an object too. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
 }
 
 /** One colour op. An unrecognised `op` is a caller bug, not a value to be guessed at. */

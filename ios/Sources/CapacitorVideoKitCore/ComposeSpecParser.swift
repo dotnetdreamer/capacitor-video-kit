@@ -12,12 +12,25 @@ import Foundation
 ///
 /// The check ORDER is load bearing. The tests compare message strings literally, so a spec that is
 /// wrong in two places has to name the same field on both platforms. Android's order is: `jobId`,
-/// `batchId`, the `clips` array, each clip, the `tracks` count, each track and its own clips,
-/// `output`, each filter op, the `overlays` count, each overlay, `audio.music`, each voiceover,
-/// `posterAtMs`. `output` sitting in the middle of that is why `OutputDTO` decodes leniently and why
-/// everything after it holds its first error instead of throwing it (see `heldError`).
+/// `batchId`, the `clips` array, each clip (and, from the second clip on, straight after that clip's
+/// own fields, its `transitionIn`), the `tracks` count, each track and its own clips, `output`, each
+/// filter op, the `overlays` count, each overlay, `audio.music`, each voiceover, `posterAtMs`.
+/// `output` sitting in the middle of that is why `OutputDTO` decodes leniently and why everything
+/// after it holds its first error instead of throwing it (see `heldError`).
+///
+/// Inside a `transitionIn` the order is Android's `parseTransitionIn`: `kind`, `from` (read by the
+/// one clip reader, so its failures are a clip's), `curves`, `mask`, `fromTint`, `toTint`. Inside
+/// `curves` it is `alpha`, `reveal`, then each side's channels in `TransitionSide` order followed by
+/// that side's unknown keys, then the unknown keys of `curves` itself, and last the check that every
+/// curve is as long as the first one read. The one place the two cannot agree is a level carrying
+/// SEVERAL unknown keys: see `firstUnknownKey`.
 enum ComposeSpecParser {
     static let maxOverlays = 30
+    /// Every curve of a transition has the same number of samples, and this many at the least and
+    /// at the most. Two is a straight line from start to end; 121 is three times what the editor
+    /// sends, room for a finer catalogue without letting a spec carry a curve of any length at all.
+    static let minCurveSamples = 2
+    static let maxCurveSamples = 121
     /// `MAX_VIDEO_TRACKS` from the manifest, the BASE track INCLUDED, so at most fifteen entries in
     /// `tracks`. It is NOT a decoder budget: this parser feeds the export, which composites offline
     /// with nothing racing a frame deadline, and the live preview keeps a budget of its own that is
@@ -65,7 +78,9 @@ enum ComposeSpecParser {
         // could run first. This is the point in Android's order where those errors surface.
         if let held = d.heldError { throw held }
 
-        let clips = d.clips.map(clip)
+        // `transitions` runs beside `clips` one for one, nil wherever a clip has none - which is
+        // always the first clip, and every clip of a post nobody put a transition in.
+        let clips = zip(d.clips, d.transitions).map { c, t in clip(c, transitionIn: t.map(transition)) }
 
         // `map` on the OPTIONAL, so a spec that carried no `tracks` key still carries none here.
         // Absence has to survive the parser intact: it is what the builder tests to keep the
@@ -73,7 +88,7 @@ enum ComposeSpecParser {
         let tracks = d.tracks.map { list in
             list.map { t in
                 ComposeTrack(id: t.id,
-                             clips: t.clips.map(clip),
+                             clips: t.clips.map { clip($0) },
                              startMs: t.startMs,
                              z: t.z,
                              opacity: clamp01(t.opacity))
@@ -140,7 +155,10 @@ enum ComposeSpecParser {
     /// because a clip on the second layer is the same kind of thing as one on the first: the day
     /// the two are read differently is the day one half of a split screen renders differently from
     /// the other.
-    private static func clip(_ c: ClipDTO) -> ComposeClip {
+    ///
+    /// `transitionIn` is the one thing a base clip may carry that a layer's may not, which is why it
+    /// is handed in rather than read off the DTO: `ClipDTO` never reads the key at all.
+    private static func clip(_ c: ClipDTO, transitionIn: ComposeTransition? = nil) -> ComposeClip {
         ComposeClip(key: c.key,
                     uri: c.uri,
                     inMs: c.inMs,
@@ -153,7 +171,41 @@ enum ComposeSpecParser {
                     // would fail specs the Android build accepts.
                     fit: c.fit == Fit.cover.rawValue ? .cover : .contain,
                     crop: clampRect(c.crop),
-                    rect: clampPlacement(c.rect))
+                    rect: clampPlacement(c.rect),
+                    transitionIn: transitionIn)
+    }
+
+    /// A decoded transition as the value the builder consumes. Every curve sample, mask number and
+    /// tint channel was already clamped where it was read, so all that is left is to resolve the two
+    /// tints' default and run `from` through the same clamps as any other clip.
+    private static func transition(_ t: TransitionDTO) -> ComposeTransition {
+        ComposeTransition(kind: t.kind,
+                          from: clip(t.from),
+                          mask: t.mask.map {
+                              ComposeTransitionMask(shape: $0.shape,
+                                                    angleDeg: $0.angleDeg,
+                                                    count: $0.count,
+                                                    feather: $0.feather,
+                                                    invert: $0.invert)
+                          },
+                          fromTint: rgb(t.fromTint),
+                          toTint: rgb(t.toTint),
+                          curves: ComposeTransitionCurves(alpha: t.curves.alpha,
+                                                          reveal: t.curves.reveal,
+                                                          from: t.curves.from.map(side),
+                                                          to: t.curves.to.map(side)))
+    }
+
+    private static func side(_ s: SideCurvesDTO) -> ComposeTransitionSideCurves {
+        ComposeTransitionSideCurves(x: s.x, y: s.y, scale: s.scale, rotation: s.rotation,
+                                    blur: s.blur, pixelate: s.pixelate, split: s.split,
+                                    gain: s.gain, tint: s.tint)
+    }
+
+    /// Absent is black, the contract's default for both tints.
+    private static func rgb(_ v: [Double]?) -> ComposeRGB {
+        guard let v, v.count == 3 else { return .black }
+        return ComposeRGB(r: v[0], g: v[1], b: v[2])
     }
 }
 
@@ -312,6 +364,98 @@ private extension KeyedDecodingContainer {
             return nil
         }
     }
+
+    /// An object-valued key of a transition: absent, or explicitly null, is nil; anything that IS
+    /// there and is not an object fails with the key's own name, and a failure inside it is spliced
+    /// behind that name the way `rect` splices one.
+    ///
+    /// Stricter than `rect` on purpose. A rectangle that is not an object means the whole frame,
+    /// which is a sensible thing for it to mean, while a transition, a mask or a curve set that is not
+    /// an object means nothing at all - drawing a cut or a mask-less reveal in its place would render
+    /// a post nobody asked for without a word.
+    func object<T: Decodable>(_ key: Key, _ name: String, _ type: T.Type) throws -> T? {
+        guard has(key) else { return nil }
+        do {
+            return try decode(T.self, forKey: key)
+        } catch let e as SpecError {
+            throw SpecError("\(name)\(e.path.isEmpty ? "" : ".\(e.path)")")
+        } catch {
+            // Capacitor's decoder throws a `DecodingError` when the value is not an object.
+            throw SpecError(name)
+        }
+    }
+
+    /// `object`, for a key that must be there: a transition's `from` and its `curves`.
+    func requiredObject<T: Decodable>(_ key: Key, _ name: String, _ type: T.Type) throws -> T {
+        guard let value = try object(key, name, type) else { throw SpecError(name) }
+        return value
+    }
+
+    /// One transition curve: 2...121 finite numbers, each held to `range`. Android's `readCurve`.
+    ///
+    /// Absent, or null, is nil: the channel holds its neutral value for the whole window. Anything
+    /// else that is not such an array - a number, an object, too few samples or too many, an array
+    /// holding a string or a null - fails with the curve's own path, because a curve with a hole in
+    /// it has no sensible reading. Whether the curves agree about their LENGTH is not this reader's
+    /// question: every curve read is appended to `read`, and `CurvesDTO` asks it once, last, of all
+    /// of them together, which is where Android asks it.
+    func curve(_ key: Key, _ path: String, _ range: ClosedRange<Double>,
+               _ read: inout [(path: String, count: Int)]) throws -> [Double]? {
+        guard has(key) else { return nil }
+        guard var list = try? nestedUnkeyedContainer(forKey: key),
+              let count = list.count,
+              count >= ComposeSpecParser.minCurveSamples,
+              count <= ComposeSpecParser.maxCurveSamples else { throw SpecError(path) }
+        var values: [Double] = []
+        values.reserveCapacity(count)
+        while !list.isAtEnd {
+            // Capacitor's container advances past an element even when decoding it throws, but
+            // nothing here relies on that: the first bad element ends the read.
+            guard let v = try? list.decode(Double.self), v.isFinite else { throw SpecError(path) }
+            values.append(min(range.upperBound, max(range.lowerBound, v)))
+        }
+        read.append((path: path, count: values.count))
+        return values
+    }
+
+    /// `fromTint` / `toTint`: exactly three finite numbers, each held to 0...1. Absent, or null, is
+    /// nil and becomes black; anything else fails with the key's own name. Exactly three and not "at
+    /// least three" as a filter's `rgb` is read, because nothing sends a fourth here and a fourth is
+    /// far more likely an alpha somebody expected to be honoured than a number to be ignored.
+    func rgb(_ key: Key, _ path: String) throws -> [Double]? {
+        guard has(key) else { return nil }
+        guard var list = try? nestedUnkeyedContainer(forKey: key), list.count == 3 else {
+            throw SpecError(path)
+        }
+        var rgb: [Double] = []
+        while !list.isAtEnd {
+            guard let v = try? list.decode(Double.self), v.isFinite else { throw SpecError(path) }
+            rgb.append(min(1, max(0, v)))
+        }
+        return rgb
+    }
+}
+
+/// A coding key for any name at all, so that a container can list keys this parser does not know.
+/// Only the two levels of a transition's `curves` ask, because only there is an unknown key an
+/// error: a channel spelt wrong would otherwise hold its neutral value in silence and the post would
+/// render a transition that is not the one the customer picked.
+private struct AnyKey: CodingKey {
+    let stringValue: String
+    init?(stringValue: String) { self.stringValue = stringValue }
+    var intValue: Int? { nil }
+    init?(intValue: Int) { return nil }
+}
+
+/// The alphabetically first key of `c` that is not one of `known`, or nil.
+///
+/// Android reports the first unknown key in the order the object was written, because its org.json
+/// keeps that order. Nothing here can: the object crossed the bridge as a Swift dictionary, which
+/// keeps none. So a spec carrying ONE unknown key at a level - the only kind a caller makes by
+/// accident - reports the same path on both platforms, and one carrying several reports the
+/// alphabetically first here, which at least names the same key every time the spec is sent.
+private func firstUnknownKey(_ c: KeyedDecodingContainer<AnyKey>, known: [String]) -> String? {
+    c.allKeys.map(\.stringValue).filter { !known.contains($0) }.sorted().first
 }
 
 // MARK: - Wire DTOs
@@ -322,6 +466,9 @@ private struct ComposeSpecDTO: Decodable {
     let jobId: String
     let batchId: String
     let clips: [ClipDTO]
+    /// One per entry of `clips`, in step with it: each base clip's `transitionIn`, or nil. The first
+    /// is always nil, because the first clip's key is never read.
+    let transitions: [TransitionDTO?]
     /// nil for a spec with no `tracks` key, which is not the same thing as an empty array and is
     /// carried all the way to `ComposeSpec.tracks` as itself.
     let tracks: [TrackDTO]?
@@ -356,12 +503,23 @@ private struct ComposeSpecDTO: Decodable {
             throw SpecError("clips")
         }
         var decodedClips: [ClipDTO] = []
+        var decodedTransitions: [TransitionDTO?] = []
         while !clipArray.isAtEnd {
             // `currentIndex` is read BEFORE the decode because `UnkeyedContainer.decode` advances it
             // in a `defer`, so a throw would otherwise report the next element's index.
             let i = clipArray.currentIndex
             do {
-                decodedClips.append(try clipArray.decode(ClipDTO.self))
+                if i == 0 {
+                    // The plain clip reader, so a `transitionIn` on the first clip is not even
+                    // looked at: there is nothing before it to come from, and `definitions.ts` has
+                    // an engine ignore one there rather than fail it.
+                    decodedClips.append(try clipArray.decode(ClipDTO.self))
+                    decodedTransitions.append(nil)
+                } else {
+                    let base = try clipArray.decode(BaseClipDTO.self)
+                    decodedClips.append(base.clip)
+                    decodedTransitions.append(base.transitionIn)
+                }
             } catch let e as SpecError {
                 // An element cannot see its own index, so it throws the leaf path and the parent
                 // splices the index in.
@@ -373,6 +531,7 @@ private struct ComposeSpecDTO: Decodable {
             }
         }
         clips = decodedClips
+        transitions = decodedTransitions
 
         // Read between `clips` and `output`, where it sits on the wire, and thrown at once rather
         // than held back: a layer's clips are the same kind of thing as the base track's, so a bad
@@ -515,6 +674,169 @@ private struct ClipDTO: Decodable {
         // still reports the old field. Nothing before this line has changed meaning.
         crop = try c.rect(.crop, "crop")
         rect = try c.rect(.rect, "rect")
+    }
+}
+
+/// A base clip from the second on: the clip, read by the one reader every clip goes through, and
+/// then its `transitionIn`.
+///
+/// The element is read twice - once as a clip, once for the single key only a base clip may carry -
+/// rather than `ClipDTO` learning the key. `ClipDTO` also reads a layer's clips and a transition's
+/// own `from`, and in both places the key is to be ignored without being read, which a reader that
+/// knew about it would have to be told not to do. Capacitor's decoder hands out a fresh container
+/// every time one is asked for, so reading an element twice costs a second dictionary lookup.
+private struct BaseClipDTO: Decodable {
+    let clip: ClipDTO
+    let transitionIn: TransitionDTO?
+
+    private enum K: String, CodingKey { case transitionIn }
+
+    init(from decoder: Decoder) throws {
+        // The clip's own fields first, so a clip that is wrong both in an old field and in its
+        // transition reports the old field, exactly as a clip wrong in `outMs` and `crop` does.
+        clip = try ClipDTO(from: decoder)
+        let c = try decoder.container(keyedBy: K.self)
+        transitionIn = try c.object(.transitionIn, "transitionIn", TransitionDTO.self)
+    }
+}
+
+/// `ComposeClip.transitionIn` on the wire. Throws leaf paths - `kind`, `from.outMs`, `curves.to.x`,
+/// `mask.shape` - and `BaseClipDTO` and the clip loop splice `clips[i].transitionIn.` in front.
+///
+/// `kind` has to be there and is otherwise taken on trust. Nothing in this engine draws differently
+/// for it, so an id this build has never heard of is a transition drawn from its numbers exactly
+/// like any other, and refusing it would make every catalogue addition a native release.
+private struct TransitionDTO: Decodable {
+    let kind: String
+    let from: ClipDTO
+    let curves: CurvesDTO
+    let mask: MaskDTO?
+    /// Already held to 0...1, three channels exactly, or nil for black.
+    let fromTint: [Double]?
+    let toTint: [Double]?
+
+    private enum K: String, CodingKey { case kind, from, curves, mask, fromTint, toTint }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        kind = c.string(.kind)
+        if kind.isEmpty { throw SpecError("kind") }
+        // The same reader as every other clip, so a bad tail reports the clip field that is bad,
+        // `from.outMs`, rather than a vaguer `from`.
+        from = try c.requiredObject(.from, "from", ClipDTO.self)
+        curves = try c.requiredObject(.curves, "curves", CurvesDTO.self)
+        mask = try c.object(.mask, "mask", MaskDTO.self)
+        fromTint = try c.rgb(.fromTint, "fromTint")
+        toTint = try c.rgb(.toTint, "toTint")
+    }
+}
+
+/// `ComposeTransitionCurves` on the wire, with every sample held to its channel's range.
+///
+/// The ranges are wide enough for anything the catalogue does - a zoom to 2.6, a spin through 180
+/// degrees, a flash to a gain of 6 - and narrow enough that a hand-built spec cannot ask for a blur
+/// the size of the frame or a scale that turns one pixel into the whole render.
+private struct CurvesDTO: Decodable {
+    let alpha: [Double]?
+    let reveal: [Double]?
+    let from: SideCurvesDTO?
+    let to: SideCurvesDTO?
+
+    private enum K: String, CodingKey, CaseIterable { case alpha, reveal, from, to }
+
+    /// Android's `parseCurves`, in its order: `alpha`, `reveal`, each side (its channels, then its
+    /// unknown keys), then the unknown keys of this object, and LAST the lengths - every curve read
+    /// against the first one read, the first that disagrees reported by its own path.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        var read: [(path: String, count: Int)] = []
+        alpha = try c.curve(.alpha, "alpha", 0...1, &read)
+        reveal = try c.curve(.reveal, "reveal", 0...1, &read)
+        from = try SideCurvesDTO.read(c, .from, "from", &read)
+        to = try SideCurvesDTO.read(c, .to, "to", &read)
+        let all = try decoder.container(keyedBy: AnyKey.self)
+        if let unknown = firstUnknownKey(all, known: K.allCases.map(\.rawValue)) { throw SpecError(unknown) }
+        if let first = read.first, let odd = read.first(where: { $0.count != first.count }) {
+            throw SpecError(odd.path)
+        }
+    }
+}
+
+/// `ComposeTransitionSideCurves` on the wire. Not `Decodable`, because every curve it reads joins
+/// the list the lengths are checked against at the end, and a `Decodable` initialiser takes nothing
+/// but its decoder.
+private struct SideCurvesDTO {
+    let x: [Double]?
+    let y: [Double]?
+    let scale: [Double]?
+    let rotation: [Double]?
+    let blur: [Double]?
+    let pixelate: [Double]?
+    let split: [Double]?
+    let gain: [Double]?
+    let tint: [Double]?
+
+    enum K: String, CodingKey, CaseIterable {
+        case x, y, scale, rotation, blur, pixelate, split, gain, tint
+    }
+
+    /// One side, `from` or `to`, out of the curves object `c`: Android's `parseSideCurves`. `name`
+    /// is the side's own name and is the front of every path this throws, so a bad channel reads
+    /// `from.blur`. Absent, or null, is nil; anything else that is not an object fails as `name`.
+    static func read<P: CodingKey>(_ c: KeyedDecodingContainer<P>, _ key: P, _ name: String,
+                                   _ read: inout [(path: String, count: Int)]) throws -> SideCurvesDTO? {
+        guard c.has(key) else { return nil }
+        guard let s = try? c.nestedContainer(keyedBy: K.self, forKey: key),
+              let all = try? c.nestedContainer(keyedBy: AnyKey.self, forKey: key) else {
+            throw SpecError(name)
+        }
+        // `TransitionSide` order, which is also the order the paths are checked in. One statement
+        // per channel, so the order is on the page rather than left to argument evaluation.
+        let x = try s.curve(.x, "\(name).x", -4...4, &read)
+        let y = try s.curve(.y, "\(name).y", -4...4, &read)
+        let scale = try s.curve(.scale, "\(name).scale", 0.01...20, &read)
+        let rotation = try s.curve(.rotation, "\(name).rotation", -3600...3600, &read)
+        let blur = try s.curve(.blur, "\(name).blur", 0...0.5, &read)
+        let pixelate = try s.curve(.pixelate, "\(name).pixelate", 0...0.5, &read)
+        let split = try s.curve(.split, "\(name).split", -0.5...0.5, &read)
+        let gain = try s.curve(.gain, "\(name).gain", 0...10, &read)
+        let tint = try s.curve(.tint, "\(name).tint", 0...1, &read)
+        // The side's unknown keys AFTER its channels, as Android checks them.
+        if let unknown = firstUnknownKey(all, known: K.allCases.map(\.rawValue)) {
+            throw SpecError("\(name).\(unknown)")
+        }
+        return SideCurvesDTO(x: x, y: y, scale: scale, rotation: rotation, blur: blur,
+                             pixelate: pixelate, split: split, gain: gain, tint: tint)
+    }
+}
+
+/// `ComposeTransitionMask` on the wire. The shape is the only thing that can be wrong; everything
+/// else is a value, defaulted when it is missing or not a number and clamped when it is out of range,
+/// on the line this file draws everywhere.
+private struct MaskDTO: Decodable {
+    let shape: ComposeTransitionMask.Shape
+    let angleDeg: Double
+    let count: Int
+    let feather: Double
+    let invert: Bool
+
+    private enum K: String, CodingKey { case shape, angleDeg, count, feather, invert }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        // An unknown shape is refused rather than drawn as some other one: the engine would have to
+        // guess which reveal was meant, and a guess is a different transition from the one picked.
+        guard let shape = ComposeTransitionMask.Shape(rawValue: c.string(.shape)) else {
+            throw SpecError("shape")
+        }
+        self.shape = shape
+        angleDeg = c.double(.angleDeg, 0)
+        // Held to a slat count a frame can show, then rounded half up as `Math.round` rounds it in
+        // `maskMeasure` and as Android rounds it - clamped FIRST, so a huge count cannot overflow the
+        // conversion.
+        count = Int((min(64, max(1, c.double(.count, 1))) + 0.5).rounded(.down))
+        feather = min(0.5, max(0.0005, c.double(.feather, 0.01)))
+        invert = c.flag(.invert, false)
     }
 }
 

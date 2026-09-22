@@ -1,4 +1,4 @@
-import { computed, signal } from '@preact/signals-core';
+import { computed, effect, signal } from '@preact/signals-core';
 import {
   DEFAULT_OUTPUT,
   aspectOf,
@@ -40,6 +40,8 @@ import {
   resetClipFraming,
   resolveFilterOps,
   setClipSpeed,
+  setAllTransitions,
+  setClipTransition,
   setOverlayWindow,
   setTrackOpacity,
   setTrackStart,
@@ -52,8 +54,16 @@ import {
   timelineSlots,
   totalDurationMs,
   trackIdOfClip,
+  transitionPreset,
+  transitionWindowAt,
   trimClip,
   uniqueClipKeys,
+  compileTransition,
+  maxTransitionMs,
+  DEFAULT_TRANSITION_MS,
+  MIN_TRANSITION_MS,
+  type CompiledTransition,
+  type EditTransition,
   type ClipDropTarget,
   type ClipFramingPatch,
   type EditAdjust,
@@ -109,6 +119,44 @@ export interface PreviewVideoLayer {
   fit: EditFit;
   opacity: number;
   z: number;
+}
+
+/**
+ * A transition on screen at the playhead, as the preview has to draw it: the incoming clip is the
+ * base entry [EditorStore.previewLayers] already holds, and `from` is the outgoing clip's tail,
+ * which plays under it for [durationMs] from [startMs].
+ */
+export interface PreviewTransition {
+  /** The incoming clip, whose slot the playhead is in. */
+  clipId: string;
+  startMs: number;
+  durationMs: number;
+  /** 0..1 through the window at the playhead. */
+  progress: number;
+  /** The outgoing clip's tail at the playhead, drawn exactly as a base layer is. */
+  from: PreviewVideoLayer;
+  transition: CompiledTransition;
+}
+
+/**
+ * One boundary of the base track, as the transition sheet shows it: the clips either side, what is
+ * on it now, and how long a transition the two clips can hold.
+ */
+export interface TransitionBoundary {
+  /** The incoming clip's id - the boundary's name everywhere, since that clip holds the transition. */
+  clipId: string;
+  /** Index of the incoming clip; the boundary is between clip `index` and clip `index + 1`, counting from 1. */
+  index: number;
+  from: EditClip;
+  to: EditClip;
+  /** What is stored, or null for a cut. */
+  transition: EditTransition | null;
+  /** How long it actually runs, after the clips either side have had their say. 0 for a cut. */
+  effectiveMs: number;
+  /** The longest transition this boundary can hold, rounded down to the slider's step. */
+  maxMs: number;
+  /** Where the boundary is on the output timeline: the incoming clip's slot start. */
+  atMs: number;
 }
 
 /**
@@ -208,6 +256,11 @@ export class EditorStore {
   private readonly past = signal<HistoryEntry[]>([]);
   private readonly future = signal<HistoryEntry[]>([]);
   private gestureStart: EditManifest | null = null;
+  /**
+   * While a group is open, every step after its first folds into the entry the first one made - see
+   * [beginHistoryGroup]. `entry` is that entry's index in [past], or -1 before it exists.
+   */
+  private historyGroup: { entry: number } | null = null;
   readonly canUndo = computed(() => this.past.value.length > 0);
   readonly canRedo = computed(() => this.future.value.length > 0);
   /**
@@ -314,6 +367,37 @@ export class EditorStore {
     return layers.sort((a, b) => a.z - b.z);
   });
 
+  /**
+   * The transition at the playhead, or null wherever one clip fills the frame. Beside
+   * [previewLayers] rather than inside it, because that list holds ONE base entry and a great deal
+   * of the preview - the crop tool, the hit-testing, the source element per track - relies on it.
+   */
+  readonly previewTransition = computed<PreviewTransition | null>(() => {
+    const window = transitionWindowAt(this.slots.value, this.playheadMs.value);
+    const kind = window?.to.transitionIn?.kind;
+    const transition = kind ? compileTransition(kind) : null;
+    if (!window || !transition) return null;
+    const from = window.from;
+    return {
+      clipId: window.to.id,
+      startMs: window.startMs,
+      durationMs: window.durationMs,
+      progress: window.progress,
+      from: {
+        trackId: null,
+        clipId: from.id,
+        clipKey: from.clipKey,
+        sourceMs: window.fromSourceMs,
+        rect: from.rect ?? null,
+        crop: from.crop ?? null,
+        fit: this.clipFit(from),
+        opacity: 1,
+        z: 0,
+      },
+      transition,
+    };
+  });
+
   /** One layer of [previewLayers]. `outputMs` is on the layer's OWN timeline, not the post's. */
   private previewLayer(trackId: string | null, slot: TimelineSlot, outputMs: number, opacity: number, z: number): PreviewVideoLayer {
     const clip = slot.clip;
@@ -341,6 +425,16 @@ export class EditorStore {
   readonly soundMenuOpen = signal(false);
   /** What the volume sheet is adjusting while it is open. */
   readonly volumeTarget = signal<VolumeTarget | null>(null);
+  /**
+   * The boundary the transition sheet is dressing while it is open, named by its INCOMING clip -
+   * the clip that holds the transition. Null whenever the sheet is shut.
+   */
+  readonly transitionTarget = signal<string | null>(null);
+  /** The boundary [transitionTarget] names, worked out, or null when there is none. */
+  readonly targetBoundary = computed<TransitionBoundary | null>(() => {
+    const id = this.transitionTarget.value;
+    return id ? this.boundaryOf(id) : null;
+  });
   /** The text layer the text sheet is editing, and whether it was created by this edit. */
   readonly textEdit = signal<{ id: string; isNew: boolean } | null>(null);
   readonly fullscreen = signal(false);
@@ -553,9 +647,40 @@ export class EditorStore {
   }
 
   private pushHistory(manifest: EditManifest, label: string): void {
+    const group = this.historyGroup;
+    // Folded into the group's entry when that entry is still the newest step: the manifest it holds
+    // is the one from before the group began, which is exactly what one undo of the whole group has
+    // to put back. The revision still moves, so a host filing drafts sees every change.
+    if (group && group.entry >= 0 && group.entry === this.past.value.length - 1 && this.future.value.length === 0) {
+      this.revision.value++;
+      return;
+    }
     this.past.value = [...this.past.value, { manifest, label }].slice(-HISTORY_LIMIT);
     this.future.value = [];
     this.revision.value++;
+    if (group) group.entry = this.past.value.length - 1;
+  }
+
+  /**
+   * Opens a history GROUP: every step committed until [endHistoryGroup] lands as ONE undo step, the
+   * label being the first step's.
+   *
+   * For a sheet a customer browses rather than uses once. Ten transitions tried one after another
+   * before settling on one are one decision, and ten undo steps to get back past them would make
+   * undo the least useful button on the screen. A gesture cannot do this job: the sheet's slider
+   * opens and closes its own, and a gesture never outlives one.
+   *
+   * An undo or redo inside the group ends the folding - the entry it folded into is no longer the
+   * newest - so the next change after one starts an entry of its own, as it should.
+   */
+  beginHistoryGroup(): void {
+    this.flushGesture();
+    this.historyGroup = { entry: -1 };
+  }
+
+  endHistoryGroup(): void {
+    this.flushGesture();
+    this.historyGroup = null;
   }
 
   /** A gesture left open (a slider still held when a button is tapped) is closed as its own step. */
@@ -577,6 +702,10 @@ export class EditorStore {
       (sel.kind === 'voice' && !!findVoiceover(m, sel.id)) ||
       (sel.kind === 'music' && !!m.music);
     if (!stillThere) this.select(null);
+    if (this.historyGroup) this.historyGroup.entry = -1;
+    // The boundary the transition sheet is on can be undone out of existence - an undo that takes
+    // back the clip it was in front of.
+    if (this.panel.value === 'transition' && !this.targetBoundary.value) this.closePanel();
     if (this.playheadMs.value > this.totalMs.value) this.seek(this.totalMs.value);
   }
 
@@ -590,7 +719,7 @@ export class EditorStore {
     if (selection) this.toolbarMode.value = 'root';
     // A sheet that was about the old selection makes no sense for the new one.
     const panel = this.panel.value;
-    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop') this.closePanel();
+    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition') this.closePanel();
   }
 
   isSelected(selection: EditorSelection): boolean {
@@ -601,10 +730,12 @@ export class EditorStore {
 
   openPanel(panel: EditorPanel | null): void {
     this.soundMenuOpen.value = false;
+    if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
     this.panel.value = panel;
   }
 
   closePanel(): void {
+    if (this.panel.value === 'transition') this.leaveTransition();
     this.panel.value = null;
     this.volumeTarget.value = null;
   }
@@ -618,6 +749,178 @@ export class EditorStore {
   selectClipAtPlayhead(): void {
     const slot = slotAt(this.manifest.value, this.playheadMs.value);
     if (slot) this.select({ kind: 'clip', id: slot.clip.id });
+  }
+
+  /* ========================================================================================= */
+  /* Transitions                                                                               */
+  /* ========================================================================================= */
+
+  /**
+   * The duration the last transition was given, so the next boundary dressed starts where the
+   * customer left the slider rather than back at the default.
+   */
+  private readonly lastTransitionMs = signal(DEFAULT_TRANSITION_MS);
+  private stopAudition: (() => void) | null = null;
+
+  /**
+   * How long a transition chosen on the target boundary would run - its own duration when it has
+   * one, and otherwise the last one chosen, held to what the two clips can take. It is what the
+   * sheet's readout shows on a cut, so the number does not jump when the first tile is tapped.
+   */
+  readonly nextTransitionMs = computed(() => {
+    const boundary = this.targetBoundary.value;
+    if (!boundary) return this.lastTransitionMs.value;
+    if (boundary.transition) return boundary.effectiveMs;
+    return Math.max(MIN_TRANSITION_MS, Math.min(this.lastTransitionMs.value, boundary.maxMs));
+  });
+
+  /** The boundary INTO base clip `clipId`, or null when that clip has nothing before it. */
+  boundaryOf(clipId: string): TransitionBoundary | null {
+    const slots = this.slots.value;
+    const slot = slots.find(s => s.clip.id === clipId);
+    if (!slot || slot.index === 0) return null;
+    const from = slots[slot.index - 1].clip;
+    return {
+      clipId,
+      index: slot.index,
+      from,
+      to: slot.clip,
+      transition: slot.clip.transitionIn ?? null,
+      effectiveMs: slot.transitionInMs,
+      maxMs: maxTransitionMs(from, slot.clip),
+      atMs: slot.startMs,
+    };
+  }
+
+  /**
+   * The dot between two clips: opens the transition sheet on the boundary into `clipId`.
+   *
+   * Everything done in the sheet is one undo step (see [beginHistoryGroup]), and the preview goes to
+   * the boundary - the middle of the transition when there is one - so the picture on the screen is
+   * the thing the sheet is about.
+   */
+  openTransition(clipId: string): void {
+    const boundary = this.boundaryOf(clipId);
+    if (!boundary) return;
+    this.pause();
+    // Selecting nothing also shuts a transition sheet that was open on another boundary.
+    this.select(null);
+    this.closePanel();
+    this.transitionTarget.value = clipId;
+    this.beginHistoryGroup();
+    this.openPanel('transition');
+    this.seek(boundary.atMs + boundary.effectiveMs / 2);
+    this.haptic('light');
+  }
+
+  /**
+   * A tile: this transition on the boundary, at the duration it already had, or the last one chosen.
+   * Plays it once in the preview, which is the only way to see a transition at all.
+   */
+  chooseTransition(kind: string): void {
+    const boundary = this.targetBoundary.value;
+    if (!boundary || !transitionPreset(kind)) return;
+    if (boundary.maxMs < MIN_TRANSITION_MS) {
+      this.showToast('These clips are too short for a transition');
+      this.haptic('warning');
+      return;
+    }
+    const wanted = boundary.transition?.durationMs ?? this.lastTransitionMs.value;
+    const durationMs = Math.max(MIN_TRANSITION_MS, Math.min(wanted, boundary.maxMs));
+    this.commit('Transition', m => setClipTransition(m, boundary.clipId, { kind, durationMs }));
+    this.haptic('selection');
+    this.auditionTransition();
+  }
+
+  /** None: the boundary goes back to a cut. */
+  removeTransition(): void {
+    const boundary = this.targetBoundary.value;
+    if (!boundary?.transition) return;
+    this.endAudition();
+    this.commit('Transition', m => setClipTransition(m, boundary.clipId, null));
+    this.haptic('selection');
+  }
+
+  /**
+   * The duration slider. Live while it is dragged (the slider wraps the drag in a gesture), one step
+   * otherwise. Held to what the two clips can take, which is the slider's own end as well.
+   */
+  setTransitionDuration(durationMs: number, live = false): void {
+    const boundary = this.targetBoundary.value;
+    const current = boundary?.transition;
+    if (!boundary || !current) return;
+    const ms = Math.round(Math.max(MIN_TRANSITION_MS, Math.min(boundary.maxMs, durationMs)));
+    this.lastTransitionMs.value = ms;
+    const fn = (m: EditManifest): EditManifest => setClipTransition(m, boundary.clipId, { kind: current.kind, durationMs: ms });
+    if (live) this.preview(fn);
+    else this.commit('Transition', fn);
+  }
+
+  /**
+   * The boundary's transition - or its cut - on every boundary of the base track, as a step of its
+   * own rather than folded into the rest of the sheet: it changes clips the customer was not looking
+   * at, and undo should be able to take back exactly that.
+   */
+  applyTransitionToAll(): void {
+    const boundary = this.targetBoundary.value;
+    if (!boundary) return;
+    const transition = boundary.transition;
+    if (this.historyGroup) this.historyGroup.entry = -1;
+    const changed = this.commit(transition ? 'Transition for all' : 'Remove transitions', m => setAllTransitions(m, transition));
+    if (this.historyGroup) this.historyGroup.entry = -1;
+    if (changed) {
+      this.showToast(transition ? 'Transition applied to all clips' : 'Transitions removed from all clips');
+      this.haptic('success');
+    } else {
+      this.showToast(transition ? 'All clips already have this transition' : 'No clip has a transition');
+    }
+  }
+
+  /**
+   * Plays the target boundary's transition once, with a little either side of it, and parks the
+   * preview on its middle - the one frame that shows what the transition is.
+   */
+  auditionTransition(): void {
+    const boundary = this.targetBoundary.value;
+    if (!boundary || boundary.effectiveMs <= 0) return;
+    const middle = boundary.atMs + boundary.effectiveMs / 2;
+    const fromMs = Math.max(0, boundary.atMs - 600);
+    const toMs = Math.min(this.totalMs.value, boundary.atMs + boundary.effectiveMs + 400);
+    this.endAudition();
+    this.seek(fromMs);
+    this.play();
+    let started = false;
+    const dispose = effect(() => {
+      const at = this.playheadMs.value;
+      const playing = this.playing.value;
+      if (playing) started = true;
+      // Paused by the customer part way: the audition is over, and the playhead stays where they put it.
+      const interrupted = started && !playing;
+      if (at < toMs && !interrupted) return;
+      queueMicrotask(() => {
+        if (this.stopAudition !== stop) return;
+        this.endAudition();
+        if (!interrupted) {
+          this.pause();
+          this.seek(middle);
+        }
+      });
+    });
+    const stop = (): void => dispose();
+    this.stopAudition = stop;
+  }
+
+  private endAudition(): void {
+    const stop = this.stopAudition;
+    this.stopAudition = null;
+    stop?.();
+  }
+
+  /** Everything the transition sheet was holding open, let go of as it shuts. */
+  private leaveTransition(): void {
+    this.endAudition();
+    this.endHistoryGroup();
+    this.transitionTarget.value = null;
   }
 
   /* ========================================================================================= */
@@ -1355,6 +1658,7 @@ export class EditorStore {
   dispose(): void {
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = null;
+    this.endAudition();
     this.player = null;
   }
 }

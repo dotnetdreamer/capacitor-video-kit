@@ -1,4 +1,5 @@
 import { cssFor } from '../../editor/edit-manifest';
+import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
 import type { ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
 
@@ -7,8 +8,8 @@ import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
 import { pictureDest } from './geometry';
 import { decodeImage, FrameReader, probeMedia } from './media';
-import { Painter, WHOLE_FRAME, type LayerDraw } from './painter';
-import { buildPlan, clipIndexAt, sourceTimeUs, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
+import { Painter, WHOLE_FRAME, type LayerDraw, type TransitionDraw } from './painter';
+import { buildPlan, clipIndexAt, sourceTimeUs, transitionAt, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
 
 /**
  * The render itself: plan, mix, then one pass down the output timeline.
@@ -20,11 +21,33 @@ import { buildPlan, clipIndexAt, sourceTimeUs, visibleIndexAt, type PlannedClip,
  * file as a desktop, just later. The recorder engine is the exception and owns its own pacing - see
  * `encode.ts` - because `MediaRecorder` timestamps by the wall clock and cannot be hurried.
  *
- * At most two decoders are open at once, which is the same budget `MAX_VIDEO_TRACKS` sets natively
- * and for the same reason - a mid-range phone has a handful of hardware decoders and the page
- * behind the editor may already hold some. Each layer keeps ONE `<video>` and re-points it when its
- * clip changes, so a post of ten clips still only ever has one video element open for the base.
+ * Decoders are held per LAYER, not per clip: each layer keeps ONE `<video>` and re-points it when
+ * its clip changes, so a post of ten clips still only ever has one video element open for the base,
+ * and every extra layer adds one of its own. A post with transitions adds exactly one more, for the
+ * outgoing clips' tails: at most two base clips are ever on screen at once - each transition is held
+ * to half of either clip it joins, so a clip's own two transitions never overlap - and every tail of
+ * the post can share the one extra element. It is a separate element even when the tail and the
+ * clip it runs under are the two halves of one split file, because one element cannot be at two
+ * moments of its file at once. The export composites offline, so none of this is a budget it has to
+ * hold to the way a phone's player does; it is simply the fewest decoders that draw the post - and
+ * the tails' element is given back as soon as the last window has closed.
  */
+
+/** The reader slot the base track is drawn from. */
+const BASE_READER = 'base';
+
+/**
+ * The reader slot the transition tails are drawn from. No extra layer can land on it, or on
+ * [BASE_READER], because every layer's slot is its track id behind [layerReader]'s prefix: a track
+ * whose id happened to be one of these would otherwise re-point that element under the base track
+ * every frame, and close it in the middle of a draw.
+ */
+const TAIL_READER = 'base:tail';
+
+/** An extra layer's reader slot, kept apart from the base track's two whatever the track is called. */
+function layerReader(trackId: string): string {
+  return `track:${trackId}`;
+}
 
 /** How often the bar is allowed to move. Any faster and it is work rather than feedback. */
 const PROGRESS_STEP = 0.01;
@@ -135,12 +158,17 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
   let poster: Blob | null = null;
   let posterCut = false;
   let reported = FRAMES_FROM;
+  // Asked once, before the first frame: a post with no transitions never looks for a window.
+  const hasTransitions = plan.transitions.length > 0;
+  // Where the last window closes. The windows run in timeline order, so from there on no tail is
+  // drawn again and its decoder can go back for the rest of the render rather than sit idle.
+  let tailsUntilUs = hasTransitions ? Math.max(...plan.transitions.map(transition => transition.startUs + transition.durUs)) : 0;
 
   for (let index = 0; index < frames; index++) {
     throwIfAborted(options.signal);
     const atUs = Math.round(index * frameUs);
 
-    const draws: LayerDraw[] = [];
+    const draws: (LayerDraw | TransitionDraw)[] = [];
 
     // The base track. A moment past its last clip draws nothing and the frame is black - the same
     // picture the native engines leave when a layer outlasts what is under it.
@@ -152,9 +180,30 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
         // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
         // destination of its own, so the angle comes off the clip; the painter turns it about that
         // same rectangle's centre either way.
-        const draw = await layerDraw(layers, 'base', clip, atUs - startUs, frameSeconds, WHOLE_FRAME, 1, clip.clip.rect?.rotationDeg ?? 0);
-        if (draw) draws.push(draw);
+        const draw = await layerDraw(layers, BASE_READER, clip, atUs - startUs, frameSeconds, WHOLE_FRAME, 1, clip.clip.rect?.rotationDeg ?? 0);
+        // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
+        // tail - read from its own element, drawn the way the base clip it continues was drawn - is
+        // the other. The spec was lowered, so the window opens exactly where the base clip starts
+        // and `clipIndexAt` has already named the right clip for it.
+        const active = hasTransitions ? transitionAt(plan, atUs) : null;
+        if (active && active.index === baseIndex) {
+          const tail = active.planned.tail;
+          const from = await layerDraw(layers, TAIL_READER, tail, atUs - active.planned.startUs, frameSeconds, WHOLE_FRAME, 1, tail.clip.rect?.rotationDeg ?? 0);
+          draws.push({
+            kind: 'transition',
+            from,
+            to: draw,
+            look: lookAt(active.planned.curves, active.progress),
+            transition: active.planned,
+          });
+        } else if (draw) {
+          draws.push(draw);
+        }
       }
+    }
+    if (tailsUntilUs > 0 && atUs >= tailsUntilUs) {
+      layers.release(TAIL_READER);
+      tailsUntilUs = 0;
     }
 
     // ...then every extra layer, bottom to top, each one placed by its own rectangle.
@@ -169,7 +218,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
       // opaque black over the picture beneath it. See [pictureDest].
       const draw = await layerDraw(
         layers,
-        track.id,
+        layerReader(track.id),
         clip,
         atUs - placement.startUs,
         frameSeconds,
@@ -270,9 +319,12 @@ async function layerDraw(
  * elements opened at once is exactly how a phone runs out of decoders.
  */
 async function probeInputs(spec: ComposeSpec, signal: AbortSignal): Promise<Map<string, ProbedInput>> {
-  const uris = new Set<string>();
-  for (const clip of spec.clips) uris.add(clip.uri);
-  for (const track of spec.tracks ?? []) for (const clip of track.clips) uris.add(clip.uri);
+  // A transition's tail is planned as a clip, clamped to its file and told whether it has sound, so
+  // its file is probed with the rest. The editor's tail is always the file of the clip before it,
+  // which the set below then costs nothing for; a spec written by hand need not be.
+  const tails = spec.clips.flatMap(clip => (clip.transitionIn ? [clip.transitionIn.from] : []));
+  const every = [...spec.clips, ...tails, ...(spec.tracks ?? []).flatMap(track => track.clips)];
+  const uris = new Set(every.map(clip => clip.uri));
 
   const probes = new Map<string, ProbedInput>();
   for (const uri of uris) {
@@ -280,7 +332,7 @@ async function probeInputs(spec: ComposeSpec, signal: AbortSignal): Promise<Map<
     try {
       probes.set(uri, await probeMedia(uri));
     } catch (error) {
-      const clip = spec.clips.find(candidate => candidate.uri === uri) ?? (spec.tracks ?? []).flatMap(track => track.clips).find(candidate => candidate.uri === uri);
+      const clip = every.find(candidate => candidate.uri === uri);
       throw new RenderFailure('unreadable_input', describe(error), clip?.key);
     }
   }
@@ -309,6 +361,12 @@ class LayerReaders {
     } catch (error) {
       throw new RenderFailure('unreadable_input', describe(error), clipKey);
     }
+  }
+
+  /** Closes one layer's element, which will not be asked for again; a later ask simply reopens it. */
+  release(layerId: string): void {
+    this.open.get(layerId)?.reader.close();
+    this.open.delete(layerId);
   }
 
   close(): void {

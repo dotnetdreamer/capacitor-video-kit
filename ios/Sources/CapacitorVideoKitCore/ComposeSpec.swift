@@ -90,6 +90,106 @@ struct ComposeClip: Sendable {
     /// rectangle, so the picture keeps its size as the customer spins it instead of swelling to fill
     /// a growing bounding box.
     let rect: ComposePlacement?
+    /// A transition INTO this clip from the one before it on the BASE track, or nil for a cut.
+    ///
+    /// Only ever set on a base clip from the second on. The parser never reads the key on the first
+    /// base clip, on a layer's clips or on a transition's own `from`, which is where `definitions.ts`
+    /// says an engine ignores it. nil for the reason `crop` is nil: a post without transitions is
+    /// what the builder tests for, once, to keep the single-timeline path it has always taken.
+    let transitionIn: ComposeTransition?
+}
+
+/// How one base clip gives way to the next: `ComposeTransition` in `definitions.ts`, whose doc
+/// comments are the drawing contract every engine implements and are not repeated here.
+///
+/// The spec arrives LOWERED, so this engine does no arithmetic for the overlap. The outgoing clip's
+/// `outMs` already stops where this clip starts, and `from` is the part it gave up - the same clip,
+/// trimmed to its last moments, with its own sound, speed and framing - drawn UNDER this clip from
+/// this clip's first frame, for its own length. The base track stays the flat sequence
+/// `CompositionBuilder` has always laid, and all a transition adds is its tail, on one extra track.
+///
+/// A class rather than a struct only because it holds a `ComposeClip` and a `ComposeClip` holds one
+/// of these, and two structs that contain each other have no size. Every property is a `let` of a
+/// Sendable type, so the conformance is checked by the compiler rather than promised.
+final class ComposeTransition: Sendable {
+    /// The catalogue id, `dissolve` or `slide-left`, for a log line and nothing else. Nothing in this
+    /// engine draws differently for it: it draws `curves` and `mask`, which is how a transition the
+    /// catalogue gains tomorrow reaches every engine as numbers without a line of native code.
+    let kind: String
+    /// The outgoing clip's last moments, drawn under this clip while the transition runs.
+    let from: ComposeClip
+    /// The shape the incoming side is revealed through. nil reveals it everywhere at once.
+    let mask: ComposeTransitionMask?
+    /// What the outgoing side's `tint` channel moves it towards. Black when the wire left it out,
+    /// which is the contract's default, resolved here so the compositor never has to ask.
+    let fromTint: ComposeRGB
+    /// The same for the incoming side.
+    let toTint: ComposeRGB
+    let curves: ComposeTransitionCurves
+
+    init(kind: String, from: ComposeClip, mask: ComposeTransitionMask?,
+         fromTint: ComposeRGB, toTint: ComposeRGB, curves: ComposeTransitionCurves) {
+        self.kind = kind
+        self.from = from
+        self.mask = mask
+        self.fromTint = fromTint
+        self.toTint = toTint
+        self.curves = curves
+    }
+}
+
+/// The shape a mask reveals the incoming side through, with every default already filled in and
+/// every number already held to its range by the parser. `TransitionMath.maskMeasure` is where the
+/// shapes are defined; see `ComposeTransitionMask` in `definitions.ts` for the same in prose.
+struct ComposeTransitionMask: Sendable {
+    enum Shape: String, Sendable { case linear, circle, diamond, clock, blinds, split }
+
+    let shape: Shape
+    /// The way a `linear` edge travels, and the direction `blinds` and `split` measure along, in
+    /// y-DOWN degrees. Not clamped: cos and sin reduce any angle.
+    let angleDeg: Double
+    /// `blinds` only: how many slats, 1...64.
+    let count: Int
+    /// Softness of the edge in the shape's own 0...1 units, 0.0005...0.5.
+    let feather: Double
+    /// Reveals the incoming side OUTSIDE the shape instead of inside it.
+    let invert: Bool
+}
+
+/// Every channel a transition moves, each sampled at evenly spaced moments of its window. The parser
+/// guarantees every curve present has the same length, 2...121, and that every sample is finite and
+/// inside its channel's range. An absent curve holds its neutral value for the whole window.
+struct ComposeTransitionCurves: Sendable {
+    /// How much of the incoming side is drawn, 0...1. Neutral 1.
+    let alpha: [Double]?
+    /// How far the mask is open, 0...1. Neutral 1.
+    let reveal: [Double]?
+    let from: ComposeTransitionSideCurves?
+    let to: ComposeTransitionSideCurves?
+}
+
+/// One side's channels, in the order `TransitionSide` lists them. See `TransitionSide` for what
+/// each one does and `TransitionRender.side` for the order they are applied in.
+struct ComposeTransitionSideCurves: Sendable {
+    let x: [Double]?
+    let y: [Double]?
+    let scale: [Double]?
+    let rotation: [Double]?
+    let blur: [Double]?
+    let pixelate: [Double]?
+    let split: [Double]?
+    let gain: [Double]?
+    let tint: [Double]?
+}
+
+/// A colour as three 0...1 channels in gamma-encoded sRGB, the space every blend in this engine
+/// happens in.
+struct ComposeRGB: Sendable {
+    let r: Double
+    let g: Double
+    let b: Double
+
+    static let black = ComposeRGB(r: 0, g: 0, b: 0)
 }
 
 /// One extra layer of video over `ComposeSpec.clips`, drawn in its clips' own rectangles.
@@ -226,6 +326,11 @@ struct ComposeSpec: Sendable {
     /// This is an UPPER BOUND: `CompositionBuilder` produces less whenever a clip's `outMs` runs
     /// past the real file and gets clamped. Use it for the disk estimate and the wall-clock budget,
     /// never for a `timeRange`.
+    ///
+    /// Transitions need nothing here. The overlap is already taken out of `clips` before the spec
+    /// leaves the editor - each outgoing clip stops where the next one starts - and a transition's
+    /// `from` is drawn UNDER the incoming clip rather than after it, so it adds no length of its own.
+    /// Summing `clips` as they arrive is the post's length with every transition in it.
     var totalOutputMs: Int64 {
         let sum = clips.reduce(Int64(0)) { acc, c in
             // The parser clamps speed to 0.25...4.0, so this cannot divide by zero. The isFinite

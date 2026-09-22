@@ -26,10 +26,18 @@ class RampGainProvider(
     /** Relative to the item start; [C.TIME_UNSET] when there is no fade-out. */
     private val fadeOutStartUs: Long = C.TIME_UNSET,
     private val fadeOutUs: Long = 0L,
+    /**
+     * Silence before this point, relative to the item start. For a transition's tail, whose first
+     * moments are laid under the base only so the compositor has a real frame to pair with the
+     * window's first one: the base is playing that same stretch of sound already, and the tail
+     * would double it. 0 - every other item - is no silence at all.
+     */
+    private val silentUntilUs: Long = 0L,
 ) : GainProcessor.GainProvider {
 
     override fun getGainFactorAtSamplePosition(samplePosition: Long, sampleRate: Int): Float {
         val tUs = toUs(samplePosition, sampleRate)
+        if (tUs < silentUntilUs) return 0f
         var gain = level
         if (fadeInUs > 0L && tUs < fadeInUs) {
             gain *= tUs.toFloat() / fadeInUs.toFloat()
@@ -47,6 +55,7 @@ class RampGainProvider(
     override fun isUnityUntil(samplePosition: Long, sampleRate: Int): Long {
         if (level != 1f) return C.TIME_UNSET
         val tUs = toUs(samplePosition, sampleRate)
+        if (tUs < silentUntilUs) return C.TIME_UNSET
         if (fadeInUs > 0L && tUs < fadeInUs) return C.TIME_UNSET
         if (fadeOutStartUs == C.TIME_UNSET || fadeOutUs <= 0L) return C.TIME_END_OF_SOURCE
         if (tUs >= fadeOutStartUs) return C.TIME_UNSET
@@ -58,5 +67,7 @@ class RampGainProvider(
         if (sampleRate <= 0) 0L else samplePosition * 1_000_000L / sampleRate
 
     /** True when this provider would leave every sample untouched. */
-    fun isNoOp(): Boolean = level == 1f && fadeInUs <= 0L && (fadeOutStartUs == C.TIME_UNSET || fadeOutUs <= 0L)
+    fun isNoOp(): Boolean =
+        level == 1f && fadeInUs <= 0L && silentUntilUs <= 0L &&
+            (fadeOutStartUs == C.TIME_UNSET || fadeOutUs <= 0L)
 }

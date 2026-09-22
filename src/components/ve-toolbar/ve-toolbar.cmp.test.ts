@@ -297,6 +297,40 @@ describe('ve-toolbar', () => {
     expect(store.panel.value).toBe(null);
   });
 
+  it('opens the transition sheet on the cut into the selected segment, or out of the first one', async () => {
+    const { store, bar } = await mount();
+
+    // The second segment: the cut at its left edge, which is the one it holds.
+    store.select({ kind: 'clip', id: 'seg-b' });
+    await until('the clip row', () => label(bar) === 'Clip tools');
+    tile(bar, 'transition').click();
+    expect(store.panel.value).toBe('transition');
+    expect(store.transitionTarget.value).toBe('seg-b');
+    // The sheet is about a cut and not a clip, so the segment lets go of the selection.
+    expect(store.selection.value).toBeNull();
+    store.closePanel();
+
+    // The first segment has no cut in front of it, so it is the one after it.
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the clip row again', () => label(bar) === 'Clip tools');
+    tile(bar, 'transition').click();
+    expect(store.transitionTarget.value).toBe('seg-b');
+  });
+
+  it('dims Transition on a video of one clip, and says what is missing', async () => {
+    const { store, bar } = await mount();
+    store.commit('Down to one', m => ({ ...m, clips: [m.clips[0]] }));
+
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the clip row', () => label(bar) === 'Clip tools');
+    await until('the tile to dim', () => tile(bar, 'transition').classList.contains('tile--dim'));
+
+    tile(bar, 'transition').click();
+    await until('the reason', () => store.toast.value !== null);
+    expect(store.toast.value?.text).toBe('Add another clip to use a transition');
+    expect(store.panel.value).toBeNull();
+  });
+
   it('names the fit tool after what a tap will do', async () => {
     const { store, bar } = await mount();
 

@@ -232,7 +232,7 @@ enum ResultBuilder {
 
     /// `totalMs` is the composition's real duration (`BuiltComposition.totalMs`), which can be less
     /// than `spec.totalOutputMs` when a clip's `outMs` was clamped to its file. It is used for the
-    /// truncation guard and for nothing else.
+    /// truncation guard, and as the duration reported when the finished file cannot be measured.
     static func describe(_ url: URL, spec: ComposeSpec, jobId: String, totalMs: Int64) async throws -> ComposeResult {
         let probed = try? await Thumbnailer.probe(url)
         let bytes = Thumbnailer.fileBytes(url)
@@ -251,8 +251,11 @@ enum ResultBuilder {
         }
 
         // Android's finalizeJob fallbacks, field for field: the plan's duration and the spec's
-        // dimensions when the read-back says nothing useful.
-        let durationMs = measured > 0 ? measured : spec.totalOutputMs
+        // dimensions when the read-back says nothing useful. The plan's duration is `totalMs`, the
+        // composition's real length, which is what Android's `plan.totalUs` is; the spec's
+        // `totalOutputMs` is an upper bound for a disk estimate, and runs long whenever a clip's
+        // trim was clamped to its file.
+        let durationMs = measured > 0 ? measured : totalMs
         let width = (probed?.width ?? 0) > 0 ? probed!.width : spec.output.width
         let height = (probed?.height ?? 0) > 0 ? probed!.height : spec.output.height
 

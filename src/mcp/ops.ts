@@ -41,11 +41,13 @@ import {
   type EditOverlay,
   type EditPlacement,
   type EditRect,
+  type EditTransition,
   type EditVoiceover,
   type OutputAspect,
   type TextAlign,
   type TextEffect,
 } from '../editor/edit-manifest';
+import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
 import {
   addOverlay,
   addVideoTrack,
@@ -78,6 +80,8 @@ import {
   setClipRect,
   setClipRotation,
   setClipSpeed,
+  setAllTransitions,
+  setClipTransition,
   setMusic,
   setOverlayWindow,
   setPostDuration,
@@ -235,6 +239,19 @@ function readPlacement(raw: Record<string, unknown>, path: string): EditPlacemen
  * own functions return the manifest unchanged instead, which is right for a UI and wrong here.
  */
 
+/**
+ * `transition` as `{kind, durationMs?}`, or null for a cut. An unknown kind is refused here with the
+ * list of the ones there are, rather than being quietly stored as a cut by the op.
+ */
+function transitionOf(op: Record<string, unknown>): EditTransition | null {
+  const value = nullableObject(op, 'transition');
+  if (value === null) return null;
+  const kind = str(value, 'kind');
+  if (!isTransitionKind(kind)) throw new Error(`"kind" must be one of ${TRANSITIONS.map((t) => t.id).join(', ')}`);
+  const durationMs = value['durationMs'] === undefined ? DEFAULT_TRANSITION_MS : num(value, 'durationMs');
+  return { kind, durationMs };
+}
+
 function requireClip(manifest: EditManifest, clipId: string): EditClip {
   const clip = findClip(manifest, clipId);
   if (!clip) throw new Error(`no clip "${clipId}" - ids on this post: ${clipIds(manifest).join(', ') || 'none'}`);
@@ -336,6 +353,17 @@ const OPS: Record<string, Apply> = {
     requireClip(manifest, clipId);
     return patchClip(manifest, clipId, { volume: num(op, 'volume') });
   },
+
+  setClipTransition: (manifest, op) => {
+    const clipId = str(op, 'clipId');
+    requireClip(manifest, clipId);
+    const index = manifest.clips.findIndex((clip) => clip.id === clipId);
+    if (index < 0) throw new Error(`"${clipId}" is on a video track, and only the base track has transitions`);
+    if (index === 0) throw new Error(`"${clipId}" is the first clip of the base track, so there is nothing for it to come in from`);
+    return setClipTransition(manifest, clipId, transitionOf(op));
+  },
+
+  setAllTransitions: (manifest, op) => setAllTransitions(manifest, transitionOf(op)),
 
   setClipMuted: (manifest, op) => {
     const clipId = str(op, 'clipId');

@@ -39,6 +39,14 @@ class RenderPlan private constructor(
      * starts after the base has ended comes back to.
      */
     val tracks: List<PlannedTrack>,
+    /**
+     * The outgoing side of every transition on the base track, in timeline order. EMPTY IS THE
+     * WHOLE OF THE OTHER FAST PATH: the builder asks this once and, finding nothing, builds exactly
+     * the composition it built before transitions existed - no extra sequence, no compositor, no
+     * extra pass on any clip. The base clips themselves are the same either way, because the spec
+     * arrives with the outgoing clips already trimmed to stop where the incoming ones start.
+     */
+    val tails: List<PlannedTail>,
     /** Null when `filter` was empty. */
     val colorMatrix: ColorMatrix?,
     val overlays: List<OverlayPlacement>,
@@ -166,6 +174,86 @@ class RenderPlan private constructor(
         val rotationGlDeg: Float,
     )
 
+    /**
+     * The outgoing side of one transition: the tail the outgoing clip gave up when the spec was
+     * lowered, placed under the incoming clip on the OUTPUT timeline.
+     *
+     * The tail is planned exactly like a clip - the probe clamps its trim, its crop and rectangle
+     * reframe it, its volume and the post's sound settings give its gain - because it IS the
+     * outgoing clip, its last moments, and the frame it shows on the first frame of the window has
+     * to be the frame that clip would have shown there with no transition at all.
+     *
+     * [startUs] is where the incoming clip starts, which is [prefixOutUs] of it and nothing else:
+     * the base track arrives already lowered, so no arithmetic here moves a clip. [durUs] is the
+     * tail's own length, floored the way every item is, and never longer than the incoming clip -
+     * the window cannot outlast the clip whose start it hides. That is also what keeps two tails
+     * apart: each window lies inside its incoming clip, so the next one cannot open until this one
+     * has closed, and one extra sequence holds every tail of a post.
+     *
+     * THE LEAD. The item handed to Media3 usually starts a little BEFORE the window, [leadUs]
+     * early, on the outgoing clip's own footage - the very frames the base is showing at those
+     * instants. It is there because of how Media3 pairs inputs: the compositor draws each base
+     * frame with the tails' frame NEAREST in time, and the frames of the gap before a tail tick at
+     * a fixed 30 fps from the gap's own start. A window whose tail happens to decode its first
+     * frame a few milliseconds late would have the gap's last frame paired with the window's first
+     * base frame, and a gap frame is hidden - so the incoming side, nearly transparent at the start
+     * of most transitions, would be drawn over nothing: one black frame. With real footage laid
+     * before the window, the nearest frame is always a tail frame. During the lead the tail shows
+     * the outgoing side at progress 0, which every transition defines as the outgoing clip exactly
+     * as it plays, under the base's identical picture, so it cannot be seen; its sound is held
+     * silent, because the base is playing that sound already.
+     *
+     * The lead is taken out of footage the outgoing clip really has, and only when the tail is that
+     * clip carried on: the same file, trimmed to start where the base's copy stops, framed and sped
+     * the same. Anything else gets no lead and keeps the one-frame risk rather than showing the
+     * wrong picture. The window itself never moves: it is [startUs] and [durUs] whatever the lead.
+     *
+     * The room for it is whatever lies between the previous tail's window and this one, and where
+     * that is less than [TAIL_MIN_LEAD_US] - two windows that meet, which is every clip the editor
+     * held to half of itself on both sides, so any clip under a second between two default
+     * transitions - the rest is BORROWED from the end of the previous tail's item, which then stops
+     * short of its window's end (see [itemEndUs]). Without it the risk is not a black frame but a
+     * wrong one: the last frame of the PREVIOUS tail, still inside its own item and so still drawn,
+     * is the one paired with this window's first base frame about one time in twelve, and under an
+     * incoming side that is all but transparent that shows the clip from two cuts back, or black
+     * for a slide. What the borrow costs is the last few hundredths of the previous window, where
+     * the incoming side over it is all but opaque and settled: there the frames under it are the
+     * incoming clip's own, laid by this lead, instead of the outgoing side's last moments.
+     */
+    data class PlannedTail(
+        /** The base clip this tail runs under: the INCOMING one, whose `transitionIn` it came from. */
+        val index: Int,
+        /**
+         * The item: the outgoing clip's last moments, planned like any clip and cut to the window
+         * if need be, with the lead laid before them. Its `outDurUs` is `leadUs + durUs`, less
+         * whatever the next tail borrowed for its own lead - see [itemEndUs].
+         */
+        val clip: PlannedClip,
+        /** Where the window opens on the output timeline: where the incoming clip starts. */
+        val startUs: Long,
+        /** How long the window runs. */
+        val durUs: Long,
+        /** How much of the outgoing clip is laid before the window; 0 when there was no room. */
+        val leadUs: Long,
+        /** The curves, the mask and the tints, for both sides. */
+        val transition: Transition,
+    ) {
+
+        /** Where the window closes: the first instant that belongs to the incoming clip alone. */
+        val endUs: Long get() = startUs + durUs
+
+        /** Where the item starts on the output timeline: the lead's first instant. */
+        val itemStartUs: Long get() = startUs - leadUs
+
+        /**
+         * Where the item stops on the output timeline. [endUs], unless the next tail's window
+         * followed this one too closely to lead out of free room and borrowed the end of this
+         * item instead, in which case it is where that tail's lead starts. Read off the item's own
+         * floored length, so the sequence, the gate and Media3 measure the same item.
+         */
+        val itemEndUs: Long get() = itemStartUs + clip.outDurUs
+    }
+
     data class OverlayPlacement(
         val id: String,
         val png: String,
@@ -208,9 +296,15 @@ class RenderPlan private constructor(
     val extraAudioSequences: Int
         get() = (if (music != null) 1 else 0) + (if (voice != null) 1 else 0)
 
-    /** Whether the composition is ONE sequence, which is the only case [reweight] can answer for. */
+    /**
+     * Whether the composition is ONE sequence, which is the only case [reweight] can answer for. The
+     * tails are a sequence of their own, so a post with a transition in it never is.
+     */
     val singleSequence: Boolean
-        get() = tracks.isEmpty() && extraAudioSequences == 0
+        get() = tracks.isEmpty() && extraAudioSequences == 0 && tails.isEmpty()
+
+    /** The tail whose item - lead and window - holds [timeUs] on the output timeline, or null. */
+    fun tailAt(timeUs: Long): PlannedTail? = tailAt(tails, timeUs)
 
     /**
      * Turns Transformer's own item-count-weighted percentage into a duration-weighted 0..1.
@@ -289,6 +383,7 @@ class RenderPlan private constructor(
                 tracks = spec.tracks.sortedBy { it.z }
                     .map { planTrack(it, spec, probes, totalUs) }
                     .filter { it.clips.isNotEmpty() },
+                tails = planTails(spec, planned, prefix, probes),
                 colorMatrix = colorMatrix,
                 overlays = overlays,
                 music = planMusic(spec.audio.music, probes, totalUs),
@@ -420,6 +515,183 @@ class RenderPlan private constructor(
                 opacity = track.opacity.coerceIn(0f, 1f),
                 hasAudio = clips.any { !it.removeAudio },
             )
+        }
+
+        /**
+         * The outgoing side of the transition into base clip [index], or null when there is no
+         * tail left to draw and the boundary renders as the cut an engine that ignored the field
+         * would have drawn.
+         *
+         * Null in two cases, and both are the probe correcting the manifest rather than a spec
+         * being wrong. A tail that starts at or past the end of the real file has no footage at
+         * all, and handing Media3 a trim that starts past the end fails the whole export. A tail
+         * that cannot be cut short enough to fit under the incoming clip without dropping below a
+         * millisecond of source has nothing worth showing - [cutTo] explains that floor.
+         *
+         * The cut is there because the window must not outlast the incoming clip: the lowering
+         * held the tail to half of either clip, but the probe may since have found the incoming
+         * clip's file shorter than the manifest thought. Cut, the tail still starts on the frame
+         * the outgoing clip stopped on, and the transition simply runs in the room there is.
+         */
+        private fun planTail(
+            index: Int,
+            transition: Transition,
+            outgoing: PlannedClip,
+            incoming: PlannedClip,
+            startUs: Long,
+            leadRoomUs: Long,
+            spec: ComposeSpec,
+            probes: Map<String, ProbedInput>,
+        ): PlannedTail? {
+            val from = transition.from
+            val probe = probes[from.uri]
+            if (probe != null && probe.durationMs > 0L && probe.durationMs <= from.inMs) return null
+            var tail = planClip(from, spec.audio, probes, spec.output)
+            if (tail.outDurUs > incoming.outDurUs) tail = tail.cutTo(incoming.outDurUs) ?: return null
+            if (tail.outDurUs <= 0L) return null
+            val durUs = tail.outDurUs
+            val item = tail.withLead(outgoing, roomUs = leadRoomUs)
+            return PlannedTail(
+                index = index,
+                clip = item,
+                startUs = startUs,
+                durUs = durUs,
+                leadUs = item.outDurUs - durUs,
+                transition = transition,
+            )
+        }
+
+        /**
+         * Every base clip's tail, in base order - which is timeline order, each window sitting at
+         * the start of its own incoming clip. In order and one at a time, because each tail's lead
+         * may only use the room the one before it left - or, where it left less than
+         * [TAIL_MIN_LEAD_US], borrow the difference from the end of that tail's item, which is
+         * then cut to stop where this lead starts (see [PlannedTail]). The first clip is never
+         * asked, because the parser never gives it a transition to answer with.
+         */
+        private fun planTails(
+            spec: ComposeSpec,
+            planned: List<PlannedClip>,
+            prefix: LongArray,
+            probes: Map<String, ProbedInput>,
+        ): List<PlannedTail> {
+            val tails = ArrayList<PlannedTail>()
+            for (i in 1 until planned.size) {
+                val transition = spec.clips[i].transitionIn ?: continue
+                val previous = tails.lastOrNull()
+                // Never negative: the previous window lies inside a clip that ends by this one's start.
+                val freeUs = prefix[i] - (previous?.endUs ?: 0L)
+                val borrowUs = if (previous == null) {
+                    0L
+                } else {
+                    (TAIL_MIN_LEAD_US - freeUs).coerceIn(0L, previous.durUs / TAIL_BORROW_SHARE)
+                }
+                val tail = planTail(
+                    i, transition, planned[i - 1], planned[i], prefix[i], freeUs + borrowUs, spec, probes,
+                ) ?: continue
+                // Only a lead that actually reached back into the previous item cuts it: a tail that
+                // is not its clip carried on takes no lead at all, and so borrows nothing.
+                if (previous != null && tail.itemStartUs < previous.itemEndUs) {
+                    tails[tails.lastIndex] = previous.endingBy(tail.itemStartUs)
+                }
+                tails += tail
+            }
+            return tails
+        }
+
+        /**
+         * This tail with its item stopping at [itemEndUs] of the output timeline, or at most a few
+         * microseconds before it: the most source that plays for no longer than the room, measured
+         * through the same floor Media3 measures the item with, so the item can never run into the
+         * next one. Exactly at [itemEndUs] for a tail at normal speed or faster; a slowed one can
+         * only land on every few microseconds, and the gap that leaves is a gap like any other.
+         */
+        private fun PlannedTail.endingBy(itemEndUs: Long): PlannedTail {
+            val speed = clip.clip.speed.coerceIn(ComposeSpecParser.MIN_SPEED, ComposeSpecParser.MAX_SPEED).toDouble()
+            val keepUs = itemEndUs - itemStartUs
+            var sourceUs = floor((keepUs + 1) * speed).toLong()
+            while (sourceUs > 0L && floor(sourceUs / speed).toLong() > keepUs) sourceUs--
+            return copy(clip = clip.copy(outUs = clip.inUs + sourceUs, outDurUs = floor(sourceUs / speed).toLong()))
+        }
+
+        /**
+         * This tail with up to [TAIL_LEAD_US] of [outgoing]'s footage laid before it, within
+         * [roomUs] of the output timeline - see [PlannedTail] for why. This clip unchanged when
+         * there is no room or when it is not [outgoing] carried on.
+         *
+         * "Carried on" is checked rather than assumed, because the lead is only invisible while it
+         * is the very picture the base shows at the same instants: the same clip in every field
+         * but its trim, with the base's copy stopping exactly where this one starts. The editor
+         * always sends that; a hand-built spec, or a probe that clamped the outgoing clip short,
+         * may not.
+         *
+         * The lead is rounded so that it never needs more room than it was given: the source it
+         * takes is floored, and so is the longer item, so the item can only come out shorter than
+         * asked, never reaching further back than the room it was given - which is the free room
+         * before the window plus whatever [planTails] borrowed, and nothing it has not cut free.
+         */
+        private fun PlannedClip.withLead(outgoing: PlannedClip, roomUs: Long): PlannedClip {
+            val carriedOn = outgoing.outUs == inUs &&
+                outgoing.clip.copy(inMs = clip.inMs, outMs = clip.outMs, transitionIn = null) ==
+                clip.copy(transitionIn = null)
+            if (!carriedOn) return this
+            val wantUs = min(TAIL_LEAD_US, roomUs)
+            if (wantUs <= 0L) return this
+            val speed = clip.speed.coerceIn(ComposeSpecParser.MIN_SPEED, ComposeSpecParser.MAX_SPEED)
+            val sourceUs = min((wantUs * speed.toDouble()).toLong(), inUs - outgoing.inUs)
+            if (sourceUs <= 0L) return this
+            val leadInUs = inUs - sourceUs
+            return copy(inUs = leadInUs, outDurUs = floor((outUs - leadInUs) / speed.toDouble()).toLong())
+        }
+
+        /**
+         * How much of the outgoing clip a tail is given before its window: longer than the gap
+         * between two frames of any ordinary source - a 24 fps clip's is 42 ms, and a phone that
+         * drops a frame doubles it - so that the frame paired with a window's first frame is the
+         * tail's own, and short enough to cost next to nothing to decode. A source slower than
+         * 10 fps can still pair a window's first frame with the gap before it.
+         */
+        private const val TAIL_LEAD_US = 100_000L
+
+        /**
+         * The lead a tail is owed even when the window before it leaves no room: a little over the
+         * frame interval of a 24 fps source, which is what it takes for the frame nearest the
+         * window's first base frame to be this tail's own rather than the previous tail's last.
+         * Borrowed from the end of the previous item when the room is not there - see [PlannedTail].
+         */
+        private const val TAIL_MIN_LEAD_US = 50_000L
+
+        /**
+         * Never more than this fraction of the previous window is borrowed, as its divisor. The
+         * borrow is at most [TAIL_MIN_LEAD_US] anyway, the last tenth of a default 500 ms window,
+         * where every transition in the catalogue has all but settled on its incoming side; the
+         * cap is for the short ones, so that a 100 ms window gives up 25 ms rather than half of
+         * itself, and the tail after it leads with what it can spare and keeps the rest of the risk.
+         */
+        private const val TAIL_BORROW_SHARE = 4L
+
+        /**
+         * How far through its window a tail is at [timeUs] on the output timeline:
+         * `clamp((t - start) / length, 0, 1)`, the contract's progress. Both sides read the same
+         * number off the same window, each from the timestamp of its own frame.
+         */
+        fun progress(tail: PlannedTail, timeUs: Long): Double =
+            TransitionMath.progress(tail.startUs, tail.durUs, timeUs)
+
+        /**
+         * The tail whose ITEM - its lead and its window - holds [timeUs], or null. Pure and here,
+         * rather than inside the compositor that asks it, because it is the whole of what hides the
+         * tails' gaps, which are served as opaque black frames and are never anything the post
+         * should show. The lead is inside, so that its frames are drawn: they are what the
+         * compositor pairs with a window's first frame. The items are in order and never overlap,
+         * so the first one that has not ended yet is the only candidate.
+         */
+        fun tailAt(tails: List<PlannedTail>, timeUs: Long): PlannedTail? {
+            for (tail in tails) {
+                if (timeUs < tail.itemStartUs) return null
+                if (timeUs < tail.itemEndUs) return tail
+            }
+            return null
         }
 
         /**

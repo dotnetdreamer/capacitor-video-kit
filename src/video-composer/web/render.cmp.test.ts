@@ -1,7 +1,8 @@
 import { BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from 'mediabunny';
 import { afterEach, describe, expect, it, vi, type TestContext } from 'vitest';
 
-import type { ComposeSpec } from '../definitions';
+import { compileTransition } from '../../editor/transitions';
+import type { ComposeClip, ComposeSpec } from '../definitions';
 
 import { renderSupport, resetRenderSupport } from './capabilities';
 import { Painter } from './painter';
@@ -245,8 +246,206 @@ describe('the web renderer, end to end', () => {
   );
 });
 
+/** Whether `event` arrived within `timeoutMs`; an `error` is a no. */
+function arrives(element: HTMLMediaElement, event: string, timeoutMs: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const done = (ok: boolean): void => {
+      clearTimeout(timer);
+      element.removeEventListener(event, yes);
+      element.removeEventListener('error', no);
+      resolve(ok);
+    };
+    const yes = (): void => done(true);
+    const no = (): void => done(false);
+    const timer = setTimeout(() => done(false), timeoutMs);
+    element.addEventListener(event, yes);
+    element.addEventListener('error', no);
+  });
+}
+
+/**
+ * One pixel of a finished file at a moment, as the browser decodes it - which is the only honest
+ * way to ask what a render put in a frame. Null when the file will not open or seek.
+ */
+async function pixelOfVideo(url: string, seconds: number, x: number, y: number): Promise<[number, number, number] | null> {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'auto';
+  const loaded = arrives(video, 'loadeddata', 10_000);
+  video.src = url;
+  try {
+    if (!(await loaded)) return null;
+    const seeked = arrives(video, 'seeked', 10_000);
+    video.currentTime = seconds;
+    if (!(await seeked)) return null;
+    // `seeked` says the time moved, not that the frame at it has been painted; one frame callback,
+    // where there is one, is the difference.
+    await new Promise<void>(resolve => {
+      if (typeof video.requestVideoFrameCallback !== 'function') return resolve();
+      const timer = setTimeout(resolve, 200);
+      video.requestVideoFrameCallback(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0);
+    const data = ctx.getImageData(x, y, 1, 1).data;
+    return [data[0] ?? 0, data[1] ?? 0, data[2] ?? 0];
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+  }
+}
+
+describe('a transition, end to end', () => {
+  it(
+    'dissolves one clip into the next in the finished file, and runs the lowered length',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const red = URL.createObjectURL(await makeSourceVideo('#f00'));
+      const blue = URL.createObjectURL(await makeSourceVideo('#00f'));
+      try {
+        /*
+         * A second of red, then a second of blue, with a 400 ms dissolve between them - lowered the
+         * way `compose.ts` lowers it: red is sent stopping at 600, where blue starts, and its last
+         * 400 ms travel on blue as the transition's tail. The post is 1600 ms, not 2000.
+         */
+        const redClip: ComposeClip = { key: 'red', uri: red, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: false, fit: 'contain' };
+        const dissolve = JSON.parse(JSON.stringify(compileTransition('dissolve'))) as NonNullable<ReturnType<typeof compileTransition>>;
+        const outcome = await renderSpec(
+          spec(red, {
+            jobId: 'job-transition',
+            clips: [
+              { ...redClip, outMs: 600 },
+              { ...redClip, key: 'blue', uri: blue, transitionIn: { ...dissolve, from: { ...redClip, inMs: 600 } } },
+            ],
+          }),
+          { signal: new AbortController().signal, onProgress: () => {} },
+        );
+        expect(outcome.durationMs).toBe(1600);
+
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const opened = await openable(url);
+          expect(opened?.durationMs).toBe(1600);
+
+          // The 160x120 picture sits in the middle of the 160x284 frame; this is its centre.
+          const at = (seconds: number) => pixelOfVideo(url, seconds, 80, 142);
+
+          // At 10 fps the frame drawn at 800 ms is the one exactly halfway through the window, where
+          // a dissolve is half of each. H.264 is lossy, so "half" is a wide band either side of 128 -
+          // and still nowhere near the pure red or pure blue a cut, or a window in the wrong place,
+          // would leave there.
+          const middle = await at(0.85);
+          expect(middle).not.toBeNull();
+          const [r, g, b] = middle!;
+          expect(r).toBeGreaterThan(70);
+          expect(r).toBeLessThan(190);
+          expect(b).toBeGreaterThan(70);
+          expect(b).toBeLessThan(190);
+          expect(g).toBeLessThan(60);
+
+          // Before the window, red alone; after it, blue alone.
+          const before = await at(0.35);
+          expect(before?.[0]).toBeGreaterThan(200);
+          expect(before?.[2]).toBeLessThan(60);
+          const after = await at(1.35);
+          expect(after?.[2]).toBeGreaterThan(200);
+          expect(after?.[0]).toBeLessThan(60);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } finally {
+        URL.revokeObjectURL(red);
+        URL.revokeObjectURL(blue);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'crossfades the sound across the same window, linearly both ways',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, support.audioCodec.length > 0, 'this browser encodes no audio');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      // Sound-only clips: a <video> opens a WAV and gives it no picture, so the frames are black and
+      // everything under test is in the audio track. One clip is a tone and the other silence, so
+      // whichever of the two fades is the only thing to be heard.
+      const tone = URL.createObjectURL(makeTone(1, 440));
+      const silence = URL.createObjectURL(makeTone(1, 440, 48_000, 0));
+      const dissolve = JSON.parse(JSON.stringify(compileTransition('dissolve'))) as NonNullable<ReturnType<typeof compileTransition>>;
+
+      /** The loudness, as RMS, of the finished file between two moments of it. */
+      async function loudness(outgoing: string, incoming: string): Promise<(fromMs: number, toMs: number) => number> {
+        const a: ComposeClip = { key: 'a', uri: outgoing, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: false, fit: 'contain' };
+        const outcome = await renderSpec(
+          spec(outgoing, {
+            jobId: `job-crossfade-${outgoing === tone ? 'out' : 'in'}`,
+            clips: [
+              { ...a, outMs: 600 },
+              { ...a, key: 'b', uri: incoming, transitionIn: { ...dissolve, from: { ...a, inMs: 600 } } },
+            ],
+            audio: { originalMuted: false, originalVolume: 1, music: null, voiceover: [] },
+          }),
+          { signal: new AbortController().signal, onProgress: () => {} },
+        );
+        expect(outcome.hasAudio).toBe(true);
+        const decoded = await new OfflineAudioContext(2, 1, 48_000).decodeAudioData(await outcome.blob.arrayBuffer());
+        const channel = decoded.getChannelData(0);
+        return (fromMs, toMs) => {
+          const from = Math.round((fromMs / 1000) * decoded.sampleRate);
+          const to = Math.min(channel.length, Math.round((toMs / 1000) * decoded.sampleRate));
+          let sum = 0;
+          for (let i = from; i < to; i++) sum += (channel[i] ?? 0) ** 2;
+          return Math.sqrt(sum / Math.max(1, to - from));
+        };
+      }
+
+      try {
+        // The window is 600..1000 ms. A linear fade out runs 1 -> 0 across it, so its first quarter
+        // is about three quarters as loud as before it and its last quarter about a quarter - with
+        // room either side for AAC and for the encoder's own priming delay.
+        const out = await loudness(tone, silence);
+        const full = out(250, 550);
+        expect(full).toBeGreaterThan(0.3);
+        expect(out(650, 750) / full).toBeGreaterThan(0.5);
+        expect(out(650, 750) / full).toBeLessThan(0.92);
+        expect(out(850, 950) / full).toBeGreaterThan(0.05);
+        expect(out(850, 950) / full).toBeLessThan(0.45);
+        expect(out(1100, 1500) / full).toBeLessThan(0.05);
+
+        // ...and the incoming clip fades in across the same window, the mirror image.
+        const into = await loudness(silence, tone);
+        const after = into(1100, 1500);
+        expect(after).toBeGreaterThan(0.3);
+        expect(into(250, 550) / after).toBeLessThan(0.05);
+        expect(into(650, 750) / after).toBeGreaterThan(0.05);
+        expect(into(650, 750) / after).toBeLessThan(0.45);
+        expect(into(850, 950) / after).toBeGreaterThan(0.5);
+        expect(into(850, 950) / after).toBeLessThan(0.92);
+      } finally {
+        URL.revokeObjectURL(tone);
+        URL.revokeObjectURL(silence);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});
+
 /** A tone as a WAV, which `decodeAudioData` reads on every browser. Stands in for a music track. */
-function makeTone(seconds: number, hz: number, rate = 48_000): Blob {
+function makeTone(seconds: number, hz: number, rate = 48_000, level = 20_000): Blob {
   const frames = Math.round(seconds * rate);
   const buffer = new ArrayBuffer(44 + frames * 2);
   const view = new DataView(buffer);
@@ -268,7 +467,7 @@ function makeTone(seconds: number, hz: number, rate = 48_000): Blob {
   view.setUint32(40, frames * 2, true);
   for (let i = 0; i < frames; i++) {
     // 0.61 of full scale, so the volume the spec asks for is visible in what comes back.
-    view.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * hz * i) / rate) * 20_000), true);
+    view.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * hz * i) / rate) * level), true);
   }
   return new Blob([buffer], { type: 'audio/wav' });
 }

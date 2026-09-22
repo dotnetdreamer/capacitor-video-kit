@@ -3,6 +3,13 @@ import { describe, expect, it } from 'vitest';
 import type { Filmstrip } from '../../state/editor.types';
 import {
   DROP_CANCEL_PX,
+  SEGMENT_GAP_PX,
+  TRANSITION_DOT_CIRCLE_PX,
+  TRANSITION_DOT_HIT_PX,
+  TRANSITION_DOT_MIN_SEGMENT_PX,
+  cutX,
+  dotFits,
+  dotHitWidth,
   durationChip,
   dropTargetAt,
   frameUrl,
@@ -345,5 +352,123 @@ describe('dropTargetAt', () => {
     const only: DropRow[] = [{ trackId: null, top: 100, bottom: 156 }];
     expect(dropTargetAt(120, only)).toEqual({ kind: 'base' });
     expect(dropTargetAt(200, only)).toEqual({ kind: 'new', index: 0 });
+  });
+});
+
+/*
+ * The dot on a cut. At 50 px per second and a pad of 200, a cut at four seconds is 400 px into the
+ * content, and the gap the segment before it leaves is the five pixels just left of that.
+ */
+describe('cutX', () => {
+  it('puts the dot in the middle of the gap the segment before it leaves', () => {
+    expect(cutX(200, 4000, PPS)).toBe(400 - SEGMENT_GAP_PX / 2);
+  });
+
+  it('moves with the zoom and the pad, because it is a time and not a place', () => {
+    expect(cutX(0, 4000, 100)).toBe(400 - SEGMENT_GAP_PX / 2);
+    expect(cutX(150, 0, PPS)).toBe(150 - SEGMENT_GAP_PX / 2);
+  });
+
+  it('sits half way between the segment before it and the one after', () => {
+    // The segment after the cut is drawn from `pad + start * pps`, and the one before stops a gap
+    // short of that; the dot's centre is exactly between the two edges.
+    const after = 200 + (4000 / 1000) * PPS;
+    const beforeEnds = after - SEGMENT_GAP_PX;
+    expect(cutX(200, 4000, PPS)).toBe((after + beforeEnds) / 2);
+  });
+});
+
+describe('dotFits', () => {
+  const slots = [
+    { startMs: 0, durationMs: 4000 },
+    { startMs: 4000, durationMs: 4000 },
+    { startMs: 8000, durationMs: 4000 },
+  ];
+
+  it('has room on every cut at an ordinary zoom', () => {
+    expect(dotFits(slots, 1, PPS)).toBe(true);
+    expect(dotFits(slots, 2, PPS)).toBe(true);
+  });
+
+  it('has no cut in front of the first segment or past the last', () => {
+    expect(dotFits(slots, 0, PPS)).toBe(false);
+    expect(dotFits(slots, 3, PPS)).toBe(false);
+  });
+
+  it('gives way when a neighbour is drawn narrower than the dot needs', () => {
+    // Four seconds drawn a gap short: the zoom at which that is exactly the minimum, then a little under.
+    const fits = ((TRANSITION_DOT_MIN_SEGMENT_PX + SEGMENT_GAP_PX) / 4000) * 1000;
+    expect(dotFits(slots, 1, fits)).toBe(true);
+    expect(dotFits(slots, 1, fits * 0.95)).toBe(false);
+  });
+
+  it('counts the last segment at its full width, since it leaves no gap behind it', () => {
+    const tail = [
+      { startMs: 0, durationMs: 4000 },
+      { startMs: 4000, durationMs: 520 },
+    ];
+    // 520 ms at 50 px per second is 26 px, and the last segment gives nothing back to a cut after it.
+    expect(dotFits(tail, 1, PPS)).toBe(true);
+    // The same 26 px in the middle of the track gives a gap to the next cut, and is too narrow.
+    const inner = [...tail, { startMs: 4520, durationMs: 4000 }];
+    expect(dotFits(inner, 1, PPS)).toBe(false);
+  });
+});
+
+/*
+ * The dot's finger target. It sits over the segments either side of its cut, so every pixel of it
+ * is a pixel of those segments that no longer selects them.
+ */
+describe('dotHitWidth', () => {
+  it('is the whole finger target between segments with room for it', () => {
+    const slots = [
+      { startMs: 0, durationMs: 4000 },
+      { startMs: 4000, durationMs: 4000 },
+    ];
+    expect(dotHitWidth(slots, 1, PPS)).toBe(TRANSITION_DOT_HIT_PX);
+  });
+
+  it('leaves a short segment between two dots a third of itself, whichever cut it is', () => {
+    // 0.6 s at the opening zoom of 64 px a second, drawn a gap short: 33.4 px, with a dot on each end.
+    const slots = [
+      { startMs: 0, durationMs: 4000 },
+      { startMs: 4000, durationMs: 600 },
+      { startMs: 4600, durationMs: 4000 },
+    ];
+    const drawn = 0.6 * 64 - SEGMENT_GAP_PX;
+    const reach = (cut: number) => (dotHitWidth(slots, cut, 64) - SEGMENT_GAP_PX) / 2;
+    expect(reach(1)).toBeCloseTo(drawn / 3, 10);
+    expect(reach(2)).toBeCloseTo(drawn / 3, 10);
+    expect(drawn - reach(1) - reach(2)).toBeGreaterThanOrEqual(drawn / 3 - 1e-9);
+  });
+
+  it('never gets narrower than the circle it carries, even at the narrowest a dot is drawn', () => {
+    const at = (px: number) => [
+      { startMs: 0, durationMs: 4000 },
+      { startMs: 4000, durationMs: ((px + SEGMENT_GAP_PX) / PPS) * 1000 },
+      { startMs: 8000, durationMs: 4000 },
+    ];
+    expect(dotHitWidth(at(TRANSITION_DOT_MIN_SEGMENT_PX), 1, PPS)).toBeGreaterThanOrEqual(TRANSITION_DOT_CIRCLE_PX);
+    expect(dotHitWidth(at(4), 1, PPS)).toBe(TRANSITION_DOT_CIRCLE_PX);
+  });
+
+  it('grows with the zoom until it is the whole target', () => {
+    const slots = [
+      { startMs: 0, durationMs: 4000 },
+      { startMs: 4000, durationMs: 600 },
+    ];
+    let last = 0;
+    for (const pps of [40, 60, 80, 100, 120]) {
+      const width = dotHitWidth(slots, 1, pps);
+      expect(width).toBeGreaterThanOrEqual(last);
+      last = width;
+    }
+    expect(last).toBe(TRANSITION_DOT_HIT_PX);
+  });
+
+  it('is the circle alone where there is no cut', () => {
+    const slots = [{ startMs: 0, durationMs: 4000 }];
+    expect(dotHitWidth(slots, 0, PPS)).toBe(TRANSITION_DOT_CIRCLE_PX);
+    expect(dotHitWidth(slots, 1, PPS)).toBe(TRANSITION_DOT_CIRCLE_PX);
   });
 });

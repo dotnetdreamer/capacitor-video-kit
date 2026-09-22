@@ -1,4 +1,5 @@
 import type { FilterOp } from '../video-composer/definitions';
+import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
  * What a customer did to their clips, in a form that can be put down and picked up again.
@@ -14,7 +15,7 @@ import type { FilterOp } from '../video-composer/definitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 7;
+export const MANIFEST_VERSION = 8;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -111,6 +112,26 @@ export interface EditClip {
    * customer toggles for the whole post and still what a clip added today gets.
    */
   fit?: EditFit;
+  /**
+   * How this segment takes over from the one before it on the BASE track. Absent is a cut.
+   *
+   * On the clip AFTER the boundary rather than the one before it, because that is the side a split
+   * leaves alone: the left piece of a split keeps its id and with it the transition that brought it
+   * in, and the new cut in the middle starts as a cut. Never on the first clip of the base track and
+   * never on a layer's clip - the ops take it off both, and [normaliseManifest] drops it there.
+   *
+   * `durationMs` is what the customer ASKED for. The two clips either side can only hold so much,
+   * and [transitionSpan] clamps it when it is read, so a trim dragged short and back again gets the
+   * transition back as it was.
+   */
+  transitionIn?: EditTransition;
+}
+
+/** A transition between two base clips: which one, and how long the customer asked for it to run. */
+export interface EditTransition {
+  /** An id from [TRANSITIONS]. */
+  kind: string;
+  durationMs: number;
 }
 
 /**
@@ -1179,6 +1200,10 @@ export function emptyManifest(): EditManifest {
  * before. A `rotationDeg` of 0 is not written onto anything. It would be the same picture, a
  * different spec, and the end of the byte-for-byte guarantee that lets a single untouched clip be
  * posted without a re-encode.
+ *
+ * Version 7 to version 8 adds transitions between base clips, and nothing is written into an older
+ * manifest for them: a version-7 manifest simply has no `transitionIn` on any clip, and absent is a
+ * cut, which is all a boundary could be before.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1188,7 +1213,7 @@ export function normaliseManifest(input: unknown): EditManifest {
   // takes a clip takes its id and nothing else, so two clips sharing one id on different layers
   // would be two clips a customer could never tell apart or address separately.
   const usedIds = new Set<string>();
-  const clips: EditClip[] = readClips(raw['clips'], usedIds);
+  const clips: EditClip[] = readClips(raw['clips'], usedIds, true);
 
   // A track with no clips is dropped rather than kept: it renders nothing, the native parsers
   // reject it outright, and an empty lane in the timeline is a thing a customer cannot get rid of.
@@ -1196,7 +1221,7 @@ export function normaliseManifest(input: unknown): EditManifest {
   const videoTracks: EditVideoTrack[] = (Array.isArray(raw['videoTracks']) ? raw['videoTracks'] : [])
     .map((t: any, i: number): EditVideoTrack => ({
       id: typeof t?.id === 'string' && t.id ? t.id : `vt-${i}`,
-      clips: readClips(t?.clips, usedIds),
+      clips: readClips(t?.clips, usedIds, false),
       startMs: Math.max(0, Math.round(num(t?.startMs, 0))),
       z: Math.max(0, Math.round(num(t?.z, i + 1))),
       opacity: clamp(num(t?.opacity, 1), 0, 1),
@@ -1360,12 +1385,31 @@ export function reconcileManifest(
       return defaultClipEdit(key, durations.get(key) ?? 0, id);
     });
 
-  return { ...current, clips: [...kept, ...added], videoTracks };
+  return { ...current, clips: withoutLeadingTransition([...kept, ...added]), videoTracks };
 }
 
-/** How long a SEQUENCE of segments runs, after every trim and speed change. */
+/**
+ * How long a SEQUENCE of segments runs, after every trim and speed change - and, on the base track,
+ * less every transition's overlap, because the incoming clip of a transition starts under the end
+ * of the outgoing one. A layer's clips carry no transitions, so a layer is the plain sum it always was.
+ */
 export function clipsDurationMs(clips: readonly EditClip[]): number {
-  return clips.reduce((sum, clip) => sum + Math.max(0, clip.outMs - clip.inMs) / (clip.speed || 1), 0);
+  const sum = clips.reduce((total, clip) => total + Math.max(0, clip.outMs - clip.inMs) / (clip.speed || 1), 0);
+  if (!clips.some(clip => clip.transitionIn)) return sum;
+  return transitionSpans(clips).reduce((total, span) => total - span.ms, sum);
+}
+
+/**
+ * The same clips with the first one's [EditClip.transitionIn] taken off - there is nothing before
+ * the first clip for it to come in from. The same array when there was nothing to take off, so an
+ * op that did not touch a transition still hands back the objects it was given.
+ */
+export function withoutLeadingTransition(clips: EditClip[]): EditClip[] {
+  const first = clips[0];
+  if (!first?.transitionIn) return clips;
+  const bare = { ...first };
+  delete bare.transitionIn;
+  return [bare, ...clips.slice(1)];
 }
 
 /**
@@ -1503,10 +1547,14 @@ function readFit(value: unknown): EditFit | undefined {
  *
  * `usedIds` is threaded through rather than owned here because ids are unique across the whole
  * manifest, not within one track.
+ *
+ * `base` is the one difference the two kinds of track have: only the base track has transitions,
+ * and never on its first clip. A transition whose id this version does not know is dropped rather
+ * than kept, so no engine is ever handed a kind it cannot draw.
  */
-function readClips(value: unknown, usedIds: Set<string>): EditClip[] {
+function readClips(value: unknown, usedIds: Set<string>, base: boolean): EditClip[] {
   if (!Array.isArray(value)) return [];
-  return value.map((c: any) => {
+  return value.map((c: any, index: number) => {
     let id = typeof c?.id === 'string' && c.id ? c.id : String(c?.clipKey);
     while (usedIds.has(id)) id = `${id}~`;
     usedIds.add(id);
@@ -1528,6 +1576,8 @@ function readClips(value: unknown, usedIds: Set<string>): EditClip[] {
     if (rect) clip.rect = rect;
     const fit = readFit(c?.fit);
     if (fit) clip.fit = fit;
+    const transition = base && index > 0 ? normaliseTransition(c?.transitionIn) : null;
+    if (transition) clip.transitionIn = transition;
     return clip;
   });
 }

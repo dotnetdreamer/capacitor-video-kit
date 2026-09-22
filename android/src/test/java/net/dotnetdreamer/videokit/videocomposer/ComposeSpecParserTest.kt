@@ -622,6 +622,307 @@ class ComposeSpecParserTest {
         assertNull(audio.music)
     }
 
+    /* ------------------------------------------------------------------------------------- */
+
+    /**
+     * A wipe from `a` into `b`, lowered the way the editor sends it: `a` already stops at 1.5 s
+     * and the half second it gave up travels as the tail.
+     */
+    private fun transitionJson(): JSONObject = JSONObject(
+        """
+        { "kind": "wipe-left",
+          "from": { "key": "a", "uri": "file:///a.mp4", "inMs": 1500, "outMs": 2000,
+                    "speed": 1, "volume": 1, "muted": false, "fit": "contain" },
+          "mask": { "shape": "linear", "angleDeg": 180, "feather": 0.015 },
+          "curves": { "alpha": [0, 0.5, 1], "reveal": [0, 0.5, 1],
+                      "from": { "x": [0, -0.5, -1] }, "to": { "x": [1, 0.5, 0] } } }
+        """.trimIndent(),
+    )
+
+    private fun incomingJson(transitionIn: Any?): JSONObject = JSONObject()
+        .put("key", "b")
+        .put("uri", "file:///b.mp4")
+        .put("inMs", 0)
+        .put("outMs", 2_000)
+        .put("speed", 1)
+        .put("volume", 1)
+        .put("muted", false)
+        .put("fit", "contain")
+        .apply { if (transitionIn != null) put("transitionIn", transitionIn) }
+
+    private fun withTransition(transitionIn: Any? = transitionJson()): JSONObject = minimalJson().apply {
+        getJSONArray("clips").getJSONObject(0).put("outMs", 1_500)
+        getJSONArray("clips").put(incomingJson(transitionIn))
+    }
+
+    private fun expectInvalidTransition(path: String, mutate: JSONObject.() -> Unit) {
+        val json = withTransition(transitionJson().apply(mutate))
+        try {
+            ComposeSpecParser.parse(json)
+            fail("expected invalid_spec:$path")
+        } catch (e: SpecException) {
+            assertEquals(path, e.path)
+        }
+    }
+
+    private fun JSONObject.curves(): JSONObject = getJSONObject("curves")
+
+    private fun numbers(vararg values: Double) = org.json.JSONArray().apply { values.forEach { put(it) } }
+
+    @Test
+    fun `a transition parses with its tail, its curves and its mask`() {
+        val spec = ComposeSpecParser.parse(withTransition())
+        val transition = spec.clips[1].transitionIn!!
+        assertEquals("wipe-left", transition.kind)
+        // The tail is a clip in its own right, read by the same reader as any other.
+        assertEquals("a", transition.from.key)
+        assertEquals(1_500L, transition.from.inMs)
+        assertEquals(2_000L, transition.from.outMs)
+        assertEquals(MaskShape.LINEAR, transition.mask!!.shape)
+        assertEquals(180f, transition.mask!!.angleDeg, 1e-6f)
+        assertEquals(0.015f, transition.mask!!.feather, 1e-6f)
+        // The contract's defaults, written in so the drawing never asks what an absent field means.
+        assertEquals(1, transition.mask!!.count)
+        assertEquals(false, transition.mask!!.invert)
+        assertEquals(listOf(0f, 0.5f, 1f), transition.curves.alpha!!.toList())
+        assertEquals(listOf(0f, -0.5f, -1f), transition.curves.from!!.x!!.toList())
+        assertEquals(listOf(1f, 0.5f, 0f), transition.curves.to!!.x!!.toList())
+        assertNull(transition.curves.from!!.blur)
+        assertNull(transition.fromTint)
+        assertNull(transition.toTint)
+    }
+
+    @Test
+    fun `a clip with no transition keeps it absent, and an explicit null means the same`() {
+        // The plan asks this once per clip, and null is the promise that a cut renders exactly as
+        // it did before transitions existed.
+        assertNull(ComposeSpecParser.parse(minimalJson()).clips[0].transitionIn)
+        assertNull(ComposeSpecParser.parse(withTransition(null)).clips[1].transitionIn)
+        assertNull(ComposeSpecParser.parse(withTransition(JSONObject.NULL)).clips[1].transitionIn)
+    }
+
+    @Test
+    fun `a transition that is not an object is rejected`() {
+        expectInvalid("clips[1].transitionIn") {
+            getJSONArray("clips").put(incomingJson("dissolve"))
+        }
+        expectInvalid("clips[1].transitionIn") {
+            getJSONArray("clips").put(incomingJson(org.json.JSONArray()))
+        }
+    }
+
+    @Test
+    fun `a transition without a kind is rejected`() {
+        expectInvalidTransition("clips[1].transitionIn.kind") { remove("kind") }
+        expectInvalidTransition("clips[1].transitionIn.kind") { put("kind", "") }
+        // A number is not a name, however readily it turns into a string.
+        expectInvalidTransition("clips[1].transitionIn.kind") { put("kind", 7) }
+    }
+
+    @Test
+    fun `a tail that is not a clip is rejected at its own path`() {
+        expectInvalidTransition("clips[1].transitionIn.from") { remove("from") }
+        expectInvalidTransition("clips[1].transitionIn.from") { put("from", "a") }
+        // The same reader as every other clip, so a broken tail names the field that broke.
+        expectInvalidTransition("clips[1].transitionIn.from.outMs") { getJSONObject("from").put("outMs", 1_000) }
+        expectInvalidTransition("clips[1].transitionIn.from.uri") { getJSONObject("from").remove("uri") }
+    }
+
+    @Test
+    fun `missing or malformed curves are rejected`() {
+        expectInvalidTransition("clips[1].transitionIn.curves") { remove("curves") }
+        expectInvalidTransition("clips[1].transitionIn.curves") { put("curves", org.json.JSONArray()) }
+        expectInvalidTransition("clips[1].transitionIn.curves.alpha") { curves().put("alpha", 0.5) }
+        expectInvalidTransition("clips[1].transitionIn.curves.alpha") {
+            curves().put("alpha", org.json.JSONArray().put(0).put("half").put(1))
+        }
+        expectInvalidTransition("clips[1].transitionIn.curves.reveal") {
+            curves().put("reveal", org.json.JSONArray().put(0).put(true).put(1))
+        }
+        expectInvalidTransition("clips[1].transitionIn.curves.from") { curves().put("from", 1) }
+        expectInvalidTransition("clips[1].transitionIn.curves.to") { curves().put("to", "right") }
+        expectInvalidTransition("clips[1].transitionIn.curves.from.scale") {
+            curves().getJSONObject("from").put("scale", JSONObject())
+        }
+        expectInvalidTransition("clips[1].transitionIn.curves.to.tint") {
+            curves().getJSONObject("to").put("tint", org.json.JSONArray().put(0).put(JSONObject.NULL).put(1))
+        }
+    }
+
+    @Test
+    fun `a curve with too few or too many samples is rejected`() {
+        expectInvalidTransition("clips[1].transitionIn.curves.alpha") { curves().put("alpha", numbers(1.0)) }
+        expectInvalidTransition("clips[1].transitionIn.curves.alpha") {
+            curves().put("alpha", numbers(*DoubleArray(ComposeSpecParser.MAX_CURVE_SAMPLES + 1) { 0.5 }))
+        }
+        // The two ends of the range are both fine: a run of 2 and a run of 121, alone in the spec.
+        val shortest = withTransition(JSONObject(transitionJson().toString()).apply {
+            put("curves", JSONObject().put("alpha", numbers(0.0, 1.0)))
+        })
+        assertEquals(2, ComposeSpecParser.parse(shortest).clips[1].transitionIn!!.curves.alpha!!.size)
+        val longest = withTransition(JSONObject(transitionJson().toString()).apply {
+            put("curves", JSONObject().put("alpha", numbers(*DoubleArray(ComposeSpecParser.MAX_CURVE_SAMPLES) { 0.5 })))
+        })
+        assertEquals(121, ComposeSpecParser.parse(longest).clips[1].transitionIn!!.curves.alpha!!.size)
+    }
+
+    @Test
+    fun `curves that disagree about their length are rejected at the first one that differs`() {
+        // alpha sets the length and is read first; the side curves follow in the contract's order.
+        expectInvalidTransition("clips[1].transitionIn.curves.from.x") {
+            curves().getJSONObject("from").put("x", numbers(0.0, -0.3, -0.6, -1.0))
+        }
+        expectInvalidTransition("clips[1].transitionIn.curves.reveal") {
+            curves().put("reveal", numbers(0.0, 1.0))
+        }
+        expectInvalidTransition("clips[1].transitionIn.curves.to.gain") {
+            curves().getJSONObject("to").put("gain", numbers(1.0, 2.0))
+        }
+    }
+
+    @Test
+    fun `a channel nobody defined is rejected rather than skipped`() {
+        // A channel this engine skipped would be one the preview drew and the export did not.
+        expectInvalidTransition("clips[1].transitionIn.curves.beta") { curves().put("beta", numbers(0.0, 0.5, 1.0)) }
+        expectInvalidTransition("clips[1].transitionIn.curves.from.wobble") {
+            curves().getJSONObject("from").put("wobble", numbers(0.0, 0.5, 1.0))
+        }
+    }
+
+    @Test
+    fun `a mask that is not a mask is rejected`() {
+        expectInvalidTransition("clips[1].transitionIn.mask") { put("mask", "linear") }
+        expectInvalidTransition("clips[1].transitionIn.mask.shape") { getJSONObject("mask").put("shape", "star") }
+        expectInvalidTransition("clips[1].transitionIn.mask.shape") { getJSONObject("mask").remove("shape") }
+    }
+
+    @Test
+    fun `a tint that is not three numbers is rejected`() {
+        expectInvalidTransition("clips[1].transitionIn.fromTint") { put("fromTint", "white") }
+        expectInvalidTransition("clips[1].transitionIn.fromTint") { put("fromTint", numbers(1.0, 1.0)) }
+        expectInvalidTransition("clips[1].transitionIn.toTint") { put("toTint", numbers(1.0, 1.0, 1.0, 1.0)) }
+        expectInvalidTransition("clips[1].transitionIn.toTint") {
+            put("toTint", org.json.JSONArray().put(1).put("1").put(1))
+        }
+    }
+
+    @Test
+    fun `the first failure in reading order is the one reported`() {
+        // kind, then the tail, then the curves, then the mask, then the tints: the browser's reader
+        // walks the same order, so the same broken spec names the same path on both.
+        expectInvalidTransition("clips[1].transitionIn.kind") { remove("kind"); remove("curves") }
+        expectInvalidTransition("clips[1].transitionIn.from") { remove("from"); remove("curves") }
+        expectInvalidTransition("clips[1].transitionIn.curves") { remove("curves"); put("mask", 1) }
+        expectInvalidTransition("clips[1].transitionIn.mask") { put("mask", 1); put("fromTint", 1) }
+        expectInvalidTransition("clips[1].transitionIn.fromTint") { put("fromTint", 1); put("toTint", 1) }
+    }
+
+    @Test
+    fun `every channel is clamped to its range rather than rejected`() {
+        val transition = transitionJson().apply {
+            put(
+                "curves",
+                JSONObject()
+                    .put("alpha", numbers(-1.0, 2.0))
+                    .put("reveal", numbers(-0.5, 1.5))
+                    .put(
+                        "from",
+                        JSONObject()
+                            .put("x", numbers(-9.0, 9.0))
+                            .put("y", numbers(-9.0, 9.0))
+                            .put("scale", numbers(0.0, 100.0))
+                            .put("rotation", numbers(-5_000.0, 5_000.0))
+                            .put("blur", numbers(-1.0, 0.9))
+                            .put("pixelate", numbers(-0.1, 0.9))
+                            .put("split", numbers(-0.9, 0.9))
+                            .put("gain", numbers(-1.0, 20.0))
+                            .put("tint", numbers(-1.0, 2.0)),
+                    ),
+            )
+            put("fromTint", numbers(2.0, -1.0, 0.5))
+            put("mask", JSONObject().put("shape", "blinds").put("count", 100).put("feather", 0.0).put("invert", true))
+        }
+        val parsed = ComposeSpecParser.parse(withTransition(transition)).clips[1].transitionIn!!
+        val from = parsed.curves.from!!
+        assertEquals(listOf(0f, 1f), parsed.curves.alpha!!.toList())
+        assertEquals(listOf(0f, 1f), parsed.curves.reveal!!.toList())
+        assertEquals(listOf(-4f, 4f), from.x!!.toList())
+        assertEquals(listOf(-4f, 4f), from.y!!.toList())
+        assertEquals(listOf(0.01f, 20f), from.scale!!.toList())
+        assertEquals(listOf(-3600f, 3600f), from.rotation!!.toList())
+        assertEquals(listOf(0f, 0.5f), from.blur!!.toList())
+        assertEquals(listOf(0f, 0.5f), from.pixelate!!.toList())
+        assertEquals(listOf(-0.5f, 0.5f), from.split!!.toList())
+        assertEquals(listOf(0f, 10f), from.gain!!.toList())
+        assertEquals(listOf(0f, 1f), from.tint!!.toList())
+        assertEquals(listOf(1f, 0f, 0.5f), parsed.fromTint!!.toList())
+        assertEquals(64, parsed.mask!!.count)
+        assertEquals(0.0005f, parsed.mask!!.feather, 1e-9f)
+        assertTrue(parsed.mask!!.invert)
+    }
+
+    @Test
+    fun `mask numbers take the contract's defaults and round the slat count`() {
+        val bare = transitionJson().put("mask", JSONObject().put("shape", "circle"))
+        val mask = ComposeSpecParser.parse(withTransition(bare)).clips[1].transitionIn!!.mask!!
+        assertEquals(MaskShape.CIRCLE, mask.shape)
+        assertEquals(0f, mask.angleDeg, 0f)
+        assertEquals(1, mask.count)
+        assertEquals(0.01f, mask.feather, 1e-9f)
+        assertEquals(false, mask.invert)
+
+        fun count(value: Double) = ComposeSpecParser.parse(
+            withTransition(transitionJson().put("mask", JSONObject().put("shape", "blinds").put("count", value))),
+        ).clips[1].transitionIn!!.mask!!.count
+        assertEquals(3, count(2.5))
+        assertEquals(2, count(2.4))
+        assertEquals(1, count(0.0))
+        // A number is a JSON number, as it is for every curve and for the iOS reader: a string
+        // that spells one takes the default instead of being read as thirty slats on Android alone.
+        val spelt = transitionJson().put(
+            "mask",
+            JSONObject().put("shape", "blinds").put("count", "30").put("feather", "0.2").put("angleDeg", "90"),
+        )
+        val read = ComposeSpecParser.parse(withTransition(spelt)).clips[1].transitionIn!!.mask!!
+        assertEquals(1, read.count)
+        assertEquals(0.01f, read.feather, 1e-9f)
+        assertEquals(0f, read.angleDeg, 0f)
+        // A direction is kept to within one turn, so a float can hold one no JSON number breaks.
+        fun angle(value: Double) = ComposeSpecParser.parse(
+            withTransition(transitionJson().put("mask", JSONObject().put("shape", "linear").put("angleDeg", value))),
+        ).clips[1].transitionIn!!.mask!!.angleDeg
+        assertEquals(90f, angle(450.0), 0f)
+        assertEquals(-90f, angle(-450.0), 0f)
+        assertEquals(180f, angle(180.0), 0f)
+        assertTrue(angle(1e300).isFinite())
+        // Only a real true inverts; a string that says so is not one.
+        val stringy = transitionJson().put("mask", JSONObject().put("shape", "circle").put("invert", "true"))
+        assertEquals(false, ComposeSpecParser.parse(withTransition(stringy)).clips[1].transitionIn!!.mask!!.invert)
+    }
+
+    @Test
+    fun `a transition on the first clip or on a layer is ignored without being read`() {
+        // Neither has an outgoing clip to come from, so whatever it carries is not a reason to fail.
+        val json = withTransition().apply {
+            getJSONArray("clips").getJSONObject(0).put("transitionIn", 5)
+            val track = trackJson("pip", "b")
+            track.getJSONArray("clips").getJSONObject(0).put("transitionIn", JSONObject().put("kind", ""))
+            put("tracks", org.json.JSONArray().put(track))
+        }
+        val spec = ComposeSpecParser.parse(json)
+        assertNull(spec.clips[0].transitionIn)
+        assertNull(spec.tracks[0].clips[0].transitionIn)
+        assertEquals("wipe-left", spec.clips[1].transitionIn!!.kind)
+    }
+
+    @Test
+    fun `a tail's own transition is ignored too`() {
+        // A tail is the outgoing clip's last moments; it has nothing before it on its own sequence.
+        val transition = transitionJson().apply { getJSONObject("from").put("transitionIn", "garbage") }
+        val parsed = ComposeSpecParser.parse(withTransition(transition)).clips[1].transitionIn!!
+        assertNull(parsed.from.transitionIn)
+    }
+
     @Test
     fun `a music trim that ends before it starts is rejected`() {
         expectInvalid("audio.music.outMs") {

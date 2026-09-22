@@ -1,4 +1,15 @@
-import type { ComposeClip, ComposeMusic, ComposeOutput, ComposePlacement, ComposeSpec, ComposeTrack, ComposeVoiceover } from '../definitions';
+import type {
+  ComposeClip,
+  ComposeMusic,
+  ComposeOutput,
+  ComposePlacement,
+  ComposeSpec,
+  ComposeTrack,
+  ComposeTransition,
+  ComposeTransitionCurves,
+  ComposeTransitionMask,
+  ComposeVoiceover,
+} from '../definitions';
 
 import { fold, isIdentity, type ColorMatrix } from './color-matrix';
 import type { Frame } from './geometry';
@@ -119,12 +130,52 @@ export interface VoiceItem {
   level: number;
 }
 
+/**
+ * One transition between two base clips, laid out.
+ *
+ * The spec arrives LOWERED - the outgoing clip already stops where the incoming one starts - so a
+ * transition changes nothing about where any base clip sits: `prefixOutUs` and `totalUs` are what
+ * they would be with a cut there. What it adds is the outgoing clip's tail, drawn UNDER the incoming
+ * clip for the first `durUs` of it, and the numbers that say how the two are mixed.
+ */
+export interface PlannedTransition {
+  /** The base clip it brings in. Its window opens where that clip starts. */
+  index: number;
+  /** For a log line and a failure message; nothing here or in the painter branches on it. */
+  kind: string;
+  /** The outgoing clip's last moments, planned exactly as a clip is: the same probe clamp, the same framing. */
+  tail: PlannedClip;
+  /** Where the window opens on the OUTPUT timeline: the incoming clip's own start. */
+  startUs: number;
+  /** How long it runs: the tail, and never longer than the incoming clip it runs under. */
+  durUs: number;
+  curves: ComposeTransitionCurves;
+  mask?: ComposeTransitionMask;
+  fromTint?: [number, number, number];
+  toTint?: [number, number, number];
+}
+
+/** A transition that is on screen, and how far through its window the instant asked about is. */
+export interface ActiveTransition {
+  /** The incoming base clip, which is also the clip `clipIndexAt` names for the same instant. */
+  index: number;
+  planned: PlannedTransition;
+  /** 0..1 through the window. */
+  progress: number;
+}
+
 export interface RenderPlan {
   spec: ComposeSpec;
   clips: PlannedClip[];
   /** Start of clip i on the OUTPUT timeline. */
   prefixOutUs: number[];
   totalUs: number;
+  /**
+   * Every transition, in timeline order. EMPTY for a post with none, which is every spec written
+   * before transitions existed - and the render asks this once, before its first frame, so such a
+   * post takes exactly the loop it always took rather than looking for a window on every frame.
+   */
+  transitions: PlannedTransition[];
   /** The extra video layers, bottom to top, and only the ones that show something. */
   tracks: PlannedTrack[];
   /** Null when `filter` was empty or folded to identity. */
@@ -158,6 +209,16 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
   const askedUs = Math.max(0, Math.round((spec.durationMs ?? 0) * 1000));
   const totalUs = Math.max(clips.length === 0 ? MIN_CLIP_US : cursorUs, askedUs);
 
+  const transitions: PlannedTransition[] = [];
+  spec.clips.forEach((clip, index) => {
+    // Never the first clip: there is nothing before it to come in from. The parser has already
+    // dropped one there, and this is the plan holding the same line on its own.
+    const incoming = clips[index];
+    if (index === 0 || !clip.transitionIn || !incoming) return;
+    const planned = planTransition(clip.transitionIn, index, incoming, prefixOutUs[index] ?? 0, spec, probes, output);
+    if (planned) transitions.push(planned);
+  });
+
   const folded = spec.filter.length === 0 ? null : fold(spec.filter);
   const colorMatrix = folded && !isIdentity(folded) ? folded : null;
 
@@ -177,6 +238,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     clips,
     prefixOutUs,
     totalUs,
+    transitions,
     tracks,
     colorMatrix,
     overlays: spec.overlays.map(overlay => ({
@@ -195,7 +257,12 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     voice,
     posterAtUs: Math.min(Math.round(spec.posterAtMs * 1000), Math.max(0, totalUs - 1)),
     output,
-    hasAudio: clips.some(clip => !clip.removeAudio) || tracks.some(track => track.hasAudio) || music !== null || voice.length > 0,
+    hasAudio:
+      clips.some(clip => !clip.removeAudio) ||
+      transitions.some(transition => !transition.tail.removeAudio) ||
+      tracks.some(track => track.hasAudio) ||
+      music !== null ||
+      voice.length > 0,
   };
 }
 
@@ -219,6 +286,23 @@ export function clipIndexAt(plan: RenderPlan, timeUs: number): number {
     if (timeUs < end) return timeUs >= start ? i : -1;
   }
   return -1;
+}
+
+/**
+ * The transition on screen at an instant of the OUTPUT timeline, or null wherever one clip fills
+ * the frame. A window is open from its start up to but NOT including its end, so the frame at the
+ * end is the incoming clip alone - the same half-open rule `clipIndexAt` uses for a clip.
+ *
+ * Progress is clamped rather than trusted, because the one reading every engine shares - curves
+ * interpolated at `p` - is only defined on 0..1.
+ */
+export function transitionAt(plan: RenderPlan, atUs: number): ActiveTransition | null {
+  for (const planned of plan.transitions) {
+    if (atUs < planned.startUs) return null;
+    if (atUs >= planned.startUs + planned.durUs) continue;
+    return { index: planned.index, planned, progress: clamp((atUs - planned.startUs) / planned.durUs, 0, 1) };
+  }
+  return null;
 }
 
 /** Which of a layer's placements is on screen at an instant of the OUTPUT timeline, or -1. */
@@ -266,6 +350,37 @@ function planClip(clip: ComposeClip, spec: ComposeSpec, probes: ReadonlyMap<stri
     reframed: clip.crop !== undefined || clip.rect !== undefined,
     frame,
   };
+}
+
+/**
+ * A base clip's `transitionIn`, laid out, or null when there is nothing left of it to draw.
+ *
+ * The tail is planned by [planClip] and nothing else, so it is clamped to its file and framed by
+ * exactly the rules its own clip was: it IS that clip, a few hundred milliseconds of it, and a tail
+ * framed differently from the clip it continues would jump on the frame the window opens.
+ *
+ * Its length is floored the way every clip's is, and then held to the incoming clip. The builder
+ * already holds a transition to half of either clip, so the second bound only matters for a spec
+ * written by hand - where it keeps the tail from running on under the clip AFTER the incoming one,
+ * whose own transition would then overlap it.
+ */
+function planTransition(
+  transition: ComposeTransition,
+  index: number,
+  incoming: PlannedClip,
+  startUs: number,
+  spec: ComposeSpec,
+  probes: ReadonlyMap<string, ProbedInput>,
+  output: Frame,
+): PlannedTransition | null {
+  const tail = planClip(transition.from, spec, probes, output);
+  const durUs = Math.min(tail.outDurUs, incoming.outDurUs);
+  if (durUs <= 0) return null;
+  const planned: PlannedTransition = { index, kind: transition.kind, tail, startUs, durUs, curves: transition.curves };
+  if (transition.mask) planned.mask = transition.mask;
+  if (transition.fromTint) planned.fromTint = transition.fromTint;
+  if (transition.toTint) planned.toTint = transition.toTint;
+  return planned;
 }
 
 /**

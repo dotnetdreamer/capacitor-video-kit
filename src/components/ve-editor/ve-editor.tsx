@@ -161,6 +161,20 @@ export class VeEditor {
   private bitmaps!: OverlayBitmaps;
   private confirm!: EditorConfirm;
 
+  /**
+   * The preview, held only so the export screen can show a still of it; see [paintStill]. A ref
+   * rather than a query, because the preview is this element's own child and the class names
+   * inside it are the preview's business.
+   */
+  private preview?: HTMLVePreviewElement;
+  private readonly keepPreview = (el?: HTMLElement) => {
+    this.preview = el as HTMLVePreviewElement | undefined;
+  };
+  /* Created with each export screen, so the still is painted once per render and never again. */
+  private readonly keepStill = (el?: HTMLElement) => {
+    if (el) void this.paintStill(el as HTMLCanvasElement);
+  };
+
   private built = false;
   private destroyed = false;
   private leaving = false;
@@ -271,12 +285,39 @@ export class VeEditor {
    * Any ARIA attribute written on an element in the PAGE's light DOM does refresh it, and this host
    * is such an element. `aria-hidden="false"` is the default state spelled out - it tells a reader
    * exactly what it already assumed about this element - so it changes nothing for anyone and buys
-   * the refresh. It is written only while a question is open, so each opening and each answer is one
-   * attribute change, and a frame that renders neither writes nothing.
+   * the refresh. It is written only while a question or the export screen is open, so each opening
+   * and each closing is one attribute change, and a frame that renders neither writes nothing. The
+   * export screen needs it for the same reason the question does: it covers the editor, and without
+   * the refresh TalkBack reads the tools under it rather than the progress on it.
    */
   componentDidRender() {
-    if (this.confirm.showing) this.el.setAttribute('aria-hidden', 'false');
+    if (this.confirm.showing || this.rendering) this.el.setAttribute('aria-hidden', 'false');
     else this.el.removeAttribute('aria-hidden');
+    this.moveFocusWithExport();
+  }
+
+  /** Whether the last frame drawn had the export screen on it, so focus moves once per change. */
+  private exportShown = false;
+
+  /**
+   * Takes the focus onto the export screen as it opens, and back to Next if the editor is still
+   * here when it closes.
+   *
+   * Not a courtesy. The focus is on Next when the screen opens - it is what was just pressed - and
+   * a focused element inside the hidden editor is one Chrome refuses to hide: it keeps the WHOLE
+   * editor in the accessibility tree, beside the progress, and says so in the console. Measured,
+   * not assumed. On the way back it only moves a focus that went with the screen, so a question
+   * the render's failure puts up keeps whatever it took.
+   */
+  private moveFocusWithExport(): void {
+    if (this.rendering === this.exportShown) return;
+    this.exportShown = this.rendering;
+    const root = this.el.shadowRoot;
+    if (this.rendering) {
+      root?.querySelector<HTMLElement>('.ve__export-still')?.focus({ preventScroll: true });
+    } else if (!root?.activeElement && !this.destroyed) {
+      root?.querySelector<HTMLElement>('.ve__round--next')?.focus({ preventScroll: true });
+    }
   }
 
   private teardown(): void {
@@ -481,7 +522,15 @@ export class VeEditor {
    * in the middle of, while every other key there belongs to the field.
    */
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (this.destroyed || this.loading || this.rendering || event.defaultPrevented) return;
+    if (this.destroyed || this.loading || event.defaultPrevented) return;
+    if (this.rendering) {
+      // The export screen's own back: the only key that means anything while the video is built.
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.cancelRender();
+      }
+      return;
+    }
     const focus = keyTarget(event);
     if (isTextEntry(focus) && event.key !== 'Escape') return;
 
@@ -550,11 +599,17 @@ export class VeEditor {
    *
    * Synchronous, because that is what a back handler is: the answer is whether the press was
    * consumed, and a host with a back button of its own needs it now rather than a promise later.
-   * True for everything the Angular handler swallowed, including the early return, because a press
-   * during a render must not take the screen away from under an encode.
+   *
+   * During a render, back is the export screen's own arrow: it stops the encode and puts the
+   * customer back in the edit. It never goes further than that - leaving the editor from under a
+   * render would throw away the edit along with the file - so the press is consumed either way.
    */
   private readonly onBack = (): boolean => {
-    if (this.rendering || this.loading) return true;
+    if (this.rendering) {
+      this.cancelRender();
+      return true;
+    }
+    if (this.loading) return true;
 
     if (this.confirm.pending) {
       /*
@@ -687,28 +742,74 @@ export class VeEditor {
     this.renderProgress = 0;
     const abort = new AbortController();
     this.renderAbort = abort;
+    /*
+     * A render the customer called off is over the moment they did, whatever it does afterwards.
+     * Every await below checks, because the host is free to settle late or not at all: a native job
+     * cancelled mid encode may still report the file it finished, or report a failure for the
+     * cancel itself, and neither is news to somebody who is already back in the edit.
+     */
+    const abandoned = () => this.destroyed || abort.signal.aborted;
     try {
       // What makes `EditorRenderHost.render`'s side of the bargain true: every layer has been drawn
       // before the host is asked for a file. In the common case the pass has already run and this
       // resolves in a microtask; the case it is here for is Next tapped in the same turn as a
       // change, where the effect that draws has not had its turn yet.
       await this.bitmaps.ensureFresh();
+      if (abandoned()) return;
       const stitched = await render.render({
         manifest,
         sources,
         onProgress: progress => {
-          this.renderProgress = progress;
+          if (!abandoned()) this.renderProgress = progress;
         },
         signal: abort.signal,
       });
-      if (this.destroyed) return;
+      if (abandoned()) return;
       this.finish({ sources, manifest, stitched });
     } catch (error) {
-      if (this.destroyed) return;
+      if (abandoned()) return;
       debugWarn('[ve-editor] render failed', error);
       this.rendering = false;
       await this.onRenderFailed(error);
     }
+  }
+
+  private readonly onCancelRender = (): void => {
+    this.cancelRender();
+  };
+
+  /**
+   * Stops the encode and puts the customer back in the edit exactly as they left it.
+   *
+   * Nothing is asked first. What is lost is the time the encode has run, and Next starts it again;
+   * the edit itself was never at risk, because the editor stayed mounted under the export screen
+   * the whole time. The editor does not wait for the host to confirm the stop either - see
+   * [next] for why the answer, whenever it comes, is ignored.
+   */
+  private cancelRender(): void {
+    if (!this.rendering) return;
+    this.renderAbort?.abort();
+    this.renderAbort = null;
+    this.rendering = false;
+  }
+
+  /**
+   * Copies the preview's picture into the export screen's own canvas.
+   *
+   * A copy rather than the preview itself, because the preview has to stay exactly where it is: it
+   * is the editor the customer comes back to if the render is called off or fails, and a `ve-*`
+   * element moved in the document stops repainting. `drawImage` rather than a data URL, because a
+   * canvas drawn from a clip on another origin refuses to be read back and draws perfectly well.
+   *
+   * No picture - a post with no video on it, or a preview that has not drawn yet - leaves the
+   * canvas empty, and the tile behind it is what shows.
+   */
+  private async paintStill(into: HTMLCanvasElement): Promise<void> {
+    const picture = await this.preview?.picture().catch(() => null);
+    if (!picture || !into.isConnected || !(picture.width > 0) || !(picture.height > 0)) return;
+    into.width = picture.width;
+    into.height = picture.height;
+    into.getContext('2d')?.drawImage(picture, 0, 0);
   }
 
   private async onRenderFailed(error: unknown): Promise<void> {
@@ -775,6 +876,13 @@ export class VeEditor {
 
       return (
         <Host>
+          {/*
+           * Out of reach while the export screen is over it, rather than taken out: the edit has to
+           * be right here, untouched, when the render is called off or fails. Only attributes
+           * change, so nothing inside is re-created. `inert` keeps Tab out of it as well, and
+           * `aria-hidden` is there beside it for the WebViews older than `inert` - Chrome 99 on
+           * the phones this is tested on, which ignores the attribute and reads the other one.
+           */}
           <div
             class={{
               've': true,
@@ -782,6 +890,8 @@ export class VeEditor {
               've--tall': layout === 'tall',
               've--fullscreen': fullscreen,
             }}
+            inert={this.rendering}
+            aria-hidden={this.rendering ? 'true' : undefined}
           >
             {this.loading
               ? this.renderLoading()
@@ -791,9 +901,9 @@ export class VeEditor {
                   !fullscreen && layout !== 'tall' ? <ve-timeline key="timeline" class="ve__timeline" ctx={ctx} compact={layout === 'compact'} /> : null,
                   fullscreen ? null : this.renderTools(ctx, panel),
                 ]}
-
-            {this.rendering ? this.renderProgressCard() : null}
           </div>
+
+          {this.rendering ? this.renderExport() : null}
 
           {/*
            * Outside the column and last in paint order, which is where `ve-alert` expects to be put:
@@ -830,7 +940,7 @@ export class VeEditor {
          * re-created would leave the transport driving elements that are no longer on the screen:
          * the picture freezes on its last frame and nothing throws.
          */}
-        <ve-preview key="preview" class="ve__preview" ctx={ctx} />
+        <ve-preview key="preview" class="ve__preview" ctx={ctx} ref={this.keepPreview} />
 
         {chromeShowing ? (
           <button key="back" type="button" class="ve__round ve__round--back" aria-label="Back" onClick={this.onBackTap}>
@@ -920,7 +1030,7 @@ export class VeEditor {
   /**
    * The open sheet, or the toolbar when nothing is open.
    *
-   * Fourteen literal tags rather than a lookup, and this is the one place in the package where that
+   * Fifteen literal tags rather than a lookup, and this is the one place in the package where that
    * matters: under `dist-custom-elements` a component's generated `defineCustomElement` also defines
    * every tag it renders, transitively, and the compiler finds those tags by collecting the string
    * literals passed to `h()`. A tag produced through a variable is invisible to that analysis, so a
@@ -958,23 +1068,59 @@ export class VeEditor {
         return <ve-voiceover-sheet key="voiceover" class="ve__sheet" ctx={ctx} />;
       case 'sound':
         return <ve-sound-sheet key="sound" class="ve__sheet ve__sheet--tall" ctx={ctx} />;
+      case 'transition':
+        return <ve-transition-sheet key="transition" class="ve__sheet" ctx={ctx} />;
       default:
         return <ve-toolbar key="toolbar" class="ve__toolbar" ctx={ctx} />;
     }
   }
 
-  private renderProgressCard() {
-    const progress = this.renderProgress;
+  /**
+   * The screen the video is built on: a still of the post with the figure over it, and a wash over
+   * the part of the picture that is still to come.
+   *
+   * The wash IS the progress bar. It lies over the whole still at 0% and draws back to the right
+   * as the figure climbs, so the picture comes through at full strength left to right - a bar with
+   * the post itself as its fill, and no second bar underneath saying the same thing in grey.
+   *
+   * It covers the editor rather than replacing it. The editor has to be exactly where it was when
+   * the render is called off or fails, and a `ve-*` element taken out of the document is not one
+   * that comes back.
+   */
+  private renderExport() {
+    const percent = Math.round(Math.min(1, Math.max(0, this.renderProgress)) * 100);
+    const output = this.store.output.value;
     return (
-      <div class="ve__render" key="render">
-        <div class="ve__render-card">
-          <p class="ve__render-title">Preparing your video</p>
-          {/* Indeterminate until the first figure arrives: a host that reports nothing until the
-              encode is half done would otherwise show an empty bar that looks stuck. */}
-          <ve-progress value={progress} type={progress > 0 ? 'determinate' : 'indeterminate'} label="Preparing your video" />
-          <p class="ve__render-pct">{(progress * 100).toFixed(0)}%</p>
-          <p class="ve__render-hint">This happens on your phone, so it keeps going if you leave the app.</p>
+      <div class="ve__export" key="export">
+        <div class="ve__export-bar">
+          <button type="button" class="ve__export-back" aria-label="Cancel" onClick={this.onCancelRender}>
+            <ve-icon name="arrow-back" />
+          </button>
         </div>
+
+        {/*
+          The progress bar for assistive technology, with the figure as its value; the figure
+          painted on the still is the same number for the eye, so it is hidden from the reader.
+          Sized from the POST's two numbers, so a landscape post is a landscape still.
+        */}
+        <div
+          class="ve__export-still"
+          tabindex="-1"
+          role="progressbar"
+          aria-label="Preparing your video"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={String(percent)}
+          style={{ '--ve-export-w-px': String(output.width), '--ve-export-h-px': String(output.height) }}
+        >
+          <canvas class="ve__export-picture" aria-hidden="true" ref={this.keepStill}></canvas>
+          <span class="ve__export-wash" aria-hidden="true" style={{ transform: `scaleX(${(100 - percent) / 100})` }}></span>
+          <span class="ve__export-pct" aria-hidden="true">
+            {percent}%
+          </span>
+        </div>
+
+        <p class="ve__export-hint">Stay on this screen until your video is ready</p>
       </div>
     );
   }

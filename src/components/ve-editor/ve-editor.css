@@ -13,6 +13,9 @@
  * chevron inside one of them.
  */
 :host {
+  /* The box the export screen covers. `position` makes no containing block for a FIXED descendant,
+     which is what the warning above is about, so `ve-alert` still covers the viewport. */
+  position: relative;
   display: block;
   height: 100%;
   background: var(--ve-bg);
@@ -388,56 +391,127 @@
   padding-bottom: var(--ve-safe-bottom);
 }
 
-/* ------------------------------------------------------------------------------------ render */
+/* ------------------------------------------------------------------------------------ export */
 
-.ve__render {
+/*
+ * The page the video is built on. Opaque and on the export tokens rather than a dim layer over the
+ * editor, because it is a screen of its own: the one the host's finished video page follows, and
+ * the same colour as it. Absolute over the host rather than fixed, so an editor placed in part of a
+ * page covers only its own part.
+ */
+.ve__export {
   position: absolute;
   inset: 0;
   z-index: 20;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  padding: var(--ve-safe-top) 16px var(--ve-safe-bottom);
+  background: var(--ve-export-bg);
+  color: var(--ve-export-text);
 }
 
-.ve__render-card {
-  width: 100%;
-  max-width: 320px;
-  padding: 22px;
-  border-radius: 18px;
-  background: var(--ve-sheet);
-  text-align: center;
+/* The row the back arrow sits in, the same height as a host's toolbar so the arrow does not jump
+   when the finished video's page replaces this one. */
+.ve__export-bar {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  flex: 0 0 56px;
+}
+
+.ve__export-back {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-left: -6px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.ve__export-back:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 
 /*
- * Only the shape. `ve-progress` already reads `--ve-raised` for its track and `--ve-accent` for its
- * fill, which is what the two Ionic custom properties here used to be set to by hand.
- *
- * A `:host` rule inside a shadow root loses to a rule from outside it, which is what lets this beat
- * the component's own 4px, and the component clips its fill so the sweep stops at the same curve.
+ * The still, at a size a phone reads as a thumbnail: two thirds of the screen's width tall, or less
+ * on a short screen, and the width that follows from the post's own shape - capped, so a landscape
+ * post comes out wide rather than off the edge. `--ve-export-still-h` is the one number to change,
+ * and the host's page after this one uses the same rule so the video lands where the still was.
  */
-.ve__render-card ve-progress {
-  height: 6px;
-  border-radius: 3px;
+.ve__export-still {
+  --ve-export-w-px: 9;
+  --ve-export-h-px: 16;
+  --ve-export-still-h: min(65vw, 40vh);
+
+  position: relative;
+  flex: 0 0 auto;
+  width: min(100%, calc(var(--ve-export-still-h) * var(--ve-export-w-px) / var(--ve-export-h-px)));
+  aspect-ratio: var(--ve-export-w-px) / var(--ve-export-h-px);
+  margin-top: clamp(16px, 11vh, 110px);
+  overflow: hidden;
+  border-radius: 10px;
+  /* What shows when there is no picture to copy: a post with no video on it. */
+  background: var(--ve-raised);
 }
 
-.ve__render-title {
-  margin: 0 0 14px;
-  font-size: 16px;
-  font-weight: 700;
+/* Focused as the screen opens, so a reader starts on the progress; it is not a control, so the
+   focus is not drawn. */
+.ve__export-still:focus {
+  outline: none;
 }
 
-.ve__render-pct {
-  margin: 10px 0 4px;
-  font-size: 22px;
+.ve__export-picture {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * Over the part of the post still to be built, drawn back to the right as the figure climbs. A
+ * `scaleX` from the right-hand edge rather than a changing `left`, so each step of progress is a
+ * compositor change and not a layout; this is a leaf with nothing fixed under it, which is the
+ * exception the top of this file allows a transform.
+ */
+.ve__export-wash {
+  position: absolute;
+  inset: 0;
+  background: var(--ve-export-wash);
+  transform-origin: right center;
+  transition: transform 0.3s linear;
+}
+
+.ve__export-pct {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: clamp(24px, 8vw, 36px);
   font-weight: 800;
   font-variant-numeric: tabular-nums;
+  /* White on the customer's own footage, so it carries its own contrast rather than trusting it. */
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
 }
 
-.ve__render-hint {
-  margin: 6px 0 0;
-  font-size: 12px;
+.ve__export-hint {
+  margin: auto 0 clamp(24px, 18vh, 160px);
+  font-size: 13px;
   line-height: 1.4;
-  color: var(--ve-dim);
+  text-align: center;
+  color: var(--ve-export-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ve__export-wash {
+    transition: none;
+  }
 }

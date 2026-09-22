@@ -6,6 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.floor
 
 /**
  * The timeline arithmetic: where every clip lands after a speed change, how music repeats to cover
@@ -913,5 +914,316 @@ class RenderPlanTest {
 
         assertEquals(1, plan.tracks.size)
         assertEquals(2_000_000L, plan.tracks[0].startUs)
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+    /* Transitions                                                                             */
+    /* ------------------------------------------------------------------------------------- */
+
+    /** A dissolve out of [from], which is the outgoing clip's tail exactly as the editor lowers it. */
+    private fun dissolve(from: Clip) = Transition(
+        kind = "dissolve",
+        from = from,
+        mask = null,
+        fromTint = null,
+        toTint = null,
+        curves = TransitionCurves(floatArrayOf(0f, 0.5f, 1f), null, null, null),
+    )
+
+    /**
+     * Clip `a` gave up its last half second to a transition into `b`: it arrives stopping at 1.5 s,
+     * and the tail is `a` from 1.5 s to 2 s. The post is 3.5 s long - already, before any plan.
+     */
+    private fun lowered(
+        tail: Clip = clip("a", inMs = 1_500, outMs = 2_000),
+        incoming: Clip = clip("b", outMs = 2_000),
+    ) = spec(listOf(clip("a", outMs = 1_500), incoming.copy(transitionIn = dissolve(tail))))
+
+    private val tenSeconds = mapOf("file:///a.mp4" to probe(10_000), "file:///b.mp4" to probe(10_000))
+
+    @Test
+    fun `a tail is laid under the incoming clip, starting where it starts`() {
+        val plan = RenderPlan.build(lowered(), tenSeconds)
+        assertEquals(1, plan.tails.size)
+        val tail = plan.tails[0]
+        assertEquals(1, tail.index)
+        // Where the incoming clip starts, which the lowering already put there: nothing moves.
+        assertEquals(plan.prefixOutUs[1], tail.startUs)
+        assertEquals(1_500_000L, tail.startUs)
+        assertEquals(500_000L, tail.durUs)
+        assertEquals(2_000_000L, tail.endUs)
+        // The item starts a tenth of a second early, on the footage the base is still showing.
+        assertEquals(100_000L, tail.leadUs)
+        assertEquals(1_400_000L, tail.itemStartUs)
+        assertEquals(1_400_000L, tail.clip.inUs)
+        assertEquals(2_000_000L, tail.clip.outUs)
+        assertEquals(tail.leadUs + tail.durUs, tail.clip.outDurUs)
+        assertEquals("dissolve", tail.transition.kind)
+        // The post is as long as the lowered base, with no arithmetic for the overlap here.
+        assertEquals(3_500_000L, plan.totalUs)
+    }
+
+    @Test
+    fun `a tail is floored exactly like a clip, so the window and the item are one number`() {
+        // 2 ms of source at 3x is 666.67 us, and Media3 floors it; so do the item and the window.
+        // Sped differently from the clip it follows, it is not that clip carried on: no lead.
+        val tail = clip("a", inMs = 1_500, outMs = 1_502, speed = 3f)
+        val plan = RenderPlan.build(lowered(tail = tail), tenSeconds)
+        assertEquals(666L, plan.tails[0].durUs)
+        assertEquals(0L, plan.tails[0].leadUs)
+        assertEquals(plan.tails[0].clip.outDurUs, plan.tails[0].durUs)
+    }
+
+    @Test
+    fun `a sped tail takes its lead through its speed, and still ends on the window's end`() {
+        val outgoing = clip("a", outMs = 1_500, speed = 2f)
+        val tail = clip("a", inMs = 1_500, outMs = 2_000, speed = 2f)
+        val spec = spec(listOf(outgoing, clip("b").copy(transitionIn = dissolve(tail))))
+        val planned = RenderPlan.build(spec, tenSeconds).tails[0]
+        assertEquals(750_000L, planned.startUs)
+        assertEquals(250_000L, planned.durUs)
+        // A tenth of a second of output is a fifth of a second of source at 2x.
+        assertEquals(100_000L, planned.leadUs)
+        assertEquals(1_300_000L, planned.clip.inUs)
+        assertEquals(planned.endUs, planned.itemStartUs + planned.clip.outDurUs)
+    }
+
+    @Test
+    fun `two windows that meet share the stretch where they meet, the earlier item cut to make room`() {
+        // `b` is all transition: its first half is the window in from `a`, its second half went
+        // to `c`. The two windows meet, so the second tail's lead has no free room at all - and
+        // without one, the first tail's last frame would be the one paired with the second
+        // window's first. So the second tail borrows 50 ms from the end of the first tail's item.
+        val a = clip("a", outMs = 1_000)
+        val b = clip("b", outMs = 500).copy(transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_500)))
+        val c = clip("c").copy(transitionIn = dissolve(clip("b", inMs = 500, outMs = 1_000)))
+        val plan = RenderPlan.build(spec(listOf(a, b, c)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+        val (first, second) = plan.tails
+        // Neither window moves: the borrow is in the items, not in the transitions.
+        assertEquals(1_000_000L, first.startUs)
+        assertEquals(500_000L, first.durUs)
+        assertEquals(1_500_000L, first.endUs)
+        assertEquals(1_500_000L, second.startUs)
+        // The second tail leads with the last 50 ms of `b`'s own base copy...
+        assertEquals(50_000L, second.leadUs)
+        assertEquals(1_450_000L, second.itemStartUs)
+        assertEquals(450_000L, second.clip.inUs)
+        // ...and the first item stops exactly there, its source cut to match, its lead untouched.
+        assertEquals(1_450_000L, first.itemEndUs)
+        assertEquals(1_450_000L, first.clip.outUs)
+        assertEquals(900_000L, first.itemStartUs)
+        assertEquals(550_000L, first.clip.outDurUs)
+        // The gate hands the stretch to the second tail, and nothing is ever left uncovered.
+        assertEquals(first, plan.tailAt(1_449_999L))
+        assertEquals(second, plan.tailAt(1_450_000L))
+
+        // With 40 ms free between the windows, 10 ms more are borrowed to make the lead 50.
+        val roomy = clip("b", outMs = 540).copy(transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_500)))
+        val c2 = clip("c").copy(transitionIn = dissolve(clip("b", inMs = 540, outMs = 1_000)))
+        val plan2 = RenderPlan.build(spec(listOf(a, roomy, c2)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+        assertEquals(50_000L, plan2.tails[1].leadUs)
+        assertEquals(1_490_000L, plan2.tails[1].itemStartUs)
+        assertEquals(plan2.tails[1].itemStartUs, plan2.tails[0].itemEndUs)
+
+        // With 50 ms free or more, nothing is borrowed: the lead is the room there is, up to 100.
+        val free = clip("b", outMs = 560).copy(transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_500)))
+        val c3 = clip("c").copy(transitionIn = dissolve(clip("b", inMs = 560, outMs = 1_000)))
+        val plan3 = RenderPlan.build(spec(listOf(a, free, c3)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+        assertEquals(60_000L, plan3.tails[1].leadUs)
+        assertEquals(plan3.tails[0].endUs, plan3.tails[0].itemEndUs)
+        assertEquals(plan3.tails[0].endUs, plan3.tails[1].itemStartUs)
+    }
+
+    @Test
+    fun `a short window lends at most a quarter of itself`() {
+        // A 100 ms window can spare 25 ms: the lead after it is shorter than it would like, and
+        // the window before it keeps three quarters of its outgoing side.
+        val a = clip("a", outMs = 1_000)
+        val b = clip("b", outMs = 100).copy(transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_100)))
+        val c = clip("c").copy(transitionIn = dissolve(clip("b", inMs = 100, outMs = 200)))
+        val plan = RenderPlan.build(spec(listOf(a, b, c)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+        assertEquals(100_000L, plan.tails[0].durUs)
+        assertEquals(25_000L, plan.tails[1].leadUs)
+        assertEquals(1_075_000L, plan.tails[0].itemEndUs)
+        assertEquals(plan.tails[0].itemEndUs, plan.tails[1].itemStartUs)
+    }
+
+    @Test
+    fun `a tail that cannot lead borrows nothing`() {
+        // `c`'s tail is sped differently from the base's copy of `b`, so it is not `b` carried on
+        // and takes no lead; the first item then keeps its whole window.
+        val a = clip("a", outMs = 1_000)
+        val b = clip("b", outMs = 500).copy(transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_500)))
+        val c = clip("c").copy(transitionIn = dissolve(clip("b", inMs = 500, outMs = 1_000, speed = 2f)))
+        val plan = RenderPlan.build(spec(listOf(a, b, c)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+        assertEquals(0L, plan.tails[1].leadUs)
+        assertEquals(plan.tails[0].endUs, plan.tails[0].itemEndUs)
+    }
+
+    @Test
+    fun `a borrowed end lands on the microsecond whatever the speed, and never past the next lead`() {
+        // At speed the cut is exact; slowed, an item can only end on every few microseconds, and
+        // it stops short of the next lead rather than running into it.
+        for (speed in listOf(0.25f, 0.3f, 0.5f, 1f, 1.5f, 3f, 4f)) {
+            val a = clip("a", outMs = 1_000, speed = speed)
+            val b = clip("b", outMs = 500).copy(
+                transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_000 + (500 * speed).toLong(), speed = speed)),
+            )
+            val c = clip("c").copy(transitionIn = dissolve(clip("b", inMs = 500, outMs = 1_000)))
+            val plan = RenderPlan.build(spec(listOf(a, b, c)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+            val (first, second) = plan.tails
+            val message = "speed $speed"
+            assertTrue(message, first.itemEndUs <= second.itemStartUs)
+            assertTrue(message, second.itemStartUs - first.itemEndUs < 4L)
+            if (speed >= 1f) assertEquals(message, second.itemStartUs, first.itemEndUs)
+            // The item is what Media3 will measure: its floored length, off its own trim.
+            assertEquals(message, floor((first.clip.outUs - first.clip.inUs) / speed.toDouble()).toLong(), first.clip.outDurUs)
+            assertTrue(message, first.itemEndUs > first.startUs)
+        }
+    }
+
+    @Test
+    fun `a lead is only as long as the footage the outgoing clip really has`() {
+        // The base's copy of `a` is only 50 ms long, so that is all there is to lead with, although
+        // the timeline has a whole second of room before it.
+        val short = spec(
+            listOf(
+                clip("z", outMs = 1_000),
+                clip("a", inMs = 1_450, outMs = 1_500),
+                clip("b").copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000))),
+            ),
+        )
+        val tail = RenderPlan.build(short, tenSeconds + ("file:///z.mp4" to probe(10_000))).tails[0]
+        assertEquals(1_050_000L, tail.startUs)
+        assertEquals(50_000L, tail.leadUs)
+        assertEquals(1_450_000L, tail.clip.inUs)
+    }
+
+    @Test
+    fun `a tail that is not the outgoing clip carried on gets no lead`() {
+        // Another file, another framing, or a base copy that stops somewhere else: footage laid
+        // under the base would then be a picture the base is NOT showing, which could be seen.
+        val otherFile = clip("z", inMs = 1_500, outMs = 2_000)
+        val otherFrame = clip("a", inMs = 1_500, outMs = 2_000, rect = place(0f, 0f, 1f, 0.5f))
+        val elsewhere = clip("a", inMs = 1_600, outMs = 2_000)
+        for (tail in listOf(otherFile, otherFrame, elsewhere)) {
+            val plan = RenderPlan.build(lowered(tail = tail), tenSeconds + ("file:///z.mp4" to probe(10_000)))
+            assertEquals(tail.toString(), 0L, plan.tails[0].leadUs)
+        }
+    }
+
+    @Test
+    fun `a tail is planned like its clip - its trim clamped, its sound and framing kept`() {
+        // The file is shorter than the manifest thought, so the probe clamps the tail's end.
+        val short = mapOf("file:///a.mp4" to probe(1_800), "file:///b.mp4" to probe(10_000))
+        val clamped = RenderPlan.build(lowered(), short).tails[0]
+        assertEquals(1_800_000L, clamped.clip.outUs)
+        assertEquals(300_000L, clamped.durUs)
+
+        val quiet = clip("a", inMs = 1_500, outMs = 2_000, volume = 0.5f, rect = place(0f, 0f, 1f, 0.5f))
+        val tail = RenderPlan.build(lowered(tail = quiet), tenSeconds).tails[0]
+        assertEquals(0.5f, tail.clip.gain, 1e-6f)
+        assertTrue(tail.clip.reframed)
+        val muted = RenderPlan.build(lowered(tail = quiet.copy(muted = true)), tenSeconds).tails[0]
+        assertTrue(muted.clip.removeAudio)
+    }
+
+    @Test
+    fun `a tail never outlasts the clip it runs under`() {
+        // The incoming clip's file turned out to hold only 300 ms, so the window cannot be 500.
+        val probes = mapOf("file:///a.mp4" to probe(10_000), "file:///b.mp4" to probe(300))
+        val tail = RenderPlan.build(lowered(), probes).tails[0]
+        assertEquals(300_000L, tail.durUs)
+        // Cut at the end, so the window still opens on the frame the outgoing clip stopped on.
+        assertEquals(1_800_000L, tail.clip.outUs)
+        assertEquals(1_500_000L - tail.leadUs, tail.clip.inUs)
+        assertEquals(plan(probes).clips[1].outDurUs, tail.durUs)
+    }
+
+    private fun plan(probes: Map<String, ProbedInput>) = RenderPlan.build(lowered(), probes)
+
+    @Test
+    fun `a tail that starts past the end of its file is dropped, leaving a cut`() {
+        // A trim that starts past the end of the file fails the whole export in Media3.
+        val probes = mapOf("file:///a.mp4" to probe(1_400), "file:///b.mp4" to probe(10_000))
+        assertTrue(RenderPlan.build(lowered(), probes).tails.isEmpty())
+    }
+
+    @Test
+    fun `the first clip is never asked for a transition`() {
+        // The parser never gives it one; a direct caller that does is ignored rather than obeyed.
+        val first = clip("a", outMs = 1_500).copy(transitionIn = dissolve(clip("z", inMs = 0, outMs = 500)))
+        val plan = RenderPlan.build(spec(listOf(first, clip("b"))), tenSeconds)
+        assertTrue(plan.tails.isEmpty())
+    }
+
+    @Test
+    fun `tails sit in timeline order and never overlap`() {
+        val a = clip("a", outMs = 1_500)
+        val b = clip("b", outMs = 1_700).copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000)))
+        val c = clip("c", outMs = 2_000).copy(transitionIn = dissolve(clip("b", inMs = 1_700, outMs = 2_000)))
+        val probes = tenSeconds + ("file:///c.mp4" to probe(10_000))
+        val plan = RenderPlan.build(spec(listOf(a, b, c)), probes)
+        assertEquals(listOf(1, 2), plan.tails.map { it.index })
+        assertEquals(1_500_000L, plan.tails[0].startUs)
+        assertEquals(3_200_000L, plan.tails[1].startUs)
+        // Lead included: one extra sequence holds them all.
+        assertTrue(plan.tails[0].endUs <= plan.tails[1].itemStartUs)
+    }
+
+    @Test
+    fun `a post with a transition is never a single sequence`() {
+        // The tails are a sequence of their own, so Transformer's own progress stops being invertible.
+        assertFalse(RenderPlan.build(lowered(), tenSeconds).singleSequence)
+        val cut = spec(listOf(clip("a", outMs = 1_500), clip("b")))
+        assertTrue(RenderPlan.build(cut, tenSeconds).singleSequence)
+        assertTrue(RenderPlan.build(cut, tenSeconds).tails.isEmpty())
+    }
+
+    @Test
+    fun `progress runs from 0 to 1 across the window and holds either side of it`() {
+        val tail = RenderPlan.build(lowered(), tenSeconds).tails[0]
+        assertEquals(0.0, RenderPlan.progress(tail, 0L), 0.0)
+        assertEquals(0.0, RenderPlan.progress(tail, 1_500_000L), 0.0)
+        assertEquals(0.25, RenderPlan.progress(tail, 1_625_000L), 1e-12)
+        assertEquals(0.5, RenderPlan.progress(tail, 1_750_000L), 1e-12)
+        assertEquals(1.0, RenderPlan.progress(tail, 2_000_000L), 0.0)
+        assertEquals(1.0, RenderPlan.progress(tail, 9_000_000L), 0.0)
+    }
+
+    @Test
+    fun `the tail playing at a timestamp is found, lead included, and none between them`() {
+        val a = clip("a", outMs = 1_500)
+        val b = clip("b", outMs = 1_700).copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000)))
+        val c = clip("c", outMs = 2_000).copy(transitionIn = dissolve(clip("b", inMs = 1_700, outMs = 2_000)))
+        val plan = RenderPlan.build(spec(listOf(a, b, c)), tenSeconds + ("file:///c.mp4" to probe(10_000)))
+        assertNull(plan.tailAt(0L))
+        assertNull(plan.tailAt(1_399_999L))
+        // The lead is part of the item, so its frames are drawn - under the base's identical ones.
+        assertEquals(1, plan.tailAt(1_400_000L)?.index)
+        assertEquals(1, plan.tailAt(1_500_000L)?.index)
+        assertEquals(1, plan.tailAt(1_999_999L)?.index)
+        // The window's end belongs to the incoming clip alone.
+        assertNull(plan.tailAt(2_000_000L))
+        assertNull(plan.tailAt(3_099_999L))
+        assertEquals(2, plan.tailAt(3_100_000L)?.index)
+        assertNull(plan.tailAt(3_500_000L))
+        assertNull(plan.tailAt(Long.MAX_VALUE))
+    }
+
+    @Test
+    fun `a tail's lead is silent, and its sound fades out across the window after it`() {
+        // 100 ms of lead, then 500 ms of window, at 48 kHz: the base is still playing the lead's
+        // sound, so the tail only starts to be heard where the base's copy stops.
+        val gain = RampGainProvider(level = 1f, fadeOutStartUs = 100_000, fadeOutUs = 500_000, silentUntilUs = 100_000)
+        assertEquals(0f, gain.getGainFactorAtSamplePosition(0, 48_000), 0f)
+        assertEquals(0f, gain.getGainFactorAtSamplePosition(4_799, 48_000), 0f)
+        assertEquals(1f, gain.getGainFactorAtSamplePosition(4_800, 48_000), 1e-6f)
+        assertEquals(0.5f, gain.getGainFactorAtSamplePosition(16_800, 48_000), 1e-3f)
+        assertEquals(0f, gain.getGainFactorAtSamplePosition(28_800, 48_000), 1e-6f)
+        assertEquals(C.TIME_UNSET, gain.isUnityUntil(0, 48_000))
+        assertFalse(gain.isNoOp())
+        // And nothing changes for a provider that asks for no silence.
+        assertTrue(RampGainProvider(level = 1f).isNoOp())
     }
 }

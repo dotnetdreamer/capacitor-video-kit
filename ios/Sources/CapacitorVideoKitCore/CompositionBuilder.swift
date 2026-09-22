@@ -60,6 +60,70 @@ private struct LayerTimeline {
     let entries: [TimelineEntry]
 }
 
+/// One transition on the OUTPUT timeline: where it runs, what runs under it, and how it is drawn.
+///
+/// The window starts where the incoming clip starts and lasts `min(tail, incoming)`, which on every
+/// spec the editor builds is simply the tail's own length. Windows never overlap one another, and
+/// that is structural rather than hoped for: each lies inside its incoming clip's placed range, and
+/// the base clips' ranges do not overlap.
+private struct TransitionWindow {
+    /// Which base entry is the incoming clip.
+    let entry: Int
+    let startMs: Int64
+    let durMs: Int64
+    /// The outgoing clip's tail as it was placed on the tail track: `range` IS the window.
+    let tail: TimelineEntry
+    let tailTrackID: CMPersistentTrackID
+    let transition: ComposeTransition
+
+    var endMs: Int64 { startMs + durMs }
+    var range: CMTimeRange { CMTimeRange(start: ms(startMs), duration: ms(durMs)) }
+}
+
+/// The one extra video track every outgoing tail of a post is laid on, and the one extra audio track
+/// its sound goes to, each created on the first tail that needs it.
+///
+/// One of each is enough because the editor holds every transition to half of either clip it joins:
+/// a clip's own incoming and outgoing transitions then never overlap, so the tails never do either,
+/// and a composition track - which holds segments that do not overlap - can hold every one of them.
+/// A post without transitions never creates either track, which is what keeps its composition the
+/// one this engine has always built.
+private final class TailTracks {
+    private(set) var video: AVMutableCompositionTrack?
+    private(set) var audio: AVMutableCompositionTrack?
+    /// Its own parameters, because the tails fade OUT while the base clips fade in, and one set of
+    /// parameters holds one volume at a time.
+    private(set) var params: AVMutableAudioMixInputParameters?
+    /// Where the last tail laid down ends. An insert is an insert and not an overwrite, so a tail
+    /// starting before this would push the one before it later instead of sitting beside it.
+    var endMs: Int64 = 0
+
+    func videoTrack(in comp: AVMutableComposition) throws -> AVMutableCompositionTrack {
+        if let existing = video { return existing }
+        guard let created = comp.addMutableTrack(withMediaType: .video,
+                                                 preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw BuildError.internalFailure("transition video track")
+        }
+        video = created
+        return created
+    }
+
+    func audioTrack(in comp: AVMutableComposition) throws -> AVMutableCompositionTrack {
+        if let existing = audio { return existing }
+        guard let created = comp.addMutableTrack(withMediaType: .audio,
+                                                 preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw BuildError.internalFailure("transition audio track")
+        }
+        let p = AVMutableAudioMixInputParameters(track: created)
+        // `.spectral` for the reason the base clips' sound carries it: a tail keeps its clip's speed,
+        // and the contract preserves pitch across a speed change.
+        p.audioTimePitchAlgorithm = .spectral
+        audio = created
+        params = p
+        return created
+    }
+}
+
 /// One entry per distinct `uri`. A split or a duplicated clip is two spec entries pointing at the
 /// same file, and loading its tracks again would cost another demux for nothing.
 private final class SourceCache {
@@ -104,6 +168,11 @@ private final class SourceCache {
 /// each extra layer, and at most one audio track for each of those, for the music and for the
 /// voiceovers. Concurrent Media3 sequences are how Android mixes; parallel composition tracks and
 /// one `AVAudioMix` is how AVFoundation mixes. Neither platform needs a mixer of ours.
+///
+/// A post with transitions adds one video track and one audio track more, holding every outgoing
+/// clip's tail at the moment its transition starts (see `TailTracks`). The base track is laid exactly
+/// as it is without them, because the spec arrives with each outgoing clip already stopping where the
+/// next one starts.
 enum CompositionBuilder {
     /// The parser already clamps `clip.speed`, but the engine clamps again rather than trusting a
     /// spec that may have come from an older JS build.
@@ -139,7 +208,9 @@ enum CompositionBuilder {
             : nil
 
         let cache = SourceCache()
+        let tails = TailTracks()
         var entries: [TimelineEntry] = []
+        var windows: [TransitionWindow] = []
         var cursor = CMTime.zero
 
         for clip in spec.clips {
@@ -212,6 +283,17 @@ enum CompositionBuilder {
 
             entries.append(TimelineEntry(clip: clip, source: src, range: placed, gain: clipGain))
             cursor = placed.end
+
+            // The outgoing clip's last moments, laid UNDER this clip's first ones. After this clip
+            // is placed rather than before, because the window is `min(tail, this clip)` and this
+            // clip's placed length is only known now. The parser never sets a transition on the
+            // first clip; the count test says the same thing here, where a stray one would lay a
+            // tail with nothing to come out of.
+            if let transition = clip.transitionIn, entries.count > 1 {
+                let window = try await addTail(transition, under: placed, entry: entries.count - 1,
+                                               to: comp, tracks: tails, cache: cache, audio: spec.audio)
+                if let window { windows.append(window) }
+            }
         }
 
         // The TAIL: the post running on past its footage, so a layer can be laid AFTER the base
@@ -265,9 +347,33 @@ enum CompositionBuilder {
             // A step per clip, including the silent ones. Setting 0 where nothing was inserted is
             // redundant today and is what stops a previous clip's 1.0 leaking forward if the insert
             // rule ever changes.
-            for e in entries { p.setVolume(e.gain, at: e.range.start) }
+            //
+            // A clip a transition leads into FADES in instead, a straight line from silence to its
+            // level across the window, while the outgoing clip's tail fades out on its own track
+            // underneath: a crossfade, linear in amplitude like `Fades` and Android's
+            // `RampGainProvider`. The ramp takes the place of the step rather than following it,
+            // because a ramp sets the volume over its whole range, start included.
+            for (index, e) in entries.enumerated() {
+                if let window = windows.first(where: { $0.entry == index }) {
+                    p.setVolumeRamp(fromStartVolume: 0, toEndVolume: e.gain, timeRange: window.range)
+                } else {
+                    p.setVolume(e.gain, at: e.range.start)
+                }
+            }
             params.append(p)
         }
+        // The tails' own fades were set as each was laid (see `addTail`).
+        if let p = tails.params { params.append(p) }
+
+        // Ramps on one set of parameters must never overlap: AVFoundation leaves that undefined. They
+        // cannot here, because every window lies inside its incoming clip and the clips do not
+        // overlap, and the tails lie inside those same windows - which is exactly what this checks.
+        assert(TransitionTiming.disjoint(entries.indices.map { index -> (startMs: Int64, endMs: Int64) in
+            let startMs = msOf(entries[index].range.start)
+            return (startMs: startMs, endMs: windows.first(where: { $0.entry == index })?.endMs ?? startMs)
+        }), "a base clip's fade-in overlaps the next clip's volume")
+        assert(TransitionTiming.disjoint(windows.map { (startMs: $0.startMs, endMs: $0.endMs) }),
+               "two transition tails overlap")
 
         // Fifteen of these at the outside, which is where the parser stops counting. Each one gets
         // its own composition track and its own audio track, and nothing here is written for a
@@ -336,35 +442,147 @@ enum CompositionBuilder {
         // `customVideoCompositorClass` is set, layer instructions are ignored and every transform -
         // orientation, fit, colour, overlays - happens inside EditCompositor.
 
-        // Absent means exactly today, decided here and never again: with no extra layer there is no
-        // second timeline to merge, and this is the instruction list the engine has always built -
-        // one per base clip, naming one source track and carrying one layer.
-        vc.instructions = layers.count == 1
-            ? base.entries.map { EditInstruction(timeRange: $0.range,
-                                                 layers: [editLayer($0, of: base, plan: plan)],
-                                                 plan: plan) }
-            : merged(layers, totalMs: totalMs, plan: plan)
-
-        #if DEBUG
-        // The instructions must tile the timeline exactly, and a gap costs an
-        // AVError.invalidVideoComposition (-11841) at export time. Apple's own validator
-        // (`isValidForTracks:assetDuration:timeRange:validationDelegate:`) says the same thing
-        // through a deprecated selector and a delegate; four lines here is cheaper and safer.
-        var edge = CMTime.zero
-        for instruction in vc.instructions {
-            assert(instruction.timeRange.start == edge,
-                   "video composition instruction gap or overlap at \(edge.seconds)s")
-            edge = instruction.timeRange.end
+        // Absent means exactly today, decided here and never again: with no extra layer and no
+        // transition there is no second timeline to merge, and this is the instruction list the
+        // engine has always built - one per base clip, naming one source track and carrying one
+        // layer. A transition retires it, because a window's end is a cut that no base clip has.
+        if layers.count == 1 && windows.isEmpty {
+            var instructions = base.entries.map { EditInstruction(timeRange: $0.range,
+                                                                  layers: [editLayer($0, of: base, plan: plan)],
+                                                                  plan: plan) }
+            // A post stretched past its footage with no layer over the stretch. The instructions
+            // must reach the composition's end all the same, and the stretch is black, which is an
+            // instruction with no layers in it - the one `merged` gives the same instant.
+            let footageEnd = base.entries.last?.range.end ?? .zero
+            if total > footageEnd {
+                instructions.append(EditInstruction(timeRange: CMTimeRange(start: footageEnd, end: total),
+                                                     layers: [],
+                                                     plan: plan))
+            }
+            vc.instructions = instructions
+        } else {
+            vc.instructions = merged(layers, windows: windows, totalMs: totalMs, plan: plan)
         }
-        assert(edge == total,
-               "instructions end at \(edge.seconds)s but the composition ends at \(total.seconds)s")
-        #endif
+
+        // The instructions must tile the timeline exactly, and a gap costs an
+        // AVError.invalidVideoComposition (-11841) at export time - a number, with nothing to say
+        // which instant was missing. So this is checked in EVERY build and thrown as a sentence.
+        // Apple's own validator (`isValidForTracks:assetDuration:timeRange:validationDelegate:`)
+        // says the same thing through a deprecated selector and a delegate; a loop here is cheaper.
+        if let problem = tilingProblem(vc.instructions.map { $0.timeRange }, total: total) {
+            throw BuildError.internalFailure(problem)
+        }
 
         return BuiltComposition(composition: comp,
                                 videoComposition: vc,
                                 audioMix: audioMix,
                                 totalMs: totalMs,
                                 plan: plan)
+    }
+
+    /// What is wrong with the instruction ranges as a tiling of `[0, total)`, as a sentence for the
+    /// failure, or nil when they tile it exactly: each starting where the last one ended, none of
+    /// them empty (a zero-length instruction is the same -11841 as a gap), and the last ending at
+    /// the composition's end.
+    private static func tilingProblem(_ ranges: [CMTimeRange], total: CMTime) -> String? {
+        var edge = CMTime.zero
+        for range in ranges {
+            if range.start != edge {
+                return "video composition instruction gap or overlap at \(edge.seconds)s"
+            }
+            if range.duration <= .zero {
+                return "empty video composition instruction at \(edge.seconds)s"
+            }
+            edge = range.end
+        }
+        if edge != total {
+            return "instructions end at \(edge.seconds)s but the composition ends at \(total.seconds)s"
+        }
+        return nil
+    }
+
+    /// Lays the outgoing clip's tail - `transition.from` - on the tail track under the incoming clip,
+    /// which has just been placed at `placed`, and answers the window it runs for. nil draws a cut.
+    ///
+    /// The tail goes in exactly as a base clip does: its source range clamped to its file, inserted
+    /// at the incoming clip's start, then scaled by its own speed straight away. Straight away for the
+    /// base clips' reason - `scaleTimeRange` ripples everything after the range it touches - though
+    /// here nothing is ever after it, because every tail goes in later on the timeline than the one
+    /// before. Its sound goes to the tail audio track at the same instant, clamped and scaled the
+    /// same way, and fades from its level to silence across the window.
+    ///
+    /// Two things turn a transition into a cut rather than a failure, both of them a file that is
+    /// shorter than the manifest believed: a tail that lies entirely past the end of its file, and a
+    /// tail that would start before the one before it has finished. The second cannot happen on a
+    /// spec the editor built, and is refused here because the insert would otherwise push the
+    /// earlier tail later and take its picture out of step with the window it was drawn for.
+    private static func addTail(_ transition: ComposeTransition,
+                                under placed: CMTimeRange,
+                                entry index: Int,
+                                to comp: AVMutableComposition,
+                                tracks tails: TailTracks,
+                                cache: SourceCache,
+                                audio: ComposeAudio) async throws -> TransitionWindow? {
+        let from = transition.from
+        let startMs = msOf(placed.start)
+        guard startMs >= tails.endMs else { return nil }
+
+        let src = try await cache.source(for: from)
+        // Clamped to the VIDEO TRACK's end, for the base clips' reason: `insertTimeRange` does not
+        // validate a range against its source, and over-reaching renders a black tail.
+        let outMsEff = min(from.outMs, msOf(src.videoRange.end))
+        let speed = min(maxSpeed, max(minSpeed, from.speed))
+        guard let span = TransitionTiming.tail(sourceMs: outMsEff - from.inMs,
+                                               speed: speed,
+                                               roomMs: msOf(placed.duration)) else { return nil }
+
+        let srcRange = CMTimeRange(start: ms(from.inMs), duration: ms(span.sourceMs))
+        let video = try tails.videoTrack(in: comp)
+        do {
+            try video.insertTimeRange(srcRange, of: src.videoTrack, at: placed.start)
+        } catch {
+            // The tail's key is the outgoing clip's own, which is the clip a customer can do
+            // something about.
+            throw BuildError.unreadable(from.key, "insert: \(error)")
+        }
+
+        let tailGain = gain(of: from, audio)
+        var audioTrack: AVMutableCompositionTrack?
+        if tailGain > 0, let at = src.audioTrack, let aRange = src.audioRange {
+            // Clamped to the audio track's own end, as every clip's sound is.
+            let aEnd = CMTimeMinimum(srcRange.end, aRange.end)
+            if aEnd > srcRange.start {
+                let track = try tails.audioTrack(in: comp)
+                // Inserted at the absolute output time, not at this track's end: the track is empty
+                // between tails, and AVFoundation writes that empty segment itself. A failure drops
+                // the tail's sound and keeps its picture, as a base clip's would.
+                if (try? track.insertTimeRange(CMTimeRange(start: srcRange.start, end: aEnd),
+                                               of: at, at: placed.start)) != nil {
+                    audioTrack = track
+                }
+            }
+        }
+
+        var range = CMTimeRange(start: placed.start, duration: srcRange.duration)
+        if speed != 1 {
+            let scaled = ms(span.placedMs)
+            video.scaleTimeRange(range, toDuration: scaled)
+            // Only when this tail put sound in: otherwise the range is empty on that track, or runs
+            // past its end, and there is nothing to scale.
+            audioTrack?.scaleTimeRange(range, toDuration: scaled)
+            range = CMTimeRange(start: placed.start, duration: scaled)
+        }
+        if audioTrack != nil {
+            tails.params?.setVolumeRamp(fromStartVolume: tailGain, toEndVolume: 0, timeRange: range)
+        }
+        tails.endMs = msOf(range.end)
+
+        return TransitionWindow(entry: index,
+                                startMs: startMs,
+                                durMs: span.placedMs,
+                                tail: TimelineEntry(clip: from, source: src, range: range, gain: tailGain),
+                                tailTrackID: video.trackID,
+                                transition: transition)
     }
 
     /// Lays one extra layer onto its own composition track and answers where its clips landed.
@@ -505,14 +723,40 @@ enum CompositionBuilder {
                   render: plan.renderSize)
     }
 
-    /// The instruction timeline for two layers or more.
+    /// The outgoing side of one transition as the compositor draws it: the tail's clip on the tail
+    /// track, framed exactly as that clip was framed on the base track a moment earlier, and at full
+    /// opacity, because it IS the base while the transition runs.
+    private static func editTransition(_ w: TransitionWindow, plan: RenderPlan) -> EditTransition {
+        let t = w.transition
+        return EditTransition(tail: EditLayer(trackID: w.tailTrackID,
+                                              orientation: Orientation.imageOrientation(w.tail.source.preferredTransform),
+                                              fit: w.tail.clip.fit,
+                                              crop: w.tail.clip.crop,
+                                              rect: w.tail.clip.rect,
+                                              opacity: 1,
+                                              render: plan.renderSize),
+                              startUs: w.startMs * 1000,
+                              durationUs: w.durMs * 1000,
+                              curves: t.curves,
+                              mask: t.mask,
+                              fromTint: t.fromTint,
+                              toTint: t.toTint)
+    }
+
+    /// The instruction timeline for two layers or more, or for any base track with a transition on it.
     ///
     /// An instruction names the source tracks it needs and the geometry of each, and both have to
     /// hold still for the whole of its range, so the cut points are the UNION of every layer's clip
     /// boundaries rather than the base's alone. Between two neighbouring cuts each layer is either
     /// showing exactly one clip or showing nothing at all, which is exactly what one instruction
     /// can describe.
-    private static func merged(_ layers: [LayerTimeline], totalMs: Int64,
+    ///
+    /// A transition window adds its END as a cut - its start is the incoming clip's start, a cut
+    /// already - and every instruction inside it carries the window, so the base is drawn as the two
+    /// sides of the transition instead of as one clip. A layer's boundary inside a window splits it
+    /// into several instructions, which is why the window travels whole rather than as the part of it
+    /// each instruction covers: the compositor measures progress against the window itself.
+    private static func merged(_ layers: [LayerTimeline], windows: [TransitionWindow], totalMs: Int64,
                                plan: RenderPlan) -> [EditInstruction] {
         // Bottom to top by z, and a tie breaks on the order the spec listed them in, which is what
         // `ComposeTrack.z` promises. The base is first in this array and carries z 0, so it stays
@@ -532,7 +776,17 @@ enum CompositionBuilder {
                 cutsMs.insert(msOf(e.range.end))
             }
         }
+        for w in windows {
+            cutsMs.insert(w.startMs)
+            cutsMs.insert(w.endMs)
+        }
         let cuts = cutsMs.sorted()
+
+        // Once per window rather than once per instruction: a window split by a layer's boundary is
+        // still one transition, drawn from one description.
+        let transitions = windows.map { editTransition($0, plan: plan) }
+        // The base is `layers[0]`, which is where `build` put it.
+        let baseTrackID = layers.first?.trackID
 
         return (0..<(cuts.count - 1)).map { i in
             let startMs = cuts[i]
@@ -545,8 +799,16 @@ enum CompositionBuilder {
                 }) else { return nil }
                 return editLayer(e, of: layer, plan: plan)
             }
+            // The compositor draws a transition in place of the FIRST layer, so one is attached only
+            // when that layer is the base. Inside a window it always is - the incoming clip is on the
+            // base there, and the base sorts under everything - and the test keeps a mistake in that
+            // reasoning from drawing a transition in place of some other layer's clip.
+            let transition: EditTransition? = drawn.first?.trackID == baseTrackID
+                ? windows.firstIndex(where: { $0.startMs <= startMs && startMs < $0.endMs }).map { transitions[$0] }
+                : nil
             return EditInstruction(timeRange: CMTimeRange(start: ms(startMs), end: ms(cuts[i + 1])),
                                    layers: drawn,
+                                   transition: transition,
                                    plan: plan)
         }
     }

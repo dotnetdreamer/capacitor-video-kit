@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ComposeClip, ComposeSpec } from '../definitions';
 
-import { buildPlan, clipIndexAt, evenOutput, sourceTimeUs, visibleIndexAt, type ProbedInput } from './plan';
+import { buildPlan, clipIndexAt, evenOutput, sourceTimeUs, transitionAt, visibleIndexAt, type ProbedInput } from './plan';
 
 /**
  * The layout every other part of the render is measured against: where each clip lands, how long
@@ -315,5 +315,137 @@ describe('buildPlan with a tail past the base track', () => {
 
     expect(plan.tracks).toHaveLength(1);
     expect(plan.tracks[0].placements[0].startUs).toBe(2_000_000);
+  });
+});
+
+/*
+ * Transitions, as the spec delivers them: LOWERED. The outgoing clip already stops where the
+ * incoming one starts, and its last moments ride on the incoming clip as `transitionIn.from`. The
+ * clips below are the wire form of "a, then b with a half-second dissolve": a is 0..1000 in its file,
+ * cut to 0..500, and its tail is 500..1000.
+ */
+describe('transitions', () => {
+  const ALPHA = [0, 0.5, 1];
+
+  function lowered(tail: Partial<ComposeClip> = {}, incoming: Partial<ComposeClip> = {}, extra: Partial<NonNullable<ComposeClip['transitionIn']>> = {}): ComposeSpec {
+    return spec({
+      clips: [
+        clip({ key: 'a', outMs: 500 }),
+        clip({
+          key: 'b',
+          uri: 'file:///b.mp4',
+          outMs: 2000,
+          transitionIn: { kind: 'dissolve', from: clip({ key: 'a', inMs: 500, outMs: 1000, ...tail }), curves: { alpha: ALPHA }, ...extra },
+          ...incoming,
+        }),
+      ],
+    });
+  }
+
+  it('changes nothing about where the base clips sit or how long the post is', () => {
+    const plan = buildPlan(lowered(), new Map());
+    // A cut in the same place would give the same numbers: the lowering already took the overlap.
+    expect(plan.prefixOutUs).toEqual([0, 500_000]);
+    expect(plan.totalUs).toBe(2_500_000);
+  });
+
+  it('plans the tail as a clip and opens its window where the incoming clip starts', () => {
+    const plan = buildPlan(lowered({}, {}, { mask: { shape: 'circle' }, toTint: [1, 1, 1] }), new Map());
+    expect(plan.transitions).toHaveLength(1);
+    const t = plan.transitions[0]!;
+    expect(t.index).toBe(1);
+    expect(t.kind).toBe('dissolve');
+    expect(t.startUs).toBe(500_000);
+    expect(t.durUs).toBe(500_000);
+    expect(t.tail).toMatchObject({ inUs: 500_000, outUs: 1_000_000, outDurUs: 500_000, speed: 1, reframed: false });
+    expect(t.tail.clip.key).toBe('a');
+    expect(t.curves.alpha).toEqual(ALPHA);
+    expect(t.mask).toEqual({ shape: 'circle' });
+    expect(t.toTint).toEqual([1, 1, 1]);
+    expect(t).not.toHaveProperty('fromTint');
+  });
+
+  it('floors a sped-up tail the way it floors a clip', () => {
+    // A second of source at 3x is 333.333 ms of output, and the window is exactly as long as the tail.
+    const plan = buildPlan(lowered({ inMs: 0, outMs: 1000, speed: 3 }), new Map());
+    expect(plan.transitions[0]?.tail.outDurUs).toBe(333_333);
+    expect(plan.transitions[0]?.durUs).toBe(333_333);
+  });
+
+  it('clamps the tail to what its file holds', () => {
+    const plan = buildPlan(lowered(), new Map([['file:///a.mp4', probed({ durationMs: 800 })]]));
+    expect(plan.transitions[0]?.tail.outUs).toBe(800_000);
+    expect(plan.transitions[0]?.durUs).toBe(300_000);
+  });
+
+  it('frames the tail by the same rules its clip is framed by', () => {
+    const plan = buildPlan(lowered({ crop: { x: 0, y: 0, w: 0.5, h: 1 }, rect: { x: 0, y: 0, w: 0.5, h: 0.5, rotationDeg: 30 } }), new Map());
+    const tail = plan.transitions[0]!.tail;
+    expect(tail.reframed).toBe(true);
+    expect(tail.frame).toMatchObject({ width: 720, height: 1280 });
+    // Kept on the clip, as a base clip's rectangle is: the painter places it inside the whole frame.
+    expect(tail.clip.rect?.rotationDeg).toBe(30);
+  });
+
+  it('never runs a window longer than the clip it runs under', () => {
+    const plan = buildPlan(lowered({ inMs: 0, outMs: 1000 }, { outMs: 300 }), new Map());
+    expect(plan.transitions[0]?.tail.outDurUs).toBe(1_000_000);
+    expect(plan.transitions[0]?.durUs).toBe(300_000);
+  });
+
+  it('ignores one on the first clip, which has nothing before it', () => {
+    const first = clip({ transitionIn: { kind: 'dissolve', from: clip(), curves: { alpha: ALPHA } } });
+    expect(buildPlan(spec({ clips: [first, clip({ key: 'b' })] }), new Map()).transitions).toEqual([]);
+  });
+
+  it('has none for a post without them, so the render never looks for a window', () => {
+    const plan = buildPlan(spec({ clips: [clip(), clip({ key: 'b' })] }), new Map());
+    expect(plan.transitions).toEqual([]);
+    expect(transitionAt(plan, 1_000_000)).toBeNull();
+  });
+
+  it('counts a tail that has sound as sound in the post', () => {
+    // Both base clips silent, so the tail is the only thing that could be heard.
+    const silentBase = (tailMuted: boolean): ComposeSpec => {
+      const post = lowered({ muted: tailMuted }, { muted: true });
+      return { ...post, clips: [{ ...post.clips[0]!, muted: true }, post.clips[1]!] };
+    };
+    expect(buildPlan(silentBase(false), new Map()).hasAudio).toBe(true);
+    expect(buildPlan(silentBase(true), new Map()).hasAudio).toBe(false);
+  });
+
+  describe('transitionAt', () => {
+    const plan = buildPlan(lowered(), new Map());
+
+    it('is nothing before the window and nothing from its end on', () => {
+      expect(transitionAt(plan, 499_999)).toBeNull();
+      expect(transitionAt(plan, 1_000_000)).toBeNull();
+      expect(transitionAt(plan, 2_000_000)).toBeNull();
+    });
+
+    it('runs 0..1 across the window, and names the clip clipIndexAt names', () => {
+      expect(transitionAt(plan, 500_000)).toMatchObject({ index: 1, progress: 0 });
+      expect(transitionAt(plan, 750_000)?.progress).toBeCloseTo(0.5, 9);
+      expect(transitionAt(plan, 999_999)?.progress).toBeCloseTo(1, 5);
+      expect(transitionAt(plan, 750_000)?.index).toBe(clipIndexAt(plan, 750_000));
+      expect(transitionAt(plan, 750_000)?.planned).toBe(plan.transitions[0]);
+    });
+
+    it('finds each of several windows along the timeline', () => {
+      const three = spec({
+        clips: [
+          clip({ key: 'a', outMs: 500 }),
+          clip({ key: 'b', outMs: 700, transitionIn: { kind: 'x', from: clip({ key: 'a', inMs: 500, outMs: 1000 }), curves: {} } }),
+          clip({ key: 'c', outMs: 1000, transitionIn: { kind: 'y', from: clip({ key: 'b', inMs: 700, outMs: 1000 }), curves: {} } }),
+        ],
+      });
+      const laid = buildPlan(three, new Map());
+      expect(laid.transitions.map(t => [t.index, t.startUs, t.durUs])).toEqual([
+        [1, 500_000, 500_000],
+        [2, 1_200_000, 300_000],
+      ]);
+      expect(transitionAt(laid, 1_100_000)).toBeNull();
+      expect(transitionAt(laid, 1_300_000)?.planned.kind).toBe('y');
+    });
   });
 });

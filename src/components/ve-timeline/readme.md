@@ -18,6 +18,10 @@ DOWN it leaves that row: the row under the finger lights up, the gap under each 
 layer that is not there yet, and letting go puts the segment there. That is the whole of how a
 post gets more than one picture on the frame from the timeline.
 
+Every cut of the base track carries LightCut's white dot, and a tap on one opens the transition
+sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
+that happens to start on one is still the timeline's scroll.
+
 Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
  - everything else - playback, undo, a split, a sheet - moves the store's playhead, which scrolls

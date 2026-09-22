@@ -97,6 +97,24 @@ struct EditLayer {
     }
 }
 
+/// A transition the base is in the middle of, as one instruction carries it: the outgoing side and
+/// everything needed to draw it against the incoming side, which is the instruction's first layer.
+///
+/// Built once per window by the builder and shared, unchanged, by every instruction the window was
+/// split into, which is why it carries the WINDOW's start and length rather than the instruction's:
+/// progress is measured against the transition, not against whichever piece of it a frame is in.
+struct EditTransition {
+    /// The outgoing clip's tail, on the tail track, framed as that clip was on the base.
+    let tail: EditLayer
+    /// The window on the output timeline, in microseconds like `request.compositionTime` is read.
+    let startUs: Int64
+    let durationUs: Int64
+    let curves: ComposeTransitionCurves
+    let mask: ComposeTransitionMask?
+    let fromTint: ComposeRGB
+    let toTint: ComposeRGB
+}
+
 /// One instruction per stretch of the OUTPUT timeline over which every layer holds still.
 ///
 /// `AVMutableVideoCompositionLayerInstruction` plays no part in this engine. The moment
@@ -110,8 +128,8 @@ final class EditInstruction: NSObject, AVVideoCompositionInstructionProtocol, @u
 
     /// MUST be true. It tells the engine the output changes WITHIN the instruction, so the
     /// compositor is asked for every frame. With false, one composed frame can be reused for the
-    /// whole clip and an overlay that appears mid-clip would never show up. Nothing here actually
-    /// tweens; that is the only reason the flag is set.
+    /// whole clip and an overlay that appears mid-clip would never show up - and a transition, which
+    /// is the one thing in this engine that genuinely tweens, would freeze on its first frame.
     let containsTweening: Bool = true
 
     let requiredSourceTrackIDs: [NSValue]?
@@ -125,14 +143,25 @@ final class EditInstruction: NSObject, AVVideoCompositionInstructionProtocol, @u
     /// video track existed.
     let layers: [EditLayer]
 
+    /// The transition the base is in the middle of over this stretch, or nil for every instruction
+    /// outside a window, which is every instruction of a post without transitions. When it is set,
+    /// `layers[0]` is the base's clip - the incoming side - and is drawn together with
+    /// `transition.tail` in place of on its own; every layer after it is drawn as it always is.
+    let transition: EditTransition?
+
     let plan: RenderPlan
 
-    init(timeRange: CMTimeRange, layers: [EditLayer], plan: RenderPlan) {
+    init(timeRange: CMTimeRange, layers: [EditLayer], transition: EditTransition? = nil,
+         plan: RenderPlan) {
         self.timeRange = timeRange
         self.layers = layers
+        self.transition = transition
         // Only the layers that actually have a clip at this instant, which is what lets a layer
-        // that has not started yet cost the engine no decode at all.
-        self.requiredSourceTrackIDs = layers.map { NSNumber(value: $0.trackID) }
+        // that has not started yet cost the engine no decode at all - and the tail track only
+        // inside a window, which is the only place it has anything on it.
+        var trackIDs = layers.map { NSNumber(value: $0.trackID) }
+        if let tail = transition?.tail { trackIDs.append(NSNumber(value: tail.trackID)) }
+        self.requiredSourceTrackIDs = trackIDs
         self.plan = plan
         super.init()
     }
@@ -244,44 +273,44 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         guard let dst = ctx.newPixelBuffer() else { throw CompositorError.noBuffer }
         let rect = CGRect(origin: .zero, size: ctx.size)
 
+        // Microseconds, matching Android's `presentationTimeUs in startUs until endUs` exactly.
+        // `compositionTime` is OUTPUT-timeline time, which is what the overlay windows are in and
+        // what a transition window is in. Read up here because a transition needs it before the
+        // layers are drawn, not only the overlays after them.
+        let tUs = CMTimeConvertScale(request.compositionTime,
+                                     timescale: 1_000_000, method: .roundTowardZero).value
+
         // Black under every layer. With one layer it is the same black `Placement` used to hold
         // behind its picture, and the frame a source that arrived nil has always produced; with two
         // it is what shows wherever neither layer reaches.
         var image = CIImage(color: .black).cropped(to: rect)
+        var layers = instr.layers[...]
 
-        for layer in instr.layers {
+        // Inside a transition window the base is not one clip but two: the outgoing clip's tail and
+        // the incoming clip, each as its WHOLE frame - picture and bars together - moved, softened
+        // and tinted by where the transition has got to, and blended. That frame takes the place of
+        // the black and the first layer; every other layer is then drawn over it as it always is,
+        // so a sticker or a picture-in-picture sits still while the base changes under it.
+        if let transition = instr.transition, let incoming = layers.first {
+            let p = TransitionMath.progress(tUs: tUs, startUs: transition.startUs,
+                                            durationUs: transition.durationUs)
+            image = TransitionRender.frame(from: wholeFrame(transition.tail, request, plan: instr.plan, rect: rect),
+                                           to: wholeFrame(incoming, request, plan: instr.plan, rect: rect),
+                                           look: TransitionMath.look(transition.curves, p),
+                                           transition: transition,
+                                           rect: rect)
+            layers = layers.dropFirst()
+        }
+
+        for layer in layers {
             // nil for a track that has no frame at this instant. The layer is skipped and the frame
             // is still rendered: a hole in one layer is not a reason to fail an export.
-            guard let src = request.sourceFrame(byTrackID: layer.trackID) else { continue }
-            var pic = CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
-                .oriented(layer.orientation)
-            // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
-            // finished frame instead, any op with a non-zero bias paints the bars: `golden` carries
-            // b = [0.1595, 0.1108, 0.0261], which gives rgb(41, 28, 7) bars, and a fade gives grey
-            // ones. `contain` is the default fit, so that is the common case and not an edge case.
-            // A colour matrix commutes with the scale and translate in `placed`, so moving it
-            // earlier leaves the picture itself identical.
-            //
-            // The wire calls the filter SPEC level - one grade of the composed frame rather than one
-            // per track - and this is still that. The matrix is affine and a source-over blend is a
-            // weighted average of the two pictures, so grading each layer before the blend and
-            // grading the blend afterwards give the same pixels. What differs is only the black
-            // underneath, and leaving that ungraded is the whole point.
-            pic = instr.plan.colorMatrix.apply(to: pic)
-            // The crop is the one step that genuinely cannot move: it decides which pixels the fit
-            // is measuring, so it happens inside `placed` and ahead of everything. Both it and
-            // `dst` are nil for a clip that fills the frame, which is every spec written before
-            // this feature; the absence was decided when the instruction was built, and all that is
-            // left here is the coalesce.
-            guard let picture = Placement.placed(pic, crop: layer.crop, into: layer.dst ?? rect,
-                                                 fit: layer.fit, spin: layer.spin) else { continue }
+            guard let src = request.sourceFrame(byTrackID: layer.trackID),
+                  let picture = placedPicture(of: layer, from: src, plan: instr.plan, rect: rect)
+            else { continue }
             image = Alpha.scaled(picture, by: layer.opacity).composited(over: image)
         }
 
-        // Microseconds, matching Android's `presentationTimeUs in startUs until endUs` exactly.
-        // `compositionTime` is OUTPUT-timeline time, which is what the overlay windows are in.
-        let tUs = CMTimeConvertScale(request.compositionTime,
-                                     timescale: 1_000_000, method: .roundTowardZero).value
         for ov in instr.plan.overlays where ov.startUs <= tUs && tUs < ov.endUs {
             image = ov.image.composited(over: image)   // spec order is drawing order, later on top
         }
@@ -291,6 +320,51 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // buffers 709, which would undo everything the unmanaged context just bought.
         ci.render(image, to: dst, bounds: rect, colorSpace: nil)
         return dst
+    }
+
+    /// One layer's picture, oriented, graded and placed, TRANSPARENT everywhere it does not reach -
+    /// exactly what every layer of every frame has always been drawn as - or nil when there is no
+    /// picture to place at all.
+    private func placedPicture(of layer: EditLayer, from src: CVPixelBuffer, plan: RenderPlan,
+                               rect: CGRect) -> CIImage? {
+        var pic = CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
+            .oriented(layer.orientation)
+        // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
+        // finished frame instead, any op with a non-zero bias paints the bars: `golden` carries
+        // b = [0.1595, 0.1108, 0.0261], which gives rgb(41, 28, 7) bars, and a fade gives grey
+        // ones. `contain` is the default fit, so that is the common case and not an edge case.
+        // A colour matrix commutes with the scale and translate in `placed`, so moving it
+        // earlier leaves the picture itself identical.
+        //
+        // The wire calls the filter SPEC level - one grade of the composed frame rather than one
+        // per track - and this is still that. The matrix is affine and a source-over blend is a
+        // weighted average of the two pictures, so grading each layer before the blend and
+        // grading the blend afterwards give the same pixels. What differs is only the black
+        // underneath, and leaving that ungraded is the whole point.
+        pic = plan.colorMatrix.apply(to: pic)
+        // The crop is the one step that genuinely cannot move: it decides which pixels the fit
+        // is measuring, so it happens inside `placed` and ahead of everything. Both it and
+        // `dst` are nil for a clip that fills the frame, which is every spec written before
+        // this feature; the absence was decided when the instruction was built, and all that is
+        // left here is the coalesce.
+        return Placement.placed(pic, crop: layer.crop, into: layer.dst ?? rect,
+                                fit: layer.fit, spin: layer.spin)
+    }
+
+    /// One side of a transition: the layer's WHOLE output frame, black with its picture drawn on it
+    /// exactly as a lone base clip is drawn, which is what the contract moves, blurs and tints.
+    ///
+    /// nil only when the track has no frame at this instant, which `TransitionRender.frame` answers
+    /// by drawing the other side alone. A clip whose picture places to nothing is not that: it is a
+    /// clip that contributes nothing, and its whole frame is black.
+    private func wholeFrame(_ layer: EditLayer, _ request: AVAsynchronousVideoCompositionRequest,
+                            plan: RenderPlan, rect: CGRect) -> CIImage? {
+        guard let src = request.sourceFrame(byTrackID: layer.trackID) else { return nil }
+        let black = CIImage(color: .black).cropped(to: rect)
+        guard let picture = placedPicture(of: layer, from: src, plan: plan, rect: rect) else { return black }
+        // Cropped to the render: a picture placed half off the frame hangs past it, and the frame the
+        // contract moves and blurs is the render rectangle and nothing more.
+        return Alpha.scaled(picture, by: layer.opacity).composited(over: black).cropped(to: rect)
     }
 }
 

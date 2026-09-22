@@ -39,10 +39,12 @@ import java.util.concurrent.atomic.AtomicLong
  * Turns a [RenderPlan] into the Media3 objects that actually do the work.
  *
  * The shape is one video sequence per layer - every extra layer's clips, top layer first, then the
- * base track's - plus at most one audio-only sequence for music and one for voiceovers. Concurrent
- * sequences are how Media3 mixes and how it composites, so neither "background music over the
- * clips' own sound" nor "a second video over the first" needs a mixer of ours. Why the base comes
- * last rather than first is written out in [toComposition], where the order is decided.
+ * base track's - then, when the post has transitions, one more holding the outgoing tail of every
+ * one of them under the base, plus at most one audio-only sequence for music and one for
+ * voiceovers. Concurrent sequences are how Media3 mixes and how it composites, so neither
+ * "background music over the clips' own sound" nor "a second video over the first" needs a mixer
+ * of ours. Why the base comes after the layers rather than first is written out in
+ * [toComposition], where the order is decided.
  *
  * Nothing here is written for a particular NUMBER of layers: the list the plan hands over is what
  * the sequences are built from and what the compositor is indexed by, so fifteen layers take the
@@ -69,7 +71,7 @@ object CompositionBuilder {
         val output = plan.spec.output
 
         val sequences = ArrayList<EditedMediaItemSequence>(
-            1 + plan.tracks.size + plan.extraAudioSequences,
+            1 + plan.tracks.size + (if (plan.tails.isEmpty()) 0 else 1) + plan.extraAudioSequences,
         )
         // TOP LAYER FIRST and the base LAST, which is the order Media3 1.11.1 actually draws in.
         // DefaultCompositorGlProgram.drawFrame walks its frame list from the END backwards, blending
@@ -131,7 +133,16 @@ object CompositionBuilder {
             plan.videoSeqHasAudio,
             output,
             plan.colorMatrix,
+            plan.tails.associateBy { it.index },
         )
+        // The tails go RIGHT AFTER the base, which by the order above draws them UNDER it - the
+        // contract's "outgoing side over black, incoming side over that". Registered after it, they
+        // are never the primary input either: the primary stays the top layer when there are
+        // layers and the base when there are none, so the output keeps the cadence it has today
+        // and never takes on the 30 fps of the blank frames that fill the tails' gaps.
+        if (plan.tails.isNotEmpty()) {
+            sequences += tailSequence(plan.tails, plan.totalUs, output, plan.colorMatrix)
+        }
         plan.music?.let { sequences += musicSequence(it) }
         plan.voice?.let { sequences += voiceSequence(it) }
 
@@ -152,13 +163,19 @@ object CompositionBuilder {
 
         val builder = Composition.Builder(sequences)
             .setEffects(Effects(/* audioProcessors= */ ImmutableList.of(), compositionEffects))
-        // Asked once, here, and never per frame: a spec with no extra layers gets no compositor
-        // settings object at all, which is the composition Media3 has been handed all along. The
-        // compositor is given the layers in REGISTRATION order, because the input id it is asked
-        // about is the sequence's index in the list above - which is why this takes `layers` and
-        // not the plan's own bottom-to-top list, whatever their length.
-        if (layers.isNotEmpty()) {
-            builder.setVideoCompositorSettings(LayerCompositor(output, layers))
+        // Asked once, here, and never per frame: a spec with no extra layers and no transitions gets
+        // no compositor settings object at all, which is the composition Media3 has been handed all
+        // along. The compositor is given the layers in REGISTRATION order, because the input id it
+        // is asked about is the sequence's index in the list above - which is why this takes
+        // `layers` and not the plan's own bottom-to-top list, whatever their length. A post with
+        // transitions and no layers gets one too, so that the tails' input is drawn only while a
+        // tail is playing. Between tails that input is a gap, which Media3 serves as small opaque
+        // black frames; under the base those are black on black today, wherever the base is
+        // transparent, but they are a picture nobody asked for, and a gate that costs a comparison
+        // per frame is cheaper than reasoning about them every time the base learns to be
+        // transparent somewhere new.
+        if (layers.isNotEmpty() || plan.tails.isNotEmpty()) {
+            builder.setVideoCompositorSettings(LayerCompositor(output, layers, plan.tails))
         }
         if (Build.VERSION.SDK_INT >= 29) {
             // Gallery picks from newer phones are frequently HLG or PQ; without this the export
@@ -216,6 +233,12 @@ object CompositionBuilder {
      *
      * With no tail this is the sequence this engine has always built, through the same two factory
      * methods, so a post nobody has stretched reaches the encoder by the path it always took.
+     *
+     * A clip that a transition runs INTO is the only one built differently: it draws the incoming
+     * side of that transition over its window (see [TransitionEffect]) and its sound fades in over
+     * the same window, under the outgoing clip's tail fading out on the sequence below. Every other
+     * clip is built exactly as it was before transitions existed, and with no transitions at all
+     * [transitionsInto] is empty and so is every difference.
      */
     private fun videoSequence(
         clips: List<RenderPlan.PlannedClip>,
@@ -223,8 +246,22 @@ object CompositionBuilder {
         hasAudio: Boolean,
         output: Output,
         colorMatrix: ColorMatrix?,
+        transitionsInto: Map<Int, RenderPlan.PlannedTail>,
     ): EditedMediaItemSequence {
-        val items = clips.map { editedClip(it, output, colorMatrix) }
+        val items = clips.mapIndexed { i, planned ->
+            val tail = transitionsInto[i]
+            if (tail == null) {
+                editedClip(planned, output, colorMatrix)
+            } else {
+                editedClip(
+                    planned,
+                    output,
+                    colorMatrix,
+                    transition = TransitionEffect(TransitionRole.TO, tail.transition, tail.startUs, tail.durUs),
+                    fadeInUs = tail.durUs,
+                )
+            }
+        }
         if (tailUs <= 0L) {
             return if (hasAudio) {
                 EditedMediaItemSequence.withAudioAndVideoFrom(items)
@@ -315,7 +352,86 @@ object CompositionBuilder {
         return builder.build()
     }
 
-    private fun editedClip(planned: RenderPlan.PlannedClip, output: Output, colorMatrix: ColorMatrix?): EditedMediaItem {
+    /**
+     * Every transition's outgoing side on ONE sequence spanning the whole output: each tail laid at
+     * its window, lead first (see [RenderPlan.PlannedTail]), with a gap before it for the stretch
+     * since the last one closed, and a gap after the last to pad the sequence to the post's length.
+     *
+     * One sequence is enough because two windows never overlap - each lies inside its own incoming
+     * clip (see [RenderPlan.PlannedTail]) - and it is the same trick a layer plays with its start
+     * time, for the same reason: a tail has to be HEARD from its window's first instant as well as
+     * seen, and a gap delays both. Every length comes off the plan's floored numbers - the gaps are
+     * the differences between them and each item runs exactly its lead and its window, less any end
+     * the next tail borrowed for its own lead ([RenderPlan.PlannedTail.itemEndUs]) - so an item
+     * never ends while its gate still calls it open, which is the rule [layerSequence] explains.
+     *
+     * Padded to the post's length like a layer, although it is never the primary input. A secondary
+     * input that has ended hands the compositor its LAST frame for every output frame that follows,
+     * and the last frame of the last tail is stamped inside that tail's window, so the gate would
+     * pass it: a frozen picture of an outgoing clip under the rest of the post, showing through the
+     * letterbox bars of every clip after it.
+     *
+     * A tail item is a clip like any other - trimmed, sped, reframed and graded by [editedClip] -
+     * with the outgoing side's look drawn over its frames and its sound silent through the lead,
+     * where the base is still playing it, then fading out across the window, under the incoming
+     * clip's sound fading in on the base.
+     */
+    private fun tailSequence(
+        tails: List<RenderPlan.PlannedTail>,
+        totalUs: Long,
+        output: Output,
+        colorMatrix: ColorMatrix?,
+    ): EditedMediaItemSequence {
+        val trackTypes = if (tails.any { !it.clip.removeAudio }) {
+            setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO)
+        } else {
+            setOf(C.TRACK_TYPE_VIDEO)
+        }
+        val builder = EditedMediaItemSequence.Builder(trackTypes)
+        var cursorUs = 0L
+        for (tail in tails) {
+            // A gap must have a positive duration or Media3 rejects it; two windows that meet
+            // exactly have nothing between them.
+            val gapUs = tail.itemStartUs - cursorUs
+            if (gapUs > 0L) builder.addGap(gapUs)
+            builder.addItem(
+                editedClip(
+                    tail.clip,
+                    output,
+                    colorMatrix,
+                    transition = TransitionEffect(TransitionRole.FROM, tail.transition, tail.startUs, tail.durUs),
+                    // Over the part of the window the item still plays: all of it, unless the next
+                    // tail borrowed its end, and then the fade still reaches silence rather than
+                    // stopping on a click at a tenth of the level.
+                    fadeOutUs = tail.itemEndUs - tail.startUs,
+                    silentUs = tail.leadUs,
+                ),
+            )
+            cursorUs = tail.itemEndUs
+        }
+        val trailingUs = totalUs - cursorUs
+        if (trailingUs > 0L) builder.addGap(trailingUs)
+        return builder.build()
+    }
+
+    /**
+     * One clip as a Media3 item.
+     *
+     * [transition], [fadeInUs], [fadeOutUs] and [silentUs] are for a clip a transition touches and
+     * nothing else: the incoming side's effect and fade-in on a base clip; the outgoing side's
+     * effect on a tail, silent for its first [silentUs] and then fading out over [fadeOutUs]. Left
+     * at their defaults they change nothing - the effect list and the audio processors are the ones
+     * every clip was given before transitions existed.
+     */
+    private fun editedClip(
+        planned: RenderPlan.PlannedClip,
+        output: Output,
+        colorMatrix: ColorMatrix?,
+        transition: TransitionEffect? = null,
+        fadeInUs: Long = 0L,
+        fadeOutUs: Long = 0L,
+        silentUs: Long = 0L,
+    ): EditedMediaItem {
         val clip = planned.clip
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(clip.uri))
@@ -341,11 +457,28 @@ object CompositionBuilder {
             )
             .build()
 
+        // A full-volume clip needs no processor at all, unless it fades: a fade is a gain that is
+        // not 1, whatever the level it fades to. The ramps are linear and MULTIPLY the level (see
+        // RampGainProvider), and they count from the item's own first sample, which is the first
+        // instant of the window on both sides of a transition.
+        val fades = fadeInUs > 0L || fadeOutUs > 0L || silentUs > 0L
         val audioProcessors: List<AudioProcessor> =
-            if (planned.removeAudio || planned.gain >= 1f) {
+            if (planned.removeAudio || (planned.gain >= 1f && !fades)) {
                 emptyList()
-            } else {
+            } else if (!fades) {
                 listOf(GainProcessor(RampGainProvider(level = planned.gain)))
+            } else {
+                listOf(
+                    GainProcessor(
+                        RampGainProvider(
+                            level = planned.gain,
+                            fadeInUs = fadeInUs,
+                            fadeOutStartUs = if (fadeOutUs > 0L) silentUs else C.TIME_UNSET,
+                            fadeOutUs = fadeOutUs,
+                            silentUntilUs = silentUs,
+                        ),
+                    ),
+                )
             }
 
         // Exactly one effect does the geometry, and which one is decided here rather than per
@@ -370,9 +503,15 @@ object CompositionBuilder {
         // brown bars under "Golden", grey ones under a fade - which the customer never asked for.
         // A colour matrix commutes with the geometry's scaling, so the picture itself is unchanged,
         // and the bars a crop or a rect leaves are bars like any other: they stay black.
+        //
+        // A transition's side goes AFTER the geometry, so that it is handed the clip's finished
+        // output frame - picture and bars together - which is what the contract moves, blurs and
+        // tints as one piece. Before the geometry it would move the picture inside bars that stood
+        // still.
         val videoEffects: List<Effect> = listOfNotNull(
             colorMatrix?.let { ColorMatrixEffect(it, progressTap = null) },
             geometry,
+            transition,
         )
 
         val builder = EditedMediaItem.Builder(mediaItem)
@@ -567,10 +706,18 @@ object CompositionBuilder {
     private class LayerCompositor(
         output: Output,
         tracks: List<RenderPlan.PlannedTrack>,
+        /** The plan's tails, in timeline order; empty when the post has no transition. */
+        private val tails: List<RenderPlan.PlannedTail>,
     ) : VideoCompositorSettings {
 
         private val size = Size(output.width, output.height)
         private val layers: List<Layer> = tracks.map { Layer(it) }
+
+        /**
+         * The tails' input: registered straight after the base, which is registered straight after
+         * the layers. [C.INDEX_UNSET] when there are no tails, which no input id ever equals.
+         */
+        private val tailsInputId = if (tails.isEmpty()) C.INDEX_UNSET else layers.size + 1
 
         // Declared rather than derived from the inputs: every layer has been drawn against this
         // frame already, and the composition's own Presentation would only have to undo a
@@ -579,11 +726,21 @@ object CompositionBuilder {
 
         override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
             // The input id is the sequence's index in the composition, and the extra layers were
-            // registered first, top one first. Anything past them is the base sequence, which is
-            // composited exactly as it arrives.
+            // registered first, top one first. Then comes the base sequence, composited exactly as
+            // it arrives, and then the tails.
+            if (inputId == tailsInputId) return tailAt(presentationTimeUs)
             val layer = layers.getOrNull(inputId) ?: return BASE
             return layer.settingsAt(presentationTimeUs)
         }
+
+        /**
+         * A tail's frame is drawn whole and where it is - it is already the output's size and its
+         * look already moved it - and only while a tail item is playing, lead included. Anywhere
+         * else the input is a gap, and the frame is hidden. The timestamp is the tail frame's OWN,
+         * which is the same number the tail's effect computed its progress from.
+         */
+        private fun tailAt(timeUs: Long): OverlaySettings =
+            if (RenderPlan.tailAt(tails, timeUs) == null) TAIL_HIDDEN else TAIL
 
         /**
          * One layer's settings, worked out once. Media3 asks for these on every frame of every
@@ -634,6 +791,12 @@ object CompositionBuilder {
         private companion object {
             /** The base track, composited as it arrives: centred, unscaled and opaque. */
             val BASE: OverlaySettings = StaticOverlaySettings.Builder().build()
+
+            /** A tail inside its window: full frame, centred and opaque, exactly like the base. */
+            val TAIL: OverlaySettings = StaticOverlaySettings.Builder().build()
+
+            /** The tails' input between windows, where all it carries is a gap. */
+            val TAIL_HIDDEN: OverlaySettings = StaticOverlaySettings.Builder().setAlphaScale(0f).build()
         }
     }
 

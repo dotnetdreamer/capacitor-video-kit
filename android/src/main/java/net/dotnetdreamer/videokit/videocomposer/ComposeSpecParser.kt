@@ -2,6 +2,7 @@ package net.dotnetdreamer.videokit.videocomposer
 
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.floor
 
 /**
  * `JSONObject` -> [ComposeSpec]. Takes `org.json` rather than Capacitor's `JSObject` (which extends
@@ -55,7 +56,13 @@ object ComposeSpecParser {
         val clipsJson = json.optJSONArray("clips") ?: throw SpecException("clips")
         if (clipsJson.length() == 0) throw SpecException("clips")
         val clips = (0 until clipsJson.length()).map { i ->
-            parseClip(clipsJson.optJSONObject(i) ?: throw SpecException("clips[$i]"), "clips[$i]")
+            val o = clipsJson.optJSONObject(i) ?: throw SpecException("clips[$i]")
+            val clip = parseClip(o, "clips[$i]")
+            // Read here and not in parseClip, because only a BASE clip with a clip before it has
+            // anything to come from. The first base clip, every layer's clips and every tail are
+            // left exactly as they were read, and whatever they carry under this key is not even
+            // validated: a key an engine is told to ignore cannot also be a reason to fail a post.
+            if (i == 0) clip else clip.copy(transitionIn = parseTransitionIn(o, "clips[$i].transitionIn"))
         }
 
         val tracksJson = json.optJSONArray("tracks") ?: JSONArray()
@@ -128,6 +135,179 @@ object ComposeSpecParser {
             crop = o.rectOrNull("crop", "$path.crop"),
             rect = o.placementOrNull("rect", "$path.rect"),
         )
+    }
+
+    /**
+     * A base clip's `transitionIn`, or null for a cut.
+     *
+     * The same split as the rest of the file, drawn through a structure that is mostly numbers.
+     * The SHAPE is refused with the path that broke: something that is not an object, a missing
+     * kind, a tail that is not a clip, a curve that is not a run of finite numbers or disagrees
+     * with the others about how many samples there are, a key nobody defined, a mask shape nobody
+     * draws. Those are a caller out of step with this engine, and a transition drawn from a curve
+     * it guessed at would be a different transition on every engine. The VALUES are clamped - an
+     * alpha of 1.2, a blur of half the frame, a tint past white - because a render that comes out
+     * a little different beats a post the customer cannot make.
+     *
+     * The fields are read in one fixed order, and the first failure is the one reported: `kind`,
+     * then `from` (through [parseClip] at its own path, so a broken tail names itself exactly as a
+     * broken clip does), then `curves`, then `mask`, then `fromTint` and `toTint`. Inside `curves`
+     * the order is `alpha`, `reveal`, then each side's channels in the contract's order followed by
+     * that side's unknown keys, then the unknown keys of `curves` itself, and last the check that
+     * every curve has the length of the first one present. The browser's reader has to report the
+     * same path for the same spec, and a fixed order is the only way two readers do.
+     *
+     * An explicit JSON null means the field is absent, here as it does for a crop: `transitionIn`,
+     * `mask`, either tint and any single curve.
+     */
+    private fun parseTransitionIn(clip: JSONObject, path: String): Transition? {
+        val raw = clip.opt("transitionIn")
+        if (raw == null || raw == JSONObject.NULL) return null
+        val o = raw as? JSONObject ?: throw SpecException(path)
+        // A string and a non-empty one: the kind is only ever logged, but a spec that lost it lost
+        // it somewhere, and a number coerced into a name would log a transition that never existed.
+        val kind = (o.opt("kind") as? String)?.takeIf { it.isNotEmpty() } ?: throw SpecException("$path.kind")
+        val fromJson = o.optJSONObject("from") ?: throw SpecException("$path.from")
+        val from = parseClip(fromJson, "$path.from")
+        val curves = parseCurves(o.opt("curves"), "$path.curves")
+        val mask = parseMask(o.opt("mask"), "$path.mask")
+        val fromTint = parseTint(o.opt("fromTint"), "$path.fromTint")
+        val toTint = parseTint(o.opt("toTint"), "$path.toTint")
+        return Transition(kind, from, mask, fromTint, toTint, curves)
+    }
+
+    /**
+     * Every curve of a transition, each brought inside its channel's range.
+     *
+     * An unknown key is refused rather than skipped. The whole point of sending curves is that no
+     * engine interprets them, so a channel this engine does not know is a channel it would silently
+     * fail to draw while the preview drew it - the one disagreement this format exists to rule out.
+     */
+    private fun parseCurves(value: Any?, path: String): TransitionCurves {
+        val o = value as? JSONObject ?: throw SpecException(path)
+        // Every curve read, in the order read, so the length check can name the first one that
+        // disagrees - the order the browser's reader has to walk them in too.
+        val read = ArrayList<Pair<String, FloatArray>>()
+        val alpha = readCurve(o, "alpha", "$path.alpha", 0f, 1f, read)
+        val reveal = readCurve(o, "reveal", "$path.reveal", 0f, 1f, read)
+        val from = parseSideCurves(o.opt("from"), "$path.from", read)
+        val to = parseSideCurves(o.opt("to"), "$path.to", read)
+        unknownKey(o, CURVE_KEYS)?.let { throw SpecException("$path.$it") }
+        val samples = read.firstOrNull()?.second?.size
+        for ((curvePath, curve) in read) {
+            if (curve.size != samples) throw SpecException(curvePath)
+        }
+        return TransitionCurves(alpha, reveal, from, to)
+    }
+
+    private fun parseSideCurves(
+        value: Any?,
+        path: String,
+        read: MutableList<Pair<String, FloatArray>>,
+    ): TransitionSideCurves? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val side = TransitionSideCurves(
+            x = readCurve(o, "x", "$path.x", -MAX_OFFSET, MAX_OFFSET, read),
+            y = readCurve(o, "y", "$path.y", -MAX_OFFSET, MAX_OFFSET, read),
+            scale = readCurve(o, "scale", "$path.scale", MIN_SIDE_SCALE, MAX_SIDE_SCALE, read),
+            rotation = readCurve(o, "rotation", "$path.rotation", -MAX_ROTATION, MAX_ROTATION, read),
+            blur = readCurve(o, "blur", "$path.blur", 0f, MAX_FRACTION, read),
+            pixelate = readCurve(o, "pixelate", "$path.pixelate", 0f, MAX_FRACTION, read),
+            split = readCurve(o, "split", "$path.split", -MAX_FRACTION, MAX_FRACTION, read),
+            gain = readCurve(o, "gain", "$path.gain", 0f, MAX_GAIN, read),
+            tint = readCurve(o, "tint", "$path.tint", 0f, 1f, read),
+        )
+        unknownKey(o, SIDE_CHANNELS)?.let { throw SpecException("$path.$it") }
+        return side
+    }
+
+    /**
+     * One curve, or null when the key is absent. Anything else has to be an array of 2 to 121
+     * finite NUMBERS: a string that happens to spell one is refused, as the contract's `number[]`
+     * refuses it, and the browser's reader has to fail on the same specs. Each sample is then
+     * clamped to its channel's range, a double too large for a float included - it becomes an
+     * infinity on the way down and the clamp lands it on the bound, where it was headed anyway.
+     */
+    private fun readCurve(
+        o: JSONObject,
+        key: String,
+        path: String,
+        min: Float,
+        max: Float,
+        read: MutableList<Pair<String, FloatArray>>,
+    ): FloatArray? {
+        val value = o.opt(key)
+        if (value == null || value == JSONObject.NULL) return null
+        val array = value as? JSONArray ?: throw SpecException(path)
+        if (array.length() < MIN_CURVE_SAMPLES || array.length() > MAX_CURVE_SAMPLES) {
+            throw SpecException(path)
+        }
+        val curve = FloatArray(array.length()) { k ->
+            val number = finiteNumber(array.opt(k)) ?: throw SpecException(path)
+            number.toFloat().coerceIn(min, max)
+        }
+        read += path to curve
+        return curve
+    }
+
+    /**
+     * The mask: its shape is the shape error, the only one, and every number is a value that takes
+     * its default when it is missing and is clamped when it is out of range - the contract's
+     * defaults, so an absent field and the default written out draw the same edge.
+     */
+    private fun parseMask(value: Any?, path: String): TransitionMask? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val shape = MaskShape.fromWire(o.opt("shape") as? String) ?: throw SpecException("$path.shape")
+        // Each number is read as a JSON number or not at all, the way the curves are and the way
+        // the iOS reader takes these very fields: `optDouble` would also read the string "30" as a
+        // slat count, and a spec that one engine draws with thirty slats and the other with one is
+        // the disagreement this format exists to rule out.
+        fun number(key: String, fallback: Double): Double = finiteNumber(o.opt(key)) ?: fallback
+        // Rounded half up, as `Math.round` rounds, after the clamp so a huge count cannot overflow
+        // the conversion to an int.
+        val count = floor(number("count", 1.0).coerceIn(1.0, MAX_BLINDS.toDouble()) + 0.5).toInt()
+        return TransitionMask(
+            shape = shape,
+            // Whole turns taken off in double first: sine and cosine do not care, and a float
+            // cannot hold a direction of 1e40 degrees at all, let alone the 90 that it is.
+            angleDeg = (number("angleDeg", 0.0) % 360.0).toFloat(),
+            count = count.coerceIn(1, MAX_BLINDS),
+            feather = number("feather", DEFAULT_FEATHER).coerceIn(MIN_FEATHER.toDouble(), MAX_FEATHER.toDouble()).toFloat(),
+            // Only a real `true` inverts. `optBoolean` would also read the string "true", which is
+            // not the boolean the contract asks for.
+            invert = o.opt("invert") == true,
+        )
+    }
+
+    /** A tint colour: exactly three finite numbers, each clamped to 0..1, or null when absent. */
+    private fun parseTint(value: Any?, path: String): FloatArray? {
+        if (value == null || value == JSONObject.NULL) return null
+        val array = value as? JSONArray ?: throw SpecException(path)
+        if (array.length() != 3) throw SpecException(path)
+        return FloatArray(3) { k ->
+            (finiteNumber(array.opt(k)) ?: throw SpecException(path)).toFloat().coerceIn(0f, 1f)
+        }
+    }
+
+    /** A finite JSON number, or null for anything else - a string that spells one included. */
+    private fun finiteNumber(value: Any?): Double? {
+        val number = (value as? Number)?.toDouble() ?: return null
+        return if (number.isFinite()) number else null
+    }
+
+    /**
+     * The first key of [o] that is not one of [known], in the order the object holds them - which on
+     * Android is the order they arrived in, which is the order `Object.keys` gives the browser.
+     */
+    private fun unknownKey(o: JSONObject, known: Set<String>): String? {
+        val keys = o.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (key !in known) return key
+        }
+        return null
     }
 
     /**
@@ -401,6 +581,39 @@ object ComposeSpecParser {
 
     const val MIN_SPEED = 0.25f
     const val MAX_SPEED = 4.0f
+
+    /*
+     * The ranges a transition's numbers are held to. None of them is a taste: each is a bound past
+     * which the picture stops meaning anything - a frame moved four frames away is off screen
+     * whichever way it went, a blur or a mosaic cell of half the shorter side is already a flat
+     * colour, and a gain of ten turns anything that is not black white. They exist so a hand-built
+     * spec cannot hand the shader a number that turns into a NaN or a texture lookup nobody can
+     * afford, and the browser's reader has to hold them to the same numbers.
+     */
+
+    /** Fewest samples a curve can have: its start and its end. */
+    const val MIN_CURVE_SAMPLES = 2
+
+    /** Most samples a curve can have. The editor sends 41. */
+    const val MAX_CURVE_SAMPLES = 121
+
+    private const val MAX_OFFSET = 4f
+    private const val MIN_SIDE_SCALE = 0.01f
+    private const val MAX_SIDE_SCALE = 20f
+    private const val MAX_ROTATION = 3600f
+    private const val MAX_FRACTION = 0.5f
+    private const val MAX_GAIN = 10f
+    private const val MAX_BLINDS = 64
+    private const val DEFAULT_FEATHER = 0.01
+    private const val MIN_FEATHER = 0.0005f
+    private const val MAX_FEATHER = 0.5f
+
+    private val CURVE_KEYS = setOf("alpha", "reveal", "from", "to")
+
+    /** A side's channels in the contract's order, which is also the order they are read in. */
+    private val SIDE_CHANNELS = linkedSetOf(
+        "x", "y", "scale", "rotation", "blur", "pixelate", "split", "gain", "tint",
+    )
 
     /**
      * The largest millisecond this parser will hand on, which is the largest one that still becomes

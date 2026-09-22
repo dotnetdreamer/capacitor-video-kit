@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { defaultClipEdit, emptyManifest, type EditManifest } from '../../editor';
-import type { EditorSource, VideoEditorHost } from '../../host/host.types';
+import type { EditorRenderHost, EditorSource, RenderRequest, VideoEditorHost } from '../../host/host.types';
 
 /*
  * A browser rather than the mock DOM, because what is pinned here is a MEASUREMENT: where the bottom
@@ -53,20 +53,18 @@ function manifest(): EditManifest {
   return {
     ...emptyManifest(),
     clips: [defaultClipEdit('clip-a', 5000, 'seg-a')],
-    videoTracks: [
-      { id: 'track-1', clips: [defaultClipEdit('clip-b', 4000, 'seg-b')], startMs: 0, z: 1, opacity: 1 },
-    ],
+    videoTracks: [{ id: 'track-1', clips: [defaultClipEdit('clip-b', 4000, 'seg-b')], startMs: 0, z: 1, opacity: 1 }],
   };
 }
 
-async function mount(): Promise<{ editor: HTMLElement; window: DOMRect }> {
+async function mount(host: VideoEditorHost = HOST): Promise<{ editor: HTMLElement; window: DOMRect }> {
   /* The WebView's own window, which is what the editor is told to be the height of. */
   const column = document.createElement('div');
   column.style.cssText = `width: ${SCREEN.width}px; height: ${SCREEN.height}px`;
   document.body.append(column);
 
   const editor = document.createElement('ve-editor');
-  Object.assign(editor, { sources: SOURCES, manifest: manifest(), host: HOST });
+  Object.assign(editor, { sources: SOURCES, manifest: manifest(), host });
   column.append(editor);
 
   mounted.push(column);
@@ -114,9 +112,7 @@ describe('ve-editor with nothing to render on', () => {
     await until('the question about the missing renderer', () => !!inside(editor, 've-alert'));
 
     const alert = inside(editor, 've-alert')!;
-    expect(alert.getAttribute('header') ?? (alert as unknown as { header: string }).header).toContain(
-      'Can’t build your video',
-    );
+    expect(alert.getAttribute('header') ?? (alert as unknown as { header: string }).header).toContain('Can’t build your video');
     // Still in the editor: nothing has been handed back while the question is on screen.
     expect(done.length).toBe(0);
   });
@@ -153,6 +149,110 @@ describe('ve-editor with nothing to render on', () => {
 
     expect(done.length).toBe(0);
     expect(inside(editor, 've-toolbar')).not.toBeNull();
+  });
+});
+
+/**
+ * A render the test holds open: it reports whatever progress it is told to, and finishes, fails or
+ * stays pending until it is told otherwise - which is how a real encode looks from here.
+ */
+function heldRender() {
+  let request: RenderRequest | null = null;
+  let settle: { resolve: (video: EditorSource) => void; reject: (error: unknown) => void } | null = null;
+  const render: EditorRenderHost = {
+    isSupported: async () => true,
+    render: received =>
+      new Promise<EditorSource>((resolve, reject) => {
+        request = received;
+        settle = { resolve, reject };
+      }),
+  };
+  return {
+    host: { ...HOST, render } as VideoEditorHost,
+    started: () => request !== null,
+    report: (progress: number) => request!.onProgress(progress),
+    aborted: () => request!.signal.aborted,
+    finish: (video: EditorSource) => settle!.resolve(video),
+    fail: (error: unknown) => settle!.reject(error),
+  };
+}
+
+/*
+ * The export screen: a still of the post with the figure on it, and a wash over the part still to
+ * be built that draws back as the figure climbs. Its arrow is the way out of a render, and the way
+ * out has to leave the edit exactly as it was.
+ */
+describe('ve-editor while the video is built', () => {
+  const RENDERED: EditorSource = { key: 'edited', fileName: 'edited.mp4' };
+
+  async function exporting() {
+    const held = heldRender();
+    const { editor } = await mount(held.host);
+    const done: CustomEvent[] = [];
+    editor.addEventListener('veDone', event => done.push(event as CustomEvent));
+    inside<HTMLButtonElement>(editor, '.ve__round--next')!.click();
+    await until('the render to start', held.started);
+    await until('the export screen', () => !!inside(editor, '.ve__export'));
+    return { editor, held, done };
+  }
+
+  it('shows the figure on the still, and washes out only what is still to come', async () => {
+    const { editor, held } = await exporting();
+
+    held.report(0.4);
+    await until('the figure to move', () => inside(editor, '.ve__export-pct')?.textContent === '40%');
+
+    const bar = inside(editor, '.ve__export-still')!;
+    expect(bar.getAttribute('role')).toBe('progressbar');
+    expect(bar.getAttribute('aria-valuenow')).toBe('40');
+    // Sixty per cent of the still is left to build, so sixty per cent of it is under the wash.
+    expect(inside<HTMLElement>(editor, '.ve__export-wash')!.style.transform).toBe('scaleX(0.6)');
+    // The editor is still there under it, hidden rather than gone.
+    expect(inside(editor, '.ve')!.getAttribute('aria-hidden')).toBe('true');
+    expect(inside(editor, 've-toolbar')).not.toBeNull();
+    // And the focus came with the screen. Left on Next, Chrome refuses the `aria-hidden` above and
+    // keeps the whole editor in the accessibility tree.
+    expect(editor.shadowRoot!.activeElement).toBe(bar);
+  });
+
+  it('calls the render off from its arrow and goes back to the edit, asking nothing', async () => {
+    const { editor, held, done } = await exporting();
+
+    inside<HTMLButtonElement>(editor, '.ve__export-back')!.click();
+    await until('the export screen to go', () => !inside(editor, '.ve__export'));
+
+    expect(held.aborted()).toBe(true);
+    expect(inside(editor, '.ve')!.hasAttribute('aria-hidden')).toBe(false);
+    expect(inside(editor, 've-toolbar')).not.toBeNull();
+    // Back on the button that started it, rather than nowhere.
+    await until('the focus to return to Next', () => editor.shadowRoot!.activeElement === inside(editor, '.ve__round--next'));
+
+    // The host settling afterwards - a file it finished anyway, or a failure for the cancel - is
+    // not news to somebody already back in the edit: no video handed over, and no question.
+    held.fail(new Error('cancelled'));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(done.length).toBe(0);
+    expect(inside(editor, 've-alert')).toBeNull();
+  });
+
+  it('ignores a file that lands after the render was called off', async () => {
+    const { editor, held, done } = await exporting();
+
+    inside<HTMLButtonElement>(editor, '.ve__export-back')!.click();
+    await until('the export screen to go', () => !inside(editor, '.ve__export'));
+    held.finish(RENDERED);
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(done.length).toBe(0);
+  });
+
+  it('hands the finished video over when the render completes', async () => {
+    const { held, done } = await exporting();
+
+    held.finish(RENDERED);
+    await until('the editor to finish', () => done.length > 0);
+
+    expect(done[0].detail.stitched).toBe(RENDERED);
   });
 });
 

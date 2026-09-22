@@ -115,6 +115,124 @@ export interface ComposeClip {
    * operation on different pixels, and the builder never emits one there.
    */
   rect?: ComposePlacement;
+  /**
+   * A transition INTO this clip from the one before it on the BASE track. Absent is a cut, and
+   * absence is every spec written before this field. It is ignored on the first base clip and on
+   * every clip of a [ComposeTrack].
+   */
+  transitionIn?: ComposeTransition;
+}
+
+/**
+ * How one base clip gives way to the next.
+ *
+ * TIMING. The transition overlaps the two clips. The spec is lowered before it gets here, so an
+ * engine does no arithmetic for it: the outgoing clip's `outMs` ALREADY stops where this clip
+ * starts, and the part it gave up is [from] - a clip in its own right, the outgoing clip's last
+ * moments, with every field the outgoing clip has. The base track therefore stays the flat,
+ * non-overlapping sequence it has always been, and [from] is drawn UNDER this clip for its own
+ * length, `(from.outMs - from.inMs) / from.speed`, starting where this clip starts. An engine that
+ * ignores the field renders a cut and a video of exactly the right length.
+ *
+ * A clip's own `transitionIn` and the next clip's never overlap on the output timeline: each is
+ * held to half of either clip, so one extra sequence holds every [from] of a post.
+ *
+ * DRAWING, at output time `t` of the window: progress `p = clamp((t - start) / length, 0, 1)`, and
+ * every curve read at `p` by straight-line interpolation between the two samples either side
+ * (`x = p * (n - 1)`, `i = min(floor(x), n - 2)`, `v = c[i] + (c[i + 1] - c[i]) * (x - i)`). Each
+ * side is its clip's WHOLE output frame - the picture cropped, fitted, placed, turned and graded
+ * exactly as it would be with no transition, over black - and for output pixel `q` (y down):
+ *
+ *   1. the side samples its frame at `s = C + R(-rotation) * (q - C - (x * W, y * H)) / scale`, with
+ *      `C` the frame centre and the turn clockwise in output pixels. Where `s` is outside the frame
+ *      the side is transparent;
+ *   2. `pixelate > 0` snaps `s` to the centre of its cell, `pixelate * min(W, H)` wide, the cells
+ *      laid out from `C`;
+ *   3. the colour at `s`, blurred by a Gaussian of sigma `blur * min(W, H)` with the frame's edges
+ *      clamped. `split` reads red at `s + (split * W, 0)` and blue at `s - (split * W, 0)`;
+ *   4. `rgb = min(rgb * gain, 1)`, then `rgb = mix(rgb, tint colour, tint)`;
+ *   5. the outgoing side is drawn over black, and the incoming side over that at an alpha of
+ *      `alpha * mask(q, reveal)` - the mask being 1 when there is none.
+ *
+ * Extra tracks and overlays are then drawn over the result exactly as they are over any frame.
+ */
+export interface ComposeTransition {
+  /**
+   * The catalogue id, `dissolve` or `slide-left`. For a failure message and a log line: an engine
+   * draws [curves] and [mask] and must never branch on this.
+   */
+  kind: string;
+  /** The outgoing clip's last moments, drawn under this clip while the transition runs. */
+  from: ComposeClip;
+  /** The shape the incoming side is revealed through. Absent reveals it everywhere at once. */
+  mask?: ComposeTransitionMask;
+  /** What [ComposeTransitionSideCurves.tint] moves the outgoing side towards, 0..1 RGB. Absent is black. */
+  fromTint?: [number, number, number];
+  /** The same for the incoming side. */
+  toTint?: [number, number, number];
+  curves: ComposeTransitionCurves;
+}
+
+/**
+ * The shape a mask reveals the incoming side through. Each shape measures a pixel `u`, 0..1 across
+ * the frame, in output PIXELS; with `fw = clamp(feather, 0.0005, 0.5)` and
+ * `r = reveal * (1 + 2 * fw) - fw`, the mask is `1 - smoothstep(r - fw, r + fw, u)`, and `1 - that`
+ * when `invert` is set. `d = (cos angleDeg, sin angleDeg)` (y down), `v = q - C`, and
+ * `L = |W cos| + |H sin|`:
+ *
+ *  - `linear`: `dot(v, d) / L + 0.5` - the edge travels along `d`;
+ *  - `circle`: `|v| / |(W / 2, H / 2)|`;
+ *  - `diamond`: `(|v.x| + |v.y|) / (W / 2 + H / 2)`;
+ *  - `clock`: the clockwise turn from twelve o'clock, `atan2(v.x, -v.y) / 2pi`, wrapped into 0..1;
+ *  - `blinds`: `fract((dot(v, d) / L + 0.5) * count)`;
+ *  - `split`: `|dot(v, d)| / (L / 2)` - two edges opening from the centre line.
+ */
+export interface ComposeTransitionMask {
+  shape: 'linear' | 'circle' | 'diamond' | 'clock' | 'blinds' | 'split';
+  /** Default 0. */
+  angleDeg?: number;
+  /** `blinds` only. Default 1. */
+  count?: number;
+  /** Softness of the edge in `u` units. Default 0.01. */
+  feather?: number;
+  /** Default false. */
+  invert?: boolean;
+}
+
+/**
+ * Every channel a transition moves, each sampled at evenly spaced moments of its window, the first
+ * at the start and the last at the end. Every curve present has the same length, 2 to 121 samples.
+ * A channel that is absent holds its neutral value for the whole window.
+ */
+export interface ComposeTransitionCurves {
+  /** How much of the incoming side is drawn, 0..1. Neutral 1. */
+  alpha?: number[];
+  /** How far the mask is open, 0..1. Neutral 1. */
+  reveal?: number[];
+  from?: ComposeTransitionSideCurves;
+  to?: ComposeTransitionSideCurves;
+}
+
+/** One side's channels. See [ComposeTransition] for the order they are applied in. */
+export interface ComposeTransitionSideCurves {
+  /** Offset, a fraction of the output width, positive right. Neutral 0. */
+  x?: number[];
+  /** Offset, a fraction of the output height, positive down. Neutral 0. */
+  y?: number[];
+  /** Size about the frame centre. Neutral 1. */
+  scale?: number[];
+  /** Clockwise degrees about the frame centre. Neutral 0. */
+  rotation?: number[];
+  /** Gaussian sigma, a fraction of the shorter side. Neutral 0. */
+  blur?: number[];
+  /** Mosaic cell, a fraction of the shorter side. Neutral 0. */
+  pixelate?: number[];
+  /** Red right and blue left by this fraction of the width. Neutral 0. */
+  split?: number[];
+  /** Colour multiplier. Neutral 1. */
+  gain?: number[];
+  /** 0..1 towards the side's tint colour. Neutral 0. */
+  tint?: number[];
 }
 
 /**

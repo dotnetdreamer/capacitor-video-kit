@@ -1,7 +1,10 @@
-import type { ComposeRect } from '../definitions';
+import type { TransitionLook } from '../../editor/transitions';
+import type { ComposeRect, ComposeTransition } from '../definitions';
 
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
+import { Transition2d } from './transition-2d';
+import { TransitionGl } from './transition-gl';
 
 /**
  * Where a frame is actually assembled: video layers first, overlays on top.
@@ -24,7 +27,37 @@ import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from '.
  * PREVIEW exactly and the native render very nearly, because CSS clamps after each operation while
  * a folded matrix clamps once at the end. It exists so a render is possible at all on a browser
  * that has an encoder and no GL, and `usesGpu` says which path a frame came from.
+ *
+ * A TRANSITION between two base clips is one more kind of item in the same list, in the base
+ * track's place: a [TransitionDraw] carrying the two clips as the ordinary layers each would be
+ * drawn as on its own, and the look of the moment between them. Each side is drawn WHOLE by the
+ * same code that draws any layer - into a frame of its own rather than onto the canvas - and the
+ * two frames are then moved, softened and mixed by `transition-gl.ts`, which is the drawing contract
+ * in `ComposeTransition` and nothing else. A frame with no transition in it never reaches any of
+ * that: the loop below is the loop it always was, and nothing is allocated for transitions until a
+ * post first asks for one.
  */
+
+/**
+ * One transition, in the base track's place in [Painter.paintLayers]: the outgoing and incoming base
+ * clips as the plain layers each would be drawn as on its own - destination the whole frame, framing
+ * its clip's fit, crop and rectangle, turned by its rectangle's angle - and the look at this moment.
+ *
+ * A side that is null has no frame to give yet, a `<video>` still loading, and is drawn as ABSENT:
+ * transparent, so the outgoing side leaves black and the incoming side leaves the outgoing one.
+ */
+export interface TransitionDraw {
+  kind: 'transition';
+  from: LayerDraw | null;
+  to: LayerDraw | null;
+  /** `lookAt(curves, progress)`: what every channel is at this moment. */
+  look: TransitionLook;
+  transition: Pick<ComposeTransition, 'mask' | 'fromTint' | 'toTint'>;
+}
+
+export function isTransitionDraw(draw: LayerDraw | TransitionDraw): draw is TransitionDraw {
+  return (draw as Partial<TransitionDraw>).kind === 'transition';
+}
 
 /**
  * What a layer can be drawn from. Narrower than `CanvasImageSource` on purpose: `texImage2D` will
@@ -145,7 +178,12 @@ export class Painter {
   private glCanvas: HTMLCanvasElement | null = null;
   private program: WebGLProgram | null = null;
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
+  /** Where the quad's corners are bound, which the transition programs are linked to read too. */
+  private position = 0;
   private readonly textures = new Map<LayerSource, WebGLTexture>();
+  /** Built the first time a frame has a transition in it, and never for a post that has none. */
+  private transitionGl: TransitionGl | null = null;
+  private transition2d: Transition2d | null = null;
   private matrix: ColorMatrix | null = null;
   /** The CSS filter the 2D fallback draws with; `none` when there is no colour work. */
   private cssFilter = 'none';
@@ -183,6 +221,7 @@ export class Painter {
       this.glCanvas = glCanvas;
       this.program = built.program;
       this.uniforms = built.uniforms;
+      this.position = built.position;
     }
   }
 
@@ -206,8 +245,12 @@ export class Painter {
     this.cssTints = css.tints;
   }
 
-  /** Everything before the overlays: black, then each video layer bottom to top. */
-  paintLayers(layers: readonly LayerDraw[]): void {
+  /**
+   * Everything before the overlays: black, then each video layer bottom to top. A [TransitionDraw]
+   * stands where the base track's layer would, and paints the whole frame - the outgoing clip over
+   * black and the incoming one over that - with the layers after it drawn over the result.
+   */
+  paintLayers(layers: ReadonlyArray<LayerDraw | TransitionDraw>): void {
     const gl = this.gl;
     if (gl && this.glCanvas && this.program) {
       if (this.paintLayersGl(gl, layers)) {
@@ -248,10 +291,16 @@ export class Painter {
    * context of the one it is still drawing with.
    */
   dispose(): void {
+    // The 2D path's frames first, because they are held whether or not there is a context: a
+    // painter that fell back to 2D mid-post would otherwise keep four frame-sized canvases alive.
+    this.transition2d?.dispose();
+    this.transition2d = null;
     const gl = this.gl;
     if (!gl) return;
     for (const texture of this.textures.values()) gl.deleteTexture(texture);
     this.textures.clear();
+    this.transitionGl?.dispose();
+    this.transitionGl = null;
     gl.getExtension('WEBGL_lose_context')?.loseContext();
     this.dropGl();
   }
@@ -263,12 +312,13 @@ export class Painter {
     this.program = null;
     this.uniforms = {};
     this.textures.clear();
+    this.transitionGl = null;
   }
 
   /* ------------------------------------------------------------------------------------------ */
 
   /** Returns false when this browser would not let the shader have a frame; see the catch below. */
-  private paintLayersGl(gl: WebGL2RenderingContext, layers: readonly LayerDraw[]): boolean {
+  private paintLayersGl(gl: WebGL2RenderingContext, layers: ReadonlyArray<LayerDraw | TransitionDraw>): boolean {
     gl.viewport(0, 0, this.output.width, this.output.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -282,43 +332,99 @@ export class Painter {
     gl.uniform3fv(this.uniforms['u_offset'] ?? null, matrix ? offsetVector(matrix) : ZERO_OFFSET);
 
     for (const layer of layers) {
-      if (layer.sourceWidth <= 0 || layer.sourceHeight <= 0) continue;
-      const frame: Frame = {
-        width: Math.max(1, Math.round(layer.dest.w * this.output.width)),
-        height: Math.max(1, Math.round(layer.dest.h * this.output.height)),
-      };
-      const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
-
-      gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, layer.source));
-      try {
-        // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
-        // texture object itself is kept, which is what saves the allocation.
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
-      } catch {
-        // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
-        // canvas: `texImage2D` throws a SecurityError outright. Every source this package loads is
-        // same-origin (a blob, or the host's own file scheme), so this is the editor being pointed
-        // at a remote URL by a host that may - and the honest answer is the picture drawn without a
-        // shader rather than no picture at all.
-        gl.disable(gl.BLEND);
-        return false;
+      if (isTransitionDraw(layer)) {
+        if (!this.paintTransitionGl(gl, layer)) {
+          gl.disable(gl.BLEND);
+          return false;
+        }
+        continue;
       }
-
-      const bounds = boundsOf(layer);
-      const kept = layer.framing.crop ?? FULL_FRAME;
-      const pivot = this.pivotOf(layer);
-      const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
-      gl.uniform4f(this.uniforms['u_clip'] ?? null, bounds.x, bounds.y, bounds.w, bounds.h);
-      gl.uniform4f(this.uniforms['u_kept'] ?? null, kept.x, kept.y, kept.w, kept.h);
-      gl.uniform4f(this.uniforms['u_dest'] ?? null, layer.dest.x, layer.dest.y, layer.dest.w, layer.dest.h);
-      gl.uniform4f(this.uniforms['u_window'] ?? null, window.x, window.y, window.w, window.h);
-      gl.uniform2f(this.uniforms['u_frame'] ?? null, this.output.width, this.output.height);
-      gl.uniform2f(this.uniforms['u_pivot'] ?? null, pivot.x, pivot.y);
-      gl.uniform2f(this.uniforms['u_turn'] ?? null, Math.cos(radians), Math.sin(radians));
-      gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (!this.drawLayerGl(gl, layer)) return false;
     }
     gl.disable(gl.BLEND);
+    return true;
+  }
+
+  /**
+   * One layer through the layer program, into whatever framebuffer is bound: the canvas's own for
+   * an ordinary layer, a side's frame for one half of a transition. False when the browser would
+   * not let the shader have the frame.
+   */
+  private drawLayerGl(gl: WebGL2RenderingContext, layer: LayerDraw): boolean {
+    if (layer.sourceWidth <= 0 || layer.sourceHeight <= 0) return true;
+    const frame: Frame = {
+      width: Math.max(1, Math.round(layer.dest.w * this.output.width)),
+      height: Math.max(1, Math.round(layer.dest.h * this.output.height)),
+    };
+    const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
+
+    gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, layer.source));
+    try {
+      // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
+      // texture object itself is kept, which is what saves the allocation.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
+    } catch {
+      // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
+      // canvas: `texImage2D` throws a SecurityError outright. Every source this package loads is
+      // same-origin (a blob, or the host's own file scheme), so this is the editor being pointed
+      // at a remote URL by a host that may - and the honest answer is the picture drawn without a
+      // shader rather than no picture at all.
+      gl.disable(gl.BLEND);
+      return false;
+    }
+
+    const bounds = boundsOf(layer);
+    const kept = layer.framing.crop ?? FULL_FRAME;
+    const pivot = this.pivotOf(layer);
+    const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
+    gl.uniform4f(this.uniforms['u_clip'] ?? null, bounds.x, bounds.y, bounds.w, bounds.h);
+    gl.uniform4f(this.uniforms['u_kept'] ?? null, kept.x, kept.y, kept.w, kept.h);
+    gl.uniform4f(this.uniforms['u_dest'] ?? null, layer.dest.x, layer.dest.y, layer.dest.w, layer.dest.h);
+    gl.uniform4f(this.uniforms['u_window'] ?? null, window.x, window.y, window.w, window.h);
+    gl.uniform2f(this.uniforms['u_frame'] ?? null, this.output.width, this.output.height);
+    gl.uniform2f(this.uniforms['u_pivot'] ?? null, pivot.x, pivot.y);
+    gl.uniform2f(this.uniforms['u_turn'] ?? null, Math.cos(radians), Math.sin(radians));
+    gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    return true;
+  }
+
+  /**
+   * A transition, over the whole frame. Each present side is drawn by [drawLayerGl] into a frame of
+   * its own that starts opaque black - so its picture is framed and graded exactly as it would be
+   * with no transition, and its bars are black and part of it - and `TransitionGl` then blurs and
+   * mixes the two onto the canvas. False, as for a layer, when a side's frame could not be had; the
+   * whole frame then goes to the 2D path, which draws transitions too.
+   *
+   * Leaves the layer program in use, blending on and the canvas's framebuffer bound, which is what
+   * every layer drawn over the transition expects to find.
+   */
+  private paintTransitionGl(gl: WebGL2RenderingContext, draw: TransitionDraw): boolean {
+    const gpu = this.transitionGl ?? (this.transitionGl = TransitionGl.create(gl, this.output, this.position));
+    if (!gpu) return false;
+    const hasFrom = hasPicture(draw.from);
+    // An incoming side at no alpha covers nothing anywhere - its coverage is alpha times the mask -
+    // so it is left out rather than uploaded, drawn and blurred to be multiplied by nought. Half of a
+    // zoom and the first third of a blur are frames like that.
+    const hasTo = hasPicture(draw.to) && draw.look.alpha > 0;
+
+    gl.useProgram(this.program);
+    gl.enable(gl.BLEND);
+    for (const [side, layer] of [
+      ['from', hasFrom ? draw.from : null],
+      ['to', hasTo ? draw.to : null],
+    ] as const) {
+      if (!layer) continue;
+      gpu.beginSide(side);
+      if (!this.drawLayerGl(gl, layer)) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return false;
+      }
+    }
+    gpu.composite(draw, hasFrom, hasTo);
+
+    gl.useProgram(this.program);
+    gl.enable(gl.BLEND);
     return true;
   }
 
@@ -349,7 +455,7 @@ export class Painter {
    * function for a tint, which is exactly why `resolveFilterOps` moves every tint to the end of the
    * list in the first place.
    */
-  private paintLayers2d(layers: readonly LayerDraw[]): void {
+  private paintLayers2d(layers: ReadonlyArray<LayerDraw | TransitionDraw>): void {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = 1;
@@ -360,61 +466,73 @@ export class Painter {
     ctx.restore();
 
     for (const layer of layers) {
-      if (layer.sourceWidth <= 0 || layer.sourceHeight <= 0) continue;
-      const frame: Frame = {
-        width: Math.max(1, Math.round(layer.dest.w * this.output.width)),
-        height: Math.max(1, Math.round(layer.dest.h * this.output.height)),
-      };
-      const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
-      const rects = drawRects(window, frame, layer.sourceWidth, layer.sourceHeight, layer.framing.crop);
-
-      const originX = layer.dest.x * this.output.width;
-      const originY = layer.dest.y * this.output.height;
-      // Where this layer is allowed to paint: its own rectangle, which for an extra layer IS the
-      // destination and for a base-track clip is a rectangle inside it. In output pixels.
-      const bounds = boundsOf(layer);
-      const clipX = bounds.x * this.output.width;
-      const clipY = bounds.y * this.output.height;
-      const clipW = Math.max(1, bounds.w * this.output.width);
-      const clipH = Math.max(1, bounds.h * this.output.height);
-
-      ctx.save();
-      // Before the clip and before the draw, so the rectangle is cut in the layer's OWN turned
-      // frame - which is what `cover` clipping to a turned rectangle means, and what the GL path
-      // gets for free by turning the quad it samples through.
-      const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
-      if (radians !== 0) {
-        const pivot = this.pivotOf(layer);
-        ctx.translate(pivot.x, pivot.y);
-        ctx.rotate(radians);
-        ctx.translate(-pivot.x, -pivot.y);
+      if (isTransitionDraw(layer)) {
+        // Each side is drawn whole by the very routine below, into a frame of its own, so the
+        // fallback's transition is framed and coloured exactly as its fallback layers are.
+        const transition = this.transition2d ?? (this.transition2d = new Transition2d(this.output));
+        transition.paint(ctx, layer, (into, side) => this.drawLayer2d(into, side));
+        continue;
       }
-      ctx.beginPath();
-      ctx.rect(clipX, clipY, clipW, clipH);
-      ctx.clip();
-      // A layer's own frame is black first, so its letterbox bars cover whatever is under them
-      // exactly as they do natively rather than letting it show through. Unconditional, because the
-      // GL path above is: its shader paints every sample that falls outside the source black at the
-      // layer's opacity, whatever size the rectangle is. The test this replaces was `dest.w < 1 ||
-      // dest.h < 1` - a layer smaller than the output - which stopped being a proxy for anything
-      // the moment a rectangle could be larger than the output or hang off its edge, and would have
-      // made a layer's bars turn transparent as a pinch took it through the frame's own size.
-      ctx.globalAlpha = layer.opacity;
-      ctx.fillStyle = '#000';
-      ctx.fillRect(clipX, clipY, clipW, clipH);
-      if (rects) {
-        ctx.globalAlpha = layer.opacity;
-        ctx.filter = this.cssFilter;
-        ctx.drawImage(layer.source, rects.sx, rects.sy, rects.sw, rects.sh, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
-        ctx.filter = 'none';
-        for (const tint of this.cssTints) {
-          ctx.globalAlpha = layer.opacity;
-          ctx.fillStyle = tint;
-          ctx.fillRect(originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
-        }
-      }
-      ctx.restore();
+      this.drawLayer2d(ctx, layer);
     }
+  }
+
+  /** One layer onto a 2D context the size of the output: the painter's own, or a transition side's. */
+  private drawLayer2d(ctx: CanvasRenderingContext2D, layer: LayerDraw): void {
+    if (layer.sourceWidth <= 0 || layer.sourceHeight <= 0) return;
+    const frame: Frame = {
+      width: Math.max(1, Math.round(layer.dest.w * this.output.width)),
+      height: Math.max(1, Math.round(layer.dest.h * this.output.height)),
+    };
+    const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
+    const rects = drawRects(window, frame, layer.sourceWidth, layer.sourceHeight, layer.framing.crop);
+
+    const originX = layer.dest.x * this.output.width;
+    const originY = layer.dest.y * this.output.height;
+    // Where this layer is allowed to paint: its own rectangle, which for an extra layer IS the
+    // destination and for a base-track clip is a rectangle inside it. In output pixels.
+    const bounds = boundsOf(layer);
+    const clipX = bounds.x * this.output.width;
+    const clipY = bounds.y * this.output.height;
+    const clipW = Math.max(1, bounds.w * this.output.width);
+    const clipH = Math.max(1, bounds.h * this.output.height);
+
+    ctx.save();
+    // Before the clip and before the draw, so the rectangle is cut in the layer's OWN turned
+    // frame - which is what `cover` clipping to a turned rectangle means, and what the GL path
+    // gets for free by turning the quad it samples through.
+    const radians = ((layer.rotationDeg ?? 0) * Math.PI) / 180;
+    if (radians !== 0) {
+      const pivot = this.pivotOf(layer);
+      ctx.translate(pivot.x, pivot.y);
+      ctx.rotate(radians);
+      ctx.translate(-pivot.x, -pivot.y);
+    }
+    ctx.beginPath();
+    ctx.rect(clipX, clipY, clipW, clipH);
+    ctx.clip();
+    // A layer's own frame is black first, so its letterbox bars cover whatever is under them
+    // exactly as they do natively rather than letting it show through. Unconditional, because the
+    // GL path above is: its shader paints every sample that falls outside the source black at the
+    // layer's opacity, whatever size the rectangle is. The test this replaces was `dest.w < 1 ||
+    // dest.h < 1` - a layer smaller than the output - which stopped being a proxy for anything
+    // the moment a rectangle could be larger than the output or hang off its edge, and would have
+    // made a layer's bars turn transparent as a pinch took it through the frame's own size.
+    ctx.globalAlpha = layer.opacity;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(clipX, clipY, clipW, clipH);
+    if (rects) {
+      ctx.globalAlpha = layer.opacity;
+      ctx.filter = this.cssFilter;
+      ctx.drawImage(layer.source, rects.sx, rects.sy, rects.sw, rects.sh, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
+      ctx.filter = 'none';
+      for (const tint of this.cssTints) {
+        ctx.globalAlpha = layer.opacity;
+        ctx.fillStyle = tint;
+        ctx.fillRect(originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
+      }
+    }
+    ctx.restore();
   }
 
   private textureFor(gl: WebGL2RenderingContext, source: LayerSource): WebGLTexture {
@@ -461,6 +579,15 @@ function boundsOf(layer: LayerDraw): ComposeRect {
   };
 }
 
+/**
+ * Whether a transition side has a picture to draw. A side with none is ABSENT - transparent over
+ * whatever is under it - rather than a black frame, which is what drawing a source with no size
+ * into a frame cleared to black would otherwise have made it.
+ */
+function hasPicture(layer: LayerDraw | null): layer is LayerDraw {
+  return layer !== null && layer.sourceWidth > 0 && layer.sourceHeight > 0;
+}
+
 function createCanvas(width: number, height: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -472,7 +599,7 @@ function createCanvas(width: number, height: number): HTMLCanvasElement {
  * Compiles the one program, or null for a context that would not give it - which is treated as "no
  * GL here" rather than as a failure, because the 2D path renders the same video.
  */
-function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; uniforms: Record<string, WebGLUniformLocation | null> } | null {
+function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; uniforms: Record<string, WebGLUniformLocation | null>; position: number } | null {
   const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
   if (!vertex || !fragment) return null;
@@ -502,6 +629,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
 
   return {
     program,
+    position,
     uniforms: {
       u_dest: gl.getUniformLocation(program, 'u_dest'),
       u_window: gl.getUniformLocation(program, 'u_window'),

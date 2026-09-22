@@ -47,6 +47,28 @@ where WKWebView decodes them today.
 | `ctx` _(required)_ | --        |             | `EditorContext` | `undefined` |
 
 
+## Methods
+
+### `picture() => Promise<HTMLCanvasElement | null>`
+
+The picture on screen at this moment, for whoever wants a still of the post: the editor's
+export screen shows one while the file is built.
+
+The canvas itself, not a copy and not a data URL. A copy is the caller's to make at whatever
+size it wants, and `toDataURL` throws on a canvas drawn from a clip on another origin - which
+the example pages' clips are - while `drawImage` of the same canvas works everywhere. It is the
+video layers, colour and framing included, and none of the text or stickers, which are drawn
+over it in the DOM.
+
+Null until the compositor exists, because before that the element is an empty rectangle.
+
+#### Returns
+
+Type: `Promise<HTMLCanvasElement | null>`
+
+
+
+
 ## Dependencies
 
 ### Used by

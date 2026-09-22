@@ -60,13 +60,30 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
   const decoder = new SourceDecoder();
   let anything = false;
 
+  // How long each base clip fades in for: the length of the transition bringing it in, if any.
+  // Worked out once, and empty for a post with no transitions, whose clips then take exactly the
+  // unfaded path they always did.
+  const fadeInUs = new Map<number, number>();
+  for (const transition of plan.transitions) fadeInUs.set(transition.index, transition.durUs);
+
   try {
     // The base track, each clip at the instant the plan put it.
     for (let i = 0; i < plan.clips.length; i++) {
       throwIfAborted(signal);
       const clip = plan.clips[i];
       if (!clip || clip.removeAudio) continue;
-      anything = (await placeClip(mix, clip, plan.prefixOutUs[i] ?? 0, decoder)) || anything;
+      const fadeIn = fadeInUs.get(i);
+      anything = (await placeClip(mix, clip, plan.prefixOutUs[i] ?? 0, decoder, fadeIn ? { fadeInUs: fadeIn } : undefined)) || anything;
+    }
+
+    // ...then every transition's tail: the outgoing clip's sound carrying on UNDER the incoming
+    // clip's, across the same window the pictures cross in. Linear both ways, so the two gains sum
+    // to one at every sample and a clip dissolving into more of the same scene does not dip or
+    // swell at the join. The tail is held to the window, which is the most of it anyone will see.
+    for (const transition of plan.transitions) {
+      throwIfAborted(signal);
+      if (transition.tail.removeAudio) continue;
+      anything = (await placeClip(mix, transition.tail, transition.startUs, decoder, { roomUs: transition.durUs, fadeOutWhole: true })) || anything;
     }
 
     // ...then every extra layer's clips, which contribute sound exactly as base clips do.
@@ -117,7 +134,20 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
 
 /* -------------------------------------------------------------------------------------------- */
 
-async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decoder: SourceDecoder): Promise<boolean> {
+/**
+ * How a clip's sound is shaped on its way into the mix, for the two cases a transition makes. Absent
+ * is the plain placement every clip had before transitions existed.
+ */
+interface ClipFade {
+  /** A linear fade in over this much of the start: the incoming side of a transition. */
+  fadeInUs?: number;
+  /** A linear fade out over the WHOLE placed length: the outgoing side, which is all window. */
+  fadeOutWhole?: boolean;
+  /** Where the clip must stop on the output timeline, when that is sooner than its own length. */
+  roomUs?: number;
+}
+
+async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decoder: SourceDecoder, fade?: ClipFade): Promise<boolean> {
   const source = await decoder.get(clip.clip.uri);
   if (!source) return false;
 
@@ -126,7 +156,7 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
   // What the clip occupies on the OUTPUT timeline, which the stretch has to land inside: the plan
   // floored that number and the picture is cut to it, so a sample over would be sound with no
   // frames under it.
-  const room = samplesAt(clip.outDurUs, mix.sampleRate);
+  const room = samplesAt(Math.min(clip.outDurUs, fade?.roomUs ?? clip.outDurUs), mix.sampleRate);
   if (room <= 0 || to <= from) return false;
 
   const at = samplesAt(atUs, mix.sampleRate);
@@ -136,7 +166,19 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
     const input = whole.subarray(Math.min(from, whole.length), Math.min(to, whole.length));
     if (input.length === 0) continue;
     const stretched = timeStretch(input, clip.speed, mix.sampleRate);
-    addInto(mix.channels[channel], stretched, at, clip.gain, Math.min(room, stretched.length));
+    const count = Math.min(room, stretched.length);
+    if (fade) {
+      // The same arithmetic as a music fade, so a transition's crossfade and a music fade out are
+      // the same curve: gain ramps in over `fadeIn` samples and out over `fadeOut` from `fadeOutFrom`.
+      // The fade out spans the whole ROOM - the window - and not merely the samples the stretch
+      // happened to produce: the incoming clip fades in across exactly that many, and only a ramp of
+      // the same length leaves the two gains summing to one at every sample. A tail whose sound runs
+      // out before the window closes falls silent there, as any clip whose sound is short does.
+      const fadeIn = fade.fadeInUs ? samplesAt(fade.fadeInUs, mix.sampleRate) : 0;
+      addFaded(mix.channels[channel], stretched, at, clip.gain, count, fadeIn, fade.fadeOutWhole ? 0 : -1, fade.fadeOutWhole ? room : 0);
+    } else {
+      addInto(mix.channels[channel], stretched, at, clip.gain, count);
+    }
     wrote = true;
   }
   return wrote;
@@ -160,15 +202,32 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, vol
     for (let i = 0; i < count; i++) {
       const sample = input[from + i];
       if (sample === undefined) break;
-      let gain = volume;
-      if (fadeIn > 0 && i < fadeIn) gain *= i / fadeIn;
-      if (fadeOutFrom >= 0 && fadeOut > 0 && i >= fadeOutFrom) {
-        gain *= Math.max(0, 1 - (i - fadeOutFrom) / fadeOut);
-      }
-      out[at + i] = (out[at + i] ?? 0) + sample * gain;
+      out[at + i] = (out[at + i] ?? 0) + sample * fadeGain(volume, i, fadeIn, fadeOutFrom, fadeOut);
     }
   }
   return true;
+}
+
+/**
+ * `gain` as a fade leaves it at sample `i` of a placed stream: a linear ramp up over the first
+ * `fadeIn` samples, and a linear ramp down over `fadeOut` samples from `fadeOutFrom` (-1 for none).
+ * One function for music and for transitions, so the two cannot come to mean different curves - and
+ * the multiplications run in the order the music fade always ran them, so its samples are the same
+ * bits they were.
+ */
+function fadeGain(gain: number, i: number, fadeIn: number, fadeOutFrom: number, fadeOut: number): number {
+  if (fadeIn > 0 && i < fadeIn) gain *= i / fadeIn;
+  if (fadeOutFrom >= 0 && fadeOut > 0 && i >= fadeOutFrom) {
+    gain *= Math.max(0, 1 - (i - fadeOutFrom) / fadeOut);
+  }
+  return gain;
+}
+
+/** [addInto] with a fade, for the clips a transition joins. Kept apart so an unfaded clip pays nothing. */
+function addFaded(out: Float32Array | undefined, input: Float32Array, at: number, gain: number, count: number, fadeIn: number, fadeOutFrom: number, fadeOut: number): void {
+  if (!out) return;
+  const room = Math.min(count, input.length, out.length - at);
+  for (let i = 0; i < room; i++) out[at + i] = (out[at + i] ?? 0) + (input[i] ?? 0) * fadeGain(gain, i, fadeIn, fadeOutFrom, fadeOut);
 }
 
 function placeVoice(mix: MixedAudio, source: DecodedSource, take: VoiceItem): boolean {

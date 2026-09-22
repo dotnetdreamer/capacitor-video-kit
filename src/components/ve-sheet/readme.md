@@ -123,6 +123,7 @@ Type: `Promise<void>`
  - [ve-speed-sheet](../ve-speed-sheet)
  - [ve-sticker-sheet](../ve-sticker-sheet)
  - [ve-text-sheet](../ve-text-sheet)
+ - [ve-transition-sheet](../ve-transition-sheet)
  - [ve-voiceover-sheet](../ve-voiceover-sheet)
  - [ve-volume-sheet](../ve-volume-sheet)
 
@@ -145,6 +146,7 @@ graph TD;
   ve-speed-sheet --> ve-sheet
   ve-sticker-sheet --> ve-sheet
   ve-text-sheet --> ve-sheet
+  ve-transition-sheet --> ve-sheet
   ve-voiceover-sheet --> ve-sheet
   ve-volume-sheet --> ve-sheet
   style ve-sheet fill:#f9f,stroke:#333,stroke-width:4px

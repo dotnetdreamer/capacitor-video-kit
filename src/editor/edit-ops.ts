@@ -15,6 +15,7 @@ import {
   normaliseRect,
   sameRect,
   totalDurationMs,
+  withoutLeadingTransition,
   type EditClip,
   type EditFit,
   type EditManifest,
@@ -22,9 +23,11 @@ import {
   type EditOverlay,
   type EditPlacement,
   type EditRect,
+  type EditTransition,
   type EditVideoTrack,
   type EditVoiceover,
 } from './edit-manifest';
+import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
  * Every change an editor can make to a manifest, as pure functions.
@@ -39,12 +42,26 @@ import {
 /* Timeline                                                                                       */
 /* -------------------------------------------------------------------------------------------- */
 
-/** One clip segment placed on the OUTPUT timeline. */
+/**
+ * One clip segment placed on the OUTPUT timeline.
+ *
+ * The slots of a sequence are a PARTITION of it - every instant belongs to exactly one - even where
+ * a transition overlaps two clips. A clip's slot ends where the next clip starts, so the last
+ * `tailMs` of the clip is not in its own slot: it plays UNDER the start of the next one, whose
+ * first `transitionInMs` is the transition. `slotAt`, `sourceMsAt` and everything built on them
+ * keep answering with one clip per instant, which is the clip the playhead, the split and the Edit
+ * tool are about.
+ */
 export interface TimelineSlot {
   clip: EditClip;
   index: number;
   startMs: number;
+  /** The slot's own length: the clip's, less the [tailMs] the next clip starts over. */
   durationMs: number;
+  /** How long the transition INTO this clip runs from [startMs], 0 for a cut. */
+  transitionInMs: number;
+  /** How much of this clip plays under the next one's transition, after [durationMs]. 0 for a cut. */
+  tailMs: number;
 }
 
 export function clipDurationMs(clip: EditClip): number {
@@ -52,10 +69,12 @@ export function clipDurationMs(clip: EditClip): number {
 }
 
 export function timelineSlots(manifest: Pick<EditManifest, 'clips'>): TimelineSlot[] {
+  const spans = transitionSpans(manifest.clips);
   let cursor = 0;
   return manifest.clips.map((clip, index) => {
-    const durationMs = clipDurationMs(clip);
-    const slot = { clip, index, startMs: cursor, durationMs };
+    const tailMs = spans[index + 1]?.ms ?? 0;
+    const durationMs = clipDurationMs(clip) - tailMs;
+    const slot = { clip, index, startMs: cursor, durationMs, transitionInMs: spans[index].ms, tailMs };
     cursor += durationMs;
     return slot;
   });
@@ -66,6 +85,53 @@ export function slotAt(manifest: Pick<EditManifest, 'clips'>, outputMs: number):
   const slots = timelineSlots(manifest);
   if (!slots.length) return null;
   return slots.find(slot => outputMs < slot.startMs + slot.durationMs) ?? slots[slots.length - 1];
+}
+
+/**
+ * A transition running at some instant: the two clips on screen at once, and how far through it is.
+ * `to` is the clip whose slot the instant is in - the one [slotAt] answers with - and `from` is the
+ * outgoing clip, playing the tail its own slot gave up.
+ */
+export interface TransitionWindow {
+  /** Index of the INCOMING clip on the base track. */
+  index: number;
+  from: EditClip;
+  to: EditClip;
+  /** Where the window starts on the output timeline: the incoming clip's slot start. */
+  startMs: number;
+  durationMs: number;
+  /** 0..1 through the window. */
+  progress: number;
+  /** Where in the outgoing clip's SOURCE the instant lands, speed applied. */
+  fromSourceMs: number;
+  /** Where in the incoming clip's source it lands. */
+  toSourceMs: number;
+}
+
+/**
+ * The transition window `outputMs` is inside, or null at every instant that shows one clip.
+ * Takes the slots rather than the manifest because the preview asks on every frame, and the store
+ * already holds them.
+ */
+export function transitionWindowAt(slots: readonly TimelineSlot[], outputMs: number): TransitionWindow | null {
+  for (const slot of slots) {
+    if (slot.startMs > outputMs) break;
+    if (slot.transitionInMs <= 0 || outputMs >= slot.startMs + slot.transitionInMs) continue;
+    const from = slots[slot.index - 1]?.clip;
+    if (!from) return null;
+    const into = Math.max(0, outputMs - slot.startMs);
+    return {
+      index: slot.index,
+      from,
+      to: slot.clip,
+      startMs: slot.startMs,
+      durationMs: slot.transitionInMs,
+      progress: Math.min(1, into / slot.transitionInMs),
+      fromSourceMs: Math.min(from.outMs, from.outMs - (slot.transitionInMs - into) * (from.speed || 1)),
+      toSourceMs: sourceMsAt(slot, outputMs),
+    };
+  }
+  return null;
 }
 
 /** Source time inside a segment for an output time, clamped to the segment's trim. */
@@ -101,10 +167,18 @@ export function trackIdOfClip(manifest: EditManifest, clipId: string): string | 
   return track ? track.id : undefined;
 }
 
-export function patchClip(manifest: EditManifest, clipId: string, patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit'>> & ClipFramingPatch): EditManifest {
+export function patchClip(
+  manifest: EditManifest,
+  clipId: string,
+  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn'>> & ClipFramingPatch & { transitionIn?: EditTransition | null },
+): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
   const next = withFraming({ ...current, ...patch } as EditClip, patch);
+  if ('transitionIn' in patch) {
+    if (patch.transitionIn) next.transitionIn = { kind: patch.transitionIn.kind, durationMs: patch.transitionIn.durationMs };
+    else delete next.transitionIn;
+  }
   if (sameClip(current, next)) return manifest;
   if (manifest.clips.some(clip => clip.id === clipId)) {
     return { ...manifest, clips: manifest.clips.map(clip => (clip.id === clipId ? next : clip)) };
@@ -215,8 +289,10 @@ export function splitClipAt(manifest: EditManifest, outputMs: number, newId: str
   const cut = Math.round(sourceMsAt(slot, outputMs));
   const { clip } = slot;
   if (cut - clip.inMs < MIN_CLIP_MS || clip.outMs - cut < MIN_CLIP_MS) return null;
+  // The left piece keeps the transition that brings the clip in; the new cut between the two
+  // pieces is a cut, and the boundary after the right piece is the next clip's to describe.
   const left: EditClip = { ...clip, outMs: cut };
-  const right: EditClip = { ...clip, id: newId, inMs: cut };
+  const right: EditClip = withoutTransition({ ...clip, id: newId, inMs: cut });
   const clips = [...manifest.clips];
   clips.splice(slot.index, 1, left, right);
   return { ...manifest, clips };
@@ -239,6 +315,9 @@ export function canJoinWithNext(manifest: EditManifest, clipId: string): boolean
     a.fit === b.fit &&
     sameRect(a.crop, b.crop) &&
     sameRect(a.rect, b.rect) &&
+    // A transition between the halves is a boundary somebody chose to keep and dress. Joining would
+    // throw it away without a word, so the halves stay two until it is taken off.
+    !b.transitionIn &&
     Math.abs(a.outMs - b.inMs) <= 1
   );
 }
@@ -252,12 +331,15 @@ export function joinWithNext(manifest: EditManifest, clipId: string): EditManife
   return { ...manifest, clips };
 }
 
-/** Inserts a copy straight after the segment. */
+/**
+ * Inserts a copy straight after the segment. The copy starts on a cut: the transition the original
+ * came in with is about the boundary before the original, and the new boundary is somewhere else.
+ */
 export function duplicateClip(manifest: EditManifest, clipId: string, newId: string): EditManifest | null {
   const index = manifest.clips.findIndex(clip => clip.id === clipId);
   if (index < 0) return null;
   const clips = [...manifest.clips];
-  clips.splice(index + 1, 0, { ...clips[index], id: newId });
+  clips.splice(index + 1, 0, withoutTransition({ ...clips[index], id: newId }));
   return { ...manifest, clips };
 }
 
@@ -272,7 +354,9 @@ export function duplicateClip(manifest: EditManifest, clipId: string, newId: str
 export function removeClip(manifest: EditManifest, clipId: string): EditManifest | null {
   if (manifest.clips.some(clip => clip.id === clipId)) {
     if (manifest.clips.length <= 1) return null;
-    return { ...manifest, clips: manifest.clips.filter(clip => clip.id !== clipId) };
+    // The clip after it keeps its transition, now coming in from the clip before the gap - unless it
+    // is the first clip now, with nothing to come in from.
+    return { ...manifest, clips: withoutLeadingTransition(manifest.clips.filter(clip => clip.id !== clipId)) };
   }
   const owner = manifest.videoTracks.find(track => track.clips.some(clip => clip.id === clipId));
   if (!owner) return null;
@@ -293,8 +377,10 @@ export function moveClip(manifest: EditManifest, clipId: string, toIndex: number
   const trackId = trackIdOfClip(manifest, clipId);
   if (trackId === undefined) return manifest;
   if (trackId === null) {
+    // A transition travels with the clip it brings in, and is lost only by a clip carried to the
+    // front, where there is nothing for it to come in from.
     const clips = reordered(manifest.clips, clipId, toIndex);
-    return clips === manifest.clips ? manifest : { ...manifest, clips };
+    return clips === manifest.clips ? manifest : { ...manifest, clips: withoutLeadingTransition(clips) };
   }
   const track = findVideoTrack(manifest, trackId);
   if (!track) return manifest;
@@ -344,6 +430,55 @@ export function replaceClipSource(manifest: EditManifest, clipId: string, clipKe
     inMs: 0,
     outMs: Math.max(MIN_CLIP_MS, Math.round(Math.min(wanted, sourceDurationMs))),
   });
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Transitions                                                                                    */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The transition into a base clip from the one before it. `null` makes the boundary a cut again.
+ *
+ * The same manifest back for anything that has no boundary before it - the first base clip, a
+ * layer's clip, an id nobody has - and for a transition it already has. What is stored is what was
+ * asked for, brought into the catalogue's range; the clips either side decide how much of it runs.
+ */
+export function setClipTransition(manifest: EditManifest, clipId: string, transition: EditTransition | null): EditManifest {
+  const index = manifest.clips.findIndex(clip => clip.id === clipId);
+  if (index <= 0) return manifest;
+  const next = transition ? normaliseTransition(transition) : null;
+  if (transition && !next) return manifest;
+  return patchClip(manifest, clipId, { transitionIn: next });
+}
+
+/**
+ * The same transition on every boundary of the base track, or `null` to make them all cuts. One op,
+ * so "Apply to all" is one undo step however many boundaries it dressed.
+ */
+export function setAllTransitions(manifest: EditManifest, transition: EditTransition | null): EditManifest {
+  const next = transition ? normaliseTransition(transition) : null;
+  if (transition && !next) return manifest;
+  let changed = false;
+  const clips = manifest.clips.map((clip, index) => {
+    if (index === 0) return clip;
+    const patched = next ? { ...clip, transitionIn: { ...next } } : withoutTransition(clip);
+    if (sameTransition(clip.transitionIn, patched.transitionIn)) return clip;
+    changed = true;
+    return patched;
+  });
+  return changed ? { ...manifest, clips } : manifest;
+}
+
+/** The clip with no [EditClip.transitionIn] - the same object when it had none. */
+export function withoutTransition(clip: EditClip): EditClip {
+  if (!clip.transitionIn) return clip;
+  const bare = { ...clip };
+  delete bare.transitionIn;
+  return bare;
+}
+
+function sameTransition(a: EditTransition | undefined, b: EditTransition | undefined): boolean {
+  return a === b || (!!a && !!b && a.kind === b.kind && a.durationMs === b.durationMs);
 }
 
 /** Appends a new source after `afterClipId` (or at the end). */
@@ -439,14 +574,17 @@ export function cutPostTo(manifest: EditManifest, durationMs: number): EditManif
  */
 function cutClipRow(clips: readonly EditClip[], end: number, startMs: number): EditClip[] {
   const kept: EditClip[] = [];
-  let cursor = startMs;
-  for (const clip of clips) {
+  // Walked by slot, so a clip that starts under the end of a transition starts where it is seen to.
+  // A clip kept whole keeps its tail too: the next clip either survives the cut and needs it, or is
+  // dropped, and then the tail is simply the end of the last clip.
+  for (const slot of timelineSlots({ clips: clips as EditClip[] })) {
+    const clip = slot.clip;
+    const cursor = startMs + slot.startMs;
     if (cursor >= end) break;
     const durationMs = clipDurationMs(clip);
     const room = end - cursor;
     if (durationMs <= room) {
       kept.push(clip);
-      cursor += durationMs;
       continue;
     }
     // Straddles the cut. `room` is OUTPUT time and `outMs` is SOURCE time, so the speed is the
@@ -522,9 +660,11 @@ export type ClipDropTarget = { kind: 'base' } | { kind: 'track'; trackId: string
  * Guessing an arrangement here would be guessing before the customer has said.
  */
 export function moveClipToTrack(manifest: EditManifest, clipId: string, target: ClipDropTarget, atMs: number, newTrackId: string): EditManifest | null {
-  const clip = findClip(manifest, clipId);
+  const found = findClip(manifest, clipId);
   const fromTrackId = trackIdOfClip(manifest, clipId);
-  if (!clip || fromTrackId === undefined) return null;
+  if (!found || fromTrackId === undefined) return null;
+  // A layer has no transitions, and a clip landing somewhere new on the base track lands on a cut.
+  const clip = withoutTransition(found);
   if (fromTrackId === null && manifest.clips.length <= 1) return null;
   if (target.kind === 'base' && fromTrackId === null) return null;
   if (target.kind === 'track' && target.trackId === fromTrackId) return null;
@@ -581,15 +721,13 @@ export function moveClipToTrack(manifest: EditManifest, clipId: string, target: 
  */
 function insertAtTime(clips: readonly EditClip[], clip: EditClip, startMs: number, atMs: number): EditClip[] {
   const into = atMs - startMs;
-  let cursor = 0;
   let index = clips.length;
-  for (let i = 0; i < clips.length; i++) {
-    const duration = clipDurationMs(clips[i]);
-    if (into < cursor + duration / 2) {
-      index = i;
+  // Measured by SLOT, so a transition's overlap counts once rather than twice.
+  for (const slot of timelineSlots({ clips: clips as EditClip[] })) {
+    if (into < slot.startMs + slot.durationMs / 2) {
+      index = slot.index;
       break;
     }
-    cursor += duration;
   }
   const next = [...clips];
   next.splice(index, 0, clip);
@@ -663,7 +801,8 @@ export function swapTrackZ(manifest: EditManifest, trackId: string): EditManifes
   return {
     ...manifest,
     clips: drawnIn(track.clips, manifest.clips[0].rect),
-    videoTracks: manifest.videoTracks.map(t => (t.id === trackId ? { ...t, clips: drawnIn(manifest.clips, track.clips[0]?.rect) } : t)),
+    // The base clips going up to the layer leave their transitions behind: a layer has none.
+    videoTracks: manifest.videoTracks.map(t => (t.id === trackId ? { ...t, clips: drawnIn(manifest.clips, track.clips[0]?.rect).map(withoutTransition) } : t)),
   };
 }
 
@@ -983,7 +1122,8 @@ function sameClip(a: EditClip, b: EditClip): boolean {
     a.muted === b.muted &&
     a.fit === b.fit &&
     sameRect(a.crop, b.crop) &&
-    sameRect(a.rect, b.rect)
+    sameRect(a.rect, b.rect) &&
+    sameTransition(a.transitionIn, b.transitionIn)
   );
 }
 

@@ -21,6 +21,7 @@ import {
   timelineSlots,
   totalDurationMs,
   trackIdOfClip,
+  transitionPreset,
   type ClipDropTarget,
   type EditOverlay,
   type OverlayKind,
@@ -54,6 +55,9 @@ import {
   TRACK2_H,
   TRACK_H,
   TRACK_H_COMPACT,
+  cutX,
+  dotFits,
+  dotHitWidth,
   durationChip,
   dropTargetAt,
   frameUrl,
@@ -73,6 +77,12 @@ const EMPTY_WAVES: ReadonlyMap<string, WaveView> = new Map();
 
 /** Movement that turns a press into a scroll or a drag, and cancels a long press. */
 const MOVE_SLOP_PX = 8;
+/**
+ * How long after a press lets go a click on a transition dot is still that press's own click. A
+ * browser fires it straight after the pointer's up, a few milliseconds at most; a screen reader's
+ * click comes with no pointer at all, and never this close behind one.
+ */
+const CLICK_ECHO_MS = 700;
 const LONG_PRESS_MS = 350;
 /** A drag this close to the side of the timeline scrolls it, faster the closer it gets. */
 const EDGE_ZONE_PX = 36;
@@ -149,6 +159,27 @@ interface TrackSegmentView {
   tiles: FilmTile[];
   /** Its file could not be opened. The segment says so rather than showing an empty strip. */
   missing: boolean;
+}
+
+/**
+ * The white dot on one cut of the base track: LightCut's way in to a transition.
+ *
+ * Named by the INCOMING clip, because that is the clip whose `transitionIn` holds what the dot
+ * dresses the cut with - the same name the store's `openTransition` and the sheet use, so a tap is
+ * the id handed on and nothing else.
+ */
+interface TransitionDotView {
+  id: string;
+  /** The middle of the cut, content px: the dot's centre. */
+  x: number;
+  /** How wide its finger target is, px: 44 where the segments either side have room (see [dotHitWidth]). */
+  hit: number;
+  /** The whole accessible name, which Maestro matches as a full-string regex, so it is built once here. */
+  label: string;
+  /** The transition on the cut, or null for a plain cut. */
+  kind: string | null;
+  /** The transition sheet is open on this cut. */
+  open: boolean;
 }
 
 /** One extra video layer's row, nearest the base track first - the order they are drawn in. */
@@ -250,6 +281,10 @@ interface PinchState {
  * DOWN it leaves that row: the row under the finger lights up, the gap under each row opens a video
  * layer that is not there yet, and letting go puts the segment there. That is the whole of how a
  * post gets more than one picture on the frame from the timeline.
+ *
+ * Every cut of the base track carries LightCut's white dot, and a tap on one opens the transition
+ * sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
+ * that happens to start on one is still the timeline's scroll.
  *
  * Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  *  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
@@ -446,6 +481,58 @@ export class VeTimeline {
     },
     (a, b) =>
       sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.shift === y.shift && x.selected === y.selected && x.chip === y.chip && sameTiles(x.tiles, y.tiles)),
+  );
+
+  /**
+   * A dot on every cut of the base track that has room for one, in the order of the cuts.
+   *
+   * Two kinds of cut get none. The two beside the SELECTED base segment belong to its trim handles,
+   * which stand on exactly those edges, and a dot under a handle would be a finger target on top of
+   * another one. And a cut beside a segment drawn too narrow to carry it (see [dotFits]) - which
+   * only happens far enough zoomed out that nobody is aiming at a cut.
+   *
+   * The compact timeline keeps them. The transition sheet is a compact sheet, and the dot being
+   * dressed has to stay on screen above it, ringed, so it is clear which cut the sheet is about.
+   * Except under a voiceover take: the voiceover sheet is compact too, and a dot tapped there would
+   * shut that sheet under the take and stop it, from a timeline the customer is only watching go by.
+   *
+   * What the dot shows is what is STORED on the incoming clip, which is also what the sheet shows
+   * as chosen. A transition on two clips too short to hold one plays as a cut until they are longer
+   * again, and the store keeps it for exactly that reason, so the dot keeps saying it is there.
+   */
+  private readonly transitionDots = computedWith<TransitionDotView[]>(
+    () => {
+      const store = this.ctx.store;
+      const slots = store.slots.value;
+      if (slots.length < 2 || store.recordingFromMs.value !== null) return [];
+      const pps = store.pps.value;
+      const pad = this.pad.value;
+      const shift = this.trimShift.value;
+      const selection = store.selection.value;
+      const selected = selection?.kind === 'clip' ? slots.findIndex(slot => slot.clip.id === selection.id) : -1;
+      // Only ever set while the sheet is open: the store lets go of it as the sheet shuts.
+      const openId = store.transitionTarget.value;
+      const dots: TransitionDotView[] = [];
+      for (let i = 1; i < slots.length; i++) {
+        if (selected >= 0 && (i === selected || i === selected + 1)) continue;
+        if (!dotFits(slots, i, pps)) continue;
+        const clip = slots[i].clip;
+        const preset = clip.transitionIn ? transitionPreset(clip.transitionIn.kind) : null;
+        // Clips counted from one, the way the customer counts them: the cut in front of slot 1 is
+        // between clip 1 and clip 2.
+        const between = `between clip ${i} and clip ${i + 1}`;
+        dots.push({
+          id: clip.id,
+          x: cutX(pad, slots[i].startMs, pps) + (shift && shift.trackId === null && i >= shift.index ? shift.px : 0),
+          hit: dotHitWidth(slots, i, pps),
+          label: preset ? `${preset.label} transition ${between}` : `Transition ${between}`,
+          kind: preset?.id ?? null,
+          open: openId === clip.id,
+        });
+      }
+      return dots;
+    },
+    (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.hit === y.hit && x.label === y.label && x.kind === y.kind && x.open === y.open),
   );
 
   /**
@@ -922,6 +1009,12 @@ export class VeTimeline {
   private press: Press | null = null;
   private drag: TimelineDrag | null = null;
   private pinch: PinchState | null = null;
+  /**
+   * When a pointer last let go of the timeline, or the browser took it for a scroll, or a key
+   * opened a dot: the moment after which a click on a dot is the browser's echo of a press that
+   * has already been answered. See [onDotClick].
+   */
+  private pressEndedAt = -Infinity;
   /**
    * The identifiers of the touches that went down on the timeline. `event.touches` counts EVERY
    * finger on the screen, and a finger resting on the preview or on an open sheet is not ours: it
@@ -1673,6 +1766,7 @@ export class VeTimeline {
   };
 
   private readonly onPointerUp = (event: PointerEvent): void => {
+    this.pressEndedAt = performance.now();
     if (this.drag) {
       if (event.pointerId === this.drag.pointerId) this.endDrag(false);
       return;
@@ -1684,6 +1778,7 @@ export class VeTimeline {
   };
 
   private readonly onPointerCancel = (event: PointerEvent): void => {
+    this.pressEndedAt = performance.now();
     const drag = this.drag;
     if (drag && event.pointerId === drag.pointerId) {
       // A reorder the system interrupted is put back; a trim or a move keeps what was shown.
@@ -1724,10 +1819,50 @@ export class VeTimeline {
       case 'voice':
         if (id) this.toggleSelection({ kind: 'voice', id });
         return;
+      case 'transition':
+        // A tap and only a tap: a swipe that began on the dot was the browser's scroll, which ended
+        // the press with a pointercancel before it could get here.
+        if (id) store.openTransition(id);
+        return;
       default:
         if (store.selection.value) store.select(null);
     }
   }
+
+  /**
+   * Enter and Space on a focused dot, which is how a keyboard reaches a transition.
+   *
+   * The dot's tap arrives through the pointer path like every other press on the timeline, and its
+   * click listener answers only the clicks no pointer came before (see [onDotClick]), so the keys
+   * are answered here, on the way down. Cancelling the key also stops the native click a button
+   * fires for it, and tells the editor's own shortcuts that Space was not a play/pause.
+   */
+  private readonly onDotKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+    const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
+    if (!id) return;
+    event.preventDefault();
+    // A browser that still clicks the button on Space's keyup, cancelled or not, is answered by
+    // [onDotClick] as an echo.
+    this.pressEndedAt = performance.now();
+    if (!event.repeat) this.ctx.store.openTransition(id);
+  };
+
+  /**
+   * A click on a dot that no finger, mouse or key here has answered: a screen reader's double tap,
+   * or switch access.
+   *
+   * Those arrive as a bare `click`, with no pointer events before it, so the pointer path never
+   * hears them - and without this a TalkBack customer could find every dot by name and open none.
+   * A click that FOLLOWS a press is something else: the browser's echo of a tap the pointer path
+   * has already answered, or deliberately refused (a tap that stopped a fling). Both of those are
+   * ignored, which is what keeps one touch to one opening.
+   */
+  private readonly onDotClick = (event: MouseEvent): void => {
+    if (performance.now() - this.pressEndedAt < CLICK_ECHO_MS) return;
+    const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
+    if (id) this.ctx.store.openTransition(id);
+  };
 
   private toggleSelection(selection: EditorSelection): void {
     const store = this.ctx.store;
@@ -2703,9 +2838,14 @@ export class VeTimeline {
                   key="track"
                   data-vrow="base"
                 >
+                  {/*
+                    Keyed now that the row holds other buttons: the dots are buttons too, and an
+                    unkeyed sibling of the same tag is matched by position.
+                  */}
                   <button
                     type="button"
                     class="tl__mute"
+                    key="mute"
                     data-hit="mute"
                     style={{ left: `${pad - 74}px` }}
                     aria-label={this.originalMuted.value ? 'Turn original sound on' : 'Turn original sound off'}
@@ -2731,6 +2871,42 @@ export class VeTimeline {
                     that has run out of filmstrip.
                   */}
                   {tail ? <span class="tl__tail" key="tail" aria-hidden="true" style={{ left: `${tail.x}px`, width: `${tail.w}px` }}></span> : null}
+
+                  {/*
+                    The dots on the cuts, in the row itself so they scroll and zoom with the
+                    filmstrip, and after the segments so they paint over the gap they mark.
+
+                    No `touch-action` of their own: a tap comes through the pointer path by
+                    `data-hit`, and a swipe that starts on a dot inherits the row's `pan-x` and
+                    scrolls the timeline like a swipe anywhere else on it. The click listener is for
+                    the clicks no pointer came before, a screen reader's. Keys are prefixed because
+                    the segments beside them are keyed by the very same clip ids.
+
+                    The target is narrowed beside a short segment (see [dotHitWidth]), always about
+                    the cut: the width and the margin that centres it are written together.
+                  */}
+                  {this.transitionDots.value.map(dot => (
+                    <button
+                      type="button"
+                      class={{ 'tl__trans': true, 'tl__trans--set': dot.kind !== null, 'tl__trans--open': dot.open }}
+                      key={`trans-${dot.id}`}
+                      data-hit="transition"
+                      data-id={dot.id}
+                      // No `aria-pressed`, although the open dot is lit. Chrome hands a button that has
+                      // both an aria-label and aria-pressed to Android as a ToggleButton, and the
+                      // WebViews still in use (Chrome 99 on the Samsung A13) send that ToggleButton
+                      // with NO text - so TalkBack reads nothing and Maestro finds nothing. The label
+                      // already says what the boundary carries, which is the state worth hearing.
+                      aria-label={dot.label}
+                      style={{ left: `${dot.x}px`, width: `${dot.hit}px`, marginLeft: `${-dot.hit / 2}px` }}
+                      onKeyDown={this.onDotKey}
+                      onClick={this.onDotClick}
+                    >
+                      <span class="tl__trans-dot" aria-hidden="true">
+                        {dot.kind !== null ? <ve-icon name="transition" key="glyph"></ve-icon> : null}
+                      </span>
+                    </button>
+                  ))}
 
                   {/* Outside the segments, so one set of arithmetic places every handle on the timeline. */}
                   {trim && trim.trackId === null

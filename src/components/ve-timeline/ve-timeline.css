@@ -426,6 +426,151 @@
   left: 20px;
 }
 
+/* ------------------------------------------------------------------------------ transitions */
+
+/*
+ * LightCut's dot on a cut: a white circle in the gap between two segments, and the way in to a
+ * transition.
+ *
+ * The button is the 44px finger target, centred on the cut and on the filmstrip; the circle inside
+ * it is what shows. Above the segments, which it overlaps by the width of a fingertip either side,
+ * and below the trim handles (3), which never share an edge with one anyway - the dots beside the
+ * selected segment are not drawn at all. Beside a short segment the component narrows it, writing
+ * `width` and `margin-left` inline together, so the segment keeps a part of itself to be tapped;
+ * the 44px here is the width wherever there is room for it.
+ *
+ * No `touch-action`. The row's `pan-x` is what makes a swipe that starts on a dot the timeline's
+ * scroll, and `none` here would turn every such swipe into a press that goes nowhere.
+ */
+.tl__trans {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  outline: 0;
+  background: transparent;
+  color: #1c1c1e;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/*
+ * A plain cut: a pure white circle with a hairline of dark around it, so it reads on the brightest
+ * frame as well as on the black gap, and a small dark centre.
+ */
+.tl__trans-dot {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45),
+    0 1px 4px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  transition:
+    width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 180ms ease,
+    transform 120ms ease;
+}
+
+.tl__trans-dot::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1c1c1e;
+}
+
+/*
+ * A dressed cut: a little larger, and the centre becomes the transition glyph - two triangles
+ * meeting in the middle. The glyph is one em square, so its size is this font size.
+ */
+.tl__trans--set .tl__trans-dot {
+  width: 22px;
+  height: 22px;
+  font-size: 13px;
+}
+
+.tl__trans--set .tl__trans-dot::after {
+  display: none;
+}
+
+/*
+ * The glyph arrives rather than appears, so the customer sees the cut take the transition they just
+ * tapped in the sheet below. It runs once, when the icon is created, which is only ever the moment a
+ * cut is dressed - or the moment a dressed cut comes back on screen, where the same small pop reads
+ * as the dot settling in.
+ */
+.tl__trans--set .tl__trans-dot ve-icon {
+  animation: tl-trans-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+@keyframes tl-trans-in {
+  from {
+    opacity: 0;
+    transform: scale(0.3) rotate(-90deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tl__trans-dot,
+  .tl__trans--set .tl__trans-dot ve-icon {
+    animation: none;
+    transition: none;
+  }
+}
+
+/*
+ * The cut the open sheet is about: ringed in the accent, with a dark hairline between the white and
+ * the lime so the ring stays a ring on a white frame too.
+ *
+ * Lifted above the playhead (5) while it is open. The sheet seeks the preview to this cut, so the
+ * line is standing on it, and the dot being dressed is the one thing on the timeline that should
+ * not be crossed out. It still paints under the add button, which comes later at the same height.
+ */
+.tl__trans--open {
+  z-index: 6;
+}
+
+.tl__trans--open .tl__trans-dot {
+  box-shadow:
+    0 0 0 1px #1c1c1e,
+    0 0 0 3px var(--ve-accent, #a6ff2e),
+    0 2px 8px rgba(0, 0, 0, 0.55);
+  transform: scale(1.12);
+}
+
+.tl__trans:active .tl__trans-dot {
+  transform: scale(0.9);
+}
+
+.tl__trans:focus-visible .tl__trans-dot {
+  box-shadow:
+    0 0 0 2px #1c1c1e,
+    0 0 0 4px #fff;
+}
+
+/*
+ * Out of the way while the row is being rearranged: a trim moves the cuts under the finger, and a
+ * lifted segment turns the row into a rail of thumbnails or carries it to another layer - a dot
+ * left floating over either would be marking a cut that is not there.
+ */
+.tl--drag-resize .tl__trans,
+.tl--reordering .tl__trans {
+  visibility: hidden;
+}
+
 /* ----------------------------------------------------------------------------------- lanes */
 
 /*
@@ -806,8 +951,18 @@
 
   .item--add-sound,
   .tl__mute,
-  .tl__add {
+  .tl__add,
+  .tl__trans {
     cursor: pointer;
+  }
+
+  /* The dot grows a little under the pointer, the one sign it is a button and not a mark. */
+  .tl__trans:hover .tl__trans-dot {
+    transform: scale(1.12);
+  }
+
+  .tl__trans:active .tl__trans-dot {
+    transform: scale(0.9);
   }
 
   /*
@@ -825,7 +980,8 @@
   .tl--drag-move .handle,
   .tl--drag-move .item--add-sound,
   .tl--drag-move .tl__mute,
-  .tl--drag-move .tl__add {
+  .tl--drag-move .tl__add,
+  .tl--drag-move .tl__trans {
     cursor: grabbing;
   }
 

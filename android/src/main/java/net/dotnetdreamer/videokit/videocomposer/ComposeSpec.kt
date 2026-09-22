@@ -93,6 +93,126 @@ data class Clip(
      * the promise that a clip which asks for neither field renders byte for byte as it did before.
      */
     val rect: Placement? = null,
+    /**
+     * A transition INTO this clip from the one before it on the BASE track. Null is a cut, which
+     * is what every spec written before this field says.
+     *
+     * Only ever set on a base clip that has a clip before it: the parser does not so much as read
+     * the key on the first base clip, on a layer's clips or on a [Transition.from], because none of
+     * those has an outgoing clip to come from. The plan asks this ONCE per clip, when it is built,
+     * and a clip that answers null takes exactly the item it took before transitions existed.
+     */
+    val transitionIn: Transition? = null,
+)
+
+/**
+ * How one base clip gives way to the next: the Kotlin mirror of `ComposeTransition`, whose doc
+ * comment in definitions.ts is the NORMATIVE drawing contract every engine implements, word for
+ * word. What follows is only what this engine needs to know to read it.
+ *
+ * The spec arrives LOWERED. The outgoing clip already stops where this one starts, so the base
+ * track is the flat sequence it has always been and the post is already the right length; what the
+ * outgoing clip gave up is [from], a clip in its own right - the same source, speed, sound and
+ * framing, trimmed to its last moments - which is drawn UNDER the incoming clip for its own length,
+ * starting where the incoming clip starts. An engine that ignored this field would render a cut
+ * and a video of exactly the right length, which is the whole of the back-compatibility story.
+ *
+ * What the transition LOOKS like is not code here. It is [curves]: every channel it moves, sampled
+ * at evenly spaced moments of its window, drawn through the same few operations by every engine.
+ * [kind] is the catalogue id and is carried for a log line and nothing else - branching on it would
+ * be a second definition of the transition that the preview could disagree with.
+ *
+ * A plain class and not a data class, because its curves are arrays and a data class would compare
+ * them by identity anyway; nothing compares two transitions.
+ */
+class Transition(
+    /** The catalogue id, `dissolve` or `slide-left`. For logs only; never branched on. */
+    val kind: String,
+    /** The outgoing clip's last moments, drawn under the incoming clip while the window runs. */
+    val from: Clip,
+    /** The shape the incoming side is revealed through. Null reveals it everywhere at once. */
+    val mask: TransitionMask?,
+    /** 0..1 RGB the outgoing side's `tint` channel moves towards. Null is black. */
+    val fromTint: FloatArray?,
+    /** The same for the incoming side. */
+    val toTint: FloatArray?,
+    val curves: TransitionCurves,
+)
+
+/**
+ * The mask shapes of the contract, with the names they travel under.
+ *
+ * The ORDER is part of the drawing: a shape reaches the shader as its ordinal, and the shader's
+ * `maskMeasure` tests 0 for linear through 5 for split. A shape added here goes at the end and gets
+ * its branch there, or every mask after it draws as its neighbour.
+ */
+enum class MaskShape(val wire: String) {
+    LINEAR("linear"),
+    CIRCLE("circle"),
+    DIAMOND("diamond"),
+    CLOCK("clock"),
+    BLINDS("blinds"),
+    SPLIT("split"),
+    ;
+
+    companion object {
+        /** Null for anything that is not one of the six: a shape error, not a value to guess at. */
+        fun fromWire(value: String?): MaskShape? = entries.firstOrNull { it.wire == value }
+    }
+}
+
+/**
+ * The shape the incoming side is revealed through - `ComposeTransitionMask`. Every field already
+ * holds its default or its clamped value, so the drawing never has to ask what an absent one means.
+ */
+data class TransitionMask(
+    val shape: MaskShape,
+    /**
+     * The way a linear edge TRAVELS, y down. Not clamped, only brought within one turn of zero,
+     * which changes no sine or cosine and keeps a float able to hold it.
+     */
+    val angleDeg: Float,
+    /** `blinds` only: how many slats, 1..64. */
+    val count: Int,
+    /** Softness of the edge in the shape's own 0..1 units, 0.0005..0.5. */
+    val feather: Float,
+    val invert: Boolean,
+)
+
+/**
+ * Every channel a transition moves, each sampled at evenly spaced moments of its window - the
+ * first at the start and the last at the end. Every curve present has the same length, 2 to 121
+ * samples, which the parser has checked. A null curve holds its neutral value for the whole window.
+ */
+class TransitionCurves(
+    /** How much of the incoming side is drawn, 0..1. Neutral 1. */
+    val alpha: FloatArray?,
+    /** How far the mask is open, 0..1. Neutral 1. */
+    val reveal: FloatArray?,
+    val from: TransitionSideCurves?,
+    val to: TransitionSideCurves?,
+)
+
+/** One side's channels - `ComposeTransitionSideCurves`, with the neutral value each one holds. */
+class TransitionSideCurves(
+    /** Offset, a fraction of the output width, positive right. Neutral 0. */
+    val x: FloatArray?,
+    /** Offset, a fraction of the output height, positive down. Neutral 0. */
+    val y: FloatArray?,
+    /** Size about the frame centre. Neutral 1. */
+    val scale: FloatArray?,
+    /** Clockwise degrees about the frame centre. Neutral 0. */
+    val rotation: FloatArray?,
+    /** Gaussian sigma, a fraction of the shorter side. Neutral 0. */
+    val blur: FloatArray?,
+    /** Mosaic cell, a fraction of the shorter side. Neutral 0. */
+    val pixelate: FloatArray?,
+    /** Red right and blue left by this fraction of the width. Neutral 0. */
+    val split: FloatArray?,
+    /** Colour multiplier. Neutral 1. */
+    val gain: FloatArray?,
+    /** 0..1 towards the side's tint colour. Neutral 0. */
+    val tint: FloatArray?,
 )
 
 /**

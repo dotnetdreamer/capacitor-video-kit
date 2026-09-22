@@ -587,6 +587,272 @@ describe('the waveform on an audio bar', () => {
 });
 
 /*
+ * LightCut's white dots: one on every cut of the base track, and the way in to a transition.
+ *
+ * The fixture's three four-second segments put the cuts at 4 and 8 seconds, 256 px apart at the
+ * zoom the editor opens on. The labels are asserted whole, because Maestro matches them as
+ * full-string regexes and a reworded one is a flow that silently stops finding its dot.
+ */
+describe('the transition dots', () => {
+  function dots(tl: HTMLElement): HTMLButtonElement[] {
+    return [...root(tl).querySelectorAll<HTMLButtonElement>('.tl__trans')];
+  }
+
+  function dot(tl: HTMLElement, into: string): HTMLButtonElement {
+    const found = root(tl).querySelector<HTMLButtonElement>(`.tl__trans[data-id="${into}"]`);
+    if (!found) throw new Error(`no dot in front of ${into}`);
+    return found;
+  }
+
+  function mouse(on: Element, type: string, x: number, y: number): void {
+    on.dispatchEvent(new PointerEvent(type, { pointerId: 7, pointerType: 'mouse', button: 0, isPrimary: true, clientX: x, clientY: y, bubbles: true, cancelable: true }));
+  }
+
+  it('puts one dot on every cut, named for the two clips it sits between', async () => {
+    const { tl } = await mount();
+
+    expect(dots(tl)).toHaveLength(2);
+    expect(dots(tl).map(d => d.getAttribute('aria-label'))).toEqual(['Transition between clip 1 and clip 2', 'Transition between clip 2 and clip 3']);
+    // Named by the INCOMING clip, which is the one that holds the transition.
+    expect(dots(tl).map(d => d.dataset.id)).toEqual(['seg-b', 'seg-c']);
+    // No toggle state on the dots: an old Android WebView drops the whole name of a labelled toggle.
+    expect(dots(tl).every(d => !d.hasAttribute('aria-pressed'))).toBe(true);
+  });
+
+  it('centres each dot on the gap it marks, on the filmstrip', async () => {
+    const { tl } = await mount();
+
+    for (const [before, after] of [
+      ['seg-a', 'seg-b'],
+      ['seg-b', 'seg-c'],
+    ]) {
+      const left = segmentEl(tl, before).getBoundingClientRect();
+      const right = segmentEl(tl, after).getBoundingClientRect();
+      const circle = centre(dot(tl, after));
+      expect(Math.abs(circle.x - (left.right + right.left) / 2)).toBeLessThanOrEqual(1);
+      expect(Math.abs(circle.y - (right.top + right.height / 2))).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('opens the transition sheet on its own cut when it is tapped', async () => {
+    const { store, tl } = await mount();
+    const at = centre(dot(tl, 'seg-c'));
+
+    pointer(dot(tl, 'seg-c'), 'pointerdown', at.x, at.y);
+    pointer(dot(tl, 'seg-c'), 'pointerup', at.x, at.y);
+
+    expect(store.panel.value).toBe('transition');
+    expect(store.transitionTarget.value).toBe('seg-c');
+    expect(store.targetBoundary.value?.index).toBe(2);
+    await until('the dot to show it is open', () => dot(tl, 'seg-c').classList.contains('tl__trans--open'));
+    expect(dot(tl, 'seg-b').classList.contains('tl__trans--open')).toBe(false);
+  });
+
+  it('opens from the keyboard as well, since it has no click of its own', async () => {
+    const { store, tl } = await mount();
+
+    dot(tl, 'seg-b').focus();
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, composed: true });
+    dot(tl, 'seg-b').dispatchEvent(event);
+
+    expect(store.panel.value).toBe('transition');
+    expect(store.transitionTarget.value).toBe('seg-b');
+    // Taken, so the editor's own shortcuts do not also read it.
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('leaves a swipe that starts on a dot to the browser, which scrolls instead of opening it', async () => {
+    const { store, tl } = await mount();
+    const at = centre(dot(tl, 'seg-b'));
+
+    // The row's `pan-x` is what hands a sideways swipe to the browser; a dot that took it for itself
+    // would be a dead patch of filmstrip that neither scrolls nor seeks.
+    expect(getComputedStyle(dot(tl, 'seg-b')).touchAction).not.toBe('none');
+
+    // What the browser does with a finger that moves sideways: the move, then a cancel as it claims
+    // the gesture for its own scroll.
+    pointer(dot(tl, 'seg-b'), 'pointerdown', at.x, at.y);
+    pointer(dot(tl, 'seg-b'), 'pointermove', at.x - 60, at.y);
+    pointer(dot(tl, 'seg-b'), 'pointercancel', at.x - 60, at.y);
+    pointer(dot(tl, 'seg-b'), 'pointerup', at.x - 60, at.y);
+    await frames(2);
+
+    expect(store.panel.value).toBeNull();
+  });
+
+  it('pulls the timeline along under a mouse dragged from a dot, and does not open it', async () => {
+    const { store, tl } = await mount();
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    const before = scroller.scrollLeft;
+    const at = centre(dot(tl, 'seg-b'));
+
+    mouse(dot(tl, 'seg-b'), 'pointerdown', at.x, at.y);
+    mouse(scroller, 'pointermove', at.x - 80, at.y);
+    await frames(3);
+    mouse(scroller, 'pointerup', at.x - 80, at.y);
+    await frames(2);
+
+    expect(scroller.scrollLeft).toBeGreaterThan(before + 40);
+    expect(store.panel.value).toBeNull();
+  });
+
+  it('gives the selected segment’s two edges to its trim handles', async () => {
+    const { store, tl } = await mount();
+
+    store.select({ kind: 'clip', id: 'seg-b' });
+    await until('both of its dots to go', () => dots(tl).length === 0);
+
+    store.select({ kind: 'clip', id: 'seg-a' });
+    // The first segment has one cut, on its right; the other cut is not its to take.
+    await until('the far dot to come back', () => dots(tl).length === 1);
+    expect(dots(tl)[0].dataset.id).toBe('seg-c');
+  });
+
+  it('goes when the segments either side are drawn too narrow to carry it', async () => {
+    const { store, tl } = await mount();
+
+    // Six pixels a second: every segment is 24 px wide, less the gap - narrower than the dot.
+    store.pps.value = 6;
+    await until('the dots to go', () => dots(tl).length === 0);
+
+    store.pps.value = 64;
+    await until('the dots to come back', () => dots(tl).length === 2);
+  });
+
+  it('opens from a bare click as well, which is how a screen reader presses a button', async () => {
+    const { store, tl } = await mount();
+
+    // TalkBack's double tap and switch access both arrive as a click with no pointer events before
+    // it, so the pointer path never hears them.
+    dot(tl, 'seg-b').click();
+
+    expect(store.panel.value).toBe('transition');
+    expect(store.transitionTarget.value).toBe('seg-b');
+  });
+
+  it('opens once for a tap, though the browser follows the tap with a click', async () => {
+    const { store, tl } = await mount();
+    const opened: string[] = [];
+    const open = store.openTransition.bind(store);
+    store.openTransition = (id: string) => {
+      opened.push(id);
+      open(id);
+    };
+    const target = dot(tl, 'seg-b');
+    const at = centre(target);
+
+    pointer(target, 'pointerdown', at.x, at.y);
+    pointer(target, 'pointerup', at.x, at.y);
+    target.click();
+
+    expect(opened).toEqual(['seg-b']);
+  });
+
+  it('leaves a short segment between two dots enough of itself to be selected', async () => {
+    const { store, tl } = await mount();
+    // The column's height, as `ve-editor` gives it, so the point below is really hit-tested: the
+    // host is otherwise a block of no height that clips everything in it out of reach of a finger.
+    tl.style.height = '100%';
+    // A second, then a 0.6 s piece of the kind a split leaves: 33 px drawn at the opening zoom. Two
+    // full 44 px targets on its two cuts would cover every pixel of it, and a tap anywhere on it
+    // would open a transition instead of selecting it.
+    store.commit('Shorten', m => ({
+      ...m,
+      clips: m.clips.map(c => (c.id === 'seg-a' ? { ...c, outMs: 1000 } : c.id === 'seg-b' ? { ...c, outMs: 600 } : c)),
+    }));
+    await until('both of its dots', () => dots(tl).length === 2 && segmentEl(tl, 'seg-b').getBoundingClientRect().width < 40);
+
+    const at = centre(segmentEl(tl, 'seg-b'));
+    const hit = root(tl).elementFromPoint(at.x, at.y);
+    expect(hit).not.toBeNull();
+    pointer(hit!, 'pointerdown', at.x, at.y);
+    pointer(hit!, 'pointerup', at.x, at.y);
+
+    expect(store.panel.value).toBeNull();
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-b' });
+  });
+
+  it('is never a smaller target than the circle it draws', async () => {
+    const { store, tl } = await mount();
+    store.commit('Shorten', m => ({ ...m, clips: m.clips.map(c => (c.id === 'seg-b' ? { ...c, outMs: 600 } : c)) }));
+    await until('the narrower targets', () => dots(tl).length === 2 && dots(tl).every(d => d.getBoundingClientRect().width < 44));
+
+    for (const d of dots(tl)) {
+      const target = d.getBoundingClientRect();
+      const circle = d.querySelector('.tl__trans-dot')!.getBoundingClientRect();
+      expect(target.width).toBeGreaterThanOrEqual(circle.width - 0.5);
+      // Still centred on the cut.
+      expect(Math.abs(target.left + target.width / 2 - (circle.left + circle.width / 2))).toBeLessThanOrEqual(0.5);
+    }
+  });
+
+  it('keeps out of reach while a voiceover take is running', async () => {
+    const { store, tl } = await mount();
+
+    // A tap on one would shut the voiceover sheet under the take and stop it.
+    store.recordingFromMs.value = 0;
+    await until('the dots to go', () => dots(tl).length === 0);
+
+    store.recordingFromMs.value = null;
+    await until('the dots to come back', () => dots(tl).length === 2);
+  });
+
+  it('keeps out of the way while an edge is trimmed', async () => {
+    const { store, tl } = await mount();
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the handles', () => root(tl).querySelector('.handle--out') !== null && dots(tl).length === 1);
+
+    const handle = root(tl).querySelector<HTMLElement>('.handle--out')!;
+    const at = centre(handle);
+    pointer(handle, 'pointerdown', at.x, at.y);
+    await until('the trim to take the row', () => root(tl).querySelector('.tl--drag-resize') !== null);
+    expect(getComputedStyle(dot(tl, 'seg-c')).visibility).toBe('hidden');
+
+    pointer(handle, 'pointerup', at.x, at.y);
+    await until('the dot to come back', () => getComputedStyle(dot(tl, 'seg-c')).visibility === 'visible');
+  });
+
+  it('keeps out of the way while a segment is lifted', async () => {
+    const { tl } = await mount();
+    const base = row(tl, 'base').getBoundingClientRect();
+
+    await lift(tl, 'seg-a', { x: base.left + 200, y: base.bottom + 12 });
+
+    expect(getComputedStyle(dot(tl, 'seg-c')).visibility).toBe('hidden');
+    drop(tl, { x: base.left + 200, y: base.top - 80 });
+  });
+
+  it('wears the transition once one is chosen, and the cut moves in by the overlap', async () => {
+    const { store, tl } = await mount();
+    const widthBefore = segmentEl(tl, 'seg-a').getBoundingClientRect().width;
+
+    store.openTransition('seg-b');
+    store.chooseTransition('slide-left');
+    await until('the new name', () => dot(tl, 'seg-b').getAttribute('aria-label') === 'Slide left transition between clip 1 and clip 2');
+
+    expect(dot(tl, 'seg-b').classList.contains('tl__trans--set')).toBe(true);
+    // A property rather than an attribute: the icon's name is not reflected.
+    expect((dot(tl, 'seg-b').querySelector('ve-icon') as (HTMLElement & { name?: string }) | null)?.name).toBe('transition');
+    // The other cut is still a plain one.
+    expect(dot(tl, 'seg-c').getAttribute('aria-label')).toBe('Transition between clip 2 and clip 3');
+
+    // Half a second of overlap at 64 px a second: the outgoing segment is drawn 32 px shorter, and
+    // the dot is still on the gap between it and the next.
+    const overlapPx = (store.targetBoundary.value!.effectiveMs / 1000) * store.pps.value;
+    expect(overlapPx).toBeCloseTo(32, 5);
+    const left = segmentEl(tl, 'seg-a').getBoundingClientRect();
+    expect(left.width).toBeCloseTo(widthBefore - overlapPx, 0);
+    const right = segmentEl(tl, 'seg-b').getBoundingClientRect();
+    expect(Math.abs(centre(dot(tl, 'seg-b')).x - (left.right + right.left) / 2)).toBeLessThanOrEqual(1);
+
+    // And back to a plain cut with None.
+    store.removeTransition();
+    await until('the plain name', () => dot(tl, 'seg-b').getAttribute('aria-label') === 'Transition between clip 1 and clip 2');
+    expect(dot(tl, 'seg-b').querySelector('ve-icon')).toBeNull();
+  });
+});
+
+/*
  * A video's own sound, on its filmstrip - and what turning that sound off does to it.
  */
 describe('the waveform on a video clip', () => {

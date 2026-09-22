@@ -160,7 +160,12 @@ class VideoComposerPlugin : Plugin() {
             // Every layer's footage, not only the base track's: a clip on a second layer is read,
             // trimmed and decoded exactly like one on the first, and a file that cannot be opened
             // has to fail the post here, where the failure can still name the clip it came from.
-            for (clip in spec.clips + spec.tracks.flatMap { it.clips }) {
+            // A transition's tail is read too. It is the outgoing clip's own file today, so this
+            // costs nothing, but the plan clamps the tail's trim to what the probe says, and a
+            // tail missing from the map would be planned off the manifest's numbers alone. It
+            // carries the outgoing clip's key, so a failure names the clip the customer knows.
+            val tails = spec.clips.mapNotNull { it.transitionIn?.from }
+            for (clip in spec.clips + tails + spec.tracks.flatMap { it.clips }) {
                 if (probes.containsKey(clip.uri)) continue
                 val info = try {
                     Thumbnailer.probe(appContext, clip.uri)
