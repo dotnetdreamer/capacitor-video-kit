@@ -125,6 +125,8 @@ interface SegmentView {
   selected: boolean;
   chip: string;
   tiles: FilmTile[];
+  /** Its file could not be opened. The segment says so rather than showing an empty strip. */
+  missing: boolean;
 }
 
 /**
@@ -140,6 +142,8 @@ interface TrackSegmentView {
   selected: boolean;
   chip: string;
   tiles: FilmTile[];
+  /** Its file could not be opened. The segment says so rather than showing an empty strip. */
+  missing: boolean;
 }
 
 /** One extra video layer's row, nearest the base track first - the order they are drawn in. */
@@ -406,6 +410,7 @@ export class VeTimeline {
       const win = this.renderWindow.value;
       const shift = this.trimShift.value;
       const slots = store.slots.value;
+      const missing = store.unreadable.value;
       return slots.map((slot, i) => {
         const clip = slot.clip;
         const last = i === slots.length - 1;
@@ -430,6 +435,7 @@ export class VeTimeline {
             winRight: win.right,
             strip: strips.get(clip.clipKey),
           }),
+          missing: missing.has(clip.clipKey),
         };
       });
     },
@@ -465,6 +471,7 @@ export class VeTimeline {
       const total = store.totalMs.value;
       const shift = this.trimShift.value;
 
+      const missing = store.unreadable.value;
       return tracks.map(track => {
         const segments: TrackSegmentView[] = [];
         for (const slot of timelineSlots({ clips: track.clips })) {
@@ -493,6 +500,7 @@ export class VeTimeline {
               winRight: win.right,
               strip: strips.get(clip.clipKey),
             }),
+            missing: missing.has(clip.clipKey),
           });
         }
         return { id: track.id, segments };
@@ -2551,12 +2559,48 @@ export class VeTimeline {
         )}
       </div>,
       seg.selected ? <span class="seg__border" key="border"></span> : null,
-      seg.selected ? (
+      /*
+       * The one thing on a segment that is not decoration.
+       *
+       * Drawn INSTEAD of the duration chip, and whether or not the segment is selected, because a
+       * clip whose file has gone is not a detail of the selection - it is the reason the stage is
+       * black, and the customer has to see it without hunting for it. An empty filmstrip cannot
+       * carry that news: grey tiles are also what a strip that has not finished cutting looks like.
+       *
+       * It is a button because there IS something to do about it. Replacing keeps the segment's
+       * length and every edit made to it, so the post survives its missing clip being swapped for
+       * the file the customer still has.
+       */
+      seg.missing ? (
+        <button
+          type="button"
+          class="seg__missing"
+          key="missing"
+          aria-label="Replace missing video"
+          onClick={event => this.onReplaceMissing(event, seg.id)}
+        >
+          Video missing
+        </button>
+      ) : seg.selected ? (
         <span class="seg__chip" key="chip">
           {seg.chip}
         </span>
       ) : null,
     ];
+  }
+
+  /**
+   * Picks a new file for a clip whose own has gone.
+   *
+   * The tap is stopped here rather than allowed through, because the segment underneath treats a
+   * tap as "select me" and the picker would then open behind a selection change. Selecting first is
+   * still needed: replacing acts on the selected clip, and the badge can be tapped on a segment
+   * that is not the selected one.
+   */
+  private onReplaceMissing(event: Event, id: string): void {
+    event.stopPropagation();
+    this.ctx.store.select({ kind: 'clip', id });
+    void this.ctx.media.replaceSelectedClip();
   }
 
   /**

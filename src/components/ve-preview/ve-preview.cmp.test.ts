@@ -467,8 +467,13 @@ describe('ve-preview composites the post', () => {
       const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#0000ff') };
       const { store, preview } = await mount(false, files);
 
-      // A square source in a 9:16 frame, drawn `contain` as every post is by default: black top and
-      // bottom. The colour work is the compositor's now, and the same call the export makes.
+      // A square source in a 9:16 frame, drawn `contain`: black top and bottom. A post FILLS its
+      // frame now, so the bars are what a tap on Fit puts back - which is the customer's own route
+      // to the thing being tested, and the reason the tap is here rather than a manifest written by
+      // hand. The colour work is the compositor's, and the same call the export makes.
+      store.select(null);
+      store.toggleFit();
+      expect(store.manifest.value.fit).toBe('contain');
       await until('the video to be composited', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
       const wasRed = pixelAt(preview, 0.5, 0.5);
 
@@ -900,6 +905,9 @@ describe('ve-preview on a free canvas', () => {
     // The edge is drawn over the canvas: on a black page against a black frame there is otherwise
     // nothing to say where the finished post ends.
     expect(getComputedStyle(frame, '::after').borderTopWidth).toBe('1px');
+    // And it is a rectangle. The render has no corner radius to give, so a rounded preview would be
+    // showing a shape the file does not come back as.
+    expect(getComputedStyle(frame).borderTopLeftRadius).toBe('0px');
   });
 });
 describe('ve-preview selecting a video by touching it', () => {

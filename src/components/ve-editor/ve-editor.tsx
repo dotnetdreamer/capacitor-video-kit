@@ -1,5 +1,6 @@
 import { Component, Element, Event, type EventEmitter, Host, Prop, State } from '@stencil/core';
 
+import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { aspectOf, isUntouched, normaliseOutput, qualityOf, reconcileManifest, uniqueClipKeys, type EditManifest } from '../../editor';
@@ -10,6 +11,7 @@ import {
   RenderFailedError,
   type EditorCancelReason,
   type EditorInsets,
+  type EditorSnapshot,
   type EditorSource,
   type RenderFailureCode,
   type VideoEditorHost,
@@ -120,6 +122,23 @@ export class VeEditor {
   @Event() veCancel!: EventEmitter<EditorCancelReason>;
 
   /**
+   * The edit, every time the customer finishes changing it. This is what a host files a draft from.
+   *
+   * It carries the same pair [veDone] does, minus the render, because a draft and a finished post
+   * are reopened by exactly the same two things - see [EditorSnapshot]. So a host can save on this
+   * and reopen on `sources` + `manifest` without knowing which of the two events wrote the record.
+   *
+   * ONE EVENT PER FINISHED STEP, never one per frame. It follows `store.revision`, which counts
+   * committed changes rather than manifest writes, so a trim dragged across the timeline emits once
+   * when the finger lifts rather than sixty times on the way. Undo and redo emit too, because they
+   * change the edit as surely as the step that is being taken back.
+   *
+   * It does NOT fire for merely opening an editor. A host that saved on that would rewrite a draft
+   * every time somebody looked at it, and bump it to the top of a list it never changed.
+   */
+  @Event() veChange!: EventEmitter<EditorSnapshot>;
+
+  /**
    * Plain `@State` rather than signals: nothing outside this class reads any of the three, and the
    * render already reads all three, so Stencil's own repaint is the whole of what they need.
    */
@@ -147,6 +166,7 @@ export class VeEditor {
   private leaving = false;
   private renderSupported = false;
   private unregisterBack: (() => void) | null = null;
+  private unwatchChange: (() => void) | null = null;
   private renderAbort: AbortController | null = null;
   private measureTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -265,6 +285,10 @@ export class VeEditor {
 
     this.unregisterBack?.();
     this.unregisterBack = null;
+    /* Before the store is disposed, and before anything below can move the manifest: a change event
+       emitted on the way out belongs to an editor the host has already taken off the screen. */
+    this.unwatchChange?.();
+    this.unwatchChange = null;
     window.removeEventListener('resize', this.onWindowResize);
     window.removeEventListener('keydown', this.onKeyDown);
     if (this.measureTimer) clearTimeout(this.measureTimer);
@@ -327,10 +351,42 @@ export class VeEditor {
      */
     const chosen = (this.manifest as { output?: unknown } | undefined)?.output ? manifest : { ...manifest, output: normaliseOutput(store.host.output.initial) };
     store.load(sources, store.durations.value, chosen);
+    this.watchChanges();
     this.loading = false;
 
     // Filmstrips are a nicety that arrives while the customer is already editing, one source at a time.
     for (const source of sources) void this.media.loadFilmstrip(source);
+  }
+
+  /**
+   * Starts telling the host about every finished change, which is what [veChange] is.
+   *
+   * Created HERE rather than beside the store, and that is not tidiness: `store.load()` seeds the
+   * manifest, so an effect made any earlier would report the seeding itself as the customer's first
+   * edit. The first run is skipped for the same reason one step further on - `deferredEffect` reads
+   * its dependency immediately, so the opening value would otherwise go out as a change. What is
+   * left is what the name promises: the customer changed the edit.
+   *
+   * `revision` rather than `manifest`, so a gesture is one event when the finger lifts. The manifest
+   * is read inside the microtask, by which point [commit] has finished writing it - see
+   * [EditorStore.revision] for why the notification comes first and the value second.
+   */
+  private watchChanges(): void {
+    const store = this.store;
+    let opening = true;
+
+    this.unwatchChange = deferredEffect(
+      () => store.revision.value,
+      () => {
+        if (opening) {
+          opening = false;
+          return;
+        }
+        if (this.destroyed) return;
+        const manifest = store.manifest.value;
+        this.veChange.emit({ sources: this.postedSources(manifest), manifest });
+      },
+    );
   }
 
   /** A host that cannot answer is a host that cannot render, and the editor still edits either way. */
@@ -602,8 +658,10 @@ export class VeEditor {
     const render = store.host.render;
 
     // A post that is one of its own clips, untouched, is posted as that file: no encode, no quality
-    // lost, and the fast path every engine tests for.
-    if (isUntouched(manifest, store.durations.value)) {
+    // lost, and the fast path every engine tests for. The source's own shape goes with the question
+    // because the post fills its frame by default: a clip of another shape is cropped to it, and
+    // the file on disk is the picture before that happened.
+    if (isUntouched(manifest, store.durations.value, store.sourceAspect.value)) {
       this.finish({ sources, manifest });
       return;
     }

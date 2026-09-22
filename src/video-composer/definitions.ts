@@ -294,15 +294,7 @@ export interface ComposeResult {
   bytes: number;
 }
 
-export type ComposeFailureCode =
-  | 'unreadable_input'
-  | 'encoder'
-  | 'muxer'
-  | 'interrupted'
-  | 'cancelled'
-  | 'no_space'
-  | 'unsupported'
-  | 'unknown';
+export type ComposeFailureCode = 'unreadable_input' | 'encoder' | 'muxer' | 'interrupted' | 'cancelled' | 'no_space' | 'unsupported' | 'unknown';
 
 export interface ComposeError {
   jobId: string;

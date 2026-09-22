@@ -8,7 +8,9 @@
  * makes its element the containing block for a fixed positioned descendant, and two of them are in
  * this tree: the toolbar's menu catcher, which covers the viewport so the next tap anywhere closes
  * the menu, and `ve-alert`, which covers the editor. Both would be laid out inside the column
- * instead, and neither would throw. The one transform below is on a round button, which is a leaf.
+ * instead, and neither would throw. The exceptions below are leaves with nothing fixed anywhere
+ * under them: the transforms on the buttons at the top of the stage, and the drop shadow on the
+ * chevron inside one of them.
  */
 :host {
   display: block;
@@ -84,10 +86,15 @@
  * `--ve-frame-w` is the picture's width, written with exactly the expression `ve-preview` sizes its
  * own frame with and read off the same size container, so the two can never disagree. What it buys
  * is that ONE rule covers both arrangements, with no breakpoint: on a phone the gutter is what
- * limits the frame, the two sides work out at 8px, the `max()` holds the circles at the 12px edge
- * they have always sat at, and they hang over the picture's corners as before. On anything wider
- * the HEIGHT limits the frame instead, so the frame is far narrower than the screen, the arithmetic
- * wins the `max()`, and each circle stands 12px clear of the picture's edge beside it.
+ * limits the frame, the arithmetic comes out under 12px, the `max()` holds the circles at the 12px
+ * edge they have always sat at, and they hang over the picture's corners as before. On anything wider - including an upright phone whose stage is short enough
+ * that the HEIGHT limits the frame, which is the ordinary case with the timeline open - the frame
+ * is narrower than the screen, the arithmetic wins the `max()`, and each circle stands clear of the
+ * picture's edge beside it.
+ *
+ * How far clear is `--ve-round-gap`. It was 12px, which put a 44px circle a thumb's width from the
+ * corner of the video and read as chrome sitting ON the picture rather than beside it; the two are
+ * a way OUT of the editor and the picture is what is being edited, so they are held apart.
  */
 .ve__round {
   /*
@@ -102,8 +109,9 @@
     calc(100cqw - var(--ve-stage-gutter)),
     calc(100cqh * var(--ve-frame-w-px) / var(--ve-frame-h-px))
   );
-  /* Half the frame, then out past its edge by the circle's own width and the 12px of air. */
-  --ve-round-x: max(12px, calc(50% - var(--ve-frame-w) / 2 - 56px));
+  /* Half the frame, then out past its edge by the circle's own width and the air beside it. */
+  --ve-round-gap: 24px;
+  --ve-round-x: max(12px, calc(50% - var(--ve-frame-w) / 2 - 44px - var(--ve-round-gap)));
 
   position: absolute;
   top: 10px;
@@ -144,6 +152,13 @@
  * Centred rather than tucked beside one of them, because it is the only thing up there that is a
  * STATEMENT rather than a way out: Back and Next are where a customer's thumbs already are, and
  * this reads as a caption on the picture under it until they want to change it.
+ *
+ * No pill behind it, for the same reason. A grey capsule floating on the video is one more object
+ * over the one thing on this screen that is the customer's own, and it announced the frame size
+ * louder than the frame. The words carry a shadow instead, which is what keeps them legible over a
+ * pale clip now that there is nothing behind them - the same trick `.pv__placeholder` uses, and the
+ * reason the hit area (32px tall, padded) is left exactly as it was: what is gone is the paint, not
+ * the target.
  */
 .ve__quality {
   position: absolute;
@@ -159,11 +174,12 @@
   padding: 0 8px 0 12px;
   border: 0;
   border-radius: 16px;
-  background: rgba(58, 58, 58, 0.85);
+  background: transparent;
   color: #fff;
   font-family: inherit;
   font-size: 13px;
   font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
   cursor: pointer;
 }
 
@@ -171,17 +187,29 @@
   transform: translateX(-50%) scale(0.94);
 }
 
+/*
+ * The chevron is an SVG drawn in `currentColor`, so the label's `text-shadow` does nothing for it
+ * and it needs a shadow of its own. A `filter` is what the top of this file warns about, and this
+ * is one of the leaves it excepts: `ve-icon` is a single `<svg>` with nothing fixed under it, so
+ * the containing block it becomes has nothing to catch.
+ */
 .ve__quality ve-icon {
   font-size: 14px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
 }
 
-/* A dot between the three settings, so they read as three answers rather than one long number. */
+/*
+ * A dot between the three settings, so they read as three answers rather than one long number.
+ * Its shadow is the label's, in the only form a 3px box can carry one: with no pill behind the row
+ * any more, a half-strength white dot over a pale clip is the first thing to disappear.
+ */
 .ve__quality-sep {
   width: 3px;
   height: 3px;
   margin: 0 4px;
   border-radius: 50%;
   background: currentColor;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
   opacity: 0.5;
 }
 

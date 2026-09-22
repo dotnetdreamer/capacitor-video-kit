@@ -99,7 +99,12 @@
    * the output width.
    */
   container-type: inline-size;
-  border-radius: 12px;
+  /*
+   * Square, and it has to be. This frame IS the post: a rounded preview promises corners the render
+   * has no radius to give, so the video a customer approved here came back a different shape from
+   * the one they were shown. The 12px that used to be here was softening the black box against the
+   * black page, which is the hairline below's job and not the picture's.
+   */
   overflow: hidden;
   /*
    * Declared HERE and not only on the stage, because `touch-action` is not inherited: it is read off
@@ -123,15 +128,14 @@
  * is a fraction OF, moving the picture a pixel away from where the render puts it. An INSET SHADOW
  * paints between the background and the children, so the composited canvas would cover it. This
  * is the last thing in the frame and the only positioned child without a rectangle of its own, so
- * it paints over the video, it is cut to the frame's own radius by `overflow: hidden`, and it takes
- * no touch: every child in here is `pointer-events: none` for the reason `touch-action` is declared.
+ * it paints over the video, square with the frame it traces, and it takes no touch: every child in
+ * here is `pointer-events: none` for the reason `touch-action` is declared.
  */
 .pv__frame::after {
   content: '';
   position: absolute;
   inset: 0;
   border: 1px solid var(--ve-frame-edge, rgba(255, 255, 255, 0.22));
-  border-radius: inherit;
   pointer-events: none;
 }
 
@@ -215,14 +219,23 @@
 /* ------------------------------------------------------------------------------------ selection */
 
 /*
- * Same size and transform as the layer; the white line sits just outside it so it never covers a
- * letter's edge. It is the stage's child, not the frame's, so a layer moved or scaled past the
- * frame's edge keeps its handles - HANDLE_INSET_PX in overlay-gestures.ts mirrors the 4px offset.
+ * Same size and transform as the layer, with the white line ON its edge.
+ *
+ * It used to stand 4px off, which is right for a sticker sitting in the middle of a picture and
+ * wrong for the one layer that usually fills the frame: around a clip the box drew a second,
+ * larger rectangle out in the black - a border floating clear of the video, in the one place a
+ * line means "this is where the post is cut". Offset zero puts it on the edge it is describing,
+ * where it coincides with the frame's own hairline and reads as one border rather than two.
+ *
+ * The handles keep their own 4px (HANDLE_INSET_PX in overlay-gestures.ts): that offset is about
+ * reaching a 24px circle with a finger without covering the corner it belongs to, which is a
+ * different question from where the line is drawn. They are the stage's children, not the frame's,
+ * so a layer moved or scaled past the frame's edge keeps them.
  */
 .pv__select {
   position: absolute;
   outline: 1.5px solid #fff;
-  outline-offset: 4px;
+  outline-offset: 0;
   pointer-events: none;
 }
 

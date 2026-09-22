@@ -23,6 +23,9 @@ import { resolveEditorHost } from '../host/defaults';
  * old post reopening as something other than the post it was.
  */
 
+/** A source already the shape of [DEFAULT_OUTPUT], which `cover` therefore leaves alone. */
+const UPRIGHT = DEFAULT_OUTPUT.width / DEFAULT_OUTPUT.height;
+
 function onePost() {
   return { ...emptyManifest(), clips: [defaultClipEdit('a', 4000)] };
 }
@@ -71,12 +74,37 @@ describe('the frame a post is rendered at', () => {
 
   it('is a render in itself, so a clip that would have gone up untouched no longer does', () => {
     const durations = new Map([['a', 4000]]);
-    expect(isUntouched(onePost(), durations)).toBe(true);
+    expect(isUntouched(onePost(), durations, UPRIGHT)).toBe(true);
 
     // The customer asked for 1080P. Posting the file on disk would hand back whatever size THAT
     // happens to be, which is the one thing they said it was not.
     const bigger = { ...onePost(), output: outputFor('9:16', '1080p', 30) };
-    expect(isUntouched(bigger, durations)).toBe(false);
+    expect(isUntouched(bigger, durations, UPRIGHT)).toBe(false);
+  });
+
+  /*
+   * The post fills its frame, so whether the file on disk IS the post now depends on the shape of
+   * the file. This is the one place in the package where that question is asked, and it is asked
+   * about a picture nobody can get back once it has been posted.
+   */
+  it('posts a clip already the shape of the frame as it is, and renders one that would be cropped', () => {
+    const durations = new Map([['a', 4000]]);
+    const post = onePost();
+
+    expect(post.fit).toBe('cover');
+    expect(isUntouched(post, durations, UPRIGHT)).toBe(true);
+    // Rounded to the even sides an encoder insists on: the same picture, and not a crop.
+    expect(isUntouched(post, durations, 1082 / 1920)).toBe(true);
+
+    // A landscape clip in an upright frame: `cover` takes the sides off it, and the file on disk is
+    // the picture with them still on. Posting that hands back more than the preview showed.
+    expect(isUntouched(post, durations, 16 / 9)).toBe(false);
+    // Not measured yet. An unknown shape is rendered rather than guessed at.
+    expect(isUntouched(post, durations)).toBe(false);
+
+    // Contained, the file is the picture without the bars around it, which has always gone up as
+    // it is whatever shape it happens to be.
+    expect(isUntouched({ ...post, fit: 'contain' }, durations, 16 / 9)).toBe(true);
   });
 });
 

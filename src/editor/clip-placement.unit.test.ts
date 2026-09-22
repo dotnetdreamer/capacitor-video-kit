@@ -56,11 +56,12 @@ describe('a clip placement', () => {
     // the same picture at the cost of a re-encode nobody asked for.
     expect(JSON.stringify(wire.clips)).toBe(
       JSON.stringify([
-        { key: 'a', uri: 'file:///a.mp4', inMs: 0, outMs: 4000, speed: 1, volume: 1, muted: false, fit: 'contain' },
+        { key: 'a', uri: 'file:///a.mp4', inMs: 0, outMs: 4000, speed: 1, volume: 1, muted: false, fit: 'cover' },
       ]),
     );
     expect(wire).not.toHaveProperty('tracks');
-    expect(isUntouched(manifest, new Map([['a', 4000]]))).toBe(true);
+    // A clip already the shape of the frame, so the post that fills it is the file it came from.
+    expect(isUntouched(manifest, new Map([['a', 4000]]), 720 / 1280)).toBe(true);
   });
 
   it('sends a placed but upright clip with four numbers and no angle', async () => {

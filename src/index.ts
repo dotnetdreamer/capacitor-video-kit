@@ -59,6 +59,7 @@ export type {
   EditorPlatformHost,
   EditorRenderHost,
   EditorSoundLibrary,
+  EditorSnapshot,
   EditorSource,
   EditorVoiceHost,
   HapticKind,

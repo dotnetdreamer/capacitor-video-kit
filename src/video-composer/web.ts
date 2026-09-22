@@ -183,7 +183,7 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
   async listSounds(): Promise<ListSoundsResult> {
     const sounds = await listSounds();
     return {
-      sounds: sounds.map((sound) => ({
+      sounds: sounds.map(sound => ({
         id: sound.id,
         uri: sound.uri,
         fileName: sound.fileName,
@@ -220,7 +220,7 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
 
   async encodeSupport({ frames }: { frames: EncodeFrame[] }): Promise<{ frames: EncodeSupport[] }> {
     const answers = await Promise.all(
-      (frames ?? []).map(async (frame) => {
+      (frames ?? []).map(async frame => {
         const { supported, reason } = await encodableAt(frame.width, frame.height, frame.fps);
         return { ...frame, supported, ...(reason ? { reason } : {}) };
       }),

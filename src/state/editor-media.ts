@@ -103,15 +103,34 @@ export class EditorMedia {
     if (known !== undefined && known > 0) return known;
 
     let durationMs = 0;
+    let readable = true;
     try {
       const measured = await this.host.media.probeDuration(source);
       if (measured > 0) durationMs = Math.round(measured);
     } catch (error) {
+      /*
+       * The file did not open. Recorded rather than only logged, because this is the one failure
+       * the CUSTOMER can act on: their video has been deleted or moved since the draft was made,
+       * and the layer has to say so instead of sitting there at the right length showing nothing.
+       */
+      readable = false;
       debugWarn('[EditorMedia] probe failed', source.key, error);
     }
 
     this.store.durations.value = new Map(this.store.durations.value).set(source.key, durationMs);
+    this.markReadable(source.key, readable);
     return durationMs;
+  }
+
+  /** Adds a clip to `store.unreadable`, or takes it back out once its file opens again. */
+  private markReadable(key: string, readable: boolean): void {
+    const missing = this.store.unreadable.value;
+    if (readable === !missing.has(key)) return;
+
+    const next = new Set(missing);
+    if (readable) next.delete(key);
+    else next.add(key);
+    this.store.unreadable.value = next;
   }
 
   /**

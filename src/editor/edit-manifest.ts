@@ -1137,7 +1137,18 @@ export function emptyManifest(): EditManifest {
     filterId: 'none',
     filterIntensity: 1,
     adjust: neutralAdjust(),
-    fit: 'contain',
+    /*
+     * A clip FILLS the frame it is put in, and a shape that does not match is cropped rather than
+     * bordered. It is what every editor a customer has used does - open one, add a clip, and the
+     * picture is edge to edge - and the reason is the same in all of them: black bars are not a
+     * decision anybody makes, they are what happens when nobody does, and a post is a thing to be
+     * watched rather than a document to be preserved whole. `Fit` on the tool row puts the bars
+     * back for the customer who wants all of the picture, which is a choice they can see.
+     *
+     * It is the whole post's fit, and so the default for every clip that carries none of its own:
+     * a second clip of another shape added later fills the frame exactly as the first one did.
+     */
+    fit: 'cover',
     originalMuted: false,
     overlays: [],
     music: null,
@@ -1282,6 +1293,13 @@ export function normaliseManifest(input: unknown): EditManifest {
     filterId: typeof raw['filterId'] === 'string' ? raw['filterId'] : base.filterId,
     filterIntensity: clamp(num(raw['filterIntensity'], 1), 0, 1),
     adjust: { ...neutralAdjust(), ...(raw['adjust'] ?? {}) },
+    /*
+     * What was STORED, and `contain` for a manifest that stored nothing - which is not what a new
+     * edit opens on any more. A manifest with no `fit` is one written before the field existed,
+     * and every one of those rendered contained; defaulting it to today's `cover` would re-crop a
+     * saved draft on the way back in, which is the byte-for-byte promise the migration notes above
+     * make, broken silently and on somebody's finished work.
+     */
     fit: raw['fit'] === 'cover' ? 'cover' : 'contain',
     originalMuted: !!raw['originalMuted'],
     overlays,
@@ -1406,8 +1424,12 @@ export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips' | 'videoTrac
 /**
  * Whether anything was actually changed. A single clip left exactly as it was can be posted as it
  * is rather than re-encoded, which is faster and kinder to the picture.
+ *
+ * `sourceAspect` is that clip's own oriented width / height, which the post's `cover` fit makes the
+ * difference between a picture that is identical to the file and one that is cropped out of it.
+ * Left out, it is unknown, and an unknown shape is never posted untouched.
  */
-export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<string, number>): boolean {
+export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<string, number>, sourceAspect = 0): boolean {
   if (manifest.clips.length !== 1) return false;
   // A frame that is not this package's own is a render by itself. Posting the file on disk instead
   // would hand back the shape and the size THAT happens to be, which is the one thing a customer
@@ -1417,7 +1439,19 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   // done to the clip underneath it.
   if (manifest.videoTracks.length > 0) return false;
   if (resolveFilterOps(manifest).length > 0) return false;
-  if (manifest.originalMuted || manifest.fit !== 'contain') return false;
+  if (manifest.originalMuted) return false;
+  /*
+   * `cover` is what a new edit opens on, and on a clip already the frame's shape it does nothing
+   * whatsoever - which is the ordinary case and the one this fast path exists for. On any other
+   * shape it crops, and the file on disk is the picture UNcropped: posting it would hand back more
+   * than the customer was shown, which is the one direction this shortcut must never fail in.
+   * `contain` is the other way round - the file is the picture without the bars around it - and
+   * that has always been thought a fair trade.
+   *
+   * The shape comes from the source itself, measured off the video element; 0 is "not known yet",
+   * and an unknown shape answers the safe way, which is to render.
+   */
+  if (manifest.fit === 'cover' && !fillsFrame(sourceAspect, manifest.output)) return false;
   if (manifest.overlays.length > 0) return false;
   if (manifest.music || manifest.voiceovers.length > 0) return false;
   return manifest.clips.every((clip) => {
@@ -1427,6 +1461,18 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
     // was done to it, so it has to go through the renderer rather than be posted as it is.
     return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted && !isClipFramed(clip, manifest.fit);
   });
+}
+
+/**
+ * Whether a source of this shape already fills a frame of that one, so that `cover` has nothing to
+ * crop off it. The tolerance is there because neither number is exact: a 1082x1920 clip - a width
+ * rounded up to the even one an encoder insists on - is the same picture as a 1080x1920 one to
+ * every eye, and `cover` would scale it by a fifth of a percent and take a pixel off each side.
+ */
+function fillsFrame(sourceAspect: number, output: EditOutput): boolean {
+  if (!(sourceAspect > 0)) return false;
+  const frame = output.width / output.height;
+  return Math.abs(sourceAspect - frame) <= frame * 0.005;
 }
 
 /* -------------------------------------------------------------------------------------------- */

@@ -395,11 +395,21 @@ export type HapticKind = 'light' | 'medium' | 'selection' | 'success' | 'warning
 /** Why the customer left without a video, which the host's own navigation needs to tell apart. */
 export type EditorCancelReason = 'back' | 'exit';
 
-/** What the editor hands back when the customer taps Next. */
-export interface VideoEditorResult {
+/**
+ * The edit as it stands, which is the whole of what it takes to reopen it.
+ *
+ * Split out of [VideoEditorResult] because it is also what [VeEditor.veChange] carries, and the two
+ * must not drift: a host that files a snapshot mid-edit and a host that files the finished result
+ * are storing the same thing, so a draft written from either one opens the same way.
+ */
+export interface EditorSnapshot {
   /** The originals, in the order the customer left them and without the ones they removed. */
   sources: EditorSource[];
   manifest: EditManifest;
+}
+
+/** What the editor hands back when the customer taps Next. */
+export interface VideoEditorResult extends EditorSnapshot {
   /** Absent when there was nothing to render. A single untouched clip is not re-encoded. */
   stitched?: EditorSource;
 }

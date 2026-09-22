@@ -312,6 +312,41 @@
 }
 
 /*
+ * A clip whose file has gone.
+ *
+ * It sits where the duration chip sits, in the chip's shape, so a glance down the timeline reads
+ * one row of labels rather than two kinds of thing at two heights. Red rather than white because
+ * it is the one label on a segment that is not information, it is a job to do.
+ *
+ * `pointer-events: auto` against the chip's `none`: this one IS the way out, so it has to take the
+ * tap. It is centred and allowed to shrink, because a segment can be a few pixels wide on a
+ * zoomed-out timeline - narrower than the words - and a label that overflowed would sit on top of
+ * its neighbours and offer the wrong clip to replace.
+ */
+.seg__missing {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  right: 4px;
+  max-width: calc(100% - 8px);
+  padding: 1px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: #ff4d4f;
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/*
  * TikTok's trim handles: a 14px white bar just outside each edge with a dark grip line. The element
  * itself is 44px wide for the finger - 16px further out than the bar and 14px in over the item.
  *

@@ -150,19 +150,20 @@ describe('deferredEffect', () => {
     plain.length = 0;
     deferred.length = 0;
 
-    store.commit('Fill frame', (m) => ({ ...m, fit: 'cover' }));
+    // Away from `cover`, which is what a new post opens on: the change has to BE one.
+    store.commit('Fit frame', (m) => ({ ...m, fit: 'contain' }));
 
     // `commit` pushes the history entry before it writes the manifest, so a plain effect runs twice
     // and the first of the two is a store contradicting itself: an undo step for a change that has
     // not been made yet. A body acting on that reads the manifest it was meant to replace.
     expect(plain).toEqual([
-      { canUndo: true, fit: 'contain' },
       { canUndo: true, fit: 'cover' },
+      { canUndo: true, fit: 'contain' },
     ]);
     expect(deferred).toEqual([]);
 
     await settle();
-    expect(deferred).toEqual([{ canUndo: true, fit: 'cover' }]);
+    expect(deferred).toEqual([{ canUndo: true, fit: 'contain' }]);
 
     stopPlain();
     stop();
@@ -175,14 +176,14 @@ describe('deferredEffect', () => {
     const stop = deferredEffect(
       () => store.manifest.value.fit,
       (fit) => {
-        if (fit === 'cover') store.commit('Original sound off', (m) => (m.originalMuted ? m : { ...m, originalMuted: true }));
+        if (fit === 'contain') store.commit('Original sound off', (m) => (m.originalMuted ? m : { ...m, originalMuted: true }));
       },
     );
     await settle();
 
     store.beginGesture();
-    store.preview((m) => ({ ...m, fit: 'cover' }));
-    store.endGesture('Fill frame');
+    store.preview((m) => ({ ...m, fit: 'contain' }));
+    store.endGesture('Fit frame');
     await settle();
     stop();
 
@@ -190,21 +191,21 @@ describe('deferredEffect', () => {
     store.undo();
     expect(store.toast.value?.text).toBe('Undo: Original sound off');
     store.undo();
-    expect(store.toast.value?.text).toBe('Undo: Fill frame');
+    expect(store.toast.value?.text).toBe('Undo: Fit frame');
     expect(store.canUndo.value).toBe(false);
   });
 
   it('is the difference between that and a drag landing under a name nobody chose', async () => {
     const store = openStore();
     const stopPlain = effect(() => {
-      if (store.manifest.value.fit === 'cover') {
+      if (store.manifest.value.fit === 'contain') {
         store.commit('Original sound off', (m) => (m.originalMuted ? m : { ...m, originalMuted: true }));
       }
     });
 
     store.beginGesture();
-    store.preview((m) => ({ ...m, fit: 'cover' }));
-    store.endGesture('Fill frame');
+    store.preview((m) => ({ ...m, fit: 'contain' }));
+    store.endGesture('Fit frame');
     stopPlain();
 
     // The body ran inside `preview`, so `commit` reached `flushGesture` with the finger still down:

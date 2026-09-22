@@ -3,17 +3,7 @@ import { computed, signal } from '@preact/signals-core';
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import {
-  FILTER_CATEGORIES,
-  FILTER_PRESETS,
-  clamp,
-  cssFor,
-  filterPreset,
-  resolveFilterOps,
-  slotAt,
-  sourceMsAt,
-  type FilterCategory,
-} from '../../editor';
+import { FILTER_CATEGORIES, FILTER_PRESETS, clamp, cssFor, filterPreset, resolveFilterOps, slotAt, sourceMsAt, type FilterCategory } from '../../editor';
 
 /** One preset as its thumbnail draws it. */
 interface FilterThumb {
@@ -182,14 +172,7 @@ export class VeFilterSheet {
       };
 
       return (
-        <ve-sheet
-          tabs={FILTER_CATEGORIES}
-          activeTab={this.category.value}
-          showNone={true}
-          onVeTab={this.onTab}
-          onVeNone={this.onNone}
-          onVeConfirm={this.onConfirm}
-        >
+        <ve-sheet tabs={FILTER_CATEGORIES} activeTab={this.category.value} showNone={true} onVeTab={this.onTab} onVeNone={this.onNone} onVeConfirm={this.onConfirm}>
           <div class="fs">
             {/*
               The thumbnails come first and stay put: the strength row appears under them when a
@@ -212,16 +195,7 @@ export class VeFilterSheet {
                   >
                     <span class="fs__frame">
                       {frame ? (
-                        <img
-                          key="frame"
-                          class="fs__img"
-                          alt=""
-                          draggable={false}
-                          decoding="async"
-                          src={frame}
-                          style={{ filter: thumb.filter }}
-                          onError={onFrameError}
-                        />
+                        <img key="frame" class="fs__img" alt="" draggable={false} decoding="async" src={frame} style={{ filter: thumb.filter }} onError={onFrameError} />
                       ) : (
                         <span key="fallback" class="fs__img fs__img--fallback" style={{ filter: thumb.filter }}></span>
                       )}
@@ -254,17 +228,7 @@ export class VeFilterSheet {
                   No pin: the readout on the right already shows the number, and two of them chased
                   each other across the row while the knob moved.
                 */}
-                <ve-slider
-                  class="fs__slider"
-                  ctx={this.ctx}
-                  label={STRENGTH_LABEL}
-                  value={intensity}
-                  min={0}
-                  max={100}
-                  step={1}
-                  pin="none"
-                  onVeLive={this.onStrength}
-                />
+                <ve-slider class="fs__slider" ctx={this.ctx} label={STRENGTH_LABEL} value={intensity} min={0} max={100} step={1} pin="none" onVeLive={this.onStrength} />
                 <span class="fs__strength-value">{intensity}</span>
               </div>
             ) : null}

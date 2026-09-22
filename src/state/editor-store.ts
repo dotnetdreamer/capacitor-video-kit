@@ -147,6 +147,19 @@ export class EditorStore {
   readonly clips = signal<EditorSource[]>([]);
   /** Source duration per clip key. */
   readonly durations = signal<ReadonlyMap<string, number>>(new Map());
+  /**
+   * The clips whose file could not be opened, by key.
+   *
+   * A duration of 0 is NOT the same question and must not be used as one: a clip that genuinely
+   * reports no length reads 0 too, and so does one that has simply not been measured yet. This is
+   * the narrower fact - the probe was tried and the file refused - which is the only one worth
+   * putting on the screen, because it is the only one the customer can do something about.
+   *
+   * It matters most on a draft opened days later, where a clip's file can have been deleted or its
+   * read permission lapsed. Without this the timeline showed a segment of the right length over a
+   * stage that painted nothing, and said nothing about why.
+   */
+  readonly unreadable = signal<ReadonlySet<string>>(new Set());
   /** Filmstrip frames per clip key, filled in as they are cut. */
   readonly filmstrips = signal<ReadonlyMap<string, Filmstrip>>(new Map());
   readonly maxClips = signal(10);
@@ -157,6 +170,22 @@ export class EditorStore {
   /** The manifest the editor opened with, for "discard your edits?". */
   private readonly opened = signal<EditManifest>(emptyManifest());
   readonly dirty = computed(() => this.manifest.value !== this.opened.value);
+
+  /**
+   * Bumped once per COMMITTED change, for a host that wants to follow the edit as it happens.
+   *
+   * Not [manifest] itself, and that is the whole point of having it. A drag writes the manifest on
+   * every frame - see [preview] - so a host watching THAT signal to file a draft would write one
+   * draft per frame for a single pull of a trim handle. Every finished step, on the other hand,
+   * lands in exactly two places: [pushHistory], which [commit] and [endGesture] both funnel into,
+   * and [afterHistoryJump], which is undo and redo. This counts those and nothing else, so one
+   * customer action is one bump.
+   *
+   * Bumped BEFORE [commit] writes the new manifest, because [pushHistory] runs first. A watcher must
+   * therefore read the manifest a microtask later rather than inside the notification, which is what
+   * `deferredEffect` is for and why nothing here reads it synchronously.
+   */
+  readonly revision = signal(0);
 
   private readonly past = signal<HistoryEntry[]>([]);
   private readonly future = signal<HistoryEntry[]>([]);
@@ -508,6 +537,7 @@ export class EditorStore {
   private pushHistory(manifest: EditManifest, label: string): void {
     this.past.value = [...this.past.value, { manifest, label }].slice(-HISTORY_LIMIT);
     this.future.value = [];
+    this.revision.value++;
   }
 
   /** A gesture left open (a slider still held when a button is tapped) is closed as its own step. */
@@ -516,6 +546,10 @@ export class EditorStore {
   }
 
   private afterHistoryJump(): void {
+    /* Undo and redo move the manifest without going through [pushHistory], so they count here or a
+       host following the edit would miss exactly the changes that put a layer back. */
+    this.revision.value++;
+
     const sel = this.selection.value;
     const m = this.manifest.value;
     const stillThere =

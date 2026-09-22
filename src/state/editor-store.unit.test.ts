@@ -239,7 +239,8 @@ describe('EditorStore', () => {
       expect(store.manifest.value).toBe(base);
       expect(store.canUndo.value).toBe(false);
       expect(store.dirty.value).toBe(false);
-      expect(store.toast.value?.text).toBe('Undo: Fill frame');
+      // A post opens filled, so the first tap of the tile is the one that FITS it.
+      expect(store.toast.value?.text).toBe('Undo: Fit frame');
 
       store.undo();
       expect(store.manifest.value).toBe(base);
@@ -441,7 +442,7 @@ describe('EditorStore', () => {
       store.toggleFit();
       store.finishText();
       expect(findOverlay(store.manifest.value, id)).toBeNull();
-      expect(store.manifest.value.fit).toBe('cover');
+      expect(store.manifest.value.fit).toBe('contain');
       expect(store.textEdit.value).toBeNull();
       expect(undoAll()).toBe(3);
       expect(store.manifest.value).toBe(base);
@@ -469,11 +470,11 @@ describe('EditorStore', () => {
       store.previewOverlay(id, { text: 'Hi' });
 
       store.finishText();
-      store.commit('Add clip', (m) => ({ ...m, fit: 'cover' }));
+      store.commit('Add clip', (m) => ({ ...m, fit: 'contain' }));
 
       expect(store.textEdit.value).toBeNull();
       store.undo();
-      expect(store.manifest.value.fit).toBe('contain');
+      expect(store.manifest.value.fit).toBe('cover');
       expect((findOverlay(store.manifest.value, id) as TextOverlay).text).toBe('Hi');
 
       store.undo();
@@ -665,7 +666,7 @@ describe('EditorStore', () => {
       it('is the one layer the preview has always drawn when there is no second video', () => {
         store.seek(1000);
         expect(store.previewLayers.value).toEqual([
-          { trackId: null, clipId: 'a', clipKey: 'a', sourceMs: 1000, rect: null, crop: null, fit: 'contain', opacity: 1, z: 0 },
+          { trackId: null, clipId: 'a', clipKey: 'a', sourceMs: 1000, rect: null, crop: null, fit: 'cover', opacity: 1, z: 0 },
         ]);
       });
 
@@ -683,8 +684,8 @@ describe('EditorStore', () => {
         store.seek(2000);
 
         expect(store.previewLayers.value).toEqual([
-          { trackId: null, clipId: 'a', clipKey: 'a', sourceMs: 2000, rect: null, crop: null, fit: 'contain', opacity: 1, z: 0 },
-          { trackId: 'vt', clipId: 'c', clipKey: 'c', sourceMs: 1000, rect: null, crop: null, fit: 'contain', opacity: 0.5, z: 1 },
+          { trackId: null, clipId: 'a', clipKey: 'a', sourceMs: 2000, rect: null, crop: null, fit: 'cover', opacity: 1, z: 0 },
+          { trackId: 'vt', clipId: 'c', clipKey: 'c', sourceMs: 1000, rect: null, crop: null, fit: 'cover', opacity: 0.5, z: 1 },
         ]);
       });
 
@@ -906,44 +907,46 @@ describe('EditorStore', () => {
   describe('Fill and Fit', () => {
     /*
      * The black bands around a video are its FIT: the picture is contained in the rectangle it was
-     * given and does not reach the sides of it. The tile that changes that sits in the clip tools
-     * row, so it belongs to the segment that is selected - it used to write the whole POST's fit,
-     * which on a post of three layers changed two pictures the customer was not looking at.
+     * given and does not reach the sides of it. A post opens FILLED - every editor a customer has
+     * used does, and bars nobody chose are not a default - so the tile's first tap is the one that
+     * puts them back. The tile sits in the clip tools row, so it belongs to the segment that is
+     * selected: it used to write the whole POST's fit, which on a post of three layers changed two
+     * pictures the customer was not looking at.
      */
-    it('fills the selected segment and leaves the rest of the post alone', () => {
+    it('fits the selected segment and leaves the rest of the post alone', () => {
       load();
       const id = store.addVideoTrack(clip('c', 0, 3000))!;
       const layer = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
       store.select({ kind: 'clip', id: layer.id });
 
-      store.toggleFit();
-
-      const after = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
-      expect(store.clipFit(after)).toBe('cover');
-      // The post's own fit, and so every segment that has not been given one, is untouched.
-      expect(store.manifest.value.fit).toBe('contain');
-      expect(store.clipFit(store.manifest.value.clips[0])).toBe('contain');
-    });
-
-    it('reads the state back off that segment, so a second tap fits it again', () => {
-      load();
-      const id = store.addVideoTrack(clip('c', 0, 3000))!;
-      const layer = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
-      store.select({ kind: 'clip', id: layer.id });
-
-      store.toggleFit();
       store.toggleFit();
 
       const after = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
       expect(store.clipFit(after)).toBe('contain');
-      expect(store.manifest.value.fit).toBe('contain');
+      // The post's own fit, and so every segment that has not been given one, is untouched.
+      expect(store.manifest.value.fit).toBe('cover');
+      expect(store.clipFit(store.manifest.value.clips[0])).toBe('cover');
+    });
+
+    it('reads the state back off that segment, so a second tap fills it again', () => {
+      load();
+      const id = store.addVideoTrack(clip('c', 0, 3000))!;
+      const layer = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
+      store.select({ kind: 'clip', id: layer.id });
+
+      store.toggleFit();
+      store.toggleFit();
+
+      const after = store.manifest.value.videoTracks.find(one => one.id === id)!.clips[0];
+      expect(store.clipFit(after)).toBe('cover');
+      expect(store.manifest.value.fit).toBe('cover');
     });
 
     it('still changes the POST when no segment is selected', () => {
       load();
       store.select(null);
       store.toggleFit();
-      expect(store.manifest.value.fit).toBe('cover');
+      expect(store.manifest.value.fit).toBe('contain');
     });
   });
 

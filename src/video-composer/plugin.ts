@@ -136,18 +136,9 @@ export interface VideoComposerPlugin {
   /** Deletes the job folder and forgets its jobs. Idempotent. */
   cleanup(options: CleanupOptions): Promise<void>;
 
-  addListener(
-    eventName: 'progress',
-    listener: (event: ComposeProgressEvent) => void,
-  ): Promise<PluginListenerHandle>;
-  addListener(
-    eventName: 'completed',
-    listener: (event: ComposeCompletedEvent) => void,
-  ): Promise<PluginListenerHandle>;
-  addListener(
-    eventName: 'failed',
-    listener: (event: ComposeFailedEvent) => void,
-  ): Promise<PluginListenerHandle>;
+  addListener(eventName: 'progress', listener: (event: ComposeProgressEvent) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: 'completed', listener: (event: ComposeCompletedEvent) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: 'failed', listener: (event: ComposeFailedEvent) => void): Promise<PluginListenerHandle>;
 
   removeAllListeners(): Promise<void>;
 }
