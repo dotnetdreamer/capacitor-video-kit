@@ -25,7 +25,7 @@ interface Session {
   stream: MediaStream;
   chunks: Blob[];
   startedAt: number;
-  pendingPostId: string;
+  batchId: string;
   mimeType: string;
 }
 
@@ -42,7 +42,7 @@ export class VoiceError extends Error {
 }
 
 /** Asks for the microphone and starts recording. Rejects `already_recording` / `permission_denied`. */
-export async function startVoiceRecording(pendingPostId?: string): Promise<void> {
+export async function startVoiceRecording(batchId?: string): Promise<void> {
   if (session) throw new VoiceError('already_recording', 'a take is already being recorded');
   if (!canRecordVoice()) {
     throw new VoiceError('recording_failed', 'this browser cannot record from the microphone');
@@ -86,7 +86,7 @@ export async function startVoiceRecording(pendingPostId?: string): Promise<void>
     stream,
     chunks,
     startedAt: Date.now(),
-    pendingPostId: pendingPostId && pendingPostId.length > 0 ? pendingPostId : 'voice-cache',
+    batchId: batchId && batchId.length > 0 ? batchId : 'voice-cache',
     mimeType: recorder.mimeType || mimeType || 'audio/webm',
   };
 }
@@ -118,7 +118,7 @@ export async function stopVoiceRecording(): Promise<VoiceRecordingResult> {
   if (blob.size === 0) throw new VoiceError('recording_failed', 'the take captured nothing');
 
   const name = `vo-${current.startedAt.toString(36)}.${extensionFor(current.mimeType)}`;
-  const stored = await putFile(current.pendingPostId, name, blob);
+  const stored = await putFile(current.batchId, name, blob);
   // The durable name, not the `blob:` URL: this goes into a manifest, and `prepareJob` may move it
   // into a job folder before anything renders it.
   return { uri: stored.uri, durationMs };

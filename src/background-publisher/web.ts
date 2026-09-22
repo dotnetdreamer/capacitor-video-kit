@@ -2,7 +2,7 @@ import { WebPlugin } from '@capacitor/core';
 
 import { describe } from '../web-runtime/files';
 
-import type { PendingPostIdOptions, PostPublisherPlugin, PublishRequest, PublishState, RetryOptions } from './definitions';
+import type { BackgroundPublisherPlugin, BatchOptions, PublishRequest, PublishState, RetryOptions } from './definitions';
 import { abort, bytesFor, resumeAll, run } from './web/runner';
 import { computePercent, IN_FLIGHT, TERMINAL } from './web/state';
 import { allEntries, deleteEntry, freshEntry, loadEntry, saveEntry, stage, sweepPublishes, updateEntry } from './web/store';
@@ -17,19 +17,19 @@ import { allEntries, deleteEntry, freshEntry, loadEntry, saveEntry, stage, sweep
  * this implementation uses, is durable storage and the next page load:
  *
  * - The request, the auth header, the body template and THE FILES THEMSELVES are copied into
- *   IndexedDB when the post is queued. A `blob:` URL dies with its document, so a record naming one
- *   would come back after a reload pointing at nothing.
+ *   IndexedDB when the batch is queued. A `blob:` URL dies with its document, so a record naming
+ *   one would come back after a reload pointing at nothing.
  * - An upload that has an id from the server is never sent again, which is the invariant the native
- *   workers are built on and the reason a resumed post does not re-send a hundred megabytes.
- * - A post still in flight when the tab closed is picked up the next time the page opens.
- * - A Web Lock keeps two tabs off one post, so the app open twice cannot double-post.
+ *   workers are built on and the reason a resumed batch does not re-send a hundred megabytes.
+ * - A batch still in flight when the tab closed is picked up the next time the page opens.
+ * - A Web Lock keeps two tabs off one batch, so the app open twice cannot send twice.
  *
  * What it still cannot do is upload while the tab is closed. A host that needs that on the web
  * needs a service worker with Background Fetch, which only Chromium has and which belongs to the
  * application rather than to this package. `getState` answering honestly is how a host tells: a
- * post left in `uploading` with the page reopened is one this plugin is about to resume.
+ * batch left in `uploading` with the page reopened is one this plugin is about to resume.
  */
-export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
+export class BackgroundPublisherWeb extends WebPlugin implements BackgroundPublisherPlugin {
   private readonly driving = new Set<string>();
 
   constructor() {
@@ -39,16 +39,16 @@ export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
 
   /**
    * Persists the request and starts it. Resolves as soon as it is queued; calling it again for a
-   * post already in flight is a no-op, so a retried call cannot double-post.
+   * batch already in flight is a no-op, so a retried call cannot send twice.
    */
   async publish(request: PublishRequest): Promise<void> {
     const checked = validate(request);
 
-    const existing = await loadEntry(checked.pendingPostId);
+    const existing = await loadEntry(checked.batchId);
     if (existing && IN_FLIGHT.includes(existing.state.phase)) {
-      // Already going. Saying yes again is what keeps a retried call from double-posting; picking
+      // Already going. Saying yes again is what keeps a retried call from sending twice; picking
       // it back up covers the case where the record outlived the page that was driving it.
-      if (!this.driving.has(checked.pendingPostId)) void this.drive(checked.pendingPostId);
+      if (!this.driving.has(checked.batchId)) void this.drive(checked.batchId);
       return;
     }
 
@@ -62,38 +62,38 @@ export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
     }
 
     await saveEntry(freshEntry(staged.request, staged.sizes, existing));
-    void this.drive(checked.pendingPostId);
+    void this.drive(checked.batchId);
   }
 
-  /** `null` when nothing is known about this post - it never started, or its record was cleared. */
-  async getState(options: PendingPostIdOptions): Promise<{ state: PublishState | null }> {
-    const pendingPostId = required(options?.pendingPostId, 'pendingPostId');
-    const entry = await loadEntry(pendingPostId);
+  /** `null` when nothing is known about this batch - it never started, or its record was cleared. */
+  async getState(options: BatchOptions): Promise<{ state: PublishState | null }> {
+    const batchId = required(options?.batchId, 'batchId');
+    const entry = await loadEntry(batchId);
     if (!entry) return { state: null };
 
     // Fold in the live byte counters: the record is written every few percent, and the caller
     // asking right now wants the current number, not the last persisted one.
-    const live = bytesFor(pendingPostId);
+    const live = bytesFor(batchId);
     if (live.size > 0) {
       for (const upload of entry.state.uploads) {
-        const bytes = live.get(upload.uploadGuid) ?? 0;
+        const bytes = live.get(upload.uploadId) ?? 0;
         if (bytes > upload.bytesSent) upload.bytesSent = bytes;
       }
       entry.state.percent = computePercent(entry.state, live);
     }
     if (TERMINAL.includes(entry.state.phase) && !entry.acked) {
-      await updateEntry(pendingPostId, stored => {
+      await updateEntry(batchId, stored => {
         stored.acked = true;
       });
     }
     return { state: entry.state };
   }
 
-  /** Stops the job. Upload ids already obtained are kept, so a retry does not re-send those files. */
-  async cancel(options: PendingPostIdOptions): Promise<void> {
-    const pendingPostId = required(options?.pendingPostId, 'pendingPostId');
-    abort(pendingPostId);
-    await updateEntry(pendingPostId, entry => {
+  /** Stops the job. Ids already obtained are kept, so a retry does not re-send those files. */
+  async cancel(options: BatchOptions): Promise<void> {
+    const batchId = required(options?.batchId, 'batchId');
+    abort(batchId);
+    await updateEntry(batchId, entry => {
       entry.state.phase = 'cancelled';
       // No error is recorded: the phase already says what happened, and a code of "cancelled" in
       // the error slot would show up as a failure in anything reading the state.
@@ -106,8 +106,8 @@ export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
 
   /** Re-queues from wherever it stopped, skipping files the server already has. */
   async retry(options: RetryOptions): Promise<void> {
-    const pendingPostId = required(options?.pendingPostId, 'pendingPostId');
-    const updated = await updateEntry(pendingPostId, entry => {
+    const batchId = required(options?.batchId, 'batchId');
+    const updated = await updateEntry(batchId, entry => {
       if (options.headers) {
         entry.request.headers = { ...entry.request.headers, ...options.headers };
       }
@@ -117,28 +117,28 @@ export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
       entry.acked = false;
       for (const upload of entry.state.uploads) {
         // Anything without an id goes back in the queue; anything with one is already done.
-        if (!upload.downloadId) upload.status = 'queued';
+        if (upload.remoteId === undefined) upload.status = 'queued';
       }
     });
-    if (!updated) throw coded(`nothing to retry for ${pendingPostId}`, 'not_found');
-    void this.drive(pendingPostId);
+    if (!updated) throw coded(`nothing to retry for ${batchId}`, 'not_found');
+    void this.drive(batchId);
   }
 
   /** Forgets the record entirely. Does not touch the caller's own files - only our copies. */
-  async clear(options: PendingPostIdOptions): Promise<void> {
-    const pendingPostId = required(options?.pendingPostId, 'pendingPostId');
-    abort(pendingPostId);
-    await deleteEntry(pendingPostId);
+  async clear(options: BatchOptions): Promise<void> {
+    const batchId = required(options?.batchId, 'batchId');
+    abort(batchId);
+    await deleteEntry(batchId);
   }
 
   /* ------------------------------------------------------------------------------------------ */
 
-  private async drive(pendingPostId: string): Promise<void> {
-    this.driving.add(pendingPostId);
+  private async drive(batchId: string): Promise<void> {
+    this.driving.add(batchId);
     try {
-      await run(pendingPostId, (event, data) => this.notifyListeners(event, data, true));
+      await run(batchId, (event, data) => this.notifyListeners(event, data, true));
     } finally {
-      this.driving.delete(pendingPostId);
+      this.driving.delete(batchId);
     }
   }
 
@@ -146,7 +146,7 @@ export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
    * Sweeps stale records and picks up whatever was in flight when the page last closed.
    *
    * The events those resumed jobs emit are RETAINED, which is what lets a host that attaches its
-   * listener a tick after the plugin loads still hear about a post that finished in the meantime -
+   * listener a tick after the plugin loads still hear about a batch that finished in the meantime -
    * the same thing `replayUnacked` does natively.
    */
   private async load(): Promise<void> {
@@ -166,8 +166,13 @@ export class PostPublisherWeb extends WebPlugin implements PostPublisherPlugin {
 function validate(input: PublishRequest): PublishRequest {
   const request = input as Partial<PublishRequest> | null | undefined;
   if (!request || typeof request !== 'object') throw invalidRequest('request');
-  const pendingPostId = required(request.pendingPostId, 'pendingPostId');
-  const uploadUrl = required(request.uploadUrl, 'uploadUrl');
+  const batchId = required(request.batchId, 'batchId');
+
+  const transport = request.upload;
+  if (!transport || typeof transport !== 'object') throw invalidRequest('upload');
+  const transportUrl = required(transport.url, 'upload.url');
+  const method = transport.method ?? 'POST';
+  if (method !== 'POST' && method !== 'PUT') throw invalidRequest('upload.method');
 
   if (!Array.isArray(request.uploads) || request.uploads.length === 0) {
     throw invalidRequest('uploads');
@@ -175,32 +180,44 @@ function validate(input: PublishRequest): PublishRequest {
   const uploads = request.uploads.map((upload, index) => {
     const path = `uploads[${index}]`;
     if (!upload || typeof upload !== 'object') throw invalidRequest(path);
-    if (!upload.uploadGuid) throw invalidRequest(`${path}.uploadGuid`);
+    if (!upload.uploadId) throw invalidRequest(`${path}.uploadId`);
     if (!upload.path) throw invalidRequest(`${path}.path`);
-    if (upload.role !== 'stitched' && upload.role !== 'original') {
-      throw invalidRequest(`${path}.role`);
-    }
     return {
-      uploadGuid: upload.uploadGuid,
-      role: upload.role,
+      uploadId: upload.uploadId,
+      tag: upload.tag ?? '',
       path: upload.path,
       mimeType: upload.mimeType || 'application/octet-stream',
-      ...(upload.pictureId && upload.pictureId > 0 ? { pictureId: upload.pictureId } : {}),
+      ...(upload.url ? { url: upload.url } : {}),
+      ...(upload.fileName ? { fileName: upload.fileName } : {}),
+      ...(upload.fields ? { fields: upload.fields } : {}),
     };
   });
 
-  const createPost = request.createPost;
-  if (!createPost) throw invalidRequest('createPost');
-  if (!createPost.url) throw invalidRequest('createPost.url');
-  if (!createPost.bodyTemplate) throw invalidRequest('createPost.bodyTemplate');
+  const finalizeStep = request.finalize;
+  if (!finalizeStep) throw invalidRequest('finalize');
+  if (!finalizeStep.url) throw invalidRequest('finalize.url');
+  if (!finalizeStep.bodyTemplate) throw invalidRequest('finalize.bodyTemplate');
+  const finalizeMethod = finalizeStep.method ?? 'POST';
+  if (finalizeMethod !== 'POST' && finalizeMethod !== 'PUT') throw invalidRequest('finalize.method');
 
   return {
-    pendingPostId,
+    batchId,
     headers: request.headers ?? {},
-    uploadUrl,
-    ...(request.lookupUrlTemplate ? { lookupUrlTemplate: request.lookupUrlTemplate } : {}),
+    upload: {
+      url: transportUrl,
+      method,
+      ...(transport.fileField ? { fileField: transport.fileField } : {}),
+      ...(transport.fields ? { fields: transport.fields } : {}),
+      ...(transport.idPath ? { idPath: transport.idPath } : {}),
+      ...(transport.lookupUrlTemplate ? { lookupUrlTemplate: transport.lookupUrlTemplate } : {}),
+    },
     uploads,
-    createPost: { url: createPost.url, bodyTemplate: createPost.bodyTemplate },
+    finalize: {
+      url: finalizeStep.url,
+      method: finalizeMethod,
+      bodyTemplate: finalizeStep.bodyTemplate,
+      ...(finalizeStep.requirePath ? { requirePath: finalizeStep.requirePath } : {}),
+    },
   };
 }
 

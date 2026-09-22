@@ -119,9 +119,9 @@ class VideoComposerPlugin : Plugin() {
         val appContext = context.applicationContext
         val job = JobRegistry.Job(
             jobId = spec.jobId,
-            pendingPostId = spec.pendingPostId,
-            jobDir = JobFolders.dir(appContext, spec.pendingPostId),
-            partFile = JobFolders.part(appContext, spec.pendingPostId, spec.jobId),
+            batchId = spec.batchId,
+            jobDir = JobFolders.dir(appContext, spec.batchId),
+            partFile = JobFolders.part(appContext, spec.batchId, spec.jobId),
             plan = RenderPlan.build(spec, emptyMap()),
         )
         JobRegistry.register(job)
@@ -366,7 +366,7 @@ class VideoComposerPlugin : Plugin() {
     private fun finalizeJob(job: JobRegistry.Job, exportResult: ExportResult) {
         val appContext = context.applicationContext
         try {
-            val stitched = JobFolders.stitched(appContext, job.pendingPostId)
+            val stitched = JobFolders.stitched(appContext, job.batchId)
             stitched.delete()
             if (!job.partFile.renameTo(stitched)) {
                 failJob(job, FailureCodes.UNKNOWN, "could not move the render into place")
@@ -380,7 +380,7 @@ class VideoComposerPlugin : Plugin() {
                 null
             }
 
-            val posterFile = JobFolders.poster(appContext, job.pendingPostId)
+            val posterFile = JobFolders.poster(appContext, job.batchId)
             val posterAtUs = min(
                 job.plan.posterAtUs,
                 max(0L, ((info?.durationMs ?: 0L) - 1L) * 1000L),
@@ -779,7 +779,7 @@ class VideoComposerPlugin : Plugin() {
     private fun beginRecording(call: PluginCall) {
         val recorder = voiceRecorder ?: VoiceRecorder(context.applicationContext).also { voiceRecorder = it }
         try {
-            recorder.start(call.getString("pendingPostId"))
+            recorder.start(call.getString("batchId"))
             call.resolve()
         } catch (e: VoiceRecorder.RecordingException) {
             call.reject(e.message ?: RECORDING_FAILED, e.message ?: RECORDING_FAILED)
@@ -939,9 +939,9 @@ class VideoComposerPlugin : Plugin() {
 
     @PluginMethod
     fun prepareJob(call: PluginCall) {
-        val pendingPostId = call.getString("pendingPostId")
-        if (pendingPostId.isNullOrEmpty()) {
-            call.reject("pendingPostId is required", INVALID_SPEC)
+        val batchId = call.getString("batchId")
+        if (batchId.isNullOrEmpty()) {
+            call.reject("batchId is required", INVALID_SPEC)
             return
         }
         val inputsArray = call.getArray("inputs")
@@ -962,7 +962,7 @@ class VideoComposerPlugin : Plugin() {
         }
 
         pluginScope.launch {
-            when (val outcome = JobFolders.prepareJob(context.applicationContext, pendingPostId, inputs)) {
+            when (val outcome = JobFolders.prepareJob(context.applicationContext, batchId, inputs)) {
                 is JobFolders.PrepareOutcome.Failed -> call.reject(outcome.message, outcome.code)
                 is JobFolders.PrepareOutcome.Ok -> {
                     val array = com.getcapacitor.JSArray()
@@ -985,13 +985,13 @@ class VideoComposerPlugin : Plugin() {
 
     @PluginMethod
     fun cleanup(call: PluginCall) {
-        val pendingPostId = call.getString("pendingPostId")
-        if (pendingPostId.isNullOrEmpty()) {
-            call.reject("pendingPostId is required", INVALID_SPEC)
+        val batchId = call.getString("batchId")
+        if (batchId.isNullOrEmpty()) {
+            call.reject("batchId is required", INVALID_SPEC)
             return
         }
         // Anything still rendering into this folder has to stop before the folder goes.
-        JobRegistry.forPendingPost(pendingPostId).forEach { job ->
+        JobRegistry.forBatch(batchId).forEach { job ->
             job.cancelRequested = true
             job.acked = true
             if (job.state == JobRegistry.State.RENDERING) {
@@ -1006,7 +1006,7 @@ class VideoComposerPlugin : Plugin() {
             JobRegistry.forget(job.jobId)
         }
         pluginScope.launch {
-            JobFolders.cleanup(context.applicationContext, pendingPostId)
+            JobFolders.cleanup(context.applicationContext, batchId)
             call.resolve()
         }
     }

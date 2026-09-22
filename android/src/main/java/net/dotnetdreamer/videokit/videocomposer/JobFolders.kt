@@ -12,7 +12,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 
 /**
- * Where a pending post's files live, and how they get there.
+ * Where a batch's files live, and how they get there.
  *
  * The rule the whole feature rests on: once a post is pending, every byte it needs is inside one
  * app-private folder that nothing but `cleanup` deletes. Camera files can be deleted by the
@@ -46,21 +46,21 @@ object JobFolders {
      */
     const val ORPHAN_TTL_MS = 7L * 24 * 60 * 60 * 1000
 
-    fun root(ctx: Context): File = File(ctx.filesDir, "pending-posts")
+    fun root(ctx: Context): File = File(ctx.filesDir, "video-batches")
 
-    fun dir(ctx: Context, pendingPostId: String): File = File(root(ctx), safeSegment(pendingPostId))
+    fun dir(ctx: Context, batchId: String): File = File(root(ctx), safeSegment(batchId))
 
-    fun inputs(ctx: Context, pendingPostId: String): File = File(dir(ctx, pendingPostId), "in")
+    fun inputs(ctx: Context, batchId: String): File = File(dir(ctx, batchId), "in")
 
-    fun stitched(ctx: Context, pendingPostId: String): File = File(dir(ctx, pendingPostId), "stitched.mp4")
+    fun stitched(ctx: Context, batchId: String): File = File(dir(ctx, batchId), "stitched.mp4")
 
-    fun poster(ctx: Context, pendingPostId: String): File = File(dir(ctx, pendingPostId), "poster.jpg")
+    fun poster(ctx: Context, batchId: String): File = File(dir(ctx, batchId), "poster.jpg")
 
-    fun part(ctx: Context, pendingPostId: String, jobId: String): File =
-        File(dir(ctx, pendingPostId), "render-${safeSegment(jobId)}.mp4.part")
+    fun part(ctx: Context, batchId: String, jobId: String): File =
+        File(dir(ctx, batchId), "render-${safeSegment(jobId)}.mp4.part")
 
     /** Written by the publisher when the post is created; the sweep's only licence to delete. */
-    fun doneMarker(ctx: Context, pendingPostId: String): File = File(dir(ctx, pendingPostId), ".done")
+    fun doneMarker(ctx: Context, batchId: String): File = File(dir(ctx, batchId), ".done")
 
     fun thumbsCache(ctx: Context): File = File(ctx.cacheDir, "video-composer/thumbs")
 
@@ -119,11 +119,11 @@ object JobFolders {
      */
     fun prepareJob(
         ctx: Context,
-        pendingPostId: String,
+        batchId: String,
         inputs: List<Pair<String, String>>,
     ): PrepareOutcome {
-        val jobDir = dir(ctx, pendingPostId)
-        val inDir = inputs(ctx, pendingPostId)
+        val jobDir = dir(ctx, batchId)
+        val inDir = inputs(ctx, batchId)
         if (!inDir.exists() && !inDir.mkdirs()) {
             return PrepareOutcome.Failed("io", "could not create ${inDir.path}")
         }
@@ -289,8 +289,8 @@ object JobFolders {
 
     /* ---------------------------------------------------------------------------------------- */
 
-    fun cleanup(ctx: Context, pendingPostId: String) {
-        val dir = dir(ctx, pendingPostId)
+    fun cleanup(ctx: Context, batchId: String) {
+        val dir = dir(ctx, batchId)
         if (dir.exists() && !dir.deleteRecursively()) {
             Log.w(TAG, "could not fully delete ${dir.path}")
         }

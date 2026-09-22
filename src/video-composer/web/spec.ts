@@ -59,7 +59,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
   if (!spec || typeof spec !== 'object') throw new SpecError('spec');
 
   const jobId = nonEmpty(spec.jobId, 'jobId');
-  const pendingPostId = nonEmpty(spec.pendingPostId, 'pendingPostId');
+  const batchId = nonEmpty(spec.batchId, 'batchId');
 
   if (!Array.isArray(spec.clips) || spec.clips.length === 0) throw new SpecError('clips');
   const clips = spec.clips.map((clip, i) => readClip(clip, `clips[${i}]`));
@@ -139,7 +139,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
 
   return {
     jobId,
-    pendingPostId,
+    batchId,
     clips,
     // A tail the base track already covers is no tail at all, and the key is left off rather than
     // read back as a number the plan would have to compare against the clips a second time.

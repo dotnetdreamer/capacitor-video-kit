@@ -42,7 +42,7 @@ function oneClip(): EditManifest {
 }
 
 function spec(manifest: EditManifest) {
-  return toComposeSpec(manifest, URIS, { jobId: 'j', pendingPostId: 'p' }, RASTER);
+  return toComposeSpec(manifest, URIS, { jobId: 'j', batchId: 'p' }, RASTER);
 }
 
 describe('a clip placement', () => {

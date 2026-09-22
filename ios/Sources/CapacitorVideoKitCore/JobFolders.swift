@@ -15,7 +15,7 @@ struct PreparedInput: Sendable {
     let uri: String
 }
 
-/// Where a pending post's files live, and how they get there.
+/// Where a batch's files live, and how they get there.
 ///
 /// The rule the whole feature rests on: once a post is pending, every byte it needs is inside one
 /// app-private folder that nothing but `cleanup` deletes. The camera plugin's own housekeeping
@@ -55,45 +55,45 @@ enum JobFolders {
 
     // MARK: - Paths
 
-    /// Library/Application Support/pending-posts/
+    /// Library/Application Support/video-batches/
     ///
     /// This is a pure path getter: Application Support does not exist on a fresh install and
     /// `urls(for:in:)` does not create it, so nothing may write here without `ensure` first.
     static var root: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("pending-posts", isDirectory: true)
+        return base.appendingPathComponent("video-batches", isDirectory: true)
     }
 
-    static func jobDir(_ pendingPostId: String) -> URL {
-        root.appendingPathComponent(sanitize(pendingPostId), isDirectory: true)
+    static func jobDir(_ batchId: String) -> URL {
+        root.appendingPathComponent(sanitize(batchId), isDirectory: true)
     }
 
-    static func inputsDir(_ pendingPostId: String) -> URL {
-        jobDir(pendingPostId).appendingPathComponent("in", isDirectory: true)
+    static func inputsDir(_ batchId: String) -> URL {
+        jobDir(batchId).appendingPathComponent("in", isDirectory: true)
     }
 
-    static func stitched(_ pendingPostId: String) -> URL {
-        jobDir(pendingPostId).appendingPathComponent("stitched.mp4")
+    static func stitched(_ batchId: String) -> URL {
+        jobDir(batchId).appendingPathComponent("stitched.mp4")
     }
 
-    static func poster(_ pendingPostId: String) -> URL {
-        jobDir(pendingPostId).appendingPathComponent("poster.jpg")
+    static func poster(_ batchId: String) -> URL {
+        jobDir(batchId).appendingPathComponent("poster.jpg")
     }
 
     /// The export writes here and the finished file is moved to `stitched.mp4`, so a process that
     /// dies mid render never leaves a file that looks finished to the publisher.
-    static func part(_ pendingPostId: String, jobId: String) -> URL {
-        jobDir(pendingPostId).appendingPathComponent("render-\(sanitize(jobId)).mp4.part")
+    static func part(_ batchId: String, jobId: String) -> URL {
+        jobDir(batchId).appendingPathComponent("render-\(sanitize(jobId)).mp4.part")
     }
 
     /// `AVAssetExportSession.directoryForTemporaryFiles`. It lives inside the job folder so
     /// `cleanup` removes it for free; it has no Android counterpart.
-    static func exportTmp(_ pendingPostId: String) -> URL {
-        jobDir(pendingPostId).appendingPathComponent("export-tmp", isDirectory: true)
+    static func exportTmp(_ batchId: String) -> URL {
+        jobDir(batchId).appendingPathComponent("export-tmp", isDirectory: true)
     }
 
-    static func doneMarker(_ pendingPostId: String) -> URL {
-        jobDir(pendingPostId).appendingPathComponent(doneMarkerName)
+    static func doneMarker(_ batchId: String) -> URL {
+        jobDir(batchId).appendingPathComponent(doneMarkerName)
     }
 
     /// Caches, not Application Support: a thumbnail strip is worth regenerating and is exactly what
@@ -185,10 +185,10 @@ enum JobFolders {
     /// Idempotent by design: an input already at its destination, or whose source is gone but whose
     /// destination is there, is echoed back untouched. That is what makes a second `prepareJob`
     /// after a crash harmless, and JS does retry it.
-    static func prepareJob(pendingPostId: String,
+    static func prepareJob(batchId: String,
                            inputs: [(key: String, uri: String)]) throws -> (jobDir: URL, inputs: [PreparedInput]) {
-        let jobDir = self.jobDir(pendingPostId)
-        let inDir = inputsDir(pendingPostId)
+        let jobDir = self.jobDir(batchId)
+        let inDir = inputsDir(batchId)
         do {
             try ensure(root)
             try ensure(jobDir)
@@ -308,8 +308,8 @@ enum JobFolders {
 
     /// A missing folder is not an error: the contract calls `cleanup` idempotent and JS calls it on
     /// every discard, whether or not anything was ever written.
-    static func cleanup(pendingPostId: String) {
-        try? FileManager.default.removeItem(at: jobDir(pendingPostId))
+    static func cleanup(batchId: String) {
+        try? FileManager.default.removeItem(at: jobDir(batchId))
     }
 
     // MARK: - sweep
@@ -349,7 +349,7 @@ enum JobFolders {
         sweepCache(voiceDir(), now: now)
     }
 
-    /// The folder name IS the sanitised pendingPostId, which is what both of the guards below are
+    /// The folder name IS the sanitised batchId, which is what both of the guards below are
     /// asked about: `JobRegistry` compares it against its jobs' sanitised ids, and `PublishStore`
     /// names its records by `PublishModels.safe`, whose character class is the same as `sanitize`'s,
     /// so sanitising an already sanitised id is a no-op.
@@ -359,7 +359,7 @@ enum JobFolders {
         // A render in flight, or a terminal outcome JS has not collected yet, owns this folder.
         // Android never needed this check because its sweep runs once at load() with nothing in
         // flight; on iOS load() also fires on a WebView reload, which CAN happen mid render.
-        if JobRegistry.shared.hasLiveJob(pendingPostId: id) { return false }
+        if JobRegistry.shared.hasLiveJob(batchId: id) { return false }
 
         // A publish that is queued, uploading, creating, failed or cancelled keeps its files
         // however old they are. A failed publish the customer has not answered yet is not garbage,

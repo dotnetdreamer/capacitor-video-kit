@@ -40,5 +40,5 @@
     "types": ["@stencil/vitest/globals"]
   },
   "include": ["."],
-  "exclude": ["plugin.ts", "video-composer", "post-publisher", "web-runtime", "mcp", "node_modules"]
+  "exclude": ["plugin.ts", "video-composer", "background-publisher", "web-runtime", "mcp", "node_modules"]
 }

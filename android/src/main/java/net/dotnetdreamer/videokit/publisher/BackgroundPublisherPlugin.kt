@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.net.Uri
 import android.util.Log
@@ -26,21 +26,21 @@ import java.lang.ref.WeakReference
  * All methods run on Capacitor's one shared plugin thread, which the rest of the app also uses, so
  * nothing here blocks on network or large file IO.
  */
-@CapacitorPlugin(name = "PostPublisher")
-class PostPublisherPlugin : Plugin() {
+@CapacitorPlugin(name = "BackgroundPublisher")
+class BackgroundPublisherPlugin : Plugin() {
 
-    private lateinit var store: PublishRequestStore
+    private lateinit var store: PublishStore
     private val pluginScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun load() {
         val appContext = context.applicationContext
-        store = PublishRequestStore(appContext)
+        store = PublishStore(appContext)
         PublisherEvents.emitter = WeakReference(this)
-        PostingNotification.ensureChannel(appContext)
+        UploadNotification.ensureChannel(appContext)
         pluginScope.launch {
-            store.sweep(System.currentTimeMillis(), PublishRequestStore.DONE_RETENTION_MS)
-            // A post that finished while no WebView was attached has been waiting to say so.
-            PublisherEvents.replayUnacked(this@PostPublisherPlugin, store)
+            store.sweep(System.currentTimeMillis(), PublishStore.DONE_RETENTION_MS)
+            // A batch that finished while no WebView was attached has been waiting to say so.
+            PublisherEvents.replayUnacked(this@BackgroundPublisherPlugin, store)
         }
     }
 
@@ -69,14 +69,24 @@ class PostPublisherPlugin : Plugin() {
         for (upload in request.uploads) {
             val file = fileFor(upload.path)
             if (!file.exists() || file.length() == 0L) {
-                call.reject("missing file for ${upload.uploadGuid}", FailureCodes.FILE_MISSING)
+                call.reject("missing file for ${upload.uploadId}", FailureCodes.FILE_MISSING)
                 return
             }
         }
 
-        val existing = store.load(request.pendingPostId)
+        val existing = store.load(request.batchId)
         if (existing != null && existing.state.phase in IN_FLIGHT) {
-            // Already going. Saying yes again is what keeps a retried call from double-posting.
+            // Already going. Saying yes again is what keeps a retried call from sending twice.
+            call.resolve()
+            return
+        }
+
+        if (existing != null && existing.state.phase == Phase.DONE) {
+            // A finished batch re-published would start a fresh record, and a fresh record is not
+            // DONE, so the finalize worker's idempotence guard could not fire and the call would go
+            // out a second time. Re-announce instead, so a caller that missed the first event still
+            // hears it. iOS has always done this.
+            PublisherEvents.finished(request.batchId, existing.state.result)
             call.resolve()
             return
         }
@@ -85,9 +95,9 @@ class PostPublisherPlugin : Plugin() {
         // An id obtained before a previous attempt was abandoned is still good - carrying it over
         // is what stops a retry from uploading the same file twice.
         existing?.state?.uploads?.forEach { previous ->
-            if (previous.downloadId == null) return@forEach
-            state.uploadFor(previous.uploadGuid)?.let { current ->
-                current.downloadId = previous.downloadId
+            if (previous.remoteId == null) return@forEach
+            state.uploadFor(previous.uploadId)?.let { current ->
+                current.remoteId = previous.remoteId
                 current.status = UploadStatus.DONE
             }
         }
@@ -103,56 +113,56 @@ class PostPublisherPlugin : Plugin() {
                 updatedAt = now,
             ),
         )
-        Workers.enqueue(context.applicationContext, request.pendingPostId, ExistingWorkPolicy.KEEP)
+        Workers.enqueue(context.applicationContext, request.batchId, ExistingWorkPolicy.KEEP)
         call.resolve()
     }
 
     @PluginMethod
     fun getState(call: PluginCall) {
-        val pendingPostId = call.getString("pendingPostId")
-        if (pendingPostId.isNullOrEmpty()) {
-            call.reject("pendingPostId is required", INVALID_REQUEST)
+        val batchId = call.getString("batchId")
+        if (batchId.isNullOrEmpty()) {
+            call.reject("batchId is required", INVALID_REQUEST)
             return
         }
-        val entry = store.load(pendingPostId)
+        val entry = store.load(batchId)
         if (entry == null) {
             call.resolve(JSObject().put("state", JSONObject.NULL))
             return
         }
         // Fold in the live byte counters: the record is written every few percent, and the caller
         // asking right now wants the current number, not the last persisted one.
-        val live = PublisherEvents.bytesFor(pendingPostId)
+        val live = PublisherEvents.bytesFor(batchId)
         if (live.isNotEmpty()) {
             entry.state.uploads.forEach { upload ->
-                live[upload.uploadGuid]?.let { bytes ->
+                live[upload.uploadId]?.let { bytes ->
                     if (bytes > upload.bytesSent) upload.bytesSent = bytes
                 }
             }
             entry.state.percent = entry.state.computePercent(live)
         }
         if (entry.state.phase in TERMINAL && !entry.acked) {
-            store.update(pendingPostId) { it.acked = true }
+            store.update(batchId) { it.acked = true }
         }
         call.resolve(JSObject().put("state", entry.state.toJson()))
     }
 
     @PluginMethod
     fun cancel(call: PluginCall) {
-        val pendingPostId = call.getString("pendingPostId")
-        if (pendingPostId.isNullOrEmpty()) {
-            call.reject("pendingPostId is required", INVALID_REQUEST)
+        val batchId = call.getString("batchId")
+        if (batchId.isNullOrEmpty()) {
+            call.reject("batchId is required", INVALID_REQUEST)
             return
         }
-        Workers.cancel(context.applicationContext, pendingPostId)
-        store.update(pendingPostId) { entry ->
+        Workers.cancel(context.applicationContext, batchId)
+        store.update(batchId) { entry ->
             entry.state.phase = Phase.CANCELLED
             // No error is recorded: the phase already says what happened, and a code of "cancelled"
             // in the error slot would show up as a failure in anything reading the state.
             entry.state.error = null
             entry.acked = true
         }
-        PostingNotification.cancel(context.applicationContext)
-        PublisherEvents.forget(pendingPostId)
+        UploadNotification.cancel(context.applicationContext)
+        PublisherEvents.forget(batchId)
         // Deliberately no event: cancel is usually the first half of a discard, and a failure event
         // arriving between the two reads as something going wrong.
         call.resolve()
@@ -160,13 +170,13 @@ class PostPublisherPlugin : Plugin() {
 
     @PluginMethod
     fun retry(call: PluginCall) {
-        val pendingPostId = call.getString("pendingPostId")
-        if (pendingPostId.isNullOrEmpty()) {
-            call.reject("pendingPostId is required", INVALID_REQUEST)
+        val batchId = call.getString("batchId")
+        if (batchId.isNullOrEmpty()) {
+            call.reject("batchId is required", INVALID_REQUEST)
             return
         }
         val headers = call.getObject("headers")
-        val updated = store.update(pendingPostId) { entry ->
+        val updated = store.update(batchId) { entry ->
             headers?.let { entry.request.headers = entry.request.headers + readHeaders(it) }
             entry.state.error = null
             entry.state.phase = Phase.QUEUED
@@ -174,30 +184,30 @@ class PostPublisherPlugin : Plugin() {
             entry.acked = false
             entry.state.uploads.forEach { upload ->
                 // Anything without an id goes back in the queue; anything with one is already done.
-                if (upload.downloadId == null) upload.status = UploadStatus.QUEUED
+                if (upload.remoteId == null) upload.status = UploadStatus.QUEUED
             }
         }
         if (updated == null) {
-            call.reject("nothing to retry for $pendingPostId", NOT_FOUND)
+            call.reject("nothing to retry for $batchId", NOT_FOUND)
             return
         }
         // REPLACE rather than KEEP: a chain that already failed would otherwise be kept in place.
-        Workers.enqueue(context.applicationContext, pendingPostId, ExistingWorkPolicy.REPLACE)
+        Workers.enqueue(context.applicationContext, batchId, ExistingWorkPolicy.REPLACE)
         call.resolve()
     }
 
     @PluginMethod
     fun clear(call: PluginCall) {
-        val pendingPostId = call.getString("pendingPostId")
-        if (pendingPostId.isNullOrEmpty()) {
-            call.reject("pendingPostId is required", INVALID_REQUEST)
+        val batchId = call.getString("batchId")
+        if (batchId.isNullOrEmpty()) {
+            call.reject("batchId is required", INVALID_REQUEST)
             return
         }
-        Workers.cancel(context.applicationContext, pendingPostId)
+        Workers.cancel(context.applicationContext, batchId)
         // Only the record goes; the files belong to whoever put them there.
-        store.delete(pendingPostId)
-        PublisherEvents.forget(pendingPostId)
-        PostingNotification.cancel(context.applicationContext)
+        store.delete(batchId)
+        PublisherEvents.forget(batchId)
+        UploadNotification.cancel(context.applicationContext)
         call.resolve()
     }
 
@@ -223,12 +233,12 @@ class PostPublisherPlugin : Plugin() {
     }
 
     private companion object {
-        const val TAG = "PostPublisher"
+        const val TAG = "BackgroundPublisher"
 
         const val INVALID_REQUEST = "invalid_request"
         const val NOT_FOUND = "not_found"
 
-        val IN_FLIGHT = setOf(Phase.QUEUED, Phase.UPLOADING, Phase.CREATING)
+        val IN_FLIGHT = setOf(Phase.QUEUED, Phase.UPLOADING, Phase.FINALIZING)
         val TERMINAL = setOf(Phase.DONE, Phase.FAILED, Phase.CANCELLED)
     }
 }

@@ -26,7 +26,7 @@ const DONE_RETENTION_MS = 24 * 60 * 60 * 1000;
 /** What goes in the store. `result.uri` here is the DURABLE name, never a `blob:` URL. */
 interface JobRecord {
   jobId: string;
-  pendingPostId: string;
+  batchId: string;
   state: JobStateName;
   progress: number;
   result?: ComposeResult;
@@ -61,7 +61,7 @@ export async function startJob(spec: ComposeSpec, emit: JobEmitter): Promise<{ j
 
   const record: JobRecord = {
     jobId: spec.jobId,
-    pendingPostId: spec.pendingPostId,
+    batchId: spec.batchId,
     state: 'pending',
     progress: 0,
     updatedAt: Date.now(),
@@ -97,21 +97,21 @@ export function cancelJob(jobId: string): void {
 }
 
 /**
- * Forgets every job of one pending post and deletes its folder - the web half of `cleanup`.
+ * Forgets every job of one batch and deletes its folder - the web half of `cleanup`.
  *
  * Anything still rendering into that folder is stopped first, because a render that finished
  * writing after the folder went would put its file back and leave it there for good.
  */
-export async function cleanupPendingPost(pendingPostId: string): Promise<void> {
+export async function cleanupBatch(batchId: string): Promise<void> {
   for (const [jobId, job] of live) {
-    if (job.record.pendingPostId !== pendingPostId) continue;
+    if (job.record.batchId !== batchId) continue;
     job.abort.abort();
     live.delete(jobId);
   }
   for (const record of await idbValues<JobRecord>(JOBS_STORE)) {
-    if (record?.pendingPostId === pendingPostId) await idbDelete(JOBS_STORE, record.jobId);
+    if (record?.batchId === batchId) await idbDelete(JOBS_STORE, record.jobId);
   }
-  await deleteFolder(pendingPostId);
+  await deleteFolder(batchId);
 }
 
 /**
@@ -139,7 +139,7 @@ export async function sweepJobs(): Promise<void> {
 /* -------------------------------------------------------------------------------------------- */
 
 async function run(spec: ComposeSpec, job: LiveJob, emit: JobEmitter): Promise<void> {
-  const { jobId, pendingPostId } = spec;
+  const { jobId, batchId } = spec;
   // A render does not survive the document, so the customer is asked before the document goes. This
   // is the whole of what a page has in place of a foreground service - see `leave-guard.ts`.
   const release = holdPageOpen(`rendering ${jobId}`);
@@ -159,8 +159,8 @@ async function run(spec: ComposeSpec, job: LiveJob, emit: JobEmitter): Promise<v
     // only had VP8 produced a WebM, and the publisher reads the extension off this path when it
     // builds the upload's filename.
     const extension = outcome.mimeType.includes('webm') ? 'webm' : 'mp4';
-    const video = await putFile(pendingPostId, `${jobId}.${extension}`, outcome.blob);
-    const poster = outcome.poster ? await putFile(pendingPostId, `${jobId}-poster.jpg`, outcome.poster) : null;
+    const video = await putFile(batchId, `${jobId}.${extension}`, outcome.blob);
+    const poster = outcome.poster ? await putFile(batchId, `${jobId}-poster.jpg`, outcome.poster) : null;
 
     const result: ComposeResult = {
       jobId,

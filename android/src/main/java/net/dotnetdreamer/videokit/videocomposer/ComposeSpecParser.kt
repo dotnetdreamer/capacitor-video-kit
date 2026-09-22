@@ -50,7 +50,7 @@ object ComposeSpecParser {
 
     fun parse(json: JSONObject): ComposeSpec {
         val jobId = json.nonEmptyString("jobId")
-        val pendingPostId = json.nonEmptyString("pendingPostId")
+        val batchId = json.nonEmptyString("batchId")
 
         val clipsJson = json.optJSONArray("clips") ?: throw SpecException("clips")
         if (clipsJson.length() == 0) throw SpecException("clips")
@@ -90,7 +90,7 @@ object ComposeSpecParser {
 
         return ComposeSpec(
             jobId = jobId,
-            pendingPostId = pendingPostId,
+            batchId = batchId,
             clips = clips,
             output = output,
             filter = filter,

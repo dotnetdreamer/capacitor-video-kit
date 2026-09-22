@@ -122,7 +122,7 @@ function openable(url: string): Promise<{ durationMs: number; width: number; hei
 function spec(uri: string, over: Partial<ComposeSpec> = {}): ComposeSpec {
   return {
     jobId: 'job-1',
-    pendingPostId: 'post-1',
+    batchId: 'post-1',
     clips: [{ key: 'c1', uri, inMs: 0, outMs: 500, speed: 1, volume: 1, muted: false, fit: 'contain' }],
     // Small and even: this is about the container and the pipeline, not about throughput.
     output: { width: 160, height: 284, fps: 10, videoBitrate: 800_000, audioBitrate: 128_000 },

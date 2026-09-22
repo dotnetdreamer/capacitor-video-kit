@@ -19,7 +19,7 @@ class ComposeSpecParserTest {
         """
         {
           "jobId": "job-1",
-          "pendingPostId": "post-1",
+          "batchId": "post-1",
           "clips": [
             { "key": "a", "uri": "file:///a.mp4", "inMs": 0, "outMs": 2000,
               "speed": 1, "volume": 1, "muted": false, "fit": "contain" }
@@ -50,7 +50,7 @@ class ComposeSpecParserTest {
     fun `a minimal spec round-trips`() {
         val spec = ComposeSpecParser.parse(minimalJson())
         assertEquals("job-1", spec.jobId)
-        assertEquals("post-1", spec.pendingPostId)
+        assertEquals("post-1", spec.batchId)
         assertEquals(1, spec.clips.size)
         assertEquals("a", spec.clips[0].key)
         assertEquals(720, spec.output.width)
@@ -61,7 +61,7 @@ class ComposeSpecParserTest {
     @Test
     fun `missing identifiers are rejected with their path`() {
         expectInvalid("jobId") { remove("jobId") }
-        expectInvalid("pendingPostId") { remove("pendingPostId") }
+        expectInvalid("batchId") { remove("batchId") }
     }
 
     @Test

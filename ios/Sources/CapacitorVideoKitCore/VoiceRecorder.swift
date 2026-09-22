@@ -66,15 +66,15 @@ actor VoiceRecorder {
 
     // MARK: - Start
 
-    /// Opens a take. `pendingPostId` decides only where the file lands: inside the job folder when
+    /// Opens a take. `batchId` decides only where the file lands: inside the job folder when
     /// the caller already has one, so `prepareJob` never has to relocate it, and the voice cache
     /// otherwise.
-    func start(pendingPostId: String?) async throws {
+    func start(batchId: String?) async throws {
         guard recorder == nil else { throw VoiceError.alreadyRecording }
 
         try await requestPermission()
 
-        let dir = pendingPostId.map { JobFolders.inputsDir($0) } ?? JobFolders.voiceDir()
+        let dir = batchId.map { JobFolders.inputsDir($0) } ?? JobFolders.voiceDir()
         do {
             try JobFolders.ensure(dir)
         } catch {

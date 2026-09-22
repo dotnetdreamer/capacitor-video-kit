@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.content.Context
 import android.net.Uri
@@ -11,15 +11,15 @@ import androidx.work.workDataOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import net.dotnetdreamer.videokit.postpublisher.PublisherHttp.await
+import net.dotnetdreamer.videokit.publisher.PublisherHttp.await
 import okhttp3.Response
 import java.io.File
 import java.io.IOException
 
 /**
- * Sends every file of one post, in order, and records the id the server gives back for each.
+ * Sends every file of one batch, in order, and records the id the server gives back for each.
  *
- * The invariant that makes this safe to re-run: an upload with a `downloadId` is never sent again.
+ * The invariant that makes this safe to re-run: an upload with a `remoteId` is never sent again.
  * WorkManager will restart this worker after a process death, a network drop or a reboot, and each
  * time it picks up exactly where the record says it stopped. A file that was mid-flight when the
  * process died is looked up by its guid first, because the server may well have the whole thing
@@ -27,49 +27,49 @@ import java.io.IOException
  */
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
-    private val pendingPostId: String = inputData.getString(Workers.KEY_PENDING_POST_ID).orEmpty()
-    private val store = PublishRequestStore(context)
+    private val batchId: String = inputData.getString(Workers.KEY_BATCH_ID).orEmpty()
+    private val store = PublishStore(context)
 
     override suspend fun getForegroundInfo(): ForegroundInfo =
-        PostingNotification.foregroundInfo(applicationContext, percent = 0, done = 0, total = 0)
+        UploadNotification.foregroundInfo(applicationContext, percent = 0, done = 0, total = 0)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        if (pendingPostId.isEmpty()) return@withContext Result.failure()
-        val entry = store.load(pendingPostId) ?: return@withContext Result.failure()
+        if (batchId.isEmpty()) return@withContext Result.failure()
+        val entry = store.load(batchId) ?: return@withContext Result.failure()
         if (entry.state.phase == Phase.CANCELLED) return@withContext Result.failure()
 
-        PostingNotification.ensureChannel(applicationContext)
+        UploadNotification.ensureChannel(applicationContext)
         goForeground()
 
         entry.state.phase = Phase.UPLOADING
         val uploads = entry.request.uploads
         // Sizes are read once up front so the percentage is stable even as files finish.
         uploads.forEach { upload ->
-            val state = entry.state.uploadFor(upload.uploadGuid) ?: return@forEach
+            val state = entry.state.uploadFor(upload.uploadId) ?: return@forEach
             if (state.bytesTotal <= 0L) state.bytesTotal = fileFor(upload).length()
         }
         store.save(entry)
 
         for (upload in uploads) {
-            val state = entry.state.uploadFor(upload.uploadGuid)
+            val state = entry.state.uploadFor(upload.uploadId)
                 ?: return@withContext fail(
                     entry,
                     FailureCodes.UNKNOWN,
-                    "no record for ${upload.uploadGuid}",
-                    upload.uploadGuid,
+                    "no record for ${upload.uploadId}",
+                    upload.uploadId,
                     retryable = false,
                 )
 
             // Already accepted by the server, this run or a previous one.
-            if (state.downloadId != null) continue
+            if (state.remoteId != null) continue
 
             // Interrupted mid-flight: the server may have the file even though we never saw the
             // answer. Asking is a great deal cheaper than sending it again.
             if (state.status == UploadStatus.UPLOADING) {
-                val recovered = PublisherHttp.lookupDownloadId(entry.request, upload.uploadGuid)
+                val recovered = PublisherHttp.lookupRemoteId(entry.request, upload.uploadId)
                 if (recovered != null) {
-                    Log.i(TAG, "recovered ${upload.uploadGuid} without re-sending")
-                    state.downloadId = recovered
+                    Log.i(TAG, "recovered ${upload.uploadId} without re-sending")
+                    state.remoteId = recovered
                     state.status = UploadStatus.DONE
                     state.bytesSent = state.bytesTotal
                     store.save(entry)
@@ -83,8 +83,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 return@withContext fail(
                     entry,
                     FailureCodes.FILE_MISSING,
-                    "missing ${upload.uploadGuid}",
-                    upload.uploadGuid,
+                    "missing ${upload.uploadId}",
+                    upload.uploadId,
                     retryable = false,
                 )
             }
@@ -96,8 +96,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             val response: Response = try {
                 PublisherHttp.client
                     .newCall(
-                        MultipartBodies.uploadRequest(entry.request, upload, file) { sent ->
-                            onBytes(entry, upload.uploadGuid, sent)
+                        UploadRequests.build(entry.request, upload, file) { sent ->
+                            onBytes(entry, upload.uploadId, sent)
                         },
                     )
                     .await()
@@ -109,7 +109,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     entry,
                     FailureCodes.NETWORK,
                     e.message ?: "connection failed",
-                    upload.uploadGuid,
+                    upload.uploadId,
                 )
             }
 
@@ -118,16 +118,22 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
             when {
                 code in 200..299 -> {
-                    val downloadId = PublisherHttp.parseDownloadId(body)
-                        ?: return@withContext fail(
-                            entry,
-                            FailureCodes.HTTP,
-                            "no downloadId in the response: ${PublisherHttp.errorMessage(body)}",
-                            upload.uploadGuid,
-                            retryable = false,
-                            httpStatus = code,
-                        )
-                    state.downloadId = downloadId
+                    // Without an `idPath` the URL already decided where the file went - the
+                    // presigned case - so the caller's own id is its id and nothing is parsed.
+                    val idPath = entry.request.upload.idPath
+                    val remoteId = if (idPath.isNullOrEmpty()) {
+                        RemoteId(upload.uploadId, isNumber = false)
+                    } else {
+                        PublisherHttp.parseRemoteId(body, idPath)
+                    } ?: return@withContext fail(
+                        entry,
+                        FailureCodes.HTTP,
+                        "no id at $idPath in the response: ${PublisherHttp.errorMessage(body)}",
+                        upload.uploadId,
+                        retryable = false,
+                        httpStatus = code,
+                    )
+                    state.remoteId = remoteId
                     state.status = UploadStatus.DONE
                     state.httpStatus = code
                     state.bytesSent = state.bytesTotal
@@ -140,7 +146,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     entry,
                     FailureCodes.AUTH,
                     PublisherHttp.errorMessage(body),
-                    upload.uploadGuid,
+                    upload.uploadId,
                     retryable = true,
                     httpStatus = code,
                 )
@@ -148,14 +154,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     entry,
                     FailureCodes.HTTP,
                     PublisherHttp.errorMessage(body),
-                    upload.uploadGuid,
+                    upload.uploadId,
                     httpStatus = code,
                 )
                 else -> return@withContext fail(
                     entry,
                     FailureCodes.HTTP,
                     PublisherHttp.errorMessage(body),
-                    upload.uploadGuid,
+                    upload.uploadId,
                     retryable = false,
                     httpStatus = code,
                 )
@@ -187,27 +193,27 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
     }
 
-    private fun onBytes(entry: PublishEntry, uploadGuid: String, sent: Long) {
-        PublisherEvents.setBytes(pendingPostId, uploadGuid, sent)
+    private fun onBytes(entry: PublishEntry, uploadId: String, sent: Long) {
+        PublisherEvents.setBytes(batchId, uploadId, sent)
         val now = SystemClock.elapsedRealtime()
         if (now - lastTickAt < PROGRESS_TICK_MS) return
         lastTickAt = now
 
-        val percent = entry.state.computePercent(PublisherEvents.bytesFor(pendingPostId))
+        val percent = entry.state.computePercent(PublisherEvents.bytesFor(batchId))
         if (percent == lastPercent) return
         lastPercent = percent
 
         setProgressAsyncSafely(percent)
         val done = entry.state.uploads.count { it.status == UploadStatus.DONE }
-        PostingNotification.update(applicationContext, percent, done, entry.state.uploads.size)
-        PublisherEvents.progress(pendingPostId, "uploading", percent)
+        UploadNotification.update(applicationContext, percent, done, entry.state.uploads.size)
+        PublisherEvents.progress(batchId, "uploading", percent)
 
         // The record is written far less often than the counter moves; it only has to be good
         // enough to resume from.
         if (percent - lastPersistedPercent >= PERSIST_EVERY_PERCENT) {
             lastPersistedPercent = percent
             entry.state.percent = percent
-            entry.state.uploadFor(uploadGuid)?.bytesSent = sent
+            entry.state.uploadFor(uploadId)?.bytesSent = sent
             store.save(entry)
         }
     }
@@ -221,11 +227,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     }
 
     private fun emitProgress(entry: PublishEntry) {
-        val percent = entry.state.computePercent(PublisherEvents.bytesFor(pendingPostId))
+        val percent = entry.state.computePercent(PublisherEvents.bytesFor(batchId))
         entry.state.percent = percent
         val done = entry.state.uploads.count { it.status == UploadStatus.DONE }
-        PostingNotification.update(applicationContext, percent, done, entry.state.uploads.size)
-        PublisherEvents.progress(pendingPostId, "uploading", percent)
+        UploadNotification.update(applicationContext, percent, done, entry.state.uploads.size)
+        PublisherEvents.progress(batchId, "uploading", percent)
     }
 
     /**
@@ -237,34 +243,34 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         entry: PublishEntry,
         code: String,
         message: String,
-        uploadGuid: String?,
+        uploadId: String?,
         httpStatus: Int? = null,
     ): Result {
         if (runAttemptCount < Workers.MAX_ATTEMPTS - 1) {
-            entry.state.error = PublishFailure(code, message, httpStatus, "uploading", uploadGuid, true)
+            entry.state.error = PublishFailure(code, message, httpStatus, "uploading", uploadId, true)
             store.save(entry)
             Log.i(TAG, "attempt ${runAttemptCount + 1} failed ($code); backing off")
             return Result.retry()
         }
-        return fail(entry, code, message, uploadGuid, retryable = true, httpStatus = httpStatus)
+        return fail(entry, code, message, uploadId, retryable = true, httpStatus = httpStatus)
     }
 
     private fun fail(
         entry: PublishEntry,
         code: String,
         message: String,
-        uploadGuid: String?,
+        uploadId: String?,
         retryable: Boolean,
         httpStatus: Int? = null,
     ): Result {
-        val failure = PublishFailure(code, message, httpStatus, "uploading", uploadGuid, retryable)
+        val failure = PublishFailure(code, message, httpStatus, "uploading", uploadId, retryable)
         entry.state.phase = Phase.FAILED
         entry.state.error = failure
         entry.acked = false
         store.save(entry)
-        PostingNotification.cancel(applicationContext)
-        PublisherEvents.failed(pendingPostId, failure)
-        Log.w(TAG, "upload failed for $pendingPostId: $code $message")
+        UploadNotification.cancel(applicationContext)
+        PublisherEvents.failed(batchId, failure)
+        Log.w(TAG, "upload failed for $batchId: $code $message")
         // Failing also drops the chained create step, which is exactly what should happen.
         return Result.failure()
     }
@@ -274,7 +280,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     private var lastPersistedPercent = 0
 
     private companion object {
-        const val TAG = "PostPublisher"
+        const val TAG = "BackgroundPublisher"
         const val PROGRESS_TICK_MS = 500L
         const val PERSIST_EVERY_PERCENT = 5
     }

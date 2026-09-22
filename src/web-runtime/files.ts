@@ -14,7 +14,7 @@
  * WRITTEN DOWN - in a job record, in a publish record - and [resolve] turns either one, plus an
  * `http(s):`, a `data:` and a bare path, back into bytes.
  *
- * The folder is the `pendingPostId`, exactly as `JobFolders` uses it natively, so `cleanup` is the
+ * The folder is the `batchId`, exactly as `JobFolders` uses it natively, so `cleanup` is the
  * same one-line promise: the folder goes and everything in it goes with it.
  */
 import { FILES_STORE, idbDelete, idbGet, idbKeys, idbPut } from './idb';

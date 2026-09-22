@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.util.Log
 import com.getcapacitor.JSObject
@@ -16,10 +16,10 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object PublisherEvents {
 
-    private const val TAG = "PostPublisher"
+    private const val TAG = "BackgroundPublisher"
 
     @Volatile
-    var emitter: WeakReference<PostPublisherPlugin>? = null
+    var emitter: WeakReference<BackgroundPublisherPlugin>? = null
 
     /** Bytes sent per upload, updated far more often than the record is written. */
     val liveBytes = ConcurrentHashMap<String, MutableMap<String, Long>>()
@@ -33,11 +33,11 @@ object PublisherEvents {
         plugin.emit(event, payload, retain)
     }
 
-    fun progress(pendingPostId: String, phase: String, percent: Int) {
+    fun progress(batchId: String, phase: String, percent: Int) {
         emit(
             "publishProgress",
             JSObject()
-                .put("pendingPostId", pendingPostId)
+                .put("batchId", batchId)
                 .put("phase", phase)
                 .put("percent", percent),
             // A stale percentage is worth nothing and would pile up in the retained list.
@@ -45,20 +45,17 @@ object PublisherEvents {
         )
     }
 
-    fun finished(pendingPostId: String, postId: Int, published: Boolean) {
-        emit(
-            "publishFinished",
-            JSObject()
-                .put("pendingPostId", pendingPostId)
-                .put("postId", postId)
-                .put("published", published),
-            retain = true,
-        )
+    fun finished(batchId: String, result: Any?) {
+        val payload = JSObject().put("batchId", batchId)
+        // Absent rather than null when the body was not JSON: a 204 finishes a batch too, and the
+        // caller reading `result` should be able to tell "nothing was sent" from "null was sent".
+        result?.let { payload.put("result", it) }
+        emit("publishFinished", payload, retain = true)
     }
 
-    fun failed(pendingPostId: String, failure: PublishFailure) {
+    fun failed(batchId: String, failure: PublishFailure) {
         val payload = JSObject()
-            .put("pendingPostId", pendingPostId)
+            .put("batchId", batchId)
             .put("phase", failure.phase)
             .put("code", failure.code)
             .put("message", failure.message)
@@ -66,36 +63,30 @@ object PublisherEvents {
         emit("publishFailed", payload, retain = true)
     }
 
-    fun setBytes(pendingPostId: String, uploadGuid: String, bytes: Long) {
-        liveBytes.getOrPut(pendingPostId) { ConcurrentHashMap() }[uploadGuid] = bytes
+    fun setBytes(batchId: String, uploadId: String, bytes: Long) {
+        liveBytes.getOrPut(batchId) { ConcurrentHashMap() }[uploadId] = bytes
     }
 
-    fun bytesFor(pendingPostId: String): Map<String, Long> = liveBytes[pendingPostId] ?: emptyMap()
+    fun bytesFor(batchId: String): Map<String, Long> = liveBytes[batchId] ?: emptyMap()
 
-    fun forget(pendingPostId: String) {
-        liveBytes.remove(pendingPostId)
+    fun forget(batchId: String) {
+        liveBytes.remove(batchId)
     }
 
-    /** Hands a fresh plugin instance every finished or failed post it has not seen yet. */
-    fun replayUnacked(plugin: PostPublisherPlugin, store: PublishRequestStore) {
+    /** Hands a fresh plugin instance every finished or failed batch it has not seen yet. */
+    fun replayUnacked(plugin: BackgroundPublisherPlugin, store: PublishStore) {
         store.all().forEach { entry ->
             if (entry.acked) return@forEach
             when (entry.state.phase) {
                 Phase.DONE -> {
-                    val postId = entry.state.postId ?: return@forEach
-                    plugin.emit(
-                        "publishFinished",
-                        JSObject()
-                            .put("pendingPostId", entry.request.pendingPostId)
-                            .put("postId", postId)
-                            .put("published", entry.state.published ?: false),
-                        retain = true,
-                    )
+                    val payload = JSObject().put("batchId", entry.request.batchId)
+                    entry.state.result?.let { payload.put("result", it) }
+                    plugin.emit("publishFinished", payload, retain = true)
                 }
                 Phase.FAILED -> {
                     val failure = entry.state.error ?: return@forEach
                     val payload = JSObject()
-                        .put("pendingPostId", entry.request.pendingPostId)
+                        .put("batchId", entry.request.batchId)
                         .put("phase", failure.phase)
                         .put("code", failure.code)
                         .put("message", failure.message)

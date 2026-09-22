@@ -32,7 +32,7 @@ private final class BackgroundAssertion: @unchecked Sendable {
 
 final class ComposeJob: @unchecked Sendable {
     let id: String
-    let pendingPostId: String
+    let batchId: String
     let jobDir: URL
     /// What the export writes. It is moved to `outputURL` only once it is whole, so a process that
     /// dies mid render never leaves a file the publisher would happily upload.
@@ -70,11 +70,11 @@ final class ComposeJob: @unchecked Sendable {
 
     init(spec: ComposeSpec) {
         self.id = spec.jobId
-        self.pendingPostId = spec.pendingPostId
-        self.jobDir = JobFolders.jobDir(spec.pendingPostId)
-        self.partURL = JobFolders.part(spec.pendingPostId, jobId: spec.jobId)
-        self.outputURL = JobFolders.stitched(spec.pendingPostId)
-        self.posterURL = JobFolders.poster(spec.pendingPostId)
+        self.batchId = spec.batchId
+        self.jobDir = JobFolders.jobDir(spec.batchId)
+        self.partURL = JobFolders.part(spec.batchId, jobId: spec.jobId)
+        self.outputURL = JobFolders.stitched(spec.batchId)
+        self.posterURL = JobFolders.poster(spec.batchId)
         self.spec = spec
         self.createdAt = ProcessInfo.processInfo.systemUptime
     }
@@ -193,12 +193,12 @@ final class JobRegistry: @unchecked Sendable {
     /// "Live" includes a terminal job JS has not collected yet: its `stitched.mp4` and poster are
     /// the whole point of the folder, and deleting them while the outcome is still unacknowledged
     /// hands the customer a `file_missing` for a render that actually succeeded.
-    func hasLiveJob(pendingPostId: String) -> Bool {
+    func hasLiveJob(batchId: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         return jobs.values.contains { job in
-            guard job.pendingPostId == pendingPostId
-                    || JobFolders.sanitize(job.pendingPostId) == pendingPostId else { return false }
+            guard job.batchId == batchId
+                    || JobFolders.sanitize(job.batchId) == batchId else { return false }
             return !job.isTerminal || !job.acked
         }
     }
@@ -284,19 +284,19 @@ final class JobRegistry: @unchecked Sendable {
     /// Cancels and forgets every job for that post with its events suppressed, then deletes the
     /// folder. JS is deliberately throwing the work away, so a `failed { cancelled }` arriving
     /// afterwards would reject a promise nobody is holding.
-    func cleanup(pendingPostId: String) async {
-        let tasks = forget(pendingPostId: pendingPostId)
+    func cleanup(batchId: String) async {
+        let tasks = forget(batchId: batchId)
         for task in tasks { task.cancel() }
         for task in tasks { await task.value }
 
-        JobFolders.cleanup(pendingPostId: pendingPostId)
+        JobFolders.cleanup(batchId: batchId)
         refreshIdleTimer()
     }
 
-    private func forget(pendingPostId: String) -> [Task<Void, Never>] {
+    private func forget(batchId: String) -> [Task<Void, Never>] {
         lock.lock()
         defer { lock.unlock() }
-        let victims = jobs.values.filter { $0.pendingPostId == pendingPostId }
+        let victims = jobs.values.filter { $0.batchId == batchId }
         for job in victims {
             if job.stopReason == nil { job.stopReason = .cancelled }
             job.acked = true
@@ -368,7 +368,7 @@ final class JobRegistry: @unchecked Sendable {
             // to be stitched.mp4 and the poster belongs beside it.
             _ = try await Exporter.export(built,
                                           to: job.partURL,
-                                          tmpDir: JobFolders.exportTmp(job.pendingPostId),
+                                          tmpDir: JobFolders.exportTmp(job.batchId),
                                           spec: job.spec,
                                           shouldStop: { [weak self] in
                                               self?.stopReason(of: job) != nil

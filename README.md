@@ -8,8 +8,10 @@ Two Capacitor plugins, both fully native:
 - **`VideoComposer`** - edits and encodes video on the device: concat, trim, speed, colour, bitmap
   overlays, music and voiceovers. Nothing is rendered in the WebView and no media bytes cross the
   bridge.
-- **`PostPublisher`** - uploads the result and creates a post in a way that survives the app being
-  backgrounded, swiped away or killed for memory.
+- **`BackgroundPublisher`** - uploads the result and makes one finalizing call to your own API, in
+  a way that survives the app being backgrounded, swiped away or killed for memory. It knows
+  nothing about your backend: the URLs, the field names, the response keys and the body are all
+  things you hand over.
 
 They ship together because they are always used together and two installs for one feature is a
 worse wart than an unused dependency. They stay two plugin *classes* because they share nothing at
@@ -99,7 +101,7 @@ handed.
 
 | Part | Source | How a consumer reaches it |
 |---|---|---|
-| The two plugin proxies | `src/plugin.ts`, `src/video-composer/`, `src/post-publisher/` | `@capacitor-video-kit/core` |
+| The two plugin proxies | `src/plugin.ts`, `src/video-composer/`, `src/background-publisher/` | `@capacitor-video-kit/core` |
 | The edit contract, which the Swift and Kotlin engines are written against | `src/editor/` | `@capacitor-video-kit/core/editor` |
 | The editor's web components and its store | the rest of `src/` | `@capacitor-video-kit/core/ui`, `/loader`, `/dist/components/*` |
 | The native engines | `ios/Sources/`, `android/src/main/` | the Capacitor CLI, on `npx cap sync` |
@@ -255,10 +257,10 @@ symlink shows whatever the last build left behind.
 ## Use
 
 ```ts
-import { VideoComposer, PostPublisher } from '@capacitor-video-kit/core';
+import { VideoComposer, BackgroundPublisher } from '@capacitor-video-kit/core';
 
 // Take ownership of the inputs before anything depends on them.
-const { inputs } = await VideoComposer.prepareJob({ pendingPostId, inputs: [{ key, uri }] });
+const { inputs } = await VideoComposer.prepareJob({ batchId, inputs: [{ key, uri }] });
 
 // Start the render. Resolves at once; the outcome arrives as an event.
 await VideoComposer.addListener('progress', ({ progress }) => setBar(progress));
@@ -270,7 +272,7 @@ const state = await VideoComposer.getState({ jobId });
 ```
 
 Full contracts: `src/video-composer/definitions.ts` plus `src/video-composer/plugin.ts`, and
-`src/post-publisher/definitions.ts`.
+`src/background-publisher/definitions.ts`.
 
 ## Editor core
 
@@ -288,7 +290,7 @@ const { filter, tint } = cssFor(filterPreset(manifest.filterId).ops);
 videoEl.style.filter = filter;
 
 // Render.
-const spec = toComposeSpec(manifest, uriByKey, { jobId, pendingPostId });
+const spec = toComposeSpec(manifest, uriByKey, { jobId, batchId });
 await VideoComposer.compose(spec);
 ```
 
@@ -742,11 +744,11 @@ const nativeRenderHost: EditorRenderHost = {
   async render({ manifest, sources, onProgress, signal }) {
     const uriByKey = new Map(sources.filter((s) => s.sourcePath).map((s) => [s.key, s.sourcePath!]));
     const jobId = crypto.randomUUID();
-    const pendingPostId = crypto.randomUUID();
+    const batchId = crypto.randomUUID();
 
     let spec: ComposeSpec;
     try {
-      spec = await toComposeSpec(manifest, uriByKey, { jobId, pendingPostId }, rasterContext);
+      spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, rasterContext);
     } catch (error) {
       // Refused before any segment id was handed out, so this one already names the host's source.
       if (error instanceof MissingClipError) {
@@ -1050,7 +1052,7 @@ is consumed as.
 
 | Build | Compiles | Reads | Writes |
 |---|---|---|---|
-| The plugin | `src/plugin.ts`, `src/video-composer/`, `src/post-publisher/`, `src/editor/` | `tsconfig.json` and `tsconfig.cjs.json` | `plugin/esm/`, `plugin/cjs/` |
+| The plugin | `src/plugin.ts`, `src/video-composer/`, `src/background-publisher/`, `src/editor/` | `tsconfig.json` and `tsconfig.cjs.json` | `plugin/esm/`, `plugin/cjs/` |
 | The editor | everything else in `src/`, and `src/editor/` again | `tsconfig.stencil.json`, which extends `src/tsconfig.json` | `dist/`, `loader/` |
 | The MCP server, when it is built at all | `src/mcp/`, and `src/editor/` a third time | `tsconfig.mcp.json` | `mcp/` |
 
@@ -1303,33 +1305,103 @@ lays out numbered repetitions and clips the last one, in microseconds, to the vi
 default gain inside the fade window, so a 60 %-volume track would ramp to 100 % and then drop.
 
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
-into `filesDir/pending-posts/<id>/`. A picker's `content://` grant dies with the Activity that got
+into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got
 it. Only `cleanup` deletes a job folder.
 
 ### Publisher
 
-**The caller's JSON stays the caller's.** `bodyTemplate` is the complete create-post body with
-`"$STITCHED"`, `"$ORIGINALS"` and `"$ALL"` where ids will go, replaced textually. The plugin never
-has to understand the post's schema - which matters for something that may run from a persisted
-record days later. Plain string replacement, never a regex: the body carries customer-written text.
+**It knows nothing about your backend, on purpose.** The upload runs in a process your JavaScript is
+not in, hours after `publish()` returned, so there is nobody for it to ask. Everything it needs is
+DATA it was handed and wrote down: the URLs, the HTTP method, the multipart field names, the dotted
+path its id lives at in your response, and the body to finish with. If a thing cannot be written
+down it cannot be used here, which is why there are no callbacks anywhere in this contract.
+
+**Two upload shapes.** `POST` builds the multipart form your `fields` and `fileField` describe -
+that is where a server convention like Fine Uploader's `qquuid`/`qqfile` goes. `PUT` sends the file
+as the raw body with no envelope, which is what a presigned S3, R2, GCS or Azure URL wants; there
+each file carries its own signed `url`.
+
+**The caller's JSON stays the caller's.** `bodyTemplate` is the complete finalize body with
+`"$ID:<uploadId>"`, `"$IDS:<tag>"` and `"$IDS"` where ids will go, replaced textually. The plugin
+never has to understand your schema - which matters for something that may run from a persisted
+record days later. Plain string replacement, never a regex: the body carries customer-written text
+and a `$` in it must stay a `$`. An id keeps the JSON type your server used, so a numeric id goes
+back as a number and a key goes back quoted.
 
 **Nothing is uploaded twice.** An id survives cancels and retries, and a file that was mid-flight
-when the process died is looked up by its guid first. `publish()` on a post already in flight is a
-no-op; the create step is idempotent on `postId`.
+when the process died is looked up first, if you gave a `lookupUrlTemplate`. `publish()` on a batch
+already in flight is a no-op; the finalize step is idempotent on the record being `done`.
 
-**Two workers, not one**, so a 503 on the create call retries only the create call.
+**Two workers, not one**, so a 503 on the finalize call retries only the finalize call.
 
 **Retryable and not-retryable are different answers.** A network drop backs off silently (the caller
 shows "waiting for connection"); a 401 stops at once and is retryable only once a fresh token
-arrives; a 400 or a missing file is final.
+arrives; a 400 or a missing file is final. A server that reports failure in the body of a 200 is
+caught only if you name the field, through `finalize.requirePath` - guessing would be worse.
 
-**Progress is bytes, not files**, capped at 95 until the post actually exists.
+**Progress is bytes, not files**, capped at 95 until the finalize call has answered.
+
+#### Moving an existing caller onto the generic contract
+
+Everything the publisher used to assume about one particular backend is now something you pass. The
+shape below is the old hard-coded behaviour, written out:
+
+```ts
+await BackgroundPublisher.publish({
+  batchId,                                  // was pendingPostId
+  headers: { 'X-Token': token },
+  upload: {
+    url: `${api}/api/download/asyncUpload`, // was uploadUrl
+    method: 'POST',
+    fileField: 'qqfile',                    // was hard-coded
+    fields: { qquuid: '{uploadId}', qqfilename: '{fileName}' },  // were hard-coded
+    idPath: 'downloadId',                   // was hard-coded
+    lookupUrlTemplate: `${api}/api/download/byName/{uploadId}`,  // was {uploadGuid}
+  },
+  uploads: [
+    { uploadId: mainGuid, tag: 'stitched', path: mainPath, mimeType: 'video/mp4',
+      fields: { pictureId: String(pictureId) } },   // pictureId was a first-class field
+    { uploadId: clipGuid, tag: 'original', path: clipPath, mimeType: 'video/mp4' },
+  ],
+  finalize: {                               // was createPost
+    url: `${api}/api/Post/CreateContentPost`,
+    bodyTemplate: JSON.stringify({ video: `$ID:${mainGuid}`, clips: '$IDS:original' }),
+    requirePath: 'postId',                  // was an unconditional check
+  },
+});
+```
+
+| Was | Is |
+|---|---|
+| `pendingPostId` | `batchId`, everywhere including the composer |
+| `uploadGuid` | `uploadId` |
+| `role: 'stitched' \| 'original'` | `tag: string`, any value, never interpreted |
+| `pictureId` | one entry in that upload's `fields` |
+| `downloadId` on the state | `remoteId`, a string or a number |
+| `postId` / `published` on the state and the finished event | `result`, your response parsed |
+| `"$STITCHED"` | `"$ID:<uploadId>"` |
+| `"$ORIGINALS"` | `"$IDS:<tag>"` |
+| `"$ALL"` | `"$IDS"` |
+| phase `creating` | phase `finalizing` |
+
+Three behaviour changes to read carefully:
+
+- **The stitched fallback is gone.** The old code treated the first upload as the post's video when
+  nothing carried `role: 'stitched'`. Nothing is implicit now: name the upload you mean with
+  `"$ID:<uploadId>"`. That policy was always the app's, and it is now written where the app can see it.
+- **A 2xx is success unless you say otherwise.** The old code failed a create whose body had no
+  `postId`. Set `finalize.requirePath` to keep that check.
+- **Records written by the old version are dropped on upgrade.** They name fields that no longer
+  exist, so a batch in flight when the new build lands is re-queued by your app rather than resumed.
+  Same for the iOS background session id and the Android notification channel, both renamed: finish
+  or cancel what is in flight before shipping the upgrade if that matters to you.
+
 
 ### iOS
 
 **The two plugin classes are one SwiftPM target.** `Package.swift` declares `CapacitorVideoKitCore` and
 Capacitor registers each `@objc` class it finds separately, so `VideoComposerPlugin` and
-`PostPublisherPlugin` ship in one library and share `JobFolders`, `PublishStore` and the error
+`BackgroundPublisherPlugin` ship in one library and share `JobFolders`, `PublishStore` and the error
 mapping rather than repeating them.
 
 **CocoaPods gets a hand written podspec beside `Package.swift`.** `CapacitorVideoKitCore.podspec` declares

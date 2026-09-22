@@ -6,10 +6,10 @@ import Foundation
 /// Every method here is short by design: it hops onto the session's serial queue, asks one
 /// question, and answers. Nothing is held in memory that the job depends on, because the job
 /// routinely outlives this object and sometimes the whole process.
-@objc(PostPublisherPlugin)
-public class PostPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
-    public let identifier = "PostPublisherPlugin"
-    public let jsName = "PostPublisher"
+@objc(BackgroundPublisherPlugin)
+public class BackgroundPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "BackgroundPublisherPlugin"
+    public let jsName = "BackgroundPublisher"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "publish", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getState", returnType: CAPPluginReturnPromise),
@@ -51,8 +51,8 @@ public class PostPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve()
             } catch let error as PublishRequestError {
                 call.reject(error.message, Reject.invalidRequest)
-            } catch PublishError.fileMissing(let uploadGuid) {
-                call.reject("missing file for \(uploadGuid)", Reject.fileMissing)
+            } catch PublishError.fileMissing(let uploadId) {
+                call.reject("missing file for \(uploadId)", Reject.fileMissing)
             } catch {
                 call.reject("\(error)", Reject.invalidRequest)
             }
@@ -60,12 +60,12 @@ public class PostPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func getState(_ call: CAPPluginCall) {
-        guard let pendingPostId = required(call) else { return }
+        guard let batchId = required(call) else { return }
         let session = PublisherSession.shared
         session.queue.addOperation {
-            guard let state = session.state(for: pendingPostId) else {
+            guard let state = session.state(for: batchId) else {
                 // The one legal NSNull in the whole module: the contract's return type is
-                // `{ state: PublishState | null }`, so an unknown post has to answer with a null
+                // `{ state: PublishState | null }`, so an unknown batch has to answer with a null
                 // rather than an absent key.
                 call.resolve(["state": NSNull()])
                 return
@@ -75,23 +75,23 @@ public class PostPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func cancel(_ call: CAPPluginCall) {
-        guard let pendingPostId = required(call) else { return }
+        guard let batchId = required(call) else { return }
         let session = PublisherSession.shared
         session.queue.addOperation {
             // An unknown id is not an error: cancel is usually the first half of a discard, and the
             // caller has no way of knowing whether a record was ever written.
-            session.cancel(pendingPostId: pendingPostId)
+            session.cancel(batchId: batchId)
             call.resolve()
         }
     }
 
     @objc func retry(_ call: CAPPluginCall) {
-        guard let pendingPostId = required(call) else { return }
+        guard let batchId = required(call) else { return }
         let headers = PublishModels.headers(call.getObject("headers"))
         let session = PublisherSession.shared
         session.queue.addOperation {
             do {
-                try session.retry(pendingPostId: pendingPostId, headers: headers)
+                try session.retry(batchId: batchId, headers: headers)
                 call.resolve()
             } catch PublishError.notFound(let id) {
                 call.reject("nothing to retry for \(id)", Reject.notFound)
@@ -102,10 +102,10 @@ public class PostPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func clear(_ call: CAPPluginCall) {
-        guard let pendingPostId = required(call) else { return }
+        guard let batchId = required(call) else { return }
         let session = PublisherSession.shared
         session.queue.addOperation {
-            session.clear(pendingPostId: pendingPostId)
+            session.clear(batchId: batchId)
             call.resolve()
         }
     }
@@ -114,12 +114,12 @@ public class PostPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /// Rejects and answers nil when the id is missing, so every caller is one `guard` long. The
     /// message is Android's, and `publish` does not use it: its id check comes out of the parser,
-    /// which reports the path (`invalid_request:pendingPostId`) like every other field.
+    /// which reports the path (`invalid_request:batchId`) like every other field.
     private func required(_ call: CAPPluginCall) -> String? {
-        guard let pendingPostId = call.getString("pendingPostId"), !pendingPostId.isEmpty else {
-            call.reject("pendingPostId is required", Reject.invalidRequest)
+        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
+            call.reject("batchId is required", Reject.invalidRequest)
             return nil
         }
-        return pendingPostId
+        return batchId
     }
 }

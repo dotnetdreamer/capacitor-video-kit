@@ -28,7 +28,7 @@
   "exclude": [
     "src/plugin.ts",
     "src/video-composer",
-    "src/post-publisher",
+    "src/background-publisher",
     /* Optional, and it imports a package a consumer may not have. `src/tsconfig.json` says why. */
     "src/mcp",
     "node_modules",

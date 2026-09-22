@@ -5,7 +5,7 @@
     <string name="videokit_render_notification_title">Videonuz hazırlanıyor</string>
     <string name="videokit_render_notification_text">%%%1$d</string>
 
-    <string name="videokit_posting_channel_name">Gönderiliyor</string>
-    <string name="videokit_posting_notification_title">Videonuz gönderiliyor</string>
-    <string name="videokit_posting_notification_text">%%%1$d - %2$s</string>
+    <string name="videokit_upload_channel_name">Yükleniyor</string>
+    <string name="videokit_upload_notification_title">Videonuz yükleniyor</string>
+    <string name="videokit_upload_notification_text">%%%1$d - %2$s</string>
 </resources>

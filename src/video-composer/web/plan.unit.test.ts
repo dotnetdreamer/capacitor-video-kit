@@ -29,7 +29,7 @@ function clip(over: Partial<ComposeClip> = {}): ComposeClip {
 function spec(over: Partial<ComposeSpec> = {}): ComposeSpec {
   return {
     jobId: 'j',
-    pendingPostId: 'p',
+    batchId: 'p',
     clips: [clip()],
     output: { width: 720, height: 1280, fps: 30, videoBitrate: 6_000_000, audioBitrate: 128_000 },
     filter: [],

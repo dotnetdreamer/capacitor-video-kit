@@ -254,13 +254,13 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - Voice
 
     @objc func startVoiceRecording(_ call: CAPPluginCall) {
-        let requested = call.getString("pendingPostId")
-        let pendingPostId = (requested?.isEmpty ?? true) ? nil : requested
+        let requested = call.getString("batchId")
+        let batchId = (requested?.isEmpty ?? true) ? nil : requested
         Task {
             do {
                 // The permission prompt happens inside this one await, so the JS promise still
                 // settles exactly once whether or not the customer is asked.
-                try await VoiceRecorder.shared.start(pendingPostId: pendingPostId)
+                try await VoiceRecorder.shared.start(batchId: batchId)
                 call.resolve()
             } catch let error as VoiceError {
                 switch error {
@@ -395,8 +395,8 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - prepareJob, cleanup
 
     @objc func prepareJob(_ call: CAPPluginCall) {
-        guard let pendingPostId = call.getString("pendingPostId"), !pendingPostId.isEmpty else {
-            call.reject("pendingPostId is required", Reject.invalidSpec)
+        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
+            call.reject("batchId is required", Reject.invalidSpec)
             return
         }
         guard let raw = call.getArray("inputs") else {
@@ -424,7 +424,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
 
         Task {
             do {
-                let prepared = try JobFolders.prepareJob(pendingPostId: pendingPostId, inputs: inputs)
+                let prepared = try JobFolders.prepareJob(batchId: batchId, inputs: inputs)
                 // Keys are echoed back exactly as they came in, never sanitised: JS maps its
                 // manifest by the key it sent. Only the file name on disk is sanitised.
                 call.resolve([
@@ -434,22 +434,22 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
             } catch let failure as PrepareFailure {
                 call.reject(failure.message, failure.code)
             } catch {
-                call.reject("could not place inputs for \(pendingPostId): \(error.localizedDescription)",
+                call.reject("could not place inputs for \(batchId): \(error.localizedDescription)",
                             Reject.io)
             }
         }
     }
 
     @objc func cleanup(_ call: CAPPluginCall) {
-        guard let pendingPostId = call.getString("pendingPostId"), !pendingPostId.isEmpty else {
-            call.reject("pendingPostId is required", Reject.invalidSpec)
+        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
+            call.reject("batchId is required", Reject.invalidSpec)
             return
         }
         Task {
             // Cancels every job for the post with its events suppressed, forgets them so a later
             // `getState` answers `job_not_found`, and only then deletes the folder. Idempotent: a
             // folder that was never created resolves just the same.
-            await JobRegistry.shared.cleanup(pendingPostId: pendingPostId)
+            await JobRegistry.shared.cleanup(batchId: batchId)
             call.resolve()
         }
     }

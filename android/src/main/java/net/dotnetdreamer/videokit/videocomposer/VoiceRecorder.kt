@@ -32,16 +32,16 @@ class VoiceRecorder(private val appContext: Context) {
     data class Result(val uri: String, val durationMs: Long)
 
     /**
-     * @param pendingPostId when the post already exists, the take is written straight into its job
+     * @param batchId when the post already exists, the take is written straight into its job
      *   folder. The editor usually has no post yet, so the cache folder is the normal case and
      *   `prepareJob` relocates the file later.
      */
     @Throws(RecordingException::class)
-    fun start(pendingPostId: String?) {
+    fun start(batchId: String?) {
         if (recorder != null) throw RecordingException("already_recording")
 
-        val dir = if (pendingPostId != null) {
-            JobFolders.inputs(appContext, pendingPostId)
+        val dir = if (batchId != null) {
+            JobFolders.inputs(appContext, batchId)
         } else {
             JobFolders.voiceCache(appContext)
         }

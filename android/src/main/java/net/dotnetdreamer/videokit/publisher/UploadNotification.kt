@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -14,16 +14,16 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.work.ForegroundInfo
 
 /**
- * The "Posting your video" card. One notification id shared by both workers, so the customer sees
- * a single card that runs from the first byte to the finished post rather than one per step.
+ * The "Uploading your video" card. One notification id shared by both workers, so the customer
+ * sees a single card that runs from the first byte to the finished batch rather than one per step.
  *
  * Nothing here asks for POST_NOTIFICATIONS: the upload runs either way, and without the grant the
  * card simply only appears in the system's Task Manager.
  */
-object PostingNotification {
+object UploadNotification {
 
     const val NOTIFICATION_ID = 41002
-    private const val CHANNEL_ID = "videokit.posting"
+    private const val CHANNEL_ID = "videokit.upload"
 
     fun ensureChannel(ctx: Context) {
         if (Build.VERSION.SDK_INT < 26) return
@@ -32,7 +32,7 @@ object PostingNotification {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                ctx.getString(R.string.videokit_posting_channel_name),
+                ctx.getString(R.string.videokit_upload_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 setShowBadge(false)
@@ -46,10 +46,10 @@ object PostingNotification {
         val safePercent = percent.coerceIn(0, 100)
         val counter = if (total > 0) "$done/$total" else ""
         return NotificationCompat.Builder(ctx, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_posting)
-            .setContentTitle(ctx.getString(R.string.videokit_posting_notification_title))
+            .setSmallIcon(R.drawable.ic_stat_upload)
+            .setContentTitle(ctx.getString(R.string.videokit_upload_notification_title))
             .setContentText(
-                ctx.getString(R.string.videokit_posting_notification_text, safePercent, counter),
+                ctx.getString(R.string.videokit_upload_notification_text, safePercent, counter),
             )
             .setProgress(100, safePercent, false)
             .setOngoing(true)

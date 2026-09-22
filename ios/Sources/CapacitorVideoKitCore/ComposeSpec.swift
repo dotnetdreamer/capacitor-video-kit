@@ -189,7 +189,7 @@ struct ComposeAudio: Sendable {
 
 struct ComposeSpec: Sendable {
     let jobId: String
-    let pendingPostId: String
+    let batchId: String
     /// The BASE track. It starts at 0, and its length is the output's length unless `durationMs`
     /// asks for more.
     let clips: [ComposeClip]

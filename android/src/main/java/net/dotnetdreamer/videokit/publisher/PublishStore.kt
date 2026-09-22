@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.content.Context
 import android.util.Log
@@ -10,48 +10,48 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * One JSON file per post, holding everything needed to finish the job with no JavaScript alive.
+ * One JSON file per batch, holding everything needed to finish the job with no JavaScript alive.
  *
- * It lives outside the post's media folder on purpose: forgetting the record and deleting the files
+ * It lives outside the batch's media folder on purpose: forgetting the record and deleting the files
  * are separate decisions made by different callers at different times.
  *
  * Writes go to a temporary file and are renamed into place, which is atomic on a single volume, so
  * a process killed mid-write leaves the previous record intact rather than a half-written one. The
- * plugin thread and a worker both write, hence a lock per post id.
+ * plugin thread and a worker both write, hence a lock per batch id.
  */
-class PublishRequestStore(context: Context) {
+class PublishStore(context: Context) {
 
     private val appContext = context.applicationContext
-    private val dir = File(appContext.filesDir, "post-publisher")
+    private val dir = File(appContext.filesDir, "background-publisher")
 
-    private fun fileFor(pendingPostId: String) = File(dir, "${safe(pendingPostId)}.json")
+    private fun fileFor(batchId: String) = File(dir, "${safe(batchId)}.json")
 
-    fun load(pendingPostId: String): PublishEntry? = lockFor(pendingPostId).withLock {
-        val file = fileFor(pendingPostId)
+    fun load(batchId: String): PublishEntry? = lockFor(batchId).withLock {
+        val file = fileFor(batchId)
         if (!file.exists()) return null
         return try {
             PublishEntry.from(JSONObject(file.readText()))
         } catch (e: Exception) {
-            // A record we cannot read is worse than none: it would stall the post forever.
-            Log.w(TAG, "dropping unreadable record for $pendingPostId: ${e.message}")
+            // A record we cannot read is worse than none: it would stall the batch forever.
+            Log.w(TAG, "dropping unreadable record for $batchId: ${e.message}")
             file.delete()
             null
         }
     }
 
     fun save(entry: PublishEntry) {
-        lockFor(entry.request.pendingPostId).withLock { writeLocked(entry) }
+        lockFor(entry.request.batchId).withLock { writeLocked(entry) }
     }
 
-    /** Read, change, write - all under the post's own lock, so two writers cannot interleave. */
-    fun update(pendingPostId: String, block: (PublishEntry) -> Unit): PublishEntry? =
-        lockFor(pendingPostId).withLock {
-            val file = fileFor(pendingPostId)
+    /** Read, change, write - all under the batch's own lock, so two writers cannot interleave. */
+    fun update(batchId: String, block: (PublishEntry) -> Unit): PublishEntry? =
+        lockFor(batchId).withLock {
+            val file = fileFor(batchId)
             if (!file.exists()) return null
             val entry = try {
                 PublishEntry.from(JSONObject(file.readText()))
             } catch (e: Exception) {
-                Log.w(TAG, "dropping unreadable record for $pendingPostId: ${e.message}")
+                Log.w(TAG, "dropping unreadable record for $batchId: ${e.message}")
                 file.delete()
                 return null
             }
@@ -60,10 +60,10 @@ class PublishRequestStore(context: Context) {
             entry
         }
 
-    fun delete(pendingPostId: String) {
-        lockFor(pendingPostId).withLock {
-            fileFor(pendingPostId).delete()
-            locks.remove(pendingPostId)
+    fun delete(batchId: String) {
+        lockFor(batchId).withLock {
+            fileFor(batchId).delete()
+            locks.remove(batchId)
         }
     }
 
@@ -84,7 +84,7 @@ class PublishRequestStore(context: Context) {
         all().forEach { entry ->
             val finished = entry.state.phase == Phase.DONE
             if (finished && entry.updatedAt > 0L && now - entry.updatedAt > retainMs) {
-                delete(entry.request.pendingPostId)
+                delete(entry.request.batchId)
             }
         }
     }
@@ -95,7 +95,7 @@ class PublishRequestStore(context: Context) {
             return
         }
         entry.updatedAt = System.currentTimeMillis()
-        val target = fileFor(entry.request.pendingPostId)
+        val target = fileFor(entry.request.batchId)
         val temp = File(dir, "${target.name}.tmp")
         try {
             temp.writeText(entry.toJson().toString())
@@ -109,18 +109,18 @@ class PublishRequestStore(context: Context) {
                 }
             }
         } catch (e: IOException) {
-            Log.w(TAG, "could not persist ${entry.request.pendingPostId}: ${e.message}")
+            Log.w(TAG, "could not persist ${entry.request.batchId}: ${e.message}")
             temp.delete()
         }
     }
 
-    private fun lockFor(pendingPostId: String): ReentrantLock =
-        locks.getOrPut(pendingPostId) { ReentrantLock() }
+    private fun lockFor(batchId: String): ReentrantLock =
+        locks.getOrPut(batchId) { ReentrantLock() }
 
     private fun safe(s: String) = s.replace(Regex("[^A-Za-z0-9._-]"), "_")
 
     companion object {
-        private const val TAG = "PostPublisher"
+        private const val TAG = "BackgroundPublisher"
 
         /** Locks are shared across every store instance, since they guard one set of files. */
         private val locks = ConcurrentHashMap<String, ReentrantLock>()

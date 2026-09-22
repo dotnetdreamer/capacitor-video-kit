@@ -257,7 +257,7 @@ enum ResultBuilder {
         let height = (probed?.height ?? 0) > 0 ? probed!.height : spec.output.height
 
         // Sibling of the render, which is the job folder, so this is the same file
-        // `JobFolders.poster(pendingPostId)` names whether the render is still the .part or has
+        // `JobFolders.poster(batchId)` names whether the render is still the .part or has
         // already been moved to stitched.mp4.
         let posterURL = url.deletingLastPathComponent().appendingPathComponent("poster.jpg")
         let posterAt = min(spec.posterAtMs, max(0, durationMs - 1))

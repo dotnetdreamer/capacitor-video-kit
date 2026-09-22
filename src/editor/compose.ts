@@ -22,7 +22,7 @@ import type { RasterContext } from './raster-context';
 
 export interface ComposeSpecIds {
   jobId: string;
-  pendingPostId: string;
+  batchId: string;
 }
 
 /** Thrown when a manifest names a clip the host has no file for. */
@@ -118,7 +118,7 @@ export async function toComposeSpec(
 
   const spec: ComposeSpec = {
     jobId: ids.jobId,
-    pendingPostId: ids.pendingPostId,
+    batchId: ids.batchId,
     clips,
     output: {
       ...manifest.output,

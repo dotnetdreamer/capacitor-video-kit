@@ -5,8 +5,8 @@
     <string name="videokit_render_notification_title">Preparing your video</string>
     <string name="videokit_render_notification_text">%1$d%%</string>
 
-    <!-- Upload (PostPublisher) -->
-    <string name="videokit_posting_channel_name">Posting</string>
-    <string name="videokit_posting_notification_title">Posting your video</string>
-    <string name="videokit_posting_notification_text">%1$d%% - %2$s</string>
+    <!-- Upload (BackgroundPublisher) -->
+    <string name="videokit_upload_channel_name">Uploading</string>
+    <string name="videokit_upload_notification_title">Uploading your video</string>
+    <string name="videokit_upload_notification_text">%1$d%% - %2$s</string>
 </resources>

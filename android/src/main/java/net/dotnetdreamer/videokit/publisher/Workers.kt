@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.content.Context
 import androidx.work.BackoffPolicy
@@ -14,9 +14,9 @@ import java.util.concurrent.TimeUnit
 /**
  * How the two steps are handed to WorkManager.
  *
- * Two workers chained rather than one doing both, so that a failure creating the post retries only
- * the create call and not the uploads that already succeeded - and so that "upload everything, then
- * post" is WorkManager's own sequencing rather than a loop of ours that a process death could
+ * Two workers chained rather than one doing both, so that a failure in the finalize call retries
+ * only that call and not the uploads that already succeeded - and so that "upload everything, then
+ * finalize" is WorkManager's own sequencing rather than a loop of ours that a process death could
  * unwind.
  *
  * WorkManager starts itself through `androidx.startup`, and its scheduled job can restart the
@@ -25,31 +25,31 @@ import java.util.concurrent.TimeUnit
  */
 object Workers {
 
-    const val KEY_PENDING_POST_ID = "pendingPostId"
-    const val TAG = "videokit-post-publisher"
+    const val KEY_BATCH_ID = "batchId"
+    const val TAG = "videokit-background-publisher"
 
     /** Attempts per worker, counted by WorkManager across process deaths as well as failures. */
     const val MAX_ATTEMPTS = 3
 
-    fun uniqueName(pendingPostId: String) = "post-$pendingPostId"
+    fun uniqueName(batchId: String) = "publish-$batchId"
 
-    fun enqueue(context: Context, pendingPostId: String, policy: ExistingWorkPolicy) {
+    fun enqueue(context: Context, batchId: String, policy: ExistingWorkPolicy) {
         WorkManager.getInstance(context)
             .beginUniqueWork(
-                uniqueName(pendingPostId),
+                uniqueName(batchId),
                 policy,
-                request<UploadWorker>(pendingPostId),
+                request<UploadWorker>(batchId),
             )
-            .then(request<CreatePostWorker>(pendingPostId))
+            .then(request<FinalizeWorker>(batchId))
             .enqueue()
     }
 
-    fun cancel(context: Context, pendingPostId: String) {
-        WorkManager.getInstance(context).cancelUniqueWork(uniqueName(pendingPostId))
+    fun cancel(context: Context, batchId: String) {
+        WorkManager.getInstance(context).cancelUniqueWork(uniqueName(batchId))
     }
 
     private inline fun <reified W : androidx.work.ListenableWorker> request(
-        pendingPostId: String,
+        batchId: String,
     ): OneTimeWorkRequest = OneTimeWorkRequestBuilder<W>()
         .setConstraints(
             Constraints.Builder()
@@ -59,7 +59,7 @@ object Workers {
         // 30 s, 60 s, 120 s. Long enough to ride out a tunnel, short enough that a customer
         // watching the pill sees it move again.
         .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-        .setInputData(workDataOf(KEY_PENDING_POST_ID to pendingPostId))
+        .setInputData(workDataOf(KEY_BATCH_ID to batchId))
         .addTag(TAG)
         .build()
 }

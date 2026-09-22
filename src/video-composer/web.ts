@@ -28,7 +28,7 @@ import type {
 } from './definitions';
 import type { VideoComposerPlugin } from './plugin';
 import { encodableAt, webCapabilities } from './web/capabilities';
-import { cancelJob, cleanupPendingPost, jobState, startJob, sweepJobs } from './web/jobs';
+import { cancelJob, cleanupBatch, jobState, startJob, sweepJobs } from './web/jobs';
 import { probeMedia } from './web/media';
 import { validateSpec } from './web/spec';
 import { thumbnails as cutThumbnails } from './web/thumbnails';
@@ -167,7 +167,7 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
 
   async startVoiceRecording(options?: StartVoiceRecordingOptions): Promise<void> {
     try {
-      await startVoiceRecording(options?.pendingPostId);
+      await startVoiceRecording(options?.batchId);
     } catch (error) {
       throw asVoiceError(error);
     }
@@ -220,7 +220,7 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
    * `cleanup` deletes.
    */
   async prepareJob(options: PrepareJobOptions): Promise<PrepareJobResult> {
-    const pendingPostId = required(options?.pendingPostId, 'pendingPostId');
+    const batchId = required(options?.batchId, 'batchId');
     const inputs = options?.inputs;
     if (!Array.isArray(inputs)) throw coded('inputs is required', 'invalid_spec');
 
@@ -232,22 +232,22 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
       try {
         const blob = await resolve(input.uri);
         const name = `${safeSegment(input.key)}.${extensionOf(input.uri, extensionForType(blob.type))}`;
-        const stored = await putFile(pendingPostId, name, blob);
+        const stored = await putFile(batchId, name, blob);
         prepared.push({ key: input.key, uri: stored.url });
       } catch (error) {
         throw coded(`could not take a copy of ${input.key}: ${describe(error)}`, 'unreadable_input');
       }
     }
-    return { jobDir: fileUri(pendingPostId, '').replace(/\/+$/, ''), inputs: prepared };
+    return { jobDir: fileUri(batchId, '').replace(/\/+$/, ''), inputs: prepared };
   }
 
   /** Deletes the folder and forgets its jobs. Idempotent. */
   async cleanup(options: CleanupOptions): Promise<void> {
-    const pendingPostId = required(options?.pendingPostId, 'pendingPostId');
+    const batchId = required(options?.batchId, 'batchId');
     // Stops anything still rendering into the folder, forgets the records, and deletes the files.
     // A render that finished writing after the folder went would put its file back and leave it
     // there for good, which is why the order is not ours to choose.
-    await cleanupPendingPost(pendingPostId);
+    await cleanupBatch(batchId);
   }
 }
 

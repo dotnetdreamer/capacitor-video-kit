@@ -1,50 +1,62 @@
 import Foundation
 
-/// The caller hands over its complete create-post JSON with `"$STITCHED"`, `"$ORIGINALS"` and
-/// `"$ALL"` standing in for ids that do not exist yet. They are replaced textually, quotes
-/// included, so a JSON string becomes a bare number or a bare array.
+/// The caller hands over its complete JSON with `"$ID:<uploadId>"`, `"$IDS:<tag>"` and `"$IDS"`
+/// standing in for ids that do not exist yet. They are replaced textually, quotes included, so a
+/// JSON string becomes a bare value or a bare array.
 ///
 /// That is what lets the native side fill a body days later without understanding one field of the
-/// post's schema, which matters when the record outlives the process that wrote it.
+/// caller's schema, which matters when the record outlives the process that wrote it.
 enum TemplateFill {
-    static let stitchedToken  = "\"$STITCHED\""
-    static let originalsToken = "\"$ORIGINALS\""
-    static let allToken       = "\"$ALL\""
+    static let tagPrefix = "\"$IDS:"
+    static let allIdsToken = "\"$IDS\""
+
+    static func idToken(_ uploadId: String) -> String { "\"$ID:\(uploadId)\"" }
 
     /// Plain string replacement, never a regular expression. The body carries customer-written text
-    /// - a post title, a comment - and a `$` in it has to stay a `$`. The quotes on the tokens are
-    /// also what makes `"Best $5 pizza"` and a stray `$STITCHEDX` survive untouched.
-    static func fill(_ template: String, stitched: Int, originals: [Int]) -> String {
-        template
-            .replacingOccurrences(of: stitchedToken, with: String(stitched))
-            .replacingOccurrences(of: originalsToken, with: array(originals))
-            .replacingOccurrences(of: allToken, with: array([stitched] + originals))
+    /// - a title, a comment - and a `$` in it has to stay a `$`. The quotes on the tokens are also
+    /// what makes `"Best $5 pizza"` and a stray `$IDX` survive untouched.
+    static func fill(_ template: String, uploads: [UploadRecord]) -> String {
+        var body = template
+        for upload in uploads {
+            guard let remoteId = upload.remoteId else { continue }
+            body = body.replacingOccurrences(of: idToken(upload.uploadId), with: remoteId.jsonLiteral)
+        }
+        body = fillTags(body, uploads: uploads)
+        return body.replacingOccurrences(of: allIdsToken, with: array(uploads))
     }
 
-    /// The stitched upload's id, falling back to the first upload's when nothing carries that role.
+    /// Every `"$IDS:<tag>"`, replaced with the ids carrying it - an empty array when none do.
     ///
-    /// The fallback is the "post the original clips" path after a render failed: there is no
-    /// stitched video, and the server treats the first id as the post's own video anyway. In that
-    /// case the first upload has effectively been promoted into the stitched slot, so it must not
-    /// also appear in `originals`.
-    static func ids(_ uploads: [UploadRecord]) throws -> (stitched: Int, originals: [Int]) {
-        let roleStitched = uploads.first(where: { $0.role == Role.stitched })
-        guard let stitched = roleStitched?.downloadId ?? uploads.first?.downloadId else {
-            throw PublishError.noVideo
+    /// Scanned for rather than built, because it has to answer `[]` for a tag nothing in this batch
+    /// carries: the batch where the render failed and there are no clips to name. Building the
+    /// token only from the tags present would leave that one untouched, and a literal
+    /// `"$IDS:clip"` arriving at somebody's server is a 400 with a baffling message.
+    private static func fillTags(_ template: String, uploads: [UploadRecord]) -> String {
+        var out = ""
+        var cursor = template.startIndex
+
+        while let open = template.range(of: tagPrefix, range: cursor..<template.endIndex) {
+            // An unterminated token is not a token. Leaving the rest alone is the safe reading.
+            guard let close = template.range(of: "\"", range: open.upperBound..<template.endIndex) else { break }
+            let tag = String(template[open.upperBound..<close.lowerBound])
+            out += template[cursor..<open.lowerBound]
+            out += array(uploads.filter { $0.tag == tag })
+            cursor = close.upperBound
         }
-        let rest = roleStitched != nil
-            ? uploads.filter { $0.role == Role.original }
-            : Array(uploads.dropFirst())
-        let originals = try rest.map { u -> Int in
-            guard let id = u.downloadId else { throw PublishError.missingId(u.uploadGuid) }
-            return id
-        }
-        return (stitched, originals)
+
+        out += template[cursor...]
+        return out
+    }
+
+    /// Whether every upload has an id. The one thing about the body that IS checked: a token
+    /// naming nothing is left alone, because at this level a typo and a sentence look identical.
+    static func missingId(_ uploads: [UploadRecord]) -> String? {
+        uploads.first(where: { $0.remoteId == nil })?.uploadId
     }
 
     /// The separator is spelled out because the default `", "` would put stray spaces inside a JSON
     /// array that a strict parser on the other end has no reason to accept.
-    private static func array(_ ids: [Int]) -> String {
-        "[" + ids.map(String.init).joined(separator: ",") + "]"
+    private static func array(_ uploads: [UploadRecord]) -> String {
+        "[" + uploads.compactMap { $0.remoteId?.jsonLiteral }.joined(separator: ",") + "]"
     }
 }

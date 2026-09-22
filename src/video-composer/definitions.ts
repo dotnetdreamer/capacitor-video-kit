@@ -229,7 +229,7 @@ export interface ComposeSpec {
   /** Caller-generated; also the idempotency key - composing twice with one id starts one render. */
   jobId: string;
   /** Selects the job folder the output and any scratch files are written to. */
-  pendingPostId: string;
+  batchId: string;
   /**
    * The BASE track. It always starts at 0, and its length is the output's length unless
    * [ComposeSpec.durationMs] asks for more: a track in [ComposeSpec.tracks] running past the OUTPUT
@@ -437,10 +437,10 @@ export interface ThumbnailsResult {
 
 export interface StartVoiceRecordingOptions {
   /**
-   * When known, the take is written straight into the job folder. The editor usually has no pending
-   * post yet, so the normal case is the cache folder and `prepareJob` moves the file in later.
+   * When known, the take is written straight into the job folder. The editor usually has no batch
+   * yet, so the normal case is the cache folder and `prepareJob` moves the file in later.
    */
-  pendingPostId?: string;
+  batchId?: string;
 }
 
 export interface VoiceRecordingResult {
@@ -491,7 +491,7 @@ export interface PrepareJobInput {
 }
 
 export interface PrepareJobOptions {
-  pendingPostId: string;
+  batchId: string;
   inputs: PrepareJobInput[];
 }
 
@@ -502,7 +502,7 @@ export interface PrepareJobResult {
 }
 
 export interface CleanupOptions {
-  pendingPostId: string;
+  batchId: string;
 }
 
 export interface JobIdOptions {

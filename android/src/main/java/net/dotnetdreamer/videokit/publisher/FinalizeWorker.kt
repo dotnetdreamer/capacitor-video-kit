@@ -1,4 +1,4 @@
-package net.dotnetdreamer.videokit.postpublisher
+package net.dotnetdreamer.videokit.publisher
 
 import android.content.Context
 import android.util.Log
@@ -8,73 +8,76 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import net.dotnetdreamer.videokit.postpublisher.PublisherHttp.await
+import net.dotnetdreamer.videokit.publisher.PublisherHttp.await
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONException
-import org.json.JSONObject
 import java.io.IOException
 
 /**
- * The second half: fill the caller's body template with the ids the uploads produced, and create
- * the post.
+ * The second half: fill the caller's body template with the ids the uploads produced, and make the
+ * one call that finishes the batch.
  *
  * Runs as its own worker so that a failure here retries only this call. The uploads are the
  * expensive part and they are already done by the time this starts; re-sending a hundred megabytes
- * because a create call got a 503 would be indefensible.
+ * because one call got a 503 would be indefensible.
  */
-class CreatePostWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+class FinalizeWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
-    private val pendingPostId: String = inputData.getString(Workers.KEY_PENDING_POST_ID).orEmpty()
-    private val store = PublishRequestStore(context)
+    private val batchId: String = inputData.getString(Workers.KEY_BATCH_ID).orEmpty()
+    private val store = PublishStore(context)
 
     override suspend fun getForegroundInfo(): ForegroundInfo =
-        PostingNotification.foregroundInfo(applicationContext, percent = 97, done = 0, total = 0)
+        UploadNotification.foregroundInfo(applicationContext, percent = 97, done = 0, total = 0)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        if (pendingPostId.isEmpty()) return@withContext Result.failure()
-        val entry = store.load(pendingPostId) ?: return@withContext Result.failure()
+        if (batchId.isEmpty()) return@withContext Result.failure()
+        val entry = store.load(batchId) ?: return@withContext Result.failure()
         if (entry.state.phase == Phase.CANCELLED) return@withContext Result.failure()
-        // Idempotent: if the post already exists, a rerun must not create a second one.
-        if (entry.state.postId != null) return@withContext Result.success()
+        // Idempotent: the call has already been made and answered, so a rerun must not repeat
+        // it. The phase is the marker rather than a field of the response, because the response
+        // belongs to the caller and may be empty - a 204 finishes a batch just as well as a body.
+        if (entry.state.phase == Phase.DONE) return@withContext Result.success()
 
         goForeground()
 
-        entry.state.phase = Phase.CREATING
-        entry.state.percent = CREATING_PERCENT
+        entry.state.phase = Phase.FINALIZING
+        entry.state.percent = FINALIZING_PERCENT
         store.save(entry)
-        PostingNotification.update(applicationContext, CREATING_PERCENT, entry.state.uploads.size, entry.state.uploads.size)
-        PublisherEvents.progress(pendingPostId, "creating", CREATING_PERCENT)
+        UploadNotification.update(applicationContext, FINALIZING_PERCENT, entry.state.uploads.size, entry.state.uploads.size)
+        PublisherEvents.progress(batchId, "finalizing", FINALIZING_PERCENT)
 
-        val stitched = entry.state.uploads.firstOrNull { it.role == "stitched" }?.downloadId
-            ?: entry.state.uploads.firstOrNull()?.downloadId
-            ?: return@withContext fail(entry, FailureCodes.UNKNOWN, "no uploaded video to post", retryable = false)
-
-        val originals = entry.state.uploads
-            .filter { it.role == "original" }
-            .map { upload ->
-                upload.downloadId ?: return@withContext fail(
+        // Every file must have an id, or the body would go out with a token still in it. This is
+        // the one thing about the template that IS checked - a token naming nothing is left alone,
+        // because at this level a typo and a sentence look identical.
+        entry.state.uploads.forEach { upload ->
+            if (upload.remoteId == null) {
+                return@withContext fail(
                     entry,
                     FailureCodes.UNKNOWN,
-                    "upload ${upload.uploadGuid} has no id",
+                    "upload ${upload.uploadId} has no id",
                     retryable = false,
                 )
             }
+        }
 
-        val body = TemplateFill.fill(entry.request.createPost.bodyTemplate, stitched, originals)
-        try {
-            JSONObject(body)
-        } catch (e: JSONException) {
+        val body = TemplateFill.fill(entry.request.finalize.bodyTemplate, entry.state.uploads)
+        if (PublisherHttp.parseJson(body) == null) {
             // The template is the caller's, so a body that does not parse is a caller bug - and one
             // no amount of retrying fixes.
             return@withContext fail(entry, FailureCodes.UNKNOWN, "the filled body is not valid JSON", retryable = false)
         }
 
+        val requestBody = body.toRequestBody(JSON)
         val request = Request.Builder()
-            .url(entry.request.createPost.url)
-            .post(body.toRequestBody(JSON))
-            .apply { entry.request.headers.forEach { (name, value) -> header(name, value) } }
+            .url(entry.request.finalize.url)
+            .apply {
+                when (entry.request.finalize.method) {
+                    UploadMethod.PUT -> put(requestBody)
+                    UploadMethod.POST -> post(requestBody)
+                }
+                entry.request.headers.forEach { (name, value) -> header(name, value) }
+            }
             .build()
 
         val response = try {
@@ -90,29 +93,34 @@ class CreatePostWorker(context: Context, params: WorkerParameters) : CoroutineWo
 
         when {
             code in 200..299 -> {
-                val created = PublisherHttp.parseCreatedPost(responseBody)
-                    ?: return@withContext fail(
+                // A server that reports failure in the body of a 200 - and there are many - is
+                // caught here, but only when the caller said which field to look at. Guessing
+                // would be worse than nothing.
+                val requirePath = entry.request.finalize.requirePath
+                if (!PublisherHttp.hasValueAt(responseBody, requirePath)) {
+                    return@withContext fail(
                         entry,
-                        FailureCodes.HTTP,
-                        "no postId in the response: ${PublisherHttp.errorMessage(responseBody)}",
+                        FailureCodes.SERVER_REJECTED,
+                        "nothing at $requirePath in the response: ${PublisherHttp.errorMessage(responseBody)}",
                         retryable = false,
                         httpStatus = code,
                     )
+                }
+                val result = PublisherHttp.parseResult(responseBody)
                 entry.state.phase = Phase.DONE
                 entry.state.percent = 100
-                entry.state.postId = created.postId
-                entry.state.published = created.published
+                entry.state.result = result
                 entry.state.error = null
                 entry.acked = false
                 store.save(entry)
 
-                PostingNotification.cancel(applicationContext)
-                PublisherEvents.forget(pendingPostId)
-                PublisherEvents.finished(pendingPostId, created.postId, created.published)
-                Log.i(TAG, "posted $pendingPostId as ${created.postId} (published=${created.published})")
+                UploadNotification.cancel(applicationContext)
+                PublisherEvents.forget(batchId)
+                PublisherEvents.finished(batchId, result)
+                Log.i(TAG, "finalized $batchId")
                 Result.success()
             }
-            // The server looked at this post and said no. Sending it again changes nothing.
+            // The server looked at this and said no. Sending it again changes nothing.
             code == 400 -> fail(
                 entry,
                 FailureCodes.SERVER_REJECTED,
@@ -160,7 +168,7 @@ class CreatePostWorker(context: Context, params: WorkerParameters) : CoroutineWo
         httpStatus: Int? = null,
     ): Result {
         if (runAttemptCount < Workers.MAX_ATTEMPTS - 1) {
-            entry.state.error = PublishFailure(code, message, httpStatus, "creating", null, true)
+            entry.state.error = PublishFailure(code, message, httpStatus, "finalizing", null, true)
             store.save(entry)
             return Result.retry()
         }
@@ -174,22 +182,22 @@ class CreatePostWorker(context: Context, params: WorkerParameters) : CoroutineWo
         retryable: Boolean,
         httpStatus: Int? = null,
     ): Result {
-        val failure = PublishFailure(code, message, httpStatus, "creating", null, retryable)
+        val failure = PublishFailure(code, message, httpStatus, "finalizing", null, retryable)
         entry.state.phase = Phase.FAILED
         entry.state.error = failure
         entry.acked = false
         store.save(entry)
-        PostingNotification.cancel(applicationContext)
-        PublisherEvents.failed(pendingPostId, failure)
-        Log.w(TAG, "create failed for $pendingPostId: $code $message")
+        UploadNotification.cancel(applicationContext)
+        PublisherEvents.failed(batchId, failure)
+        Log.w(TAG, "finalize failed for $batchId: $code $message")
         return Result.failure()
     }
 
     private companion object {
-        const val TAG = "PostPublisher"
+        const val TAG = "BackgroundPublisher"
 
-        /** Where the bar sits while the post is being created: the files are in, the post is not. */
-        const val CREATING_PERCENT = 97
+        /** Where the bar sits while the call is in flight: the files are in, the batch is not. */
+        const val FINALIZING_PERCENT = 97
 
         val JSON = "application/json; charset=utf-8".toMediaType()
     }

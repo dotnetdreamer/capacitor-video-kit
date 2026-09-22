@@ -22,11 +22,11 @@
  * than through this file, so nothing they bundle reaches `@capacitor/core`.
  */
 export { VideoComposer } from './video-composer';
-export { PostPublisher } from './post-publisher';
+export { BackgroundPublisher } from './background-publisher';
 
 export * from './video-composer/definitions';
 export * from './video-composer/plugin';
-export * from './post-publisher/definitions';
+export * from './background-publisher/definitions';
 
 // The editor's framework-free core - the web half of editing, the way web.ts is the web half of
 // the plugins.

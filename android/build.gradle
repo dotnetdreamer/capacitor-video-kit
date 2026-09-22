@@ -28,7 +28,7 @@ apply plugin: 'kotlin-android'
 
 android {
     // One module, two Capacitor plugin classes. The Kotlin packages stay separate
-    // (...videocomposer and ...postpublisher) because they share nothing but a file path.
+    // (...videocomposer and ...publisher) because they share nothing but a file path.
     namespace = "net.dotnetdreamer.videokit"
     compileSdk = project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 36
     defaultConfig {
@@ -82,7 +82,7 @@ dependencies {
     implementation "androidx.media3:media3-muxer:$media3Version"
     // media3-exoplayer arrives transitively through media3-transformer; not listed on purpose.
 
-    // --- PostPublisher: the background transport ---
+    // --- BackgroundPublisher: the background transport ---
     // CoroutineWorker has lived in work-runtime since 2.9.0; work-runtime-ktx is an empty artifact.
     implementation "androidx.work:work-runtime:$workManagerVersion"
     implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"

@@ -188,7 +188,7 @@ data class Audio(
 
 data class ComposeSpec(
     val jobId: String,
-    val pendingPostId: String,
+    val batchId: String,
     /**
      * The BASE track. It always starts at 0 and ITS length is the output's length: a track in
      * [tracks] running past the OUTPUT is cut, and one ending early leaves what is under it showing.

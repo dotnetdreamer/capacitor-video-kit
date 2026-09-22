@@ -12,7 +12,7 @@ import Foundation
 ///
 /// The check ORDER is load bearing. The tests compare message strings literally, so a spec that is
 /// wrong in two places has to name the same field on both platforms. Android's order is: `jobId`,
-/// `pendingPostId`, the `clips` array, each clip, the `tracks` count, each track and its own clips,
+/// `batchId`, the `clips` array, each clip, the `tracks` count, each track and its own clips,
 /// `output`, each filter op, the `overlays` count, each overlay, `audio.music`, each voiceover,
 /// `posterAtMs`. `output` sitting in the middle of that is why `OutputDTO` decodes leniently and why
 /// everything after it holds its first error instead of throwing it (see `heldError`).
@@ -125,7 +125,7 @@ enum ComposeSpecParser {
                                  voiceover: voiceover)
 
         return ComposeSpec(jobId: d.jobId,
-                           pendingPostId: d.pendingPostId,
+                           batchId: d.batchId,
                            clips: clips,
                            durationMs: d.durationMs,
                            tracks: tracks,
@@ -320,7 +320,7 @@ private extension KeyedDecodingContainer {
 /// other file in the module ever sees a DTO, only the validated `ComposeSpec`.
 private struct ComposeSpecDTO: Decodable {
     let jobId: String
-    let pendingPostId: String
+    let batchId: String
     let clips: [ClipDTO]
     /// nil for a spec with no `tracks` key, which is not the same thing as an empty array and is
     /// carried all the way to `ComposeSpec.tracks` as itself.
@@ -340,16 +340,16 @@ private struct ComposeSpecDTO: Decodable {
     let heldError: SpecError?
 
     private enum K: String, CodingKey {
-        case jobId, pendingPostId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs
+        case jobId, batchId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs
     }
 
     init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: K.self) else { throw SpecError("clips") }
 
         jobId = c.string(.jobId)
-        pendingPostId = c.string(.pendingPostId)
+        batchId = c.string(.batchId)
         if jobId.isEmpty { throw SpecError("jobId") }
-        if pendingPostId.isEmpty { throw SpecError("pendingPostId") }
+        if batchId.isEmpty { throw SpecError("batchId") }
 
         // Missing, not an array, and empty all report the bare `clips` path.
         guard var clipArray = try? c.nestedUnkeyedContainer(forKey: .clips), (clipArray.count ?? 0) > 0 else {

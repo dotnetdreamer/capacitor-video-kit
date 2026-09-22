@@ -38,7 +38,7 @@ object JobRegistry {
 
     class Job(
         val jobId: String,
-        val pendingPostId: String,
+        val batchId: String,
         val jobDir: File,
         val partFile: File,
         /** Replaced once the pre-flight has probed the inputs and can build the real timeline. */
@@ -98,8 +98,8 @@ object JobRegistry {
 
     fun active(): List<Job> = jobs.values.filter { it.state == State.PENDING || it.state == State.RENDERING }
 
-    fun forPendingPost(pendingPostId: String): List<Job> =
-        jobs.values.filter { it.pendingPostId == pendingPostId }
+    fun forBatch(batchId: String): List<Job> =
+        jobs.values.filter { it.batchId == batchId }
 
     fun forget(jobId: String) {
         jobs.remove(jobId)

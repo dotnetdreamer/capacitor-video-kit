@@ -51,7 +51,7 @@ class RenderPlanTest {
         durationMs: Long = 0,
     ) = ComposeSpec(
         jobId = "job",
-        pendingPostId = "post",
+        batchId = "post",
         clips = clips,
         output = Output(720, 1280, 30, 4_000_000, 128_000),
         filter = filter,

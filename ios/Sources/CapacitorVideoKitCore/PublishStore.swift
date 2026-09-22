@@ -7,26 +7,29 @@ struct ErrorRecord: Codable, Sendable {
     var message: String
     var httpStatus: Int?
     var phase: String
-    var uploadGuid: String?
+    var uploadId: String?
     var retryable: Bool
 }
 
 struct UploadRecord: Codable, Sendable {
-    var uploadGuid: String
-    var role: String
+    var uploadId: String
+    var tag: String
     var path: String
     var mimeType: String
-    var pictureId: Int?
+    var url: String?
+    var fileName: String?
+    var fields: [String: String] = [:]
     var status: String
-    var downloadId: Int?
+    /// The server's id for the stored file, keeping the JSON type it arrived as.
+    var remoteId: RemoteId?
     var httpStatus: Int?
     var bytesSent: Int64 = 0
-    /// The ENVELOPE's length, not the video's. Both counters are in the same unit so the
-    /// percentage is unaffected, but anything displaying this as "MB of video" is a few hundred
-    /// bytes out.
+    /// The BODY's length, not the video's. For a multipart POST that is a few hundred bytes more
+    /// than the file. Both counters are in the same unit so the percentage is unaffected, but
+    /// anything displaying this as "MB of video" is a little out.
     var bytesTotal: Int64 = 0
-    var envelopePath: String?
-    /// `<pendingPostId>|<attempts>|upload|<uploadGuid>`, the durable join across a relaunch:
+    var bodyPath: String?
+    /// `<batchId>|<attempts>|upload|<uploadId>`, the durable join across a relaunch:
     /// `taskIdentifier` is only stable inside one session object.
     var taskDescription: String?
     /// Native re-sends of this file after a transient error, capped at 3.
@@ -35,34 +38,78 @@ struct UploadRecord: Codable, Sendable {
 }
 
 struct PublishRecord: Codable, Sendable {
-    var version: Int = 1
-    var pendingPostId: String
+    /// Bumped from 1: the request and state shapes changed when the backend coupling went. A
+    /// version 1 record describes a transaction this code can no longer carry out, so it fails to
+    /// decode and is dropped, and the batch is re-queued by the caller rather than resumed wrongly.
+    var version: Int = 2
+    var batchId: String
     var headers: [String: String]
+
+    /// The transport, flattened. Kept flat rather than nested because every one of these is read
+    /// on its own in the hot path, and a record is decoded on every progress tick.
     var uploadUrl: String
+    var uploadMethod: String = UploadMethod.post.rawValue
+    var fileField: String = defaultFileField
+    var uploadFields: [String: String] = [:]
+    var idPath: String?
     var lookupUrlTemplate: String?
-    var createUrl: String
+
+    var finalizeUrl: String
+    var finalizeMethod: String = UploadMethod.post.rawValue
     var bodyTemplate: String
+    var requirePath: String?
+
     var uploads: [UploadRecord]
     var phase: String
     var percent: Int = 0
     var attempts: Int = 0
-    var postId: Int?
-    var published: Bool?
+    /// The finalize response, verbatim. Stored as text rather than as a decoded value because
+    /// `Any` is not `Codable`, and parsed back only when the state crosses the bridge.
+    var resultBody: String?
     var error: ErrorRecord?
     /// Has JS been told about a terminal phase yet. The only thing that stops the replay on a fresh
     /// plugin instance from repeating forever.
     var acked: Bool = false
-    var createTaskDescription: String?
-    var createAttempts: Int = 0
+    var finalizeTaskDescription: String?
+    var finalizeAttempts: Int = 0
     /// Epoch SECONDS. They never cross the bridge; only the 30 day sweep reads them.
     var createdAt: Double
     var updatedAt: Double
 }
 
-/// One JSON file per post at `Library/Application Support/post-publisher/<safeId>.json`.
+extension PublishRecord {
+    /// The record read back as the request it came from, so the URL and field resolvers live in
+    /// one place rather than being re-derived on both sides of the process boundary.
+    func asRequest() -> PublishRequest {
+        PublishRequest(
+            batchId: batchId,
+            headers: headers,
+            upload: PublishTransport(
+                url: uploadUrl,
+                method: UploadMethod(rawValue: uploadMethod) ?? .post,
+                fileField: fileField,
+                fields: uploadFields,
+                idPath: idPath,
+                lookupUrlTemplate: lookupUrlTemplate
+            ),
+            uploads: uploads.map {
+                PublishUpload(uploadId: $0.uploadId, tag: $0.tag, path: $0.path, mimeType: $0.mimeType,
+                              url: $0.url, fileName: $0.fileName, fields: $0.fields)
+            },
+            finalize: PublishFinalize(
+                url: finalizeUrl,
+                method: UploadMethod(rawValue: finalizeMethod) ?? .post,
+                bodyTemplate: bodyTemplate,
+                requirePath: requirePath
+            )
+        )
+    }
+}
+
+/// One JSON file per batch at `Library/Application Support/background-publisher/<safeId>.json`.
 ///
 /// One file rather than one shared document because a single corrupt write must not lose every
-/// in-flight post, and because each atomic write then stays small enough to be cheap on the
+/// in-flight batch, and because each atomic write then stays small enough to be cheap on the
 /// progress path. It also matches Android's layout, so the two engines' records read the same.
 ///
 /// The lock exists for exactly one caller: `JobFolders.sweepOnLaunch` reads `phase(for:)` from a
@@ -71,7 +118,7 @@ final class PublishStore: @unchecked Sendable {
     static let shared = PublishStore()
 
     /// 30 days, matching Android's `DONE_RETENTION_MS`. A finished record is what tells a late
-    /// `getState` that the post exists, so it outlives the upload by a long way.
+    /// `getState` that the batch succeeded, so it outlives the upload by a long way.
     private static let doneRetention: TimeInterval = 30 * 24 * 60 * 60
 
     private let lock = NSLock()
@@ -81,15 +128,15 @@ final class PublishStore: @unchecked Sendable {
     static var root: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("post-publisher", isDirectory: true)
+        return base.appendingPathComponent("background-publisher", isDirectory: true)
     }
 
-    /// The multipart envelopes and the create-post body. Deliberately NOT the composer's job
-    /// folder: `PublishRequest` carries no jobDir, and `VideoComposer.cleanup` would delete a live
-    /// envelope out from under a running upload task.
-    static func bodiesDir(_ pendingPostId: String) -> URL {
+    /// The request bodies: the multipart envelopes, or the copies a raw PUT sends. Deliberately NOT
+    /// the composer's job folder: `PublishRequest` carries no jobDir, and `VideoComposer.cleanup`
+    /// would delete a live body out from under a running upload task.
+    static func bodiesDir(_ batchId: String) -> URL {
         root.appendingPathComponent("bodies", isDirectory: true)
-            .appendingPathComponent(PublishModels.safe(pendingPostId), isDirectory: true)
+            .appendingPathComponent(PublishModels.safe(batchId), isDirectory: true)
     }
 
     /// Reads every record into memory once, drops the ones that will not decode, and sweeps. Safe
@@ -106,13 +153,17 @@ final class PublishStore: @unchecked Sendable {
         let decoder = JSONDecoder()
         for file in files where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file),
-                  let record = try? decoder.decode(PublishRecord.self, from: data) else {
-                // A record that cannot be read stalls its post forever, so it goes rather than
+                  let record = try? decoder.decode(PublishRecord.self, from: data),
+                  // An older record names fields this build no longer sends. Dropping it is the
+                  // right outcome: the caller re-queues rather than resuming a request that can no
+                  // longer be built. A version 1 record fails to decode anyway; this is explicit.
+                  record.version == 2 else {
+                // A record that cannot be read stalls its batch forever, so it goes rather than
                 // staying as a permanent "something is in flight". Android does the same.
                 try? fm.removeItem(at: file)
                 continue
             }
-            records[record.pendingPostId] = record
+            records[record.batchId] = record
         }
         sweepLocked()
     }
@@ -143,7 +194,7 @@ final class PublishStore: @unchecked Sendable {
         defer { lock.unlock() }
         var stamped = r
         stamped.updatedAt = Date().timeIntervalSince1970
-        records[stamped.pendingPostId] = stamped
+        records[stamped.batchId] = stamped
         if persist { writeLocked(stamped) }
     }
 
@@ -160,26 +211,24 @@ final class PublishStore: @unchecked Sendable {
     /// call silently.
     func state(_ r: PublishRecord) -> [String: Any] {
         var out: [String: Any] = [
-            "pendingPostId": r.pendingPostId,
+            "batchId": r.batchId,
             "phase": r.phase,
             "percent": percent(r),
             "attempts": r.attempts,
             "uploads": r.uploads.map { u -> [String: Any] in
                 var d: [String: Any] = [
-                    "uploadGuid": u.uploadGuid,
-                    "role": u.role,
+                    "uploadId": u.uploadId,
+                    "tag": u.tag,
                     "status": u.status,
                     "bytesSent": u.bytesSent,
                     "bytesTotal": u.bytesTotal,
                 ]
-                if let v = u.downloadId { d["downloadId"] = v }
-                if let v = u.pictureId { d["pictureId"] = v }
+                if let v = u.remoteId { d["remoteId"] = v.jsonValue }
                 if let v = u.httpStatus { d["httpStatus"] = v }
                 return d
             },
         ]
-        if let v = r.postId { out["postId"] = v }
-        if let v = r.published { out["published"] = v }
+        if let v = Self.decodeResult(r.resultBody) { out["result"] = v }
         if let e = r.error {
             var d: [String: Any] = [
                 "code": e.code,
@@ -188,15 +237,24 @@ final class PublishStore: @unchecked Sendable {
                 "retryable": e.retryable,
             ]
             if let v = e.httpStatus { d["httpStatus"] = v }
-            if let v = e.uploadGuid { d["uploadGuid"] = v }
+            if let v = e.uploadId { d["uploadId"] = v }
             out["error"] = d
         }
         return out
     }
 
-    /// Bytes-weighted and capped at 95 until the post itself exists. Nothing reaches 100 on the
-    /// strength of the files alone, because "uploaded" is not "posted" and showing otherwise is a
-    /// lie the customer notices; 97 is the number Android's create worker puts on the wire.
+    /// The finalize response as something that can cross the bridge, or nil when there was none and
+    /// when it was not JSON. `fragmentsAllowed` because a body of `5` or `"ok"` is a perfectly good
+    /// answer from somebody's server, and refusing it would lose the only thing they sent.
+    static func decodeResult(_ body: String?) -> Any? {
+        guard let body, !body.isEmpty, let data = body.data(using: .utf8) else { return nil }
+        guard let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { return nil }
+        return parsed is NSNull ? nil : parsed
+    }
+
+    /// Bytes-weighted and capped at 95 until the finalize call has answered. Nothing reaches 100 on
+    /// the strength of the files alone, because "uploaded" is not "done" and showing otherwise is a
+    /// lie the customer notices; 97 is the number Android's finalize worker puts on the wire.
     func percent(_ r: PublishRecord) -> Int {
         if r.phase == Phase.done { return 100 }
         let total = r.uploads.reduce(Int64(0)) { $0 + $1.bytesTotal }
@@ -208,27 +266,27 @@ final class PublishStore: @unchecked Sendable {
         // here would show 10 percent for a job that has sent 9.5, and the four pinned values in the
         // Android tests (9, 47, 95, 100) would all move.
         let base = min(max(Int(Double(sent) / Double(total) * 95.0), 0), 95)
-        if r.phase == Phase.creating { return r.createTaskDescription != nil ? 97 : max(base, 95) }
+        if r.phase == Phase.finalizing { return r.finalizeTaskDescription != nil ? 97 : max(base, 95) }
         return base
     }
 
-    /// For `JobFolders.sweep`, which must never delete a folder whose post is still in flight or
-    /// has failed and not yet been answered. nil means there is no record for that post at all.
-    func phase(for pendingPostId: String) -> String? {
+    /// For `JobFolders.sweep`, which must never delete a folder whose batch is still in flight or
+    /// has failed and not yet been answered. nil means there is no record for that batch at all.
+    func phase(for batchId: String) -> String? {
         // Self-initialising, because this is the one entry point that can arrive before the session
-        // has been built. Answering nil there would tell the composer's sweep that a post nobody
+        // has been built. Answering nil there would tell the composer's sweep that a batch nobody
         // has answered yet is garbage. `load()` takes the lock itself and returns at once when it
         // has already run, so the two acquisitions are sequential and never nested.
         load()
         lock.lock()
         defer { lock.unlock() }
-        return records[pendingPostId]?.phase
+        return records[batchId]?.phase
     }
 
     /* ---------------------------------------------------------------------------------------- */
 
-    private static func file(for pendingPostId: String) -> URL {
-        root.appendingPathComponent(PublishModels.safe(pendingPostId) + ".json")
+    private static func file(for batchId: String) -> URL {
+        root.appendingPathComponent(PublishModels.safe(batchId) + ".json")
     }
 
     private static func ensureRoot() {
@@ -248,7 +306,7 @@ final class PublishStore: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(r) else { return }
-        try? data.write(to: Self.file(for: r.pendingPostId), options: [.atomic])
+        try? data.write(to: Self.file(for: r.batchId), options: [.atomic])
     }
 
     private func sweepLocked() {
@@ -256,11 +314,11 @@ final class PublishStore: @unchecked Sendable {
         // Snapshot first: this loop removes from the dictionary it is walking.
         for r in Array(records.values) where r.phase == Phase.done && r.updatedAt > 0 {
             guard now - r.updatedAt > Self.doneRetention else { continue }
-            records.removeValue(forKey: r.pendingPostId)
-            try? FileManager.default.removeItem(at: Self.file(for: r.pendingPostId))
-            try? FileManager.default.removeItem(at: Self.bodiesDir(r.pendingPostId))
+            records.removeValue(forKey: r.batchId)
+            try? FileManager.default.removeItem(at: Self.file(for: r.batchId))
+            try? FileManager.default.removeItem(at: Self.bodiesDir(r.batchId))
         }
-        // Envelopes whose record is gone. A 100 MB body left behind by a cleared post would
+        // Bodies whose record is gone. A 100 MB body left behind by a cleared batch would
         // otherwise sit in Application Support until the app is deleted.
         let live = Set(records.keys.map { PublishModels.safe($0) })
         let bodies = Self.root.appendingPathComponent("bodies", isDirectory: true)
