@@ -17,6 +17,7 @@ import {
   cssFor,
   duplicateClip,
   duplicateOverlay,
+  cutPostTo,
   emptyManifest,
   findClip,
   findOverlay,
@@ -74,15 +75,7 @@ import {
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
-import type {
-  EditorPanel,
-  EditorPlayer,
-  EditorSelection,
-  Filmstrip,
-  OverlayBitmap,
-  ToolbarMode,
-  VolumeTarget,
-} from './editor.types';
+import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './editor.types';
 
 interface HistoryEntry {
   manifest: EditManifest;
@@ -221,7 +214,7 @@ export class EditorStore {
   readonly layoutTrack = computed(() => {
     const selected = this.selectedClipTrackId.value;
     const rows = this.videoTrackRows.value;
-    return (selected ? rows.find((track) => track.id === selected) : null) ?? rows[0] ?? null;
+    return (selected ? rows.find(track => track.id === selected) : null) ?? rows[0] ?? null;
   });
   /**
    * Whether another video layer would go past [MAX_VIDEO_TRACKS], which counts the base track. The
@@ -275,13 +268,7 @@ export class EditorStore {
   });
 
   /** One layer of [previewLayers]. `outputMs` is on the layer's OWN timeline, not the post's. */
-  private previewLayer(
-    trackId: string | null,
-    slot: TimelineSlot,
-    outputMs: number,
-    opacity: number,
-    z: number,
-  ): PreviewVideoLayer {
+  private previewLayer(trackId: string | null, slot: TimelineSlot, outputMs: number, opacity: number, z: number): PreviewVideoLayer {
     const clip = slot.clip;
     return {
       trackId,
@@ -398,7 +385,7 @@ export class EditorStore {
   }
 
   clipByKey(key: string): EditorSource | undefined {
-    return this.clips.value.find((clip) => clip.key === key);
+    return this.clips.value.find(clip => clip.key === key);
   }
 
   sourceDurationMs(clipKey: string): number {
@@ -432,6 +419,25 @@ export class EditorStore {
   preview(fn: (m: EditManifest) => EditManifest | null): void {
     this.beginGesture();
     const next = fn(this.manifest.value);
+    if (next && next !== this.manifest.value) this.manifest.value = next;
+  }
+
+  /**
+   * A live step applied to where the gesture STARTED rather than to where it has got to.
+   *
+   * [preview] compounds, which is right for everything that had been using it: moving a clip by a
+   * delta, or setting a value that does not read the old one, gives the same answer either way. It
+   * is wrong for a step that DESTROYS, and the end grip's cut is the first of those. Fed the
+   * running manifest, frame two would cut a post that frame one had already shortened, the picture
+   * would race away under a finger that had barely moved, and dragging back out would restore
+   * nothing - the clips it would have to put back are gone.
+   *
+   * Against the snapshot, every frame of the drag is the same cut made once from the same starting
+   * point, so it is idempotent and the whole gesture stays reversible until it is let go.
+   */
+  previewFromStart(fn: (m: EditManifest) => EditManifest | null): void {
+    this.beginGesture();
+    const next = fn(this.gestureStart ?? this.manifest.value);
     if (next && next !== this.manifest.value) this.manifest.value = next;
   }
 
@@ -593,7 +599,7 @@ export class EditorStore {
   splitAtPlayhead(): void {
     const newId = this.newId('seg');
     const at = this.playheadMs.value;
-    const ok = this.commit('Split', (m) => splitClipAt(m, at, newId));
+    const ok = this.commit('Split', m => splitClipAt(m, at, newId));
     if (!ok) {
       this.showToast('Move the playhead further into the clip to split it');
       this.haptic('warning');
@@ -614,7 +620,7 @@ export class EditorStore {
     const clip = this.selectedClip.value;
     if (!clip) return;
     const newId = this.newId('seg');
-    if (this.commit('Duplicate', (m) => duplicateClip(m, clip.id, newId))) {
+    if (this.commit('Duplicate', m => duplicateClip(m, clip.id, newId))) {
       this.select({ kind: 'clip', id: newId });
       this.haptic('light');
     }
@@ -632,7 +638,7 @@ export class EditorStore {
       this.removeVideoTrack(trackId);
       return;
     }
-    if (!this.commit('Delete', (m) => removeClip(m, clip.id))) {
+    if (!this.commit('Delete', m => removeClip(m, clip.id))) {
       this.showToast('A video needs at least one clip');
       this.haptic('warning');
       return;
@@ -643,11 +649,11 @@ export class EditorStore {
 
   joinSelectedWithNext(): void {
     const clip = this.selectedClip.value;
-    if (clip && this.commit('Join', (m) => joinWithNext(m, clip.id))) this.haptic('light');
+    if (clip && this.commit('Join', m => joinWithNext(m, clip.id))) this.haptic('light');
   }
 
   moveClipTo(clipId: string, toIndex: number): void {
-    if (this.commit('Reorder', (m) => moveClip(m, clipId, toIndex))) this.haptic('light');
+    if (this.commit('Reorder', m => moveClip(m, clipId, toIndex))) this.haptic('light');
   }
 
   /** Live trim from a handle; wrap in begin/endGesture('Trim'). */
@@ -655,22 +661,22 @@ export class EditorStore {
     const clip = findClip(this.manifest.value, clipId);
     if (!clip) return;
     const source = this.sourceDurationMs(clip.clipKey);
-    this.preview((m) => trimClip(m, clipId, inMs, outMs, source));
+    this.preview(m => trimClip(m, clipId, inMs, outMs, source));
   }
 
   setClipSpeed(clipId: string, speed: number, live = false): void {
-    if (live) this.preview((m) => setClipSpeed(m, clipId, speed));
-    else this.commit('Speed', (m) => setClipSpeed(m, clipId, speed));
+    if (live) this.preview(m => setClipSpeed(m, clipId, speed));
+    else this.commit('Speed', m => setClipSpeed(m, clipId, speed));
   }
 
   patchClip(clipId: string, patch: Parameters<typeof patchClip>[2], label: string, live = false): void {
-    if (live) this.preview((m) => patchClip(m, clipId, patch));
-    else this.commit(label, (m) => patchClip(m, clipId, patch));
+    if (live) this.preview(m => patchClip(m, clipId, patch));
+    else this.commit(label, m => patchClip(m, clipId, patch));
   }
 
   toggleOriginalMuted(): void {
     const muted = !this.manifest.value.originalMuted;
-    this.commit(muted ? 'Mute original sound' : 'Unmute original sound', (m) => ({ ...m, originalMuted: muted }));
+    this.commit(muted ? 'Mute original sound' : 'Unmute original sound', m => ({ ...m, originalMuted: muted }));
     this.showToast(muted ? 'Original sound off' : 'Original sound on');
     this.haptic('light');
   }
@@ -693,7 +699,7 @@ export class EditorStore {
       this.commitClipFraming(clip.id, { fit }, label);
       return;
     }
-    this.commit(label, (m) => ({ ...m, fit }));
+    this.commit(label, m => ({ ...m, fit }));
   }
 
   /* ========================================================================================= */
@@ -726,16 +732,16 @@ export class EditorStore {
    * begin/endGesture: one continuous gesture is one undo step, as every other drag is.
    */
   previewClipFraming(clipId: string, patch: ClipFramingPatch): void {
-    this.preview((m) => patchClip(m, clipId, patch));
+    this.preview(m => patchClip(m, clipId, patch));
   }
 
   commitClipFraming(clipId: string, patch: ClipFramingPatch, label: string): void {
-    this.commit(label, (m) => patchClip(m, clipId, patch));
+    this.commit(label, m => patchClip(m, clipId, patch));
   }
 
   /** Back to the whole source over the whole frame: the crop sheet's Reset. */
   resetClipFraming(clipId: string): void {
-    if (this.commit('Reset crop', (m) => resetClipFraming(m, clipId))) this.haptic('light');
+    if (this.commit('Reset crop', m => resetClipFraming(m, clipId))) this.haptic('light');
   }
 
   /* ========================================================================================= */
@@ -756,7 +762,7 @@ export class EditorStore {
       return null;
     }
     const id = this.newId('vt');
-    if (!this.commit('Add video', (m) => addVideoTrack(m, clip, id))) return null;
+    if (!this.commit('Add video', m => addVideoTrack(m, clip, id))) return null;
     this.select({ kind: 'clip', id: clip.id });
     this.haptic('light');
     return id;
@@ -772,7 +778,7 @@ export class EditorStore {
    * base left in half the frame with nothing beside it is a black band nobody asked for.
    */
   removeVideoTrack(trackId: string): void {
-    if (!this.commit('Remove video', (m) => removeVideoTrack(applyLayoutPreset(m, trackId, 'full'), trackId))) return;
+    if (!this.commit('Remove video', m => removeVideoTrack(applyLayoutPreset(m, trackId, 'full'), trackId))) return;
     this.closePanel();
     this.select(null);
     this.haptic('light');
@@ -799,7 +805,7 @@ export class EditorStore {
       return false;
     }
     const newTrackId = this.newId('vt');
-    if (!this.commit('Move to layer', (mm) => moveClipToTrack(mm, clipId, target, atMs, newTrackId))) return false;
+    if (!this.commit('Move to layer', mm => moveClipToTrack(mm, clipId, target, atMs, newTrackId))) return false;
     this.select({ kind: 'clip', id: clipId });
     this.haptic('light');
     return true;
@@ -830,6 +836,21 @@ export class EditorStore {
     if (this.playheadMs.value > this.totalMs.value) this.seek(this.totalMs.value);
   }
 
+  /**
+   * The end pulled back INTO the post, cutting every row at that instant - see [cutPostTo]. The
+   * grip only reaches this once it has given back all the tail there was, so a post nobody has
+   * stretched is cutting from the first pixel of the drag.
+   *
+   * Live steps go through [previewFromStart] and not [preview]: a cut applied to its own result
+   * compounds, and the clips the next frame would have to put back are already gone.
+   */
+  cutPostTo(durationMs: number, live = false): void {
+    const fn = (m: EditManifest): EditManifest => cutPostTo(m, durationMs);
+    if (live) this.previewFromStart(fn);
+    else if (!this.commit('Trim video', fn)) return;
+    if (this.playheadMs.value > this.totalMs.value) this.seek(this.totalMs.value);
+  }
+
   /** Where the second video lands on the output timeline. Live; wrap in begin/endGesture. */
   setTrackStart(trackId: string, startMs: number, live = false): void {
     const fn = (m: EditManifest): EditManifest => setTrackStart(m, trackId, Math.max(0, Math.round(startMs)));
@@ -855,7 +876,7 @@ export class EditorStore {
    */
   swapTrackZ(trackId: string): void {
     const before = this.totalMs.value;
-    if (!this.commit('Swap videos', (m) => swapTrackZ(m, trackId))) return;
+    if (!this.commit('Swap videos', m => swapTrackZ(m, trackId))) return;
     this.haptic('light');
     const after = this.totalMs.value;
     if (this.playheadMs.value > after) this.seek(after);
@@ -868,7 +889,7 @@ export class EditorStore {
    * geometry of its own here - the preset holds it and every engine already draws rectangles.
    */
   applyLayoutPreset(trackId: string, presetId: LayoutPresetId, label: string): void {
-    if (this.commit(`Layout ${label}`, (m) => applyLayoutPreset(m, trackId, presetId))) {
+    if (this.commit(`Layout ${label}`, m => applyLayoutPreset(m, trackId, presetId))) {
       this.haptic('selection');
     }
   }
@@ -891,7 +912,7 @@ export class EditorStore {
     // Starting at the very end would make a layer nobody can see; start it at 0 instead.
     const at = this.playheadMs.value >= this.totalMs.value - 100 ? 0 : Math.round(this.playheadMs.value);
     const overlay = { startMs: at, endMs: 0, ...layer, id } as unknown as EditOverlay;
-    if (!this.commit(label, (m) => addOverlay(m, overlay))) return null;
+    if (!this.commit(label, m => addOverlay(m, overlay))) return null;
     this.select({ kind: 'overlay', id });
     this.haptic('light');
     return id;
@@ -968,7 +989,7 @@ export class EditorStore {
       startMs: at,
       endMs: 0,
     };
-    this.preview((m) => addOverlay(m, overlay));
+    this.preview(m => addOverlay(m, overlay));
     this.selection.value = { kind: 'overlay', id };
     this.textEdit.value = { id, isNew: true };
     this.openPanel('text');
@@ -999,7 +1020,7 @@ export class EditorStore {
         this.cancelText();
         return;
       }
-      this.preview((m) => removeOverlay(m, edit.id));
+      this.preview(m => removeOverlay(m, edit.id));
       this.selection.value = null;
     }
     this.endGesture(edit.isNew ? 'Add text' : 'Edit text');
@@ -1018,24 +1039,24 @@ export class EditorStore {
 
   /** A live change to a layer (drag, pinch, slider, typing); wrap in begin/endGesture. */
   previewOverlay(id: string, patch: Parameters<typeof patchOverlay>[2]): void {
-    this.preview((m) => patchOverlay(m, id, patch));
+    this.preview(m => patchOverlay(m, id, patch));
   }
 
   commitOverlay(id: string, patch: Parameters<typeof patchOverlay>[2], label: string): void {
-    this.commit(label, (m) => patchOverlay(m, id, patch));
+    this.commit(label, m => patchOverlay(m, id, patch));
   }
 
   /** Live move/trim of a layer's time window from the timeline; wrap in begin/endGesture. */
   previewOverlayWindow(id: string, startMs: number, endMs: number): void {
     const total = this.totalMs.value;
-    this.preview((m) => setOverlayWindow(m, id, startMs, endMs, total));
+    this.preview(m => setOverlayWindow(m, id, startMs, endMs, total));
   }
 
   duplicateSelectedOverlay(): void {
     const overlay = this.selectedOverlay.value;
     if (!overlay) return;
     const newId = this.newId(overlay.kind);
-    if (this.commit('Duplicate', (m) => duplicateOverlay(m, overlay.id, newId))) {
+    if (this.commit('Duplicate', m => duplicateOverlay(m, overlay.id, newId))) {
       this.select({ kind: 'overlay', id: newId });
       this.haptic('light');
     } else if (this.layersFull.value) {
@@ -1046,14 +1067,14 @@ export class EditorStore {
   deleteSelectedOverlay(): void {
     const overlay = this.selectedOverlay.value;
     if (!overlay) return;
-    if (this.commit('Delete', (m) => removeOverlay(m, overlay.id))) {
+    if (this.commit('Delete', m => removeOverlay(m, overlay.id))) {
       this.select(null);
       this.haptic('light');
     }
   }
 
   deleteOverlay(id: string): void {
-    if (this.commit('Delete', (m) => removeOverlay(m, id))) {
+    if (this.commit('Delete', m => removeOverlay(m, id))) {
       if (this.isSelected({ kind: 'overlay', id })) this.select(null);
       this.haptic('warning');
     }
@@ -1065,7 +1086,7 @@ export class EditorStore {
     const newId = this.newId(overlay.kind);
     const total = this.totalMs.value;
     const at = this.playheadMs.value;
-    if (this.commit('Split', (m) => splitOverlayAt(m, overlay.id, at, newId, total))) {
+    if (this.commit('Split', m => splitOverlayAt(m, overlay.id, at, newId, total))) {
       this.select({ kind: 'overlay', id: newId });
       this.haptic('light');
     } else if (this.layersFull.value) {
@@ -1088,7 +1109,7 @@ export class EditorStore {
       front: 'Bring to front',
       back: 'Send to back',
     };
-    if (this.commit(labels[move], (m) => moveLayer(m, overlay.id, move))) {
+    if (this.commit(labels[move], m => moveLayer(m, overlay.id, move))) {
       this.haptic('light');
     } else {
       this.showToast(move === 'forward' || move === 'front' ? 'Already on top' : 'Already at the bottom');
@@ -1116,7 +1137,7 @@ export class EditorStore {
         : at >= overlay.startMs + MIN_LAYER_MS
           ? [overlay.startMs, at]
           : [Math.max(0, at - length), at];
-    this.commit(edge === 'start' ? 'Start here' : 'End here', (m) => setOverlayWindow(m, overlay.id, s, e, total));
+    this.commit(edge === 'start' ? 'Start here' : 'End here', m => setOverlayWindow(m, overlay.id, s, e, total));
   }
 
   /* ========================================================================================= */
@@ -1124,27 +1145,25 @@ export class EditorStore {
   /* ========================================================================================= */
 
   setFilter(filterId: string): void {
-    this.commit('Filter', (m) => (m.filterId === filterId ? m : { ...m, filterId, filterIntensity: 1 }));
+    this.commit('Filter', m => (m.filterId === filterId ? m : { ...m, filterId, filterIntensity: 1 }));
   }
 
   /** Live; wrap in begin/endGesture('Filter strength'). */
   previewFilterIntensity(k: number): void {
     const filterIntensity = Math.max(0, Math.min(1, k));
     // The same object back for the same value, so a slider released where it started is no undo step.
-    this.preview((m) => (m.filterIntensity === filterIntensity ? m : { ...m, filterIntensity }));
+    this.preview(m => (m.filterIntensity === filterIntensity ? m : { ...m, filterIntensity }));
   }
 
   /** Live; wrap in begin/endGesture('Adjust'). */
   previewAdjust(key: keyof EditAdjust, value: number): void {
     const min = key === 'fade' ? 0 : -1;
     const v = Math.max(min, Math.min(1, value));
-    this.preview((m) => (m.adjust[key] === v ? m : { ...m, adjust: { ...m.adjust, [key]: v } }));
+    this.preview(m => (m.adjust[key] === v ? m : { ...m, adjust: { ...m.adjust, [key]: v } }));
   }
 
   resetAdjust(): void {
-    this.commit('Reset adjust', (m) =>
-      Object.values(m.adjust).every((v) => v === 0) ? m : { ...m, adjust: neutralAdjust() },
-    );
+    this.commit('Reset adjust', m => (Object.values(m.adjust).every(v => v === 0) ? m : { ...m, adjust: neutralAdjust() }));
   }
 
   /* ========================================================================================= */
@@ -1152,29 +1171,29 @@ export class EditorStore {
   /* ========================================================================================= */
 
   setMusic(music: EditMusic, label = 'Add sound'): void {
-    if (this.commit(label, (m) => ({ ...m, music }))) {
+    if (this.commit(label, m => ({ ...m, music }))) {
       this.select({ kind: 'music' });
       this.haptic('light');
     }
   }
 
   removeMusic(): void {
-    if (this.commit('Remove sound', (m) => (m.music ? { ...m, music: null } : m))) this.select(null);
+    if (this.commit('Remove sound', m => (m.music ? { ...m, music: null } : m))) this.select(null);
   }
 
   /** Live; wrap in begin/endGesture. */
   previewMusic(patch: Partial<EditMusic>): void {
-    this.preview((m) => patchMusic(m, patch));
+    this.preview(m => patchMusic(m, patch));
   }
 
   commitMusic(patch: Partial<EditMusic>, label: string): void {
-    this.commit(label, (m) => patchMusic(m, patch));
+    this.commit(label, m => patchMusic(m, patch));
   }
 
   /** Adds a recorded take where it was recorded. Returns false when there was no room for it. */
   addVoiceover(take: EditVoiceover): boolean {
     const total = this.totalMs.value;
-    const ok = this.commit('Voiceover', (m) => addVoiceover(m, take, total));
+    const ok = this.commit('Voiceover', m => addVoiceover(m, take, total));
     if (ok) {
       this.select({ kind: 'voice', id: take.id });
       this.haptic('success');
@@ -1184,13 +1203,13 @@ export class EditorStore {
 
   removeSelectedVoice(): void {
     const take = this.selectedVoice.value;
-    if (take && this.commit('Delete voiceover', (m) => removeVoiceover(m, take.id))) this.select(null);
+    if (take && this.commit('Delete voiceover', m => removeVoiceover(m, take.id))) this.select(null);
   }
 
   /** Live; wrap in begin/endGesture('Move voiceover'). */
   previewMoveVoice(id: string, startMs: number): void {
     const total = this.totalMs.value;
-    this.preview((m) => moveVoiceover(m, id, startMs, total));
+    this.preview(m => moveVoiceover(m, id, startMs, total));
   }
 
   /** Sets a volume live (slider) or as a step, for whatever [VolumeTarget] names. 0..1. */
@@ -1273,7 +1292,7 @@ export class EditorStore {
    */
   setOutput(output: EditOutput, label = 'Quality'): void {
     if (sameOutput(this.manifest.value.output, output)) return;
-    this.commit(label, (m) => ({ ...m, output }));
+    this.commit(label, m => ({ ...m, output }));
   }
 
   /**
@@ -1303,9 +1322,5 @@ function sameValue(a: unknown, b: unknown): boolean {
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
-  return ka.every(
-    (key) =>
-      Object.prototype.hasOwnProperty.call(b, key) &&
-      sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
-  );
+  return ka.every(key => Object.prototype.hasOwnProperty.call(b, key) && sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
 }

@@ -65,7 +65,7 @@ export function timelineSlots(manifest: Pick<EditManifest, 'clips'>): TimelineSl
 export function slotAt(manifest: Pick<EditManifest, 'clips'>, outputMs: number): TimelineSlot | null {
   const slots = timelineSlots(manifest);
   if (!slots.length) return null;
-  return slots.find((slot) => outputMs < slot.startMs + slot.durationMs) ?? slots[slots.length - 1];
+  return slots.find(slot => outputMs < slot.startMs + slot.durationMs) ?? slots[slots.length - 1];
 }
 
 /** Source time inside a segment for an output time, clamped to the segment's trim. */
@@ -85,10 +85,10 @@ export function sourceMsAt(slot: TimelineSlot, outputMs: number): number {
  * clips use, or the crop tool and the volume sheet would work on one layer only.
  */
 export function findClip(manifest: EditManifest, clipId: string): EditClip | null {
-  const base = manifest.clips.find((clip) => clip.id === clipId);
+  const base = manifest.clips.find(clip => clip.id === clipId);
   if (base) return base;
   for (const track of manifest.videoTracks) {
-    const found = track.clips.find((clip) => clip.id === clipId);
+    const found = track.clips.find(clip => clip.id === clipId);
     if (found) return found;
   }
   return null;
@@ -96,29 +96,23 @@ export function findClip(manifest: EditManifest, clipId: string): EditClip | nul
 
 /** Which layer a segment is on: `null` for the base track, otherwise the extra track's id. */
 export function trackIdOfClip(manifest: EditManifest, clipId: string): string | null | undefined {
-  if (manifest.clips.some((clip) => clip.id === clipId)) return null;
-  const track = manifest.videoTracks.find((t) => t.clips.some((clip) => clip.id === clipId));
+  if (manifest.clips.some(clip => clip.id === clipId)) return null;
+  const track = manifest.videoTracks.find(t => t.clips.some(clip => clip.id === clipId));
   return track ? track.id : undefined;
 }
 
-export function patchClip(
-  manifest: EditManifest,
-  clipId: string,
-  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit'>> & ClipFramingPatch,
-): EditManifest {
+export function patchClip(manifest: EditManifest, clipId: string, patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit'>> & ClipFramingPatch): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
   const next = withFraming({ ...current, ...patch } as EditClip, patch);
   if (sameClip(current, next)) return manifest;
-  if (manifest.clips.some((clip) => clip.id === clipId)) {
-    return { ...manifest, clips: manifest.clips.map((clip) => (clip.id === clipId ? next : clip)) };
+  if (manifest.clips.some(clip => clip.id === clipId)) {
+    return { ...manifest, clips: manifest.clips.map(clip => (clip.id === clipId ? next : clip)) };
   }
   return {
     ...manifest,
-    videoTracks: manifest.videoTracks.map((track) =>
-      track.clips.some((clip) => clip.id === clipId)
-        ? { ...track, clips: track.clips.map((clip) => (clip.id === clipId ? next : clip)) }
-        : track,
+    videoTracks: manifest.videoTracks.map(track =>
+      track.clips.some(clip => clip.id === clipId) ? { ...track, clips: track.clips.map(clip => (clip.id === clipId ? next : clip)) } : track,
     ),
   };
 }
@@ -197,13 +191,7 @@ export function resetClipFraming(manifest: EditManifest, clipId: string): EditMa
  *
  * @param sourceDurationMs 0 when unknown, which lifts the upper bound.
  */
-export function trimClip(
-  manifest: EditManifest,
-  clipId: string,
-  inMs: number,
-  outMs: number,
-  sourceDurationMs: number,
-): EditManifest {
+export function trimClip(manifest: EditManifest, clipId: string, inMs: number, outMs: number, sourceDurationMs: number): EditManifest {
   const clip = findClip(manifest, clipId);
   if (!clip) return manifest;
   const max = sourceDurationMs > 0 ? sourceDurationMs : Number.MAX_SAFE_INTEGER;
@@ -236,7 +224,7 @@ export function splitClipAt(manifest: EditManifest, outputMs: number, newId: str
 
 /** Whether the segment can be joined with the one after it - two halves of an earlier split. */
 export function canJoinWithNext(manifest: EditManifest, clipId: string): boolean {
-  const index = manifest.clips.findIndex((clip) => clip.id === clipId);
+  const index = manifest.clips.findIndex(clip => clip.id === clipId);
   const a = manifest.clips[index];
   const b = manifest.clips[index + 1];
   return (
@@ -257,7 +245,7 @@ export function canJoinWithNext(manifest: EditManifest, clipId: string): boolean
 
 export function joinWithNext(manifest: EditManifest, clipId: string): EditManifest | null {
   if (!canJoinWithNext(manifest, clipId)) return null;
-  const index = manifest.clips.findIndex((clip) => clip.id === clipId);
+  const index = manifest.clips.findIndex(clip => clip.id === clipId);
   const clips = [...manifest.clips];
   const [a, b] = clips.splice(index, 2);
   clips.splice(index, 0, { ...a, outMs: b.outMs });
@@ -266,7 +254,7 @@ export function joinWithNext(manifest: EditManifest, clipId: string): EditManife
 
 /** Inserts a copy straight after the segment. */
 export function duplicateClip(manifest: EditManifest, clipId: string, newId: string): EditManifest | null {
-  const index = manifest.clips.findIndex((clip) => clip.id === clipId);
+  const index = manifest.clips.findIndex(clip => clip.id === clipId);
   if (index < 0) return null;
   const clips = [...manifest.clips];
   clips.splice(index + 1, 0, { ...clips[index], id: newId });
@@ -282,19 +270,17 @@ export function duplicateClip(manifest: EditManifest, clipId: string, newId: str
  * not a state this manifest holds.
  */
 export function removeClip(manifest: EditManifest, clipId: string): EditManifest | null {
-  if (manifest.clips.some((clip) => clip.id === clipId)) {
+  if (manifest.clips.some(clip => clip.id === clipId)) {
     if (manifest.clips.length <= 1) return null;
-    return { ...manifest, clips: manifest.clips.filter((clip) => clip.id !== clipId) };
+    return { ...manifest, clips: manifest.clips.filter(clip => clip.id !== clipId) };
   }
-  const owner = manifest.videoTracks.find((track) => track.clips.some((clip) => clip.id === clipId));
+  const owner = manifest.videoTracks.find(track => track.clips.some(clip => clip.id === clipId));
   if (!owner) return null;
   return {
     ...manifest,
     videoTracks: manifest.videoTracks
-      .map((track) =>
-        track.id === owner.id ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) } : track,
-      )
-      .filter((track) => track.clips.length > 0),
+      .map(track => (track.id === owner.id ? { ...track, clips: track.clips.filter(clip => clip.id !== clipId) } : track))
+      .filter(track => track.clips.length > 0),
   };
 }
 
@@ -316,13 +302,13 @@ export function moveClip(manifest: EditManifest, clipId: string, toIndex: number
   if (clips === track.clips) return manifest;
   return {
     ...manifest,
-    videoTracks: manifest.videoTracks.map((t) => (t.id === trackId ? { ...t, clips } : t)),
+    videoTracks: manifest.videoTracks.map(t => (t.id === trackId ? { ...t, clips } : t)),
   };
 }
 
 /** The same list when the segment is not on it or is already there, so a no-op stays an identity. */
 function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip[] {
-  const from = clips.findIndex((clip) => clip.id === clipId);
+  const from = clips.findIndex(clip => clip.id === clipId);
   const to = clamp(Math.round(toIndex), 0, clips.length - 1);
   if (from < 0 || from === to) return clips;
   const next = [...clips];
@@ -349,13 +335,7 @@ function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip
  * new source SHORTER than the hole gives up what is not there rather than the segment claiming
  * frames the file does not have.
  */
-export function replaceClipSource(
-  manifest: EditManifest,
-  clipId: string,
-  clipKey: string,
-  sourceDurationMs: number,
-  keepLength = true,
-): EditManifest {
+export function replaceClipSource(manifest: EditManifest, clipId: string, clipKey: string, sourceDurationMs: number, keepLength = true): EditManifest {
   const current = keepLength ? findClip(manifest, clipId) : null;
   const wanted = current ? current.outMs - current.inMs : sourceDurationMs;
 
@@ -367,13 +347,9 @@ export function replaceClipSource(
 }
 
 /** Appends a new source after `afterClipId` (or at the end). */
-export function insertClip(
-  manifest: EditManifest,
-  clip: EditClip,
-  afterClipId: string | null = null,
-): EditManifest {
+export function insertClip(manifest: EditManifest, clip: EditClip, afterClipId: string | null = null): EditManifest {
   const clips = [...manifest.clips];
-  const index = afterClipId ? clips.findIndex((c) => c.id === afterClipId) : -1;
+  const index = afterClipId ? clips.findIndex(c => c.id === afterClipId) : -1;
   clips.splice(index >= 0 ? index + 1 : clips.length, 0, clip);
   return { ...manifest, clips };
 }
@@ -399,12 +375,96 @@ export function setPostDuration(manifest: EditManifest, durationMs: number): Edi
   return next === manifest.durationMs ? manifest : { ...manifest, durationMs: next };
 }
 
+/**
+ * Cuts the post down to `durationMs`, through EVERYTHING on it.
+ *
+ * [setPostDuration] is the other half of the same grip and it is the gentle one: it moves the end
+ * out past the footage and back in again, and it stops dead the moment it reaches the content,
+ * because the tail is empty room and taking empty room away costs nobody anything. This is what
+ * happens when the customer keeps pulling. The end is already against the last frame, there is no
+ * more room to give back, and the only thing left to shorten is the post itself - so every row is
+ * cut at the same instant: the base track, every video layer, every piece of text, every sticker
+ * and effect, the voiceovers and the music.
+ *
+ * Destructive on purpose, and undoable for the same reason. The drag is wrapped in one gesture, so
+ * the whole cut is one entry on the undo stack however many rows it touched, and a customer who
+ * pulled too far gets all of it back with one tap.
+ *
+ * What each row does at the cut:
+ *
+ *  - a clip that ENDS before it is kept whole, one that STRADDLES it is shortened to meet it, and
+ *    one that starts after it is dropped. Shortening is done in SOURCE time through the clip's own
+ *    speed, because a clip at half speed gives up half as much source for the same output;
+ *  - a layer whose every clip is gone goes with them, rather than being left as an empty row;
+ *  - an overlay that starts after the cut is dropped, and one that runs past it has its end pulled
+ *    in. An overlay with `endMs` of 0 already means "to the end of the post" and is left alone -
+ *    [overlayEndMs] clamps it on the way out, so it follows the new end for free;
+ *  - a voiceover is treated as an overlay with a length: dropped, or shortened to reach the cut;
+ *  - music is dropped only if it began after the cut. A bed that started before it still plays,
+ *    and every engine already stops it with the picture.
+ *
+ * `durationMs` is floored at [MIN_CLIP_MS], because a post with nothing left in it is not an edit,
+ * and ceilinged at the content, so asking for more than there is falls through to the tail.
+ */
+export function cutPostTo(manifest: EditManifest, durationMs: number): EditManifest {
+  const content = contentDurationMs(manifest);
+  const end = clamp(Math.round(durationMs), MIN_CLIP_MS, content);
+  // Not a cut at all: the end is still out in the tail, which is [setPostDuration]'s business.
+  if (end >= content) return setPostDuration(manifest, durationMs);
+
+  const voiceovers = manifest.voiceovers
+    .filter(take => take.startMs < end)
+    .map(take => (take.startMs + take.durationMs > end ? { ...take, durationMs: end - take.startMs } : take))
+    .filter(take => take.durationMs >= MIN_LAYER_MS);
+
+  return {
+    ...manifest,
+    // Back inside the content, so the post carries no tail: the same 0 a manifest nobody stretched
+    // has, which is what keeps its spec byte for byte the one this package has always produced.
+    durationMs: 0,
+    clips: cutClipRow(manifest.clips, end, 0),
+    videoTracks: manifest.videoTracks.map(track => ({ ...track, clips: cutClipRow(track.clips, end, Math.max(0, track.startMs)) })).filter(track => track.clips.length > 0),
+    overlays: manifest.overlays.filter(overlay => overlay.startMs < end).map(overlay => (overlay.endMs > end ? { ...overlay, endMs: end } : overlay)),
+    music: manifest.music && manifest.music.startMs < end ? manifest.music : null,
+    voiceovers,
+  };
+}
+
+/**
+ * One row of clips cut at `end`, where the row itself begins at `startMs` on the output timeline.
+ *
+ * `startMs` is what makes this work for a layer as well as for the base track: a layer that begins
+ * at ten seconds has its first clip's first frame at ten seconds, so the cut falls that much later
+ * into the row. The base track passes 0 and gets the same arithmetic.
+ */
+function cutClipRow(clips: readonly EditClip[], end: number, startMs: number): EditClip[] {
+  const kept: EditClip[] = [];
+  let cursor = startMs;
+  for (const clip of clips) {
+    if (cursor >= end) break;
+    const durationMs = clipDurationMs(clip);
+    const room = end - cursor;
+    if (durationMs <= room) {
+      kept.push(clip);
+      cursor += durationMs;
+      continue;
+    }
+    // Straddles the cut. `room` is OUTPUT time and `outMs` is SOURCE time, so the speed is the
+    // conversion between them - the same one [clipDurationMs] divides by on the way out.
+    const outMs = Math.round(clip.inMs + room * (clip.speed || 1));
+    // A sliver too short to be a segment is dropped rather than kept as one nobody can grab.
+    if (outMs - clip.inMs >= MIN_CLIP_MS) kept.push({ ...clip, outMs });
+    break;
+  }
+  return kept;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Video tracks                                                                                   */
 /* -------------------------------------------------------------------------------------------- */
 
 export function findVideoTrack(manifest: EditManifest, trackId: string): EditVideoTrack | null {
-  return manifest.videoTracks.find((track) => track.id === trackId) ?? null;
+  return manifest.videoTracks.find(track => track.id === trackId) ?? null;
 }
 
 /**
@@ -440,10 +500,7 @@ export function addVideoTrack(manifest: EditManifest, clip: EditClip, trackId: s
  * it is not an index into `videoTracks` either, because the row the segment came off may be emptied
  * by the move and take its gap with it.
  */
-export type ClipDropTarget =
-  | { kind: 'base' }
-  | { kind: 'track'; trackId: string }
-  | { kind: 'new'; index: number };
+export type ClipDropTarget = { kind: 'base' } | { kind: 'track'; trackId: string } | { kind: 'new'; index: number };
 
 /**
  * Carries one segment from the layer it is on to another one, or to a layer of its own opened
@@ -464,13 +521,7 @@ export type ClipDropTarget =
  * [addVideoTrack] leaves the layer it opens, and a layout preset or the crop tool is what places it.
  * Guessing an arrangement here would be guessing before the customer has said.
  */
-export function moveClipToTrack(
-  manifest: EditManifest,
-  clipId: string,
-  target: ClipDropTarget,
-  atMs: number,
-  newTrackId: string,
-): EditManifest | null {
+export function moveClipToTrack(manifest: EditManifest, clipId: string, target: ClipDropTarget, atMs: number, newTrackId: string): EditManifest | null {
   const clip = findClip(manifest, clipId);
   const fromTrackId = trackIdOfClip(manifest, clipId);
   if (!clip || fromTrackId === undefined) return null;
@@ -478,7 +529,7 @@ export function moveClipToTrack(
   if (target.kind === 'base' && fromTrackId === null) return null;
   if (target.kind === 'track' && target.trackId === fromTrackId) return null;
 
-  const fromRow = manifest.videoTracks.findIndex((track) => track.id === fromTrackId);
+  const fromRow = manifest.videoTracks.findIndex(track => track.id === fromTrackId);
   // Taken off FIRST, so everything below counts the row this move is about to empty as already
   // gone: the last segment of a layer carried onto a layer of its own is one layer swapped for
   // another, not a seventeenth one, and the gaps under it have all moved up a row.
@@ -495,9 +546,7 @@ export function moveClipToTrack(
     if (!owner) return null;
     return {
       ...lifted,
-      videoTracks: lifted.videoTracks.map((track) =>
-        track.id === owner.id ? { ...track, clips: insertAtTime(track.clips, clip, track.startMs, atMs) } : track,
-      ),
+      videoTracks: lifted.videoTracks.map(track => (track.id === owner.id ? { ...track, clips: insertAtTime(track.clips, clip, track.startMs, atMs) } : track)),
     };
   }
 
@@ -570,7 +619,7 @@ function restack(tracks: readonly EditVideoTrack[]): EditVideoTrack[] {
  */
 export function removeVideoTrack(manifest: EditManifest, trackId: string): EditManifest {
   if (!findVideoTrack(manifest, trackId)) return manifest;
-  return { ...manifest, videoTracks: manifest.videoTracks.filter((track) => track.id !== trackId) };
+  return { ...manifest, videoTracks: manifest.videoTracks.filter(track => track.id !== trackId) };
 }
 
 /**
@@ -614,9 +663,7 @@ export function swapTrackZ(manifest: EditManifest, trackId: string): EditManifes
   return {
     ...manifest,
     clips: drawnIn(track.clips, manifest.clips[0].rect),
-    videoTracks: manifest.videoTracks.map((t) =>
-      t.id === trackId ? { ...t, clips: drawnIn(manifest.clips, track.clips[0]?.rect) } : t,
-    ),
+    videoTracks: manifest.videoTracks.map(t => (t.id === trackId ? { ...t, clips: drawnIn(manifest.clips, track.clips[0]?.rect) } : t)),
   };
 }
 
@@ -631,7 +678,7 @@ export function swapTrackZ(manifest: EditManifest, trackId: string): EditManifes
  * carries the framing maths on every frame.
  */
 function drawnIn(clips: readonly EditClip[], rect: EditClip['rect']): EditClip[] {
-  return clips.map((clip) => {
+  return clips.map(clip => {
     if (rect) return { ...clip, rect };
     if (!clip.rect) return clip;
     const moved = { ...clip };
@@ -640,18 +687,14 @@ function drawnIn(clips: readonly EditClip[], rect: EditClip['rect']): EditClip[]
   });
 }
 
-function patchTrack(
-  manifest: EditManifest,
-  trackId: string,
-  patch: Partial<Omit<EditVideoTrack, 'id' | 'clips'>>,
-): EditManifest {
+function patchTrack(manifest: EditManifest, trackId: string, patch: Partial<Omit<EditVideoTrack, 'id' | 'clips'>>): EditManifest {
   const current = findVideoTrack(manifest, trackId);
   if (!current) return manifest;
   const next = { ...current, ...patch };
   if (sameFields(current, next)) return manifest;
   return {
     ...manifest,
-    videoTracks: manifest.videoTracks.map((track) => (track.id === trackId ? next : track)),
+    videoTracks: manifest.videoTracks.map(track => (track.id === trackId ? next : track)),
   };
 }
 
@@ -660,7 +703,7 @@ function patchTrack(
 /* -------------------------------------------------------------------------------------------- */
 
 export function findOverlay(manifest: EditManifest, id: string): EditOverlay | null {
-  return manifest.overlays.find((overlay) => overlay.id === id) ?? null;
+  return manifest.overlays.find(overlay => overlay.id === id) ?? null;
 }
 
 /** Where a layer stops on the output timeline, with "until the end" resolved. */
@@ -680,29 +723,25 @@ export function addOverlay(manifest: EditManifest, overlay: EditOverlay): EditMa
   return { ...manifest, overlays: [...manifest.overlays, normaliseLayer(overlay)] };
 }
 
-export function patchOverlay(
-  manifest: EditManifest,
-  id: string,
-  patch: Partial<Omit<EditOverlay, 'id' | 'kind'>> & Record<string, unknown>,
-): EditManifest {
+export function patchOverlay(manifest: EditManifest, id: string, patch: Partial<Omit<EditOverlay, 'id' | 'kind'>> & Record<string, unknown>): EditManifest {
   const current = findOverlay(manifest, id);
   if (!current) return manifest;
   const next = normaliseLayer({ ...current, ...patch } as EditOverlay);
   if (sameFields(current, next)) return manifest;
   return {
     ...manifest,
-    overlays: manifest.overlays.map((overlay) => (overlay.id === id ? next : overlay)),
+    overlays: manifest.overlays.map(overlay => (overlay.id === id ? next : overlay)),
   };
 }
 
 export function removeOverlay(manifest: EditManifest, id: string): EditManifest {
   if (!findOverlay(manifest, id)) return manifest;
-  return { ...manifest, overlays: manifest.overlays.filter((overlay) => overlay.id !== id) };
+  return { ...manifest, overlays: manifest.overlays.filter(overlay => overlay.id !== id) };
 }
 
 /** A copy directly above the original, nudged so the two are not exactly on top of each other. */
 export function duplicateOverlay(manifest: EditManifest, id: string, newId: string): EditManifest | null {
-  const index = manifest.overlays.findIndex((overlay) => overlay.id === id);
+  const index = manifest.overlays.findIndex(overlay => overlay.id === id);
   if (index < 0 || manifest.overlays.length >= MAX_LAYERS) return null;
   const source = manifest.overlays[index];
   const copy = normaliseLayer({
@@ -720,14 +759,10 @@ export type LayerMove = 'forward' | 'backward' | 'front' | 'back';
 
 /** Changes the drawing order. `front` is drawn last, over everything. */
 export function moveLayer(manifest: EditManifest, id: string, move: LayerMove): EditManifest {
-  const from = manifest.overlays.findIndex((overlay) => overlay.id === id);
+  const from = manifest.overlays.findIndex(overlay => overlay.id === id);
   if (from < 0) return manifest;
   const last = manifest.overlays.length - 1;
-  const to =
-    move === 'forward' ? Math.min(last, from + 1)
-    : move === 'backward' ? Math.max(0, from - 1)
-    : move === 'front' ? last
-    : 0;
+  const to = move === 'forward' ? Math.min(last, from + 1) : move === 'backward' ? Math.max(0, from - 1) : move === 'front' ? last : 0;
   if (to === from) return manifest;
   const overlays = [...manifest.overlays];
   const [moved] = overlays.splice(from, 1);
@@ -737,7 +772,7 @@ export function moveLayer(manifest: EditManifest, id: string, move: LayerMove): 
 
 /** Puts a layer at an exact position in the drawing order, 0 being the bottom. */
 export function moveLayerTo(manifest: EditManifest, id: string, toIndex: number): EditManifest {
-  const from = manifest.overlays.findIndex((overlay) => overlay.id === id);
+  const from = manifest.overlays.findIndex(overlay => overlay.id === id);
   const to = clamp(Math.round(toIndex), 0, manifest.overlays.length - 1);
   if (from < 0 || from === to) return manifest;
   const overlays = [...manifest.overlays];
@@ -751,13 +786,7 @@ export function moveLayerTo(manifest: EditManifest, id: string, toIndex: number)
  * (or past) the end of the video is stored as "until the end", so the layer keeps covering the
  * whole tail when a clip is added later.
  */
-export function setOverlayWindow(
-  manifest: EditManifest,
-  id: string,
-  startMs: number,
-  endMs: number,
-  totalMs: number,
-): EditManifest {
+export function setOverlayWindow(manifest: EditManifest, id: string, startMs: number, endMs: number, totalMs: number): EditManifest {
   const overlay = findOverlay(manifest, id);
   if (!overlay) return manifest;
   const [start, end] = clampWindow(startMs, endMs, totalMs, overlay.startMs, overlayEndMs(overlay, totalMs));
@@ -765,14 +794,8 @@ export function setOverlayWindow(
 }
 
 /** Cuts a layer in two at `atMs`; the right half gets `newId` and sits directly above the left. */
-export function splitOverlayAt(
-  manifest: EditManifest,
-  id: string,
-  atMs: number,
-  newId: string,
-  totalMs: number,
-): EditManifest | null {
-  const index = manifest.overlays.findIndex((overlay) => overlay.id === id);
+export function splitOverlayAt(manifest: EditManifest, id: string, atMs: number, newId: string, totalMs: number): EditManifest | null {
+  const index = manifest.overlays.findIndex(overlay => overlay.id === id);
   if (index < 0 || manifest.overlays.length >= MAX_LAYERS) return null;
   const overlay = manifest.overlays[index];
   const end = overlayEndMs(overlay, totalMs);
@@ -839,7 +862,7 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
 }
 
 export function findVoiceover(manifest: EditManifest, id: string): EditVoiceover | null {
-  return manifest.voiceovers.find((take) => take.id === id) ?? null;
+  return manifest.voiceovers.find(take => take.id === id) ?? null;
 }
 
 /**
@@ -847,9 +870,9 @@ export function findVoiceover(manifest: EditManifest, id: string): EditVoiceover
  * the video. 0 when `startMs` is inside an existing take.
  */
 export function voiceRoomAt(manifest: EditManifest, startMs: number, totalMs: number, ignoreId?: string): number {
-  const takes = manifest.voiceovers.filter((take) => take.id !== ignoreId);
-  if (takes.some((take) => startMs >= take.startMs && startMs < take.startMs + take.durationMs)) return 0;
-  const next = takes.filter((take) => take.startMs >= startMs).sort((a, b) => a.startMs - b.startMs)[0];
+  const takes = manifest.voiceovers.filter(take => take.id !== ignoreId);
+  if (takes.some(take => startMs >= take.startMs && startMs < take.startMs + take.durationMs)) return 0;
+  const next = takes.filter(take => take.startMs >= startMs).sort((a, b) => a.startMs - b.startMs)[0];
   return Math.max(0, Math.min(next ? next.startMs : totalMs, totalMs) - startMs);
 }
 
@@ -868,7 +891,7 @@ export function patchVoiceover(manifest: EditManifest, id: string, patch: Partia
   if (sameFields(current, next)) return manifest;
   return {
     ...manifest,
-    voiceovers: manifest.voiceovers.map((take) => (take.id === id ? next : take)),
+    voiceovers: manifest.voiceovers.map(take => (take.id === id ? next : take)),
   };
 }
 
@@ -876,24 +899,22 @@ export function patchVoiceover(manifest: EditManifest, id: string, patch: Partia
 export function moveVoiceover(manifest: EditManifest, id: string, startMs: number, totalMs: number): EditManifest {
   const take = findVoiceover(manifest, id);
   if (!take) return manifest;
-  const others = manifest.voiceovers.filter((t) => t.id !== id);
-  const before = others.filter((t) => t.startMs + t.durationMs <= take.startMs).sort((a, b) => b.startMs - a.startMs)[0];
-  const after = others.filter((t) => t.startMs >= take.startMs + take.durationMs).sort((a, b) => a.startMs - b.startMs)[0];
+  const others = manifest.voiceovers.filter(t => t.id !== id);
+  const before = others.filter(t => t.startMs + t.durationMs <= take.startMs).sort((a, b) => b.startMs - a.startMs)[0];
+  const after = others.filter(t => t.startMs >= take.startMs + take.durationMs).sort((a, b) => a.startMs - b.startMs)[0];
   const min = before ? before.startMs + before.durationMs : 0;
   const max = Math.max(min, (after ? after.startMs : Math.max(totalMs, take.startMs + take.durationMs)) - take.durationMs);
   const next = Math.round(clamp(startMs, min, max));
   if (next === take.startMs) return manifest;
   return {
     ...manifest,
-    voiceovers: manifest.voiceovers
-      .map((t) => (t.id === id ? { ...t, startMs: next } : t))
-      .sort((a, b) => a.startMs - b.startMs),
+    voiceovers: manifest.voiceovers.map(t => (t.id === id ? { ...t, startMs: next } : t)).sort((a, b) => a.startMs - b.startMs),
   };
 }
 
 export function removeVoiceover(manifest: EditManifest, id: string): EditManifest {
   if (!findVoiceover(manifest, id)) return manifest;
-  return { ...manifest, voiceovers: manifest.voiceovers.filter((take) => take.id !== id) };
+  return { ...manifest, voiceovers: manifest.voiceovers.filter(take => take.id !== id) };
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -976,13 +997,7 @@ function sameFields<T extends object>(a: T, b: T): boolean {
   return true;
 }
 
-function clampWindow(
-  startMs: number,
-  endMs: number,
-  totalMs: number,
-  prevStart: number,
-  prevEnd: number,
-): [number, number] {
+function clampWindow(startMs: number, endMs: number, totalMs: number, prevStart: number, prevEnd: number): [number, number] {
   const total = Math.max(MIN_LAYER_MS, totalMs);
   // Both edges moved by the same amount: the whole window is being dragged, and it stops at the
   // ends of the video with its length intact rather than being squashed against them.

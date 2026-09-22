@@ -682,6 +682,26 @@
     cursor: ew-resize;
   }
 
+  /*
+   * The post's own end is an edge like any other, and it was the one that did not say so. It sits
+   * inside `.tl__content`, so it inherited the open hand meant for panning and read as one more
+   * piece of the timeline to drag along - which is the opposite of what it does.
+   */
+  .tl__end {
+    cursor: ew-resize;
+  }
+
+  /*
+   * ...and when the post is already as short as its footage, it can only be pulled OUT. The grip
+   * refuses to go left there - the base track's length is the floor, because this makes room PAST
+   * the footage rather than cutting into it - and a two-headed arrow over a thing that moves one
+   * way reads as a broken control rather than as a limit. One head is the honest cursor, and it is
+   * the only warning anybody gets that a pull to the left is going to do nothing.
+   */
+  .tl__end--min {
+    cursor: e-resize;
+  }
+
   .item--add-sound,
   .tl__mute,
   .tl__add {

@@ -325,9 +325,7 @@ export class VeEditor {
      * from one that never said. A post stepped back into keeps the frame it was edited at, which is
      * the whole reason the field is on the manifest.
      */
-    const chosen = (this.manifest as { output?: unknown } | undefined)?.output
-      ? manifest
-      : { ...manifest, output: normaliseOutput(store.host.output.initial) };
+    const chosen = (this.manifest as { output?: unknown } | undefined)?.output ? manifest : { ...manifest, output: normaliseOutput(store.host.output.initial) };
     store.load(sources, store.durations.value, chosen);
     this.loading = false;
 
@@ -732,9 +730,7 @@ export class VeEditor {
               : [
                   this.renderStage(ctx, layout, fullscreen),
                   layout === 'tall' ? null : this.renderTransport(ctx, fullscreen),
-                  !fullscreen && layout !== 'tall' ? (
-                    <ve-timeline key="timeline" class="ve__timeline" ctx={ctx} compact={layout === 'compact'} />
-                  ) : null,
+                  !fullscreen && layout !== 'tall' ? <ve-timeline key="timeline" class="ve__timeline" ctx={ctx} compact={layout === 'compact'} /> : null,
                   fullscreen ? null : this.renderTools(ctx, panel),
                 ]}
 
@@ -746,14 +742,7 @@ export class VeEditor {
            * it covers the whole editor with `position: fixed`, and nothing above it here carries a
            * transform that would make itself the containing block instead.
            */}
-          {asking ? (
-            <ve-alert
-              header={asking.header}
-              message={asking.message}
-              buttons={asking.buttons}
-              onVeDismiss={event => this.confirm.settle(event.detail)}
-            />
-          ) : null}
+          {asking ? <ve-alert header={asking.header} message={asking.message} buttons={asking.buttons} onVeDismiss={event => this.confirm.settle(event.detail)} /> : null}
         </Host>
       );
     });
@@ -776,11 +765,7 @@ export class VeEditor {
         They used to be written into the stylesheet as `9 / 16`, which put both circles over the
         picture the moment a customer turned the canvas on its side.
       */
-      <div
-        class="ve__stage"
-        key="stage"
-        style={{ '--ve-frame-w-px': String(output.width), '--ve-frame-h-px': String(output.height) }}
-      >
+      <div class="ve__stage" key="stage" style={{ '--ve-frame-w-px': String(output.width), '--ve-frame-h-px': String(output.height) }}>
         {/*
          * Keyed, like everything else in this column. The preview's player reads its media elements
          * once and never again, so a `<ve-preview>` the vdom matched to a different position and
@@ -790,13 +775,7 @@ export class VeEditor {
         <ve-preview key="preview" class="ve__preview" ctx={ctx} />
 
         {chromeShowing ? (
-          <button
-            key="back"
-            type="button"
-            class="ve__round ve__round--back"
-            aria-label="Back"
-            onClick={this.onBackTap}
-          >
+          <button key="back" type="button" class="ve__round ve__round--back" aria-label="Back" onClick={this.onBackTap}>
             <ve-icon name="chevron-back" />
           </button>
         ) : null}
@@ -832,14 +811,7 @@ export class VeEditor {
           </button>
         ) : null}
         {chromeShowing ? (
-          <button
-            key="next"
-            type="button"
-            class="ve__round ve__round--next"
-            aria-label="Next"
-            disabled={this.rendering || ctx.media.busy.value}
-            onClick={this.onNext}
-          >
+          <button key="next" type="button" class="ve__round ve__round--next" aria-label="Next" disabled={this.rendering || ctx.media.busy.value} onClick={this.onNext}>
             <ve-icon name="arrow-forward" />
           </button>
         ) : null}
@@ -870,36 +842,16 @@ export class VeEditor {
 
         <span class="ve__transport-end">
           {fullscreen ? null : (
-            <button
-              key="undo"
-              type="button"
-              class="ve__icon"
-              aria-label="Undo"
-              disabled={!store.canUndo.value || store.historyLocked.value}
-              onClick={this.onUndo}
-            >
+            <button key="undo" type="button" class="ve__icon" aria-label="Undo" disabled={!store.canUndo.value || store.historyLocked.value} onClick={this.onUndo}>
               <ve-icon name="arrow-undo-outline" />
             </button>
           )}
           {fullscreen ? null : (
-            <button
-              key="redo"
-              type="button"
-              class="ve__icon"
-              aria-label="Redo"
-              disabled={!store.canRedo.value || store.historyLocked.value}
-              onClick={this.onRedo}
-            >
+            <button key="redo" type="button" class="ve__icon" aria-label="Redo" disabled={!store.canRedo.value || store.historyLocked.value} onClick={this.onRedo}>
               <ve-icon name="arrow-redo-outline" />
             </button>
           )}
-          <button
-            key="fullscreen"
-            type="button"
-            class="ve__icon"
-            aria-label={fullscreen ? 'Exit full screen' : 'Full screen'}
-            onClick={this.toggleFullscreen}
-          >
+          <button key="fullscreen" type="button" class="ve__icon" aria-label={fullscreen ? 'Exit full screen' : 'Full screen'} onClick={this.toggleFullscreen}>
             <ve-icon name={fullscreen ? 'contract-outline' : 'expand-outline'} />
           </button>
         </span>
@@ -961,11 +913,7 @@ export class VeEditor {
           <p class="ve__render-title">Preparing your video</p>
           {/* Indeterminate until the first figure arrives: a host that reports nothing until the
               encode is half done would otherwise show an empty bar that looks stuck. */}
-          <ve-progress
-            value={progress}
-            type={progress > 0 ? 'determinate' : 'indeterminate'}
-            label="Preparing your video"
-          />
+          <ve-progress value={progress} type={progress > 0 ? 'determinate' : 'indeterminate'} label="Preparing your video" />
           <p class="ve__render-pct">{(progress * 100).toFixed(0)}%</p>
           <p class="ve__render-hint">This happens on your phone, so it keeps going if you leave the app.</p>
         </div>
@@ -1027,7 +975,5 @@ function renderFailureCode(error: unknown): RenderFailureCode {
   if (error instanceof RenderFailedError) return error.code;
   const thrown = error as { name?: unknown; code?: unknown } | null | undefined;
   if (thrown?.name !== 'RenderFailedError') return 'unknown';
-  return RENDER_FAILURE_CODES.includes(thrown.code as RenderFailureCode)
-    ? (thrown.code as RenderFailureCode)
-    : 'unknown';
+  return RENDER_FAILURE_CODES.includes(thrown.code as RenderFailureCode) ? (thrown.code as RenderFailureCode) : 'unknown';
 }

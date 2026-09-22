@@ -1,15 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  MAX_POST_MS,
-  MAX_VIDEO_TRACKS,
-  defaultClipEdit,
-  emptyManifest,
-  totalDurationMs,
-  type EditManifest,
-  type EditVideoTrack,
-} from './edit-manifest';
-import { moveClip, moveClipToTrack, setPostDuration, type ClipDropTarget } from './edit-ops';
+import { MAX_POST_MS, MAX_VIDEO_TRACKS, MIN_CLIP_MS, defaultClipEdit, emptyManifest, totalDurationMs, type EditManifest, type EditVideoTrack } from './edit-manifest';
+import { cutPostTo, moveClip, moveClipToTrack, setPostDuration, type ClipDropTarget } from './edit-ops';
 
 /*
  * Carrying a segment off the layer it is on, which is the whole of what makes the timeline more than
@@ -251,5 +243,106 @@ describe('setPostDuration', () => {
     expect(moved!.videoTracks[0].startMs).toBe(16_000);
     // And it still ends inside the post, which is what every engine cuts to.
     expect(moved!.videoTracks[0].startMs).toBeLessThan(totalDurationMs(moved!));
+  });
+});
+
+/*
+ * The other half of the same grip: the end pulled back INSIDE the post.
+ *
+ * `setPostDuration` stops at the content because the tail is empty room. Past that the customer is
+ * asking for the post itself to be shorter, and every row has to answer - which is the difference
+ * between a grip that gives back space and one that cuts.
+ */
+describe('cutPostTo', () => {
+  it('drops whole segments past the cut and shortens the one that straddles it', () => {
+    // a 0-4s, b 4-8s, c 8-12s. Cut at 6s: a survives, b is halved, c is gone.
+    const cut = cutPostTo(oneTrack(), 6000);
+
+    expect(ids(cut.clips)).toEqual(['a', 'b']);
+    expect(cut.clips[0].outMs - cut.clips[0].inMs).toBe(FOUR_S);
+    expect(cut.clips[1].outMs - cut.clips[1].inMs).toBe(2000);
+    expect(totalDurationMs(cut)).toBe(6000);
+  });
+
+  it('cuts a layer at the same instant, counting from where the layer starts', () => {
+    // The layer begins at 4s, so its first clip runs 4-8s and its second 8-12s. Cut at 6s leaves
+    // the first clip two seconds long and takes the second away entirely.
+    const m: EditManifest = { ...oneTrack(), videoTracks: [layer('vt', 1, ['x', 'y'], 4000)] };
+
+    const cut = cutPostTo(m, 6000);
+
+    expect(ids(cut.videoTracks[0].clips)).toEqual(['x']);
+    expect(cut.videoTracks[0].clips[0].outMs - cut.videoTracks[0].clips[0].inMs).toBe(2000);
+  });
+
+  it('takes a layer off the post when the cut lands before it starts', () => {
+    // An empty row is not a layer, and leaving one behind is a lane nobody can put anything in.
+    const m: EditManifest = { ...oneTrack(), videoTracks: [layer('vt', 1, ['x'], 8000)] };
+
+    expect(cutPostTo(m, 6000).videoTracks).toHaveLength(0);
+  });
+
+  it('cuts text and stickers too: the ones past it go, the ones across it are pulled in', () => {
+    const overlay = (id: string, startMs: number, endMs: number) => ({
+      ...({ kind: 'sticker', assetId: 'x', emoji: null, cx: 0.5, cy: 0.5, scale: 1, rotationDeg: 0, opacity: 1 } as const),
+      id,
+      startMs,
+      endMs,
+    });
+    const m: EditManifest = {
+      ...oneTrack(),
+      overlays: [overlay('early', 0, 3000), overlay('across', 2000, 11_000), overlay('late', 9000, 11_000)],
+    };
+
+    const cut = cutPostTo(m, 6000);
+
+    expect(ids(cut.overlays)).toEqual(['early', 'across']);
+    expect(cut.overlays[0].endMs).toBe(3000);
+    expect(cut.overlays[1].endMs).toBe(6000);
+  });
+
+  it('leaves an overlay that already runs to the end of the post alone', () => {
+    // `endMs` of 0 IS "to the end", and `overlayEndMs` clamps it on the way out - so it follows the
+    // new end without being rewritten, and following the end back out again is free.
+    const m: EditManifest = {
+      ...oneTrack(),
+      overlays: [{ kind: 'sticker', assetId: 'x', emoji: null, cx: 0.5, cy: 0.5, scale: 1, rotationDeg: 0, opacity: 1, id: 'whole', startMs: 0, endMs: 0 }],
+    };
+
+    expect(cutPostTo(m, 6000).overlays[0].endMs).toBe(0);
+  });
+
+  it('shortens a voiceover that runs past the cut and drops one that starts after it', () => {
+    const take = (id: string, startMs: number, durationMs: number) => ({ id, uri: `${id}.webm`, startMs, durationMs, volume: 1 });
+    const m: EditManifest = { ...oneTrack(), voiceovers: [take('across', 5000, 4000), take('late', 9000, 1000)] };
+
+    const cut = cutPostTo(m, 6000);
+
+    expect(ids(cut.voiceovers)).toEqual(['across']);
+    expect(cut.voiceovers[0].durationMs).toBe(1000);
+  });
+
+  it('hands anything at or past the content back to setPostDuration, so pulling OUT still only makes tail', () => {
+    const m = oneTrack();
+
+    // Past the content: a tail, and the footage untouched.
+    expect(cutPostTo(m, 20_000).durationMs).toBe(20_000);
+    expect(cutPostTo(m, 20_000).clips).toBe(m.clips);
+    // Exactly at it: no tail, and still untouched.
+    expect(cutPostTo(m, 12_000).durationMs).toBe(0);
+    expect(cutPostTo(m, 12_000).clips).toBe(m.clips);
+  });
+
+  it('will not cut the post away to nothing', () => {
+    const cut = cutPostTo(oneTrack(), 0);
+
+    expect(totalDurationMs(cut)).toBeGreaterThanOrEqual(MIN_CLIP_MS);
+    expect(cut.clips).toHaveLength(1);
+  });
+
+  it('carries no tail afterwards, because the end is back inside the content', () => {
+    const stretched = setPostDuration(oneTrack(), 20_000);
+
+    expect(cutPostTo(stretched, 6000).durationMs).toBe(0);
   });
 });

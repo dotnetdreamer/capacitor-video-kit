@@ -6,6 +6,7 @@ import { SignalWatcher } from '../../bridge/signal-watcher';
 import { stickerById, stickerUrl } from '../../data/stickers';
 import {
   MAX_POST_MS,
+  MIN_CLIP_MS,
   MIN_LAYER_MS,
   clamp,
   effectPreset,
@@ -338,6 +339,16 @@ export class VeTimeline {
     const pps = store.pps.value;
     return { x: this.pad.value + (baseMs / 1000) * pps, w: (extraMs / 1000) * pps };
   });
+  /**
+   * Whether the post is already as short as its footage, so the end grip can only be pulled OUT.
+   *
+   * The same question [tail] answers by returning null, asked in the one place that has to say it
+   * out loud: `startEndDrag` floors the drag at the base track's length, because the grip makes
+   * room PAST the footage and never cuts into it. Pulled left at the floor it simply does not move,
+   * and nothing on screen said why - which reads as a grip that has failed rather than one that has
+   * run out of room. The cursor says it; see `.tl__end--min`.
+   */
+  private readonly atMinDuration = computed(() => this.tail.value === null);
   private readonly contentWidth = computed(() => Math.max(this.viewportWidth.value + this.totalPx.value, this.holdWidth.value));
   private readonly tileW = computed(() => (this.compactSig.value ? TRACK_H_COMPACT : TRACK_H));
 
@@ -493,11 +504,7 @@ export class VeTimeline {
         b,
         (x, y) =>
           x.id === y.id &&
-          sameList(
-            x.segments,
-            y.segments,
-            (p, q) => p.id === q.id && p.x === q.x && p.w === q.w && p.selected === q.selected && p.chip === q.chip && sameTiles(p.tiles, q.tiles),
-          ),
+          sameList(x.segments, y.segments, (p, q) => p.id === q.id && p.x === q.x && p.w === q.w && p.selected === q.selected && p.chip === q.chip && sameTiles(p.tiles, q.tiles)),
       ),
   );
 
@@ -1371,8 +1378,7 @@ export class VeTimeline {
     // past and nowhere to carry it either, because the base track may not be emptied. A segment on a
     // layer always lifts - it has the base track and every other layer to go to, and the gap under
     // any of them.
-    const canLift =
-      (kind === 'clip' && store.slots.value.length > 1) || kind === 'track-clip' || (kind === 'layer' && store.layerCount.value > 1);
+    const canLift = (kind === 'clip' && store.slots.value.length > 1) || kind === 'track-clip' || (kind === 'layer' && store.layerCount.value > 1);
     if (canLift) press.timer = setTimeout(() => this.onLongPress(press), LONG_PRESS_MS);
     this.press = press;
   };
@@ -1631,7 +1637,16 @@ export class VeTimeline {
       ...base,
       kind: 'end',
       duration0: store.totalMs.value,
-      minMs: store.baseMs.value,
+      /*
+       * The base track's length USED to be the floor, and that is what made this grip feel broken:
+       * a post nobody had stretched was already sitting on it, so the one drag anybody tries first
+       * - pulling the end in to shorten the video - moved nothing at all and gave no reason why.
+       *
+       * The floor is now the shortest post there can be. Past the content the grip stops giving
+       * back empty tail and starts CUTTING, through every row at once; see [applyEnd] and
+       * [cutPostTo].
+       */
+      minMs: MIN_CLIP_MS,
       targets: this.snapTargets(),
     };
     this.beginDrag(drag);
@@ -1994,7 +2009,13 @@ export class VeTimeline {
     const targets = [...drag.targets, this.centreMs(pps)];
     const wanted = clamp(drag.duration0 + this.dragDeltaMs(drag, pps), drag.minMs, MAX_POST_MS);
     const end = clamp(this.snapEdge(drag, wanted, targets, pps), drag.minMs, MAX_POST_MS);
-    store.setPostDuration(end, true);
+    /*
+     * One call for both halves of the drag. `cutPostTo` hands anything at or past the content
+     * straight to `setPostDuration`, so pulling OUT still only makes tail and touches no footage;
+     * it is only inside the content that it starts cutting. Deciding here instead would mean this
+     * file holding its own copy of where the content ends, and getting it a frame out of date.
+     */
+    store.cutPostTo(end, true);
   }
 
   private applyLayer(drag: LayerDrag): void {
@@ -2112,8 +2133,7 @@ export class VeTimeline {
       this.endDrag(true);
       return false;
     }
-    const ownRow =
-      (target.kind === 'base' && drag.fromTrackId === null) || (target.kind === 'track' && target.trackId === drag.fromTrackId);
+    const ownRow = (target.kind === 'base' && drag.fromTrackId === null) || (target.kind === 'track' && target.trackId === drag.fromTrackId);
     const drop = ownRow ? null : target;
 
     const rel = drag.x - drag.viewLeft;
@@ -2198,7 +2218,10 @@ export class VeTimeline {
       cancelAnimationFrame(this.tickRaf);
       this.tickRaf = 0;
       // The finger's last position may not have been applied yet.
-      if (!cancelled && (drag.kind === 'trim' || drag.kind === 'track' || drag.kind === 'end' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')) {
+      if (
+        !cancelled &&
+        (drag.kind === 'trim' || drag.kind === 'track' || drag.kind === 'end' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')
+      ) {
         this.applyDrag(drag, false);
       }
     }
@@ -2500,7 +2523,14 @@ export class VeTimeline {
             {label.text}
           </span>
         ))}
-        <span class="tl__end" key="end" data-hit="end" role="separator" aria-label="Video length" style={{ left: `${pad + this.totalPx.value}px` }}></span>
+        <span
+          class={{ 'tl__end': true, 'tl__end--min': this.atMinDuration.value }}
+          key="end"
+          data-hit="end"
+          role="separator"
+          aria-label="Video length"
+          style={{ left: `${pad + this.totalPx.value}px` }}
+        ></span>
       </div>
     );
   }

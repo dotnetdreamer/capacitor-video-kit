@@ -363,12 +363,49 @@ describe('the end of the post', () => {
     expect(store.manifest.value.clips).toHaveLength(3);
   });
 
-  it('will not be dragged inside the base track', async () => {
+  it('cuts the post when it is dragged back inside the footage', async () => {
+    // It used to stop dead here, and that is what made the grip read as broken: a post nobody had
+    // stretched was already sitting on the floor, so the first thing anybody tries - pulling the
+    // end in to shorten the video - moved nothing and said nothing about why.
     const { store, tl } = await mount();
+    await zoomRightOut(store, tl);
+    expect(store.totalMs.value).toBe(12_000);
+
+    // 6 px per second, so 60 px of finger is ten seconds off the end.
+    await dragGrip(tl, -60);
+
+    expect(store.totalMs.value).toBeCloseTo(2000, -3);
+    // Cut, not merely hidden: two of the three four-second segments are gone with it.
+    expect(store.manifest.value.clips).toHaveLength(1);
+    expect(store.baseMs.value).toBeCloseTo(2000, -3);
+  });
+
+  it('cuts every row at the same instant, layers with the footage', async () => {
+    const { store, tl } = await mount([layer('vt-1', 1, [{ id: 'seg-x', key: 'clip-x' }])]);
     await zoomRightOut(store, tl);
 
     await dragGrip(tl, -60);
 
+    // A layer is cut where the base is, and an empty one is taken off rather than left as a lane
+    // with nothing in it.
+    for (const track of store.manifest.value.videoTracks) {
+      expect(track.clips.length).toBeGreaterThan(0);
+    }
+    expect(store.totalMs.value).toBeCloseTo(2000, -3);
+  });
+
+  it('puts the whole cut back as one undo step', async () => {
+    // Every row it touched, undone together: the drag is one gesture, so pulling too far costs one
+    // tap to get back rather than one per clip.
+    const { store, tl } = await mount();
+    await zoomRightOut(store, tl);
+
+    await dragGrip(tl, -60);
+    expect(store.manifest.value.clips).toHaveLength(1);
+
+    store.undo();
+
+    expect(store.manifest.value.clips).toHaveLength(3);
     expect(store.totalMs.value).toBe(12_000);
   });
 
