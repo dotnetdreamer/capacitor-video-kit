@@ -1,7 +1,8 @@
+import { compileTransition, lookAt, transitionPreset, type CompiledTransition } from '../../editor/transitions';
 import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
 import { pictureDest } from '../../video-composer/web/geometry';
-import { Painter, WHOLE_FRAME, type LayerDraw } from '../../video-composer/web/painter';
+import { Painter, WHOLE_FRAME, type LayerDraw, type TransitionDraw } from '../../video-composer/web/painter';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorStore } from '../../state/editor-store';
 
@@ -17,8 +18,11 @@ import type { EditorStore } from '../../state/editor-store';
  * compositor the export uses, so the two cannot drift, and what the customer looks at is literally
  * what `web/render.ts` will draw for the same manifest.
  *
- * The `<video>` elements stay exactly where they were, one per video track, still seeked by
- * `PreviewPlayer` and `FollowerVideo`. They are simply invisible now - sources rather than picture.
+ * The `<video>` elements stay exactly where they were, one per extra video track and two for the
+ * base track, still seeked by `PreviewPlayer` and `FollowerVideo`. They are simply invisible now -
+ * sources rather than picture. The base track is read from the player as one [BaseShot] a frame,
+ * and inside a transition it is painted as the two clips it is, mixed by the painter's own
+ * transition drawing, which is the export's.
  * They are NOT `display: none`: some WebViews stop decoding a video that is not laid out, and a
  * source that has stopped decoding is a black layer.
  *
@@ -41,13 +45,71 @@ const MAX_PIXEL_RATIO = 2;
  */
 const WAIT_FOR_LAYER_MS = 2000;
 
+/**
+ * How long a transition's OUTGOING side is waited for, when the incoming side has a frame and it has
+ * not, before the frame is painted without it.
+ *
+ * Paused or scrubbed into a transition, both base elements are seeked at once and land within a
+ * seek of each other. Painting the first to land on its own would flash the incoming clip over black
+ * on the way to the blended frame, so the frame is held for about one seek. Past that the incoming
+ * side is painted alone - the outgoing clip may be a file that will never load - and a transition is
+ * never frozen for the two seconds [WAIT_FOR_LAYER_MS] allows a layer.
+ */
+const TAIL_WAIT_MS = 600;
+
+/**
+ * How long after Play the compositor may still spend a frame warming a transition up; see
+ * [PreviewCanvas.warmUp]. The elements' own clocks stand still for about this long after a start,
+ * so a frame spent here is a frame nobody sees go by.
+ */
+const WARM_AFTER_PLAY_MS = 250;
+/** The most transitions warmed in one frame, so a post dressed with a dozen kinds does not stall one frame by all of them. */
+const WARM_PER_FRAME = 3;
+
 /** What one video track contributes: the element the compositor draws it from. */
 interface Source {
   video: HTMLVideoElement;
 }
 
+/**
+ * The base track at one instant, as ONE reading: the clip under the playhead and the element
+ * showing it, and inside a transition the outgoing clip, its element, and how far through the
+ * transition the clock is. See [PreviewPlayer.baseShot], which is where it is read.
+ *
+ * One reading rather than three questions, because the player swaps its two base elements' roles at
+ * every cut and every transition, in an animation-frame callback of its own that runs before or
+ * after this one in no fixed order. Asked separately, a swap landing between two of the answers
+ * would pair one clip's framing with the other clip's picture for a frame - a flash exactly at the
+ * cut the two elements exist to make seamless.
+ */
+export interface BaseShot {
+  /** The base clip under the playhead - inside a transition, the INCOMING one - as a layer. */
+  layer: PreviewVideoLayer;
+  /** The element showing it, or null while that element has no frame to give. */
+  video: HTMLVideoElement | null;
+  /** Its element could not load the clip, so there is nothing worth waiting for. */
+  lost: boolean;
+  transition: BaseTransitionShot | null;
+}
+
+/** The outgoing side of a transition in a [BaseShot]. */
+export interface BaseTransitionShot {
+  /** The outgoing clip's tail, framed exactly as a base layer is: its own fit, crop, rectangle and angle. */
+  layer: PreviewVideoLayer;
+  /** The element playing the tail, or null while it has no frame to give. */
+  video: HTMLVideoElement | null;
+  /** Its element could not load the clip, so there is nothing worth waiting for. */
+  lost: boolean;
+  /** 0..1 through the transition, read off the clock element at this instant. */
+  progress: number;
+  compiled: CompiledTransition;
+}
+
 /** `readyState >= HAVE_CURRENT_DATA`: the element has a frame that `drawImage` can take. */
 const HAVE_CURRENT_DATA = 2;
+
+/** The element events that can change what an element shows; see [PreviewCanvas.listenTo]. */
+const FRAME_EVENTS = ['loadeddata', 'canplay', 'seeked', 'playing', 'resize', 'timeupdate'] as const;
 
 export class PreviewCanvas {
   private painter: Painter | null = null;
@@ -55,9 +117,20 @@ export class PreviewCanvas {
   private width = 0;
   private height = 0;
 
-  /** One entry per video track, keyed the way [PreviewVideoLayer.trackId] is - null is the base. */
+  /**
+   * One entry per EXTRA video track, keyed the way [PreviewVideoLayer.trackId] is. The base track is
+   * the [baseFeed]'s once one is attached; a null key here is only ever the base of a canvas that
+   * was handed a single element instead, which is what the unit tests build.
+   */
   private readonly sources = new Map<string | null, Source>();
   private readonly listeners = new Map<HTMLVideoElement, () => void>();
+  /**
+   * Where the base track is read from: the player's [BaseShot], a whole reading at a time. Its two
+   * elements are listened to like any other source, because a seek landing on either one is a frame
+   * that has changed with nothing in the store moving.
+   */
+  private baseFeed: (() => BaseShot | null) | null = null;
+  private baseElements: HTMLVideoElement[] = [];
 
   private rafId = 0;
   private pending = false;
@@ -65,6 +138,13 @@ export class PreviewCanvas {
   private destroyed = false;
   /** When the current wait for a layer started, or 0 when nothing is being waited for. */
   private waitingSince = 0;
+  /** When the current wait for a transition's outgoing side started; see [TAIL_WAIT_MS]. */
+  private tailSince = 0;
+  /** The redraw that ends a wait nothing else will end: a paused canvas only draws when told to. */
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The transitions this painter has drawn at least once; see [warmUp]. A new painter starts cold. */
+  private warmed = new Set<string>();
+  private playingSince = 0;
   /** The last op list folded into a matrix, and what it folded to. A fold a frame is a fold wasted:
       the list comes off a computed, so an unchanged filter is the very same array. */
   private folded: { ops: unknown; matrix: ColorMatrix | null } | null = null;
@@ -91,19 +171,34 @@ export class PreviewCanvas {
       return;
     }
     this.sources.set(trackId, { video });
-    // Every one of these is a moment this element's picture has changed with nothing in the store
-    // moving: a source landing, a seek settling, a decoder waking up. While playing the frame loop
-    // is already drawing, and a redraw asked for twice in a frame only happens once.
-    const onFrame = () => this.request();
-    for (const type of ['loadeddata', 'canplay', 'seeked', 'playing', 'resize', 'timeupdate']) {
-      video.addEventListener(type, onFrame);
-    }
-    this.listeners.set(video, () => {
-      for (const type of ['loadeddata', 'canplay', 'seeked', 'playing', 'resize', 'timeupdate']) {
-        video.removeEventListener(type, onFrame);
-      }
-    });
+    this.listenTo(video);
     this.request();
+  }
+
+  /**
+   * Hands over the base track: the reading it is drawn from, and the two elements that reading can
+   * name, which are listened to exactly as a track's element is. Once, from the component's set-up;
+   * the elements live as long as the component does.
+   */
+  attachBase(feed: () => BaseShot | null, elements: readonly HTMLVideoElement[]): void {
+    for (const video of this.baseElements) this.release(video);
+    this.baseFeed = feed;
+    this.baseElements = [...elements];
+    for (const video of this.baseElements) this.listenTo(video);
+    this.request();
+  }
+
+  /**
+   * Every one of these is a moment an element's picture has changed with nothing in the store
+   * moving: a source landing, a seek settling, a decoder waking up. While playing the frame loop is
+   * already drawing, and a redraw asked for twice in a frame only happens once.
+   */
+  private listenTo(video: HTMLVideoElement): void {
+    const onFrame = () => this.request();
+    for (const type of FRAME_EVENTS) video.addEventListener(type, onFrame);
+    this.listeners.set(video, () => {
+      for (const type of FRAME_EVENTS) video.removeEventListener(type, onFrame);
+    });
   }
 
   /**
@@ -126,6 +221,7 @@ export class PreviewCanvas {
     // up every context the page is allowed.
     this.painter?.dispose();
     this.painter = new Painter({ width, height }, this.canvas);
+    this.warmed = new Set();
     this.request();
   }
 
@@ -133,6 +229,7 @@ export class PreviewCanvas {
   setPlaying(playing: boolean): void {
     if (this.playing === playing) return;
     this.playing = playing;
+    if (playing) this.playingSince = performance.now();
     if (playing) this.startLoop();
     else this.stopLoop();
     this.request();
@@ -151,8 +248,13 @@ export class PreviewCanvas {
   destroy(): void {
     this.destroyed = true;
     this.stopLoop();
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     for (const source of this.sources.values()) this.release(source.video);
     this.sources.clear();
+    for (const video of this.baseElements) this.release(video);
+    this.baseElements = [];
+    this.baseFeed = null;
     this.painter?.dispose();
     this.painter = null;
   }
@@ -170,21 +272,59 @@ export class PreviewCanvas {
    * it is free here - a canvas keeps whatever was last drawn into it. Getting it wrong is not
    * subtle: a `<video>` pointed at a new file has no frame for as long as the load takes, so every
    * source change and every first play would flash black exactly where the holds used to hold.
+   *
+   * The base track is read from the player as one [BaseShot] - which clip, which element, and inside
+   * a transition which other clip and how far through - and painted as a [TransitionDraw] in the
+   * base track's place whenever the shot has a transition in it. Every other layer is drawn over it
+   * exactly as it is over any frame.
    */
   private draw(): void {
     if (this.destroyed) return;
     const painter = this.painter;
     if (!painter) return;
 
-    // The segment the crop sheet is open on, which is drawn as a TOOL rather than as the post; see
-    // [layerDraw]. Null whenever that sheet is shut, which is almost always.
-    const cropping = this.store.panel.value === 'crop' ? (this.store.cropClip.value?.id ?? null) : null;
+    // The crop sheet draws its segment as a TOOL rather than as the post - see [layerDraw] - and
+    // with no transition either: the tool is about one clip's own picture, and the window drawn over
+    // it would be a lie about a frame that was half somebody else's.
+    const cropOpen = this.store.panel.value === 'crop';
+    // The segment the crop sheet is open on. Null whenever that sheet is shut, which is almost always.
+    const cropping = cropOpen ? (this.store.cropClip.value?.id ?? null) : null;
+    const frameAspect = this.store.frameAspect.value;
 
-    const draws: LayerDraw[] = [];
+    const draws: (LayerDraw | TransitionDraw)[] = [];
     // How many layers the POST says are on screen, whether or not their elements can supply one.
     let onScreen = 0;
     let missing = false;
+
+    // ONE reading of the base track per frame; see [BaseShot].
+    const feed = this.baseFeed;
+    const shot = feed ? feed() : null;
+    if (shot) {
+      onScreen += 1;
+      const base = baseDraw(shot, frameAspect, cropOpen, cropping);
+      if (base.tailComing) {
+        // Hold the frame - bounded - rather than flash the incoming side over black on its way to
+        // the blended frame; see [TAIL_WAIT_MS].
+        const now = performance.now();
+        if (this.tailSince === 0) this.tailSince = now;
+        const left = TAIL_WAIT_MS - (now - this.tailSince);
+        if (left > 0) {
+          this.retryIn(left);
+          return;
+        }
+      } else {
+        this.tailSince = 0;
+      }
+      if (base.draw) draws.push(base.draw);
+      else missing = true;
+    } else {
+      this.tailSince = 0;
+    }
+
     for (const layer of orderedLayers(this.store.previewLayers.value)) {
+      // The base is the shot's whenever there is a feed, and never also the store's: the store's is
+      // the playhead's, which is written a tick behind the clock the shot is read off.
+      if (feed && layer.trackId === null) continue;
       const source = this.sources.get(layer.trackId);
       if (!source) continue;
       onScreen += 1;
@@ -193,7 +333,7 @@ export class PreviewCanvas {
         missing = true;
         continue;
       }
-      draws.push(layerDraw(layer, video, this.store.frameAspect.value, cropping === layer.clipId));
+      draws.push(layerDraw(layer, video, frameAspect, cropping === layer.clipId));
     }
 
     // Nothing to draw, over a post that should be showing something: KEEP what is on the canvas.
@@ -216,7 +356,49 @@ export class PreviewCanvas {
     }
 
     painter.setColour(this.colour(), this.store.previewCss.value);
+    const side = draws[0] ? warmSide(draws[0]) : null;
+    if (side) this.warmUp(painter, side);
     painter.paintLayers(draws);
+  }
+
+  /**
+   * Draws every transition on the post once, where nobody can see it, before it is ever drawn where
+   * somebody can.
+   *
+   * The painter builds a transition's programs and frame targets the first time a frame has that
+   * transition in it, which is the first frame of its window - and compiling shaders and allocating
+   * frame-sized textures is a frame's work, dropped at exactly the moment the customer is watching the
+   * join they chose. Measured in a headless browser it was a 76 ms frame on a first pass through a
+   * dissolve and 43 ms on the second; a phone's GPU compiles faster and still misses a frame.
+   *
+   * So it is paid where it is free: on a paused frame, or in the first moments of a play, which the
+   * elements' own start stall already stands still through. The frame drawn is thrown away - the
+   * real one is painted over it in the same task, so the browser never shows it - and each kind is
+   * drawn with the current picture on both sides at its poster moment, where every channel it has is
+   * moving and so every program it will need is built.
+   */
+  private warmUp(painter: Painter, side: LayerDraw): void {
+    if (this.playing && performance.now() - this.playingSince > WARM_AFTER_PLAY_MS) return;
+    let budget = WARM_PER_FRAME;
+    for (const slot of this.store.slots.value) {
+      const kind = slot.transitionInMs > 0 ? slot.clip.transitionIn?.kind : undefined;
+      if (!kind || this.warmed.has(kind)) continue;
+      const compiled = compileTransition(kind);
+      if (!compiled) continue;
+      this.warmed.add(kind);
+      const look = lookAt(compiled.curves, transitionPreset(kind)?.posterAt ?? 0.5);
+      painter.paintLayers([{ kind: 'transition', from: side, to: side, look, transition: compiled }]);
+      if (--budget === 0) return;
+    }
+  }
+
+  /** One redraw, `ms` from now, for a wait that no element event may come to end. */
+  private retryIn(ms: number): void {
+    if (this.retryTimer || this.playing) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.request();
+    }, Math.ceil(ms) + 5);
   }
 
   /** The post's colour as the shader wants it, folded once per filter rather than once per frame. */
@@ -322,5 +504,58 @@ export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, fra
     ...common,
     framing,
     dest: pictureDest(layer.rect ?? WHOLE_FRAME, framing, frameAspect, video.videoWidth, video.videoHeight),
+  };
+}
+
+/** A real picture to warm a transition up with: the base layer, or either side of a transition. */
+function warmSide(draw: LayerDraw | TransitionDraw): LayerDraw | null {
+  const layer = 'kind' in draw && draw.kind === 'transition' ? (draw.to ?? draw.from) : (draw as LayerDraw);
+  return layer && layer.sourceWidth > 0 && layer.sourceHeight > 0 ? layer : null;
+}
+
+/**
+ * The base track's draw for one [BaseShot], built the way `render.ts` builds the same frame: a plain
+ * layer, or - inside a transition - a [TransitionDraw] in the base track's place, each side the
+ * very layer [layerDraw] makes of its clip on its own, and the look read off the compiled curves at
+ * the shot's progress.
+ *
+ * A side with no frame to give is handed over as null, which the painter draws as ABSENT: an
+ * outgoing side that is still seeking leaves the incoming one over black, and an incoming side
+ * leaves the outgoing one as it was - at its FULL level, the picture jumping back to the clip the
+ * transition is leaving.
+ *
+ * So an incoming side that is on its way is not drawn around at all: the base is simply not ready,
+ * exactly as it is outside a transition, and the caller keeps the frame it has. It is the element
+ * the clock is, and every seek of it - each step of a scrub through the window, the seek a paused
+ * playhead lands with - takes it to HAVE_METADATA until the seek is done: 100 to 450 ms on a phone,
+ * and the outgoing side's own seek, which is not waited on, is usually done first. Painted anyway,
+ * a scrub through a dissolve flickered back to the outgoing clip at every step. Only an incoming
+ * clip that could not be loaded is drawn around, because nothing is coming.
+ *
+ * `tailComing` says the incoming side is ready and the outgoing one is on its way, which is a frame
+ * the caller holds for a moment rather than paints; see [TAIL_WAIT_MS]. `cropOpen` draws the base
+ * alone whatever the shot says, as the crop tool needs it.
+ */
+export function baseDraw(
+  shot: BaseShot,
+  frameAspect: number,
+  cropOpen: boolean,
+  cropping: string | null,
+): { draw: LayerDraw | TransitionDraw | null; tailComing: boolean } {
+  const to = shot.video ? layerDraw(shot.layer, shot.video, frameAspect, cropping === shot.layer.clipId) : null;
+  const transition = cropOpen ? null : shot.transition;
+  if (!transition) return { draw: to, tailComing: false };
+  if (!to && !shot.lost) return { draw: null, tailComing: false };
+  const from = transition.video ? layerDraw(transition.layer, transition.video, frameAspect) : null;
+  if (!to && !from) return { draw: null, tailComing: false };
+  return {
+    draw: {
+      kind: 'transition',
+      from,
+      to,
+      look: lookAt(transition.compiled.curves, transition.progress),
+      transition: transition.compiled,
+    },
+    tailComing: !!to && !from && !transition.lost,
   };
 }

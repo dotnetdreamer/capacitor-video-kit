@@ -71,6 +71,29 @@ export function applyClipAudio(video: HTMLVideoElement, clip: EditClip, silenced
   if (video.volume !== volume) video.volume = volume;
 }
 
+let volumeWritable: boolean | null = null;
+
+/**
+ * Whether this WebView lets a page set a media element's `volume` at all.
+ *
+ * iOS does not: the volume is the hardware buttons' alone, and `volume` reads back 1 whatever was
+ * written to it. Everything that FADES a clip's own sound - a transition's crossfade - has to know,
+ * because a fade written to an element that ignores it is two clips at full volume at once. Asked of
+ * a detached element once and remembered; the answer cannot change while the page is up.
+ */
+export function volumeIsWritable(): boolean {
+  if (volumeWritable === null) {
+    try {
+      const probe = document.createElement('video');
+      probe.volume = 0.5;
+      volumeWritable = Math.abs(probe.volume - 0.5) < 0.01;
+    } catch {
+      volumeWritable = false;
+    }
+  }
+  return volumeWritable;
+}
+
 /**
  * `play()` rejects with AbortError whenever a src change interrupts it. That is the normal cost of
  * swapping clips on one element, not a failure, so it is swallowed - the transport follows the

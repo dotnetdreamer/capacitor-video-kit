@@ -222,6 +222,10 @@ export class Painter {
       this.program = built.program;
       this.uniforms = built.uniforms;
       this.position = built.position;
+    } else {
+      // A context with no program is one this painter will never draw with, and it still counts
+      // against the handful a page may hold, so it is handed back rather than left to the collector.
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
     }
   }
 
@@ -253,15 +257,21 @@ export class Painter {
   paintLayers(layers: ReadonlyArray<LayerDraw | TransitionDraw>): void {
     const gl = this.gl;
     if (gl && this.glCanvas && this.program) {
-      if (this.paintLayersGl(gl, layers)) {
+      // A LOST context - the GPU reclaimed while the page was in the background, or the browser
+      // dropping its oldest context for a newer one - draws nothing and throws nothing, so without
+      // this check the frame below would be the last one the context drew, over and over: a preview
+      // frozen on one picture, and a web render encoding that picture to the end of the post.
+      if (!gl.isContextLost() && this.paintLayersGl(gl, layers)) {
         this.ctx.globalAlpha = 1;
         this.ctx.globalCompositeOperation = 'source-over';
         this.ctx.filter = 'none';
         this.ctx.drawImage(this.glCanvas, 0, 0);
         return;
       }
-      // The shader refused a source and said so once; every frame after this one takes the 2D path
-      // straight away rather than throwing the same SecurityError thirty times a second.
+      // Lost, or the shader refused a source and said so once: every frame after this one takes the
+      // 2D path straight away rather than failing the same way thirty times a second. A context that
+      // is still alive is handed back first, for the reason [dispose] gives.
+      if (!gl.isContextLost()) gl.getExtension('WEBGL_lose_context')?.loseContext();
       this.dropGl();
     }
     this.paintLayers2d(layers);
@@ -280,6 +290,26 @@ export class Painter {
     if (overlay.rotationDeg !== 0) ctx.rotate((overlay.rotationDeg * Math.PI) / 180);
     ctx.drawImage(overlay.bitmap, -overlay.wPx / 2, -overlay.hPx / 2, overlay.wPx, overlay.hPx);
     ctx.restore();
+  }
+
+  /**
+   * Lets go of the texture `source` was uploaded into, for a source that will not be drawn again.
+   *
+   * [textureFor] keeps one texture per source object for as long as the painter lives, which suits
+   * the preview: its `<video>` elements are made once and re-pointed, so there are only ever a
+   * handful. The web render is the other kind of caller. It opens a new element for every file a
+   * layer moves on to, and another for every transition's tail, so without this each of them left a
+   * frame-sized texture on the GPU until the render ended - a real share of a phone's GPU memory on a
+   * post of a dozen clips, and roughly twice that with transitions between them.
+   *
+   * A source drawn again afterwards simply gets a new texture. The 2D path holds none, and a context
+   * that has been lost or given back has already taken every texture with it.
+   */
+  forget(source: LayerSource): void {
+    const texture = this.textures.get(source);
+    if (!texture) return;
+    this.textures.delete(source);
+    this.gl?.deleteTexture(texture);
   }
 
   /**

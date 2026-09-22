@@ -157,9 +157,14 @@
   transition: opacity 160ms ease;
 }
 
-/* A plain cut: the row is there to say there is a length to set, and out of reach until there is. */
+/*
+ * A plain cut: the row is there to say there is a length to set, and out of reach until there is.
+ * Out of a finger's reach here, which every WebView honours - Chrome 99 on the A13 included, where
+ * `inert` does nothing - while the row stays in the accessibility tree, readout and all.
+ */
 .ts__duration--off {
   opacity: 0.35;
+  pointer-events: none;
 }
 
 .ts__duration-label {
@@ -234,6 +239,14 @@
 
 .ts__apply-all:active {
   transform: scale(0.96);
+}
+
+/*
+ * A plain cut has nothing to apply, and the pill is not offered. Its band stays, so the rows above
+ * do not rise under the finger when the first tile is tapped and it arrives.
+ */
+.ts__apply-all--off {
+  visibility: hidden;
 }
 
 .ts__apply-all:focus-visible {

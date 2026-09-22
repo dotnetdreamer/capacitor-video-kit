@@ -5,7 +5,7 @@ import { compileTransition } from '../../editor/transitions';
 import type { ComposeClip, ComposeSpec } from '../definitions';
 
 import { renderSupport, resetRenderSupport } from './capabilities';
-import { Painter } from './painter';
+import { Painter, isTransitionDraw, type LayerSource } from './painter';
 import { renderSpec } from './render';
 
 /**
@@ -365,6 +365,60 @@ describe('a transition, end to end', () => {
           URL.revokeObjectURL(url);
         }
       } finally {
+        URL.revokeObjectURL(red);
+        URL.revokeObjectURL(blue);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'gives each element’s texture back as its reader lets go of it, rather than holding all of them to the end',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const red = URL.createObjectURL(await makeSourceVideo('#f00'));
+      const blue = URL.createObjectURL(await makeSourceVideo('#00f'));
+      const forget = vi.spyOn(Painter.prototype, 'forget');
+      const paint = vi.spyOn(Painter.prototype, 'paintLayers');
+      try {
+        // The dissolve above: red to 600, blue from 600, red's tail under blue until 1000, and blue
+        // alone for the 600 ms after that.
+        const redClip: ComposeClip = { key: 'red', uri: red, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: false, fit: 'contain' };
+        const dissolve = JSON.parse(JSON.stringify(compileTransition('dissolve'))) as NonNullable<ReturnType<typeof compileTransition>>;
+        await renderSpec(
+          spec(red, {
+            jobId: 'job-textures',
+            clips: [
+              { ...redClip, outMs: 600 },
+              { ...redClip, key: 'blue', uri: blue, transitionIn: { ...dissolve, from: { ...redClip, inMs: 600 } } },
+            ],
+          }),
+          { signal: new AbortController().signal, onProgress: () => {} },
+        );
+
+        const drawn = new Set<LayerSource>();
+        for (const [layers] of paint.mock.calls) {
+          for (const layer of layers) {
+            if (!isTransitionDraw(layer)) drawn.add(layer.source);
+            else for (const side of [layer.from, layer.to]) if (side) drawn.add(side.source);
+          }
+        }
+        // Three elements: the base track's on red, the base track's on blue, and the tail's.
+        expect(drawn.size).toBe(3);
+        // Every one of them is forgotten, and all but the base track's last - still on screen when
+        // the final frame is drawn - while there were still frames to draw.
+        const forgotten = forget.mock.calls.map(([source]) => source);
+        expect([...drawn].every(source => forgotten.includes(source))).toBe(true);
+        const lastPaint = paint.mock.invocationCallOrder.at(-1) ?? 0;
+        const early = forget.mock.calls.filter((_, i) => (forget.mock.invocationCallOrder[i] ?? Infinity) < lastPaint);
+        expect(new Set(early.map(([source]) => source)).size).toBe(2);
+      } finally {
+        forget.mockRestore();
+        paint.mockRestore();
         URL.revokeObjectURL(red);
         URL.revokeObjectURL(blue);
       }
@@ -886,5 +940,36 @@ describe('the painter', () => {
     expect(b).toBeLessThan(60);
     expect(pixelAt(painter, 50, 50)).toEqual([0, 0, 0]);
     painter.dispose();
+  });
+
+  it('lets go of a source’s texture when told to, and makes a new one if the source comes back', ctx => {
+    const painter = new Painter({ width: 100, height: 100 });
+    needs(ctx, painter.usesGpu, 'this browser gives the painter no WebGL2, so it keeps no textures');
+    painter.setColour(null, { filter: 'none', tints: [] });
+    const created = vi.spyOn(WebGL2RenderingContext.prototype, 'createTexture');
+    const deleted = vi.spyOn(WebGL2RenderingContext.prototype, 'deleteTexture');
+    try {
+      const source = square('#f00');
+      const layer = { source, sourceWidth: 100, sourceHeight: 100, framing: { fit: 'contain' as const }, dest: { x: 0, y: 0, w: 1, h: 1 }, opacity: 1 };
+      painter.paintLayers([layer]);
+      painter.paintLayers([layer]);
+      // One texture a source, kept from frame to frame.
+      expect(created).toHaveBeenCalledTimes(1);
+
+      painter.forget(source);
+      expect(deleted).toHaveBeenCalledTimes(1);
+      expect(deleted.mock.calls[0]?.[0]).toBe(created.mock.results[0]?.value);
+      // A second time has nothing left to let go of.
+      painter.forget(source);
+      expect(deleted).toHaveBeenCalledTimes(1);
+
+      painter.paintLayers([layer]);
+      expect(created).toHaveBeenCalledTimes(2);
+      expect(pixelAt(painter, 50, 50)).toEqual([255, 0, 0]);
+    } finally {
+      created.mockRestore();
+      deleted.mockRestore();
+      painter.dispose();
+    }
   });
 });

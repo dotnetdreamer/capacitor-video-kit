@@ -616,3 +616,32 @@ function meanMiss(actual: Uint8ClampedArray, expected: (qx: number, qy: number) 
   }
   return sum / count;
 }
+
+describe('a painter whose GPU context is lost', () => {
+  /*
+   * A lost WebGL context draws nothing and throws nothing. Before the painter checked for it, the
+   * frame it handed on was the last one the context had drawn, forever: a preview frozen on one
+   * picture and a web render encoding that picture to the end of the post, without a word.
+   */
+  it('goes on drawing on the 2D path instead of holding its last frame', () => {
+    const painter = new Painter({ width: W, height: H });
+    try {
+      const red = layerOf(paintSource(10, 10, () => [255, 0, 0]), 'cover');
+      const blue = layerOf(paintSource(10, 10, () => [0, 0, 255]), 'cover');
+      painter.paintLayers([red]);
+      expect(pixel(pixels(painter), 45, 80)[0]).toBeGreaterThan(240);
+      const gl = (painter as unknown as { gl: WebGL2RenderingContext | null }).gl;
+      const lose = gl?.getExtension('WEBGL_lose_context');
+      // Without a GPU the 2D path is the only one there is, and nothing here can be lost.
+      if (!lose) return;
+      lose.loseContext();
+      painter.paintLayers([blue]);
+      const [r, , b] = pixel(pixels(painter), 45, 80);
+      expect(b).toBeGreaterThan(240);
+      expect(r).toBeLessThan(15);
+      expect(painter.usesGpu).toBe(false);
+    } finally {
+      painter.dispose();
+    }
+  });
+});

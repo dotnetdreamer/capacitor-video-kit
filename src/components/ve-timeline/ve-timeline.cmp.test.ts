@@ -648,6 +648,27 @@ describe('the transition dots', () => {
     expect(dot(tl, 'seg-b').classList.contains('tl__trans--open')).toBe(false);
   });
 
+  it('opens nothing for a finger held on it and let go, the click after the lift included', async () => {
+    const { store, tl } = await mount();
+    const target = dot(tl, 'seg-b');
+    const at = centre(target);
+
+    pointer(target, 'pointerdown', at.x, at.y);
+    // Past the long press, which everywhere else on the timeline lifts what is under the finger.
+    await new Promise(resolve => setTimeout(resolve, 450));
+    pointer(target, 'pointerup', at.x, at.y);
+    target.click();
+    await frames(2);
+
+    expect(store.panel.value).toBeNull();
+    expect(store.transitionTarget.value).toBeNull();
+
+    // And a tap straight after it still opens it.
+    pointer(target, 'pointerdown', at.x, at.y);
+    pointer(target, 'pointerup', at.x, at.y);
+    expect(store.transitionTarget.value).toBe('seg-b');
+  });
+
   it('opens from the keyboard as well, since it has no click of its own', async () => {
     const { store, tl } = await mount();
 

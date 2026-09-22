@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import { compileTransition, lookAt } from '../../editor';
 import type { PreviewVideoLayer } from '../../state/editor-store';
-import { layerDraw, orderedLayers } from './preview-canvas';
+import type { TransitionDraw } from '../../video-composer/web/painter';
+import { baseDraw, layerDraw, orderedLayers, type BaseShot } from './preview-canvas';
 
 /**
  * What the preview hands its compositor, which is the one thing that has to agree with `render.ts`
@@ -96,5 +98,85 @@ describe('the preview compositor', () => {
     expect(draw.sourceWidth).toBe(1920);
     expect(draw.sourceHeight).toBe(1080);
     expect(draw.source).toBe(source);
+  });
+});
+
+describe('the base track in a transition', () => {
+  /*
+   * What the preview hands the compositor for the base track, which inside a transition is ONE item
+   * in the base track's place - the item `render.ts` builds for the same frame - with each side the
+   * very layer its clip would be drawn as on its own.
+   */
+  const outgoing = { videoWidth: 1080, videoHeight: 1920 } as HTMLVideoElement;
+  const incoming = { videoWidth: 1920, videoHeight: 1080 } as HTMLVideoElement;
+  const dissolve = compileTransition('dissolve')!;
+
+  function shot(
+    over: { to?: HTMLVideoElement | null; from?: HTMLVideoElement | null; lost?: boolean; toLost?: boolean } = {},
+  ): BaseShot {
+    return {
+      layer: layer({ clipId: 'in', clipKey: 'b', fit: 'cover' }),
+      video: over.to === undefined ? incoming : over.to,
+      lost: over.toLost ?? false,
+      transition: {
+        layer: layer({ clipId: 'out', clipKey: 'a', rect: { x: 0.1, y: 0.1, w: 0.8, h: 0.8, rotationDeg: 12 } }),
+        video: over.from === undefined ? outgoing : over.from,
+        lost: over.lost ?? false,
+        progress: 0.5,
+        compiled: dissolve,
+      },
+    };
+  }
+
+  it("draws each side as its own clip's layer, with the look at the shot's progress", () => {
+    const { draw, tailComing } = baseDraw(shot(), 9 / 16, false, null);
+    expect(tailComing).toBe(false);
+    const transition = draw as TransitionDraw;
+    expect(transition.kind).toBe('transition');
+    // Each side framed by ITS clip: the outgoing one keeps its own rectangle and angle.
+    expect(transition.from).toEqual(layerDraw(shot().transition!.layer, outgoing, 9 / 16));
+    expect(transition.from!.rotationDeg).toBe(12);
+    expect(transition.to).toEqual(layerDraw(shot().layer, incoming, 9 / 16));
+    expect(transition.look).toEqual(lookAt(dissolve.curves, 0.5));
+    expect(transition.transition).toBe(dissolve);
+  });
+
+  it('asks for a short wait while the outgoing side is still on its way', () => {
+    const { draw, tailComing } = baseDraw(shot({ from: null }), 9 / 16, false, null);
+    expect(tailComing).toBe(true);
+    // And what is painted once the wait runs out: the incoming side, the outgoing one absent.
+    expect((draw as TransitionDraw).from).toBeNull();
+    expect((draw as TransitionDraw).to).not.toBeNull();
+  });
+
+  it('does not wait for an outgoing clip that could not be loaded', () => {
+    expect(baseDraw(shot({ from: null, lost: true }), 9 / 16, false, null).tailComing).toBe(false);
+  });
+
+  it('draws nothing while the incoming side is on its way, so the frame is held as for any base clip', () => {
+    // The painter would draw the outgoing side at its FULL level with the incoming one left out: the
+    // picture jumping back to the clip the transition is leaving, for as long as a seek takes.
+    expect(baseDraw(shot({ to: null }), 9 / 16, false, null)).toEqual({ draw: null, tailComing: false });
+  });
+
+  it('draws the outgoing side alone when the incoming clip could not be loaded', () => {
+    const { draw, tailComing } = baseDraw(shot({ to: null, toLost: true }), 9 / 16, false, null);
+    expect(tailComing).toBe(false);
+    expect((draw as TransitionDraw).to).toBeNull();
+    expect((draw as TransitionDraw).from).not.toBeNull();
+  });
+
+  it('has nothing to draw when neither side has a frame', () => {
+    expect(baseDraw(shot({ to: null, from: null }), 9 / 16, false, null)).toEqual({ draw: null, tailComing: false });
+  });
+
+  it('draws the clip under the playhead alone, as the tool needs it, while the crop sheet is open', () => {
+    const { draw } = baseDraw(shot(), 9 / 16, true, 'in');
+    expect(draw).toEqual(layerDraw(shot().layer, incoming, 9 / 16, true));
+  });
+
+  it('is a plain layer outside a transition', () => {
+    const plain: BaseShot = { ...shot(), transition: null };
+    expect(baseDraw(plain, 9 / 16, false, null).draw).toEqual(layerDraw(plain.layer, incoming, 9 / 16));
   });
 });

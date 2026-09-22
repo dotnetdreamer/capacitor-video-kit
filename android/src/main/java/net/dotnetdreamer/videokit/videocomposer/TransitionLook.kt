@@ -128,7 +128,11 @@ object TransitionMath {
  * cosine of the turn, the mask's reveal widened by its feather.
  */
 class TransitionFrame(
-    /** False outside the incoming clip's window: its frame passes through, made opaque. */
+    /**
+     * False once the incoming clip's window has closed, and for a window with no length at all:
+     * its frame passes through, made opaque. Never false for the outgoing side, nor for an
+     * incoming frame stamped early - see [TransitionFrame.at] for why an early one is not "before".
+     */
     val drawLook: Boolean,
     /** `(x * W, y * H)`: how far the side's frame has moved, in pixels, y down. */
     val offsetXPx: Float,
@@ -213,11 +217,35 @@ class TransitionFrame(
          * The frame a side draws at [timeUs] on the OUTPUT timeline, for a window that opens at
          * [startUs] and runs [durUs], on a [width] x [height] frame.
          *
-         * The incoming side draws its look only INSIDE the window. Outside it the clip is simply
+         * The incoming side draws its look until the window CLOSES. From then on the clip is simply
          * itself, and it is drawn opaque - its letterbox bars black instead of transparent - so
          * that nothing underneath could show through them even on the frame where the compositor's
-         * nearest-timestamp pairing puts a tail frame under it. The outgoing side is a tail item
-         * that exists only for its window, so it draws its look on every frame it has.
+         * nearest-timestamp pairing puts the tail's last frame, still inside its own window and so
+         * still let through by the gate, under it.
+         *
+         * There is no "before the window" for the incoming side, only EARLY. Its effect rides on
+         * the incoming clip's own item and nothing else, and that item starts the window by
+         * construction, so a frame it is handed with a stamp short of [startUs] is the window's
+         * first frame stamped a little soon - never footage from before the window. Real files do
+         * this: Media3 stamps each item from the sum of the ACTUAL lengths of the items ahead of it,
+         * and those come up a hair short of the plan's prefix sums wherever a ClippingMediaSource
+         * clamps an untrimmed clip's end to the real stream (a MediaMetadataRetriever probe is
+         * rounded to the nearest millisecond, so the plan's end can sit up to half of one past it)
+         * or a speed change rounds. Read as outside the window, that first frame came out opaque:
+         * the whole incoming clip for one frame at the very start of a dissolve, gone again on the
+         * next. Read at progress 0 - the clamp in [TransitionMath.progress] - it is exactly the
+         * window's first frame, however early it was stamped, so there is no tolerance to tune.
+         *
+         * The outgoing side is a tail item that exists only for its lead and its window, so it
+         * draws its look on every frame it has, and the same clamp holds it at both ends: at
+         * progress 0 through the lead, and at progress 1 for a frame stamped at or past the window's
+         * end, whatever rounding put it there - never passed through as the outgoing clip unmoved,
+         * which is what [opaque] would draw on a tail. Whether such a frame is SHOWN at all is the
+         * compositor's gate's call, from [RenderPlan.tailAt], not this one's.
+         *
+         * A window with no length has nothing to draw, so the incoming side passes through opaque
+         * throughout. The plan never builds one; this keeps a caller that does from reading an
+         * early frame at progress 0, which for a fade would hide it outright.
          */
         fun at(
             role: TransitionRole,
@@ -228,8 +256,7 @@ class TransitionFrame(
             width: Int,
             height: Int,
         ): TransitionFrame {
-            val inWindow = timeUs >= startUs && timeUs < startUs + durUs
-            if (role == TransitionRole.TO && !inWindow) return opaque()
+            if (role == TransitionRole.TO && (durUs <= 0L || timeUs >= startUs + durUs)) return opaque()
             val look = TransitionMath.lookAt(transition.curves, TransitionMath.progress(startUs, durUs, timeUs))
             val side = if (role == TransitionRole.FROM) look.from else look.to
             val tint = (if (role == TransitionRole.FROM) transition.fromTint else transition.toTint) ?: BLACK

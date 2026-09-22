@@ -63,6 +63,12 @@ export interface Press {
    */
   consumed: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  /**
+   * When the finger went down, on `performance.now()`'s clock. Most presses have their timer to say
+   * how long they were held, and a dot does not: nothing lifts off one, so a long press on a dot
+   * never starts a timer and would otherwise reach its tap on the way up.
+   */
+  downAt: number;
 }
 
 export interface DragBase {

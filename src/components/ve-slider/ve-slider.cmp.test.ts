@@ -36,6 +36,7 @@ interface Fixture {
   readonly calls: string[];
   unmount(): void;
   setValue(value: number): Promise<void>;
+  setProps(props: Record<string, unknown>): Promise<void>;
 }
 
 /**
@@ -90,6 +91,7 @@ async function mount(props: Record<string, unknown> = {}): Promise<Fixture> {
     at: (value: number) => track.left + (value / 100) * track.width,
     unmount: () => rendered.unmount(),
     setValue: (value: number) => rendered.setProps({ value }),
+    setProps: (next: Record<string, unknown>) => rendered.setProps(next),
   };
 }
 
@@ -262,6 +264,31 @@ describe('ve-slider', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     expect(store.manifest.value.filterIntensity).toBeCloseTo(0.41, 6);
     expect(store.canUndo.value).toBe(true);
+  });
+
+  it('takes no focus, press or key while disabled, and all three again once it is not', async () => {
+    const { slider, store, at, live, setValue, setProps } = await mount({ disabled: true });
+    const arrow = () => slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+
+    expect(slider.tabIndex).toBe(-1);
+    expect(slider.getAttribute('aria-disabled')).toBe('true');
+    press(slider, at(90));
+    lift(slider, at(90));
+    arrow();
+    expect(live).toEqual([]);
+    expect(store.canUndo.value).toBe(false);
+
+    // Re-rendered by a value that moved, which is what gave back a tabindex set from outside: the
+    // host's own render decides it, so it has to go on deciding it.
+    await setValue(25);
+    expect(slider.tabIndex).toBe(-1);
+
+    await setProps({ disabled: false });
+    expect(slider.tabIndex).toBe(0);
+    expect(slider.hasAttribute('aria-disabled')).toBe(false);
+    press(slider, at(90));
+    lift(slider, at(90));
+    expect(live).toEqual([90]);
   });
 });
 

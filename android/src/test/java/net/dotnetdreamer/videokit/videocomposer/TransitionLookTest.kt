@@ -141,18 +141,79 @@ class TransitionLookTest {
         height: Int = 1280,
     ) = TransitionFrame.at(role, t, startUs = 1_000_000L, durUs = 500_000L, timeUs = timeUs, width = width, height = height)
 
+    /** Every number a frame hands the shader, in one list, so two frames can be compared whole. */
+    private fun uniforms(f: TransitionFrame): List<Any> = listOf(
+        f.drawLook, f.offsetXPx, f.offsetYPx, f.invScale, f.turnCos, f.turnSin, f.cellPx, f.shiftPx,
+        f.sigmaPx, f.gain, f.tintR, f.tintG, f.tintB, f.tintAmount, f.alpha, f.maskShape, f.maskDirX,
+        f.maskDirY, f.maskExtentPx, f.maskCount, f.maskEdge, f.maskFeather, f.maskInvert,
+    )
+
     @Test
-    fun `the incoming side draws its look only inside its window`() {
+    fun `the incoming side draws its look until its window closes, and opaque from then on`() {
         val t = transition(TransitionCurves(floatArrayOf(0f, 1f), null, null, null))
-        assertFalse(frame(TransitionRole.TO, t, timeUs = 999_999L).drawLook)
         assertTrue(frame(TransitionRole.TO, t, timeUs = 1_000_000L).drawLook)
         assertTrue(frame(TransitionRole.TO, t, timeUs = 1_499_999L).drawLook)
         // The window's end belongs to the incoming clip as it plays, opaque and untouched.
         val after = frame(TransitionRole.TO, t, timeUs = 1_500_000L)
         assertFalse(after.drawLook)
         assertFalse(after.blurs)
+        assertEquals(1f, after.alpha, 0f)
+        assertEquals(TransitionFrame.MASK_NONE, after.maskShape)
+        assertFalse(frame(TransitionRole.TO, t, timeUs = 9_000_000L).drawLook)
         // The outgoing side is a tail that exists only for its window, so it always draws.
         assertTrue(frame(TransitionRole.FROM, t, timeUs = 1_500_000L).drawLook)
+    }
+
+    @Test
+    fun `an incoming frame stamped early is the window's first frame, never the clip made opaque`() {
+        // Media3 stamps the incoming item from the REAL lengths of the items ahead of it, which can
+        // come up short of the plan's prefix sums, so the window's first frame arrives a little
+        // before startUs. Read as outside the window it was drawn opaque: the whole incoming clip
+        // for one frame, at the start of a dissolve that should show none of it yet.
+        val mask = TransitionMask(MaskShape.CIRCLE, angleDeg = 0f, count = 1, feather = 0.02f, invert = false)
+        val curves = TransitionCurves(dissolveAlpha, floatArrayOf(0f, 1f), whipRight.from, whipRight.to)
+        val t = transition(curves, mask = mask, toTint = floatArrayOf(1f, 1f, 1f))
+        val first = frame(TransitionRole.TO, t, timeUs = 1_000_000L)
+        // A microsecond, a probe's rounding, a few clips' worth of it, and a whole 30 fps frame.
+        for (early in longArrayOf(999_999L, 999_563L, 998_000L, 966_667L)) {
+            val f = frame(TransitionRole.TO, t, timeUs = early)
+            assertTrue("drawLook at $early", f.drawLook)
+            assertEquals("uniforms at $early", uniforms(first), uniforms(f))
+        }
+        // Which is progress 0: nothing of the incoming side yet, its whip a whole width off to the
+        // left, and the mask's edge a feather short of its centre.
+        assertEquals(0f, first.alpha, 0f)
+        assertEquals(-720f, first.offsetXPx, 1e-3f)
+        assertEquals(-0.02f, first.maskEdge, 1e-6f)
+    }
+
+    @Test
+    fun `a window with no length leaves the incoming clip opaque on every frame`() {
+        // Read at progress 0 an early frame of a fade would be hidden outright, so a window that
+        // cannot be drawn is not drawn on either side of its start.
+        val t = transition(TransitionCurves(floatArrayOf(0f, 1f), null, null, null))
+        for (timeUs in longArrayOf(999_000L, 1_000_000L, 1_001_000L)) {
+            val f = TransitionFrame.at(TransitionRole.TO, t, 1_000_000L, 0L, timeUs, 720, 1280)
+            assertFalse("drawLook at $timeUs", f.drawLook)
+        }
+    }
+
+    @Test
+    fun `a tail frame stamped past its window's end still draws, at progress 1`() {
+        val t = transition(whipRight)
+        val last = frame(TransitionRole.FROM, t, timeUs = 1_500_000L)
+        for (late in longArrayOf(1_500_001L, 1_500_437L, 1_533_333L)) {
+            val f = frame(TransitionRole.FROM, t, timeUs = late)
+            assertTrue("drawLook at $late", f.drawLook)
+            assertEquals("uniforms at $late", uniforms(last), uniforms(f))
+        }
+        // Progress 1 of a whip: the outgoing side a whole width off to the right, not back in place.
+        assertEquals(720f, last.offsetXPx, 1e-3f)
+        // Through the lead it holds progress 0, which is the outgoing clip exactly as it plays.
+        val lead = frame(TransitionRole.FROM, t, timeUs = 950_000L)
+        assertTrue(lead.drawLook)
+        assertEquals(0f, lead.offsetXPx, 0f)
+        assertEquals(uniforms(frame(TransitionRole.FROM, t, timeUs = 1_000_000L)), uniforms(lead))
     }
 
     @Test

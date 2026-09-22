@@ -1,31 +1,100 @@
 import { describe, expect, it } from 'vitest';
 
-import { TRANSITIONS, compileTransition, maskAlpha, maskMeasure } from '../../editor';
-import { LOOP_HOLD_END_MS, LOOP_HOLD_START_MS, LOOP_RUN_MS, coverRect, loopProgress, maskCoverage } from './transition-thumbs';
+import { TRANSITIONS, compileTransition, lookAt } from '../../editor';
+import { WHOLE_FRAME, isTransitionDraw, type LayerDraw } from '../../video-composer/web/painter';
+import { sourceWindow } from '../../video-composer/web/geometry';
+import { LOOP_HOLD_END_MS, LOOP_HOLD_START_MS, LOOP_RUN_MS, frameSize, loopProgress, thumbDraws, thumbLayer, type ThumbSource } from './transition-thumbs';
 
 /*
- * The arithmetic behind the transition sheet's thumbnails. The drawing itself is a canvas and is
- * looked at in the sheet's browser test; what is held here is that the numbers it draws with are
- * the reference's own.
+ * The arithmetic behind the transition sheet's thumbnails. The drawing is the render's painter and is
+ * held to the render in the sheet's browser test; what is held here is that the sheet hands that
+ * painter what `web/render.ts` hands it, and hands it frames it can read one texel to a pixel.
  */
 
-describe('maskCoverage', () => {
-  // Every mask in the catalogue, not a hand-picked one: a shape added later is held to this too.
-  const masked = TRANSITIONS.map(preset => compileTransition(preset.id)).filter(compiled => !!compiled?.mask);
+/** A frame as far as anything here reads one: its size. */
+function frame(width: number, height: number): ThumbSource {
+  return { width, height } as ThumbSource;
+}
 
-  it('is the reference maskAlpha, over a measure worked out once', () => {
-    expect(masked.length).toBeGreaterThan(0);
-    const w = 48;
-    const h = 48;
-    for (const compiled of masked) {
-      const mask = compiled!.mask!;
-      for (const reveal of [0, 0.13, 0.5, 0.87, 1]) {
-        for (let y = 0.5; y < h; y += 7) {
-          for (let x = 0.5; x < w; x += 5) {
-            const u = maskMeasure(mask, x, y, w, h);
-            expect(maskCoverage(mask, reveal, u)).toBeCloseTo(maskAlpha(mask, reveal, x, y, w, h), 10);
-          }
-        }
+describe('thumbDraws', () => {
+  const from = thumbLayer(frame(128, 228));
+  const to = thumbLayer(frame(228, 128));
+
+  it('is one transition in the base track’s place, at the moment asked for, for every kind in the catalogue', () => {
+    for (const preset of TRANSITIONS) {
+      const compiled = compileTransition(preset.id)!;
+      for (const p of [0, preset.posterAt, 0.73, 1]) {
+        const draws = thumbDraws(from, to, preset.id, p);
+        expect(draws).toHaveLength(1);
+        const draw = draws[0];
+        if (!isTransitionDraw(draw)) throw new Error(`${preset.id} drew no transition`);
+        expect(draw.from).toBe(from);
+        expect(draw.to).toBe(to);
+        // The render's own evaluation of the render's own curves - not a look of the sheet's.
+        expect(draw.look).toEqual(lookAt(compiled.curves, p));
+        expect(draw.transition).toBe(compiled);
+      }
+    }
+  });
+
+  it('draws the outgoing side alone for a kind it does not know, as a render draws a cut', () => {
+    expect(thumbDraws(from, to, 'no-such-transition', 0.5)).toEqual([from]);
+    expect(thumbDraws(null, to, 'no-such-transition', 0.5)).toEqual([]);
+  });
+
+  it('keeps a side with no picture as absent rather than inventing one', () => {
+    const [draw] = thumbDraws(null, to, 'dissolve', 0.5);
+    expect(isTransitionDraw(draw) && draw.from).toBeNull();
+  });
+});
+
+describe('thumbLayer', () => {
+  it('is the plain base-track layer, fitted cover into the whole frame', () => {
+    const picture = frame(128, 228);
+    const layer: LayerDraw = thumbLayer(picture);
+    expect(layer).toEqual({ source: picture, sourceWidth: 128, sourceHeight: 228, framing: { fit: 'cover' }, dest: WHOLE_FRAME, opacity: 1 });
+  });
+});
+
+describe('frameSize', () => {
+  it('brings a portrait frame’s width to the tile, the part cover shows', () => {
+    // A filmstrip frame is 90x160; at 2x the tile is 128.
+    expect(frameSize(90, 160, 128)).toEqual({ width: 128, height: 228 });
+    expect(frameSize(1080, 1920, 128)).toEqual({ width: 128, height: 228 });
+  });
+
+  it('brings a landscape frame’s height to the tile', () => {
+    expect(frameSize(1920, 1080, 128)).toEqual({ width: 228, height: 128 });
+  });
+
+  it('takes a square frame as the tile', () => {
+    expect(frameSize(500, 500, 64)).toEqual({ width: 64, height: 64 });
+  });
+
+  it('never makes a side shorter than the tile, and never a size of nothing', () => {
+    expect(frameSize(0, 160, 128)).toEqual({ width: 128, height: 128 });
+    expect(frameSize(160, 159.9, 128)).toEqual({ width: 128, height: 128 });
+  });
+
+  it('lands the cover window on whole pixels, so the tile is read one texel to a pixel', () => {
+    for (const [w, h] of [
+      [90, 160],
+      [1080, 1920],
+      [720, 1280],
+      [480, 854],
+      [1920, 1080],
+      [3, 4],
+      [1080, 1350],
+    ]) {
+      for (const cell of [64, 96, 128]) {
+        const size = frameSize(w, h, cell);
+        expect(Math.min(size.width, size.height)).toBe(cell);
+        const window = sourceWindow({ fit: 'cover' }, { width: cell, height: cell }, size.width, size.height);
+        // The window's corner in the frame's own pixels, and how many of them one tile pixel spans.
+        expect(window.x * size.width).toBeCloseTo(Math.round(window.x * size.width), 6);
+        expect(window.y * size.height).toBeCloseTo(Math.round(window.y * size.height), 6);
+        expect((window.w * size.width) / cell).toBeCloseTo(1, 6);
+        expect((window.h * size.height) / cell).toBeCloseTo(1, 6);
       }
     }
   });
@@ -49,19 +118,5 @@ describe('loopProgress', () => {
       expect(p).toBeGreaterThanOrEqual(0);
       expect(p).toBeLessThanOrEqual(1);
     }
-  });
-});
-
-describe('coverRect', () => {
-  it('takes the middle square of a portrait frame, as tall as it is wide', () => {
-    expect(coverRect(1080, 1920, 128, 128)).toEqual({ x: 0, y: 420, w: 1080, h: 1080 });
-  });
-
-  it('takes the middle square of a landscape frame, as wide as it is tall', () => {
-    expect(coverRect(1920, 1080, 64, 64)).toEqual({ x: 420, y: 0, w: 1080, h: 1080 });
-  });
-
-  it('takes a square frame whole', () => {
-    expect(coverRect(500, 500, 64, 64)).toEqual({ x: 0, y: 0, w: 500, h: 500 });
   });
 });

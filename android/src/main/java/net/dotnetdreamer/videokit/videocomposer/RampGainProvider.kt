@@ -51,16 +51,26 @@ class RampGainProvider(
     /**
      * How long the gain stays at exactly 1 from [samplePosition]. `GainProcessor` uses this to skip
      * the per-sample multiply entirely, so a full-volume track with no fades costs nothing at all.
+     *
+     * It must agree with [getGainFactorAtSamplePosition] sample for sample: whenever that returns
+     * exactly 1f, `GainProcessor` asks for the end of the unity run and THROWS ("Expected a valid end
+     * boundary for unity region") on [C.TIME_UNSET]. Deciding it from the regions alone got two cases
+     * wrong at full volume - the first sample of a fade-out, where the ramp has not moved yet, and the
+     * last samples of a fade-in, where the float ratio rounds up to exactly 1 - and a transition's
+     * crossfade on a clip at full volume hits the first of them on every export. So the gain itself
+     * is asked first, and a unity sample inside a ramp is reported as a run of one sample, which is
+     * all that can be promised there.
      */
     override fun isUnityUntil(samplePosition: Long, sampleRate: Int): Long {
-        if (level != 1f) return C.TIME_UNSET
+        if (getGainFactorAtSamplePosition(samplePosition, sampleRate) != 1f) return C.TIME_UNSET
         val tUs = toUs(samplePosition, sampleRate)
-        if (tUs < silentUntilUs) return C.TIME_UNSET
-        if (fadeInUs > 0L && tUs < fadeInUs) return C.TIME_UNSET
+        if (fadeInUs > 0L && tUs < fadeInUs) return samplePosition + 1
         if (fadeOutStartUs == C.TIME_UNSET || fadeOutUs <= 0L) return C.TIME_END_OF_SOURCE
-        if (tUs >= fadeOutStartUs) return C.TIME_UNSET
-        // The exclusive end of the unity run, back in sample positions.
-        return fadeOutStartUs * sampleRate / 1_000_000L
+        if (tUs >= fadeOutStartUs) return samplePosition + 1
+        // Flat up to the first sample at or after the fade-out's start, back in sample positions.
+        val rate = sampleRate.toLong()
+        val firstRamped = (fadeOutStartUs * rate + 999_999L) / 1_000_000L
+        return maxOf(firstRamped, samplePosition + 1)
     }
 
     private fun toUs(samplePosition: Long, sampleRate: Int): Long =

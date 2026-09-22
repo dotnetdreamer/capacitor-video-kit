@@ -20,8 +20,10 @@ Nothing here decides anything. A tile is `chooseTransition`, None is `removeTran
 slider is `setTransitionDuration`: the store auditions the choice in the preview and folds the
 whole visit into one undo step, so the sheet can be browsed freely and left with one tap of undo.
 
-The thumbnails live outside the vdom, as the effects sheet's do: a repaint is a diff of nine
-buttons, and a thumbnail is a small composite, so they are drawn onto their canvases by a budgeted
+Every tile is drawn by the render's own painter, handed the very transition the export draws at
+that moment, so what a tile shows is what the customer will get - blur, mosaic and all. The
+thumbnails live outside the vdom, as the effects sheet's do: a repaint is a diff of nine buttons,
+and a thumbnail is a GPU composite, so they are drawn onto their canvases by a budgeted
 `requestAnimationFrame` pump, and only the tiles an `IntersectionObserver` says are on screen are
 drawn at all.
 

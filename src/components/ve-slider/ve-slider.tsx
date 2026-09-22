@@ -88,6 +88,18 @@ export class VeSlider {
   @Prop() snap: readonly number[] = [];
   @Prop() snapRadius = 0;
 
+  /**
+   * Shown and out of reach: no focus, no press, no keys, and `aria-disabled` to say so. For a slider
+   * a sheet shows before it can be used - the transition sheet's duration on a plain cut, there to
+   * say a length can be set once there is a transition to set it on.
+   *
+   * A prop, because the one attribute that decides focus is one this element renders on its own
+   * host. A `tabindex="-1"` a sheet put on it lasted exactly one render: Stencil keeps an attribute
+   * the parent set before the first one, then writes the host's own `0` over it on the next - the
+   * next time the value or the range moved - and the slider was back in the tab order by itself.
+   */
+  @Prop() disabled = false;
+
   /** A drag, or a press on the bar, has begun; the store's gesture is already open. */
   @Event() veGestureStart!: EventEmitter<void>;
 
@@ -121,7 +133,7 @@ export class VeSlider {
   /* ========================================================================================= */
 
   private readonly onPointerDown = (event: PointerEvent) => {
-    if (this.drag || !event.isPrimary || !this.trackEl) return;
+    if (this.disabled || this.drag || !event.isPrimary || !this.trackEl) return;
     const rect = this.trackEl.getBoundingClientRect();
     const track: SliderTrack = { left: rect.left, width: rect.width };
     const grab = sliderGrab(event.clientX, sliderKnobX(this.value, track, this.min, this.max));
@@ -209,7 +221,7 @@ export class VeSlider {
    * the single value, so the store sees the same shape it sees from a finger.
    */
   private readonly onKeyDown = (event: KeyboardEvent) => {
-    if (this.drag) return;
+    if (this.disabled || this.drag) return;
     const stride = this.step > 0 ? this.step : (this.max - this.min) / 100;
     let raw: number;
     switch (event.key) {
@@ -260,7 +272,8 @@ export class VeSlider {
     return (
       <Host
         role="slider"
-        tabindex="0"
+        tabindex={this.disabled ? '-1' : '0'}
+        aria-disabled={this.disabled ? 'true' : undefined}
         aria-label={this.label}
         aria-orientation="horizontal"
         aria-valuemin={String(min)}

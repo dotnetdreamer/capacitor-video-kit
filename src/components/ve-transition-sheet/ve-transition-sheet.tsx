@@ -8,16 +8,24 @@ import {
   TRANSITIONS,
   TRANSITION_CATEGORIES,
   TRANSITION_STEP_MS,
+  cssFor,
   transitionPreset,
+  type FilterOp,
   type TransitionCategory,
   type TransitionPreset,
 } from '../../editor';
 import { computedWith } from '../../state/computed-with';
+import { fold, isIdentity } from '../../video-composer/web/color-matrix';
 import { durationChip, frameUrl } from '../ve-timeline/timeline-geometry';
-import { drawThumb, loopProgress, type ThumbSource } from './transition-thumbs';
+import { ThumbPainter, loopProgress, prepareFrame, type ThumbColour, type ThumbSource } from './transition-thumbs';
 
-/** The tile is 64 CSS px square; its canvas gets those pixels at up to 2x, which is sharp at this size. */
-const CELL_PX = Math.round(64 * Math.max(1, Math.min(2, globalThis.devicePixelRatio || 1)));
+/**
+ * The tile is 64 CSS px square, and its canvas is the screen's own pixels for that square, up to 3x:
+ * one canvas pixel to one device pixel on every phone the editor is tested on, so the edge of a wipe
+ * or of a spinning frame is drawn sharp by the painter rather than stretched soft by the compositor.
+ * The painter draws on the GPU, where a 192 px tile costs little more than a 128 px one did.
+ */
+const CELL_PX = Math.round(64 * Math.max(1, Math.min(3, globalThis.devicePixelRatio || 1)));
 /** Per-frame drawing budget, so opening the sheet never stalls the preview's own frame. */
 const DRAW_BUDGET_MS = 8;
 /**
@@ -55,8 +63,10 @@ interface CutFrames {
  * slider is `setTransitionDuration`: the store auditions the choice in the preview and folds the
  * whole visit into one undo step, so the sheet can be browsed freely and left with one tap of undo.
  *
- * The thumbnails live outside the vdom, as the effects sheet's do: a repaint is a diff of nine
- * buttons, and a thumbnail is a small composite, so they are drawn onto their canvases by a budgeted
+ * Every tile is drawn by the render's own painter, handed the very transition the export draws at
+ * that moment, so what a tile shows is what the customer will get - blur, mosaic and all. The
+ * thumbnails live outside the vdom, as the effects sheet's do: a repaint is a diff of nine buttons,
+ * and a thumbnail is a GPU composite, so they are drawn onto their canvases by a budgeted
  * `requestAnimationFrame` pump, and only the tiles an `IntersectionObserver` says are on screen are
  * drawn at all.
  */
@@ -101,13 +111,32 @@ export class VeTransitionSheet {
     (a, b) => a.from === b.from && a.to === b.to,
   );
 
+  /**
+   * The post's colour work, which the render lays over both sides of a transition and so the tiles
+   * do too. Compared by what it says, because the store builds a new list on every manifest write
+   * and a duration drag is a manifest write per frame.
+   */
+  private readonly filterOps = computedWith<FilterOp[]>(
+    () => this.ctx.store.filterOps.value,
+    (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b),
+  );
+
   /* -- thumbnails (plain fields: read and written per frame) --------------------------------- */
 
   private observer: IntersectionObserver | null = null;
   private readonly tracked = new Map<HTMLCanvasElement, TileState>();
   private readonly queue = new Set<HTMLCanvasElement>();
-  /** Decoded frames by URL; null for one that could not be loaded. */
-  private readonly images = new Map<string, HTMLImageElement | null>();
+  /**
+   * The ONE painter every tile of this sheet is drawn by, built by the first tile drawn and given
+   * back - GL context and all - when the sheet leaves the document.
+   */
+  private thumbs: ThumbPainter | null = null;
+  /** The colour the tiles are drawn in, and a count that goes up whenever it changes, for [TileState.drawnKey]. */
+  private colour: ThumbColour | null = null;
+  private colourVersion = 0;
+  private seenOps: FilterOp[] | null = null;
+  /** Frames by URL, decoded and brought to the tile's size once; null for one that could not be loaded. */
+  private readonly images = new Map<string, ThumbSource | null>();
   private readonly loading = new Set<string>();
   private rafId = 0;
   private destroyed = false;
@@ -116,6 +145,12 @@ export class VeTransitionSheet {
   /** When the chosen tile's loop began, so a new choice plays from its start. */
   private loopFrom = 0;
   private lastLoopDraw = 0;
+  /**
+   * The tile the last frame of the pump had moving. A tile that stops moving with no new choice -
+   * the system has asked for less motion - is left on whatever moment of its loop it last showed,
+   * half way through a wipe, and nothing but this remembers that it is owed its still.
+   */
+  private moved: HTMLCanvasElement | null = null;
   /** The last frames and choice the thumbnails were told about, to tell a real change from a wake. */
   private seenFrames: CutFrames | null = null;
   private seenChosen: string | null | undefined = undefined;
@@ -124,6 +159,14 @@ export class VeTransitionSheet {
   /** Answered by the next render: the chosen tile is brought to the middle of the row. */
   private centrePending = false;
   private readonly still = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+  /**
+   * The system's motion setting changing while the sheet is open, which matters in one direction:
+   * motion allowed again, when the pump has stopped and nothing else would start the chosen tile's
+   * loop. The other direction cannot be left to this. The pump reads `matches` every frame of a
+   * loop, and Chrome reports no change to a query whose `matches` was read after it - so the pump
+   * sees less motion asked for itself, and puts the still back through [moved].
+   */
+  private readonly onMotionSetting = () => this.requeueVisible();
   private stopWatching?: () => void;
 
   private row?: HTMLElement;
@@ -168,18 +211,20 @@ export class VeTransitionSheet {
      * which Stencil does not call a second time when it re-attaches an element it has moved.
      */
     this.destroyed = false;
+    this.still?.addEventListener('change', this.onMotionSetting);
     if (this.loaded) this.observe();
     /*
-     * The thumbnails answer to three things the render does not need to repaint for: which frames
-     * the cut has, which transition is chosen, and which cut it is. An effect rather than a render
-     * hook, because a render can happen for any reason and these three are the only ones that mean
-     * a canvas is now out of date.
+     * The thumbnails answer to four things the render does not need to repaint for: which frames
+     * the cut has, which transition is chosen, which cut it is, and the post's colour. An effect
+     * rather than a render hook, because a render can happen for any reason and these four are the
+     * only ones that mean a canvas is now out of date.
      */
     this.stopWatching = effect(() => {
       const target = this.ctx.store.transitionTarget.value;
       const frames = this.frames.value;
       const chosen = this.chosen.value;
-      untracked(() => this.follow(target, frames, chosen));
+      const ops = this.filterOps.value;
+      untracked(() => this.follow(target, frames, chosen, ops));
     });
   }
 
@@ -207,16 +252,23 @@ export class VeTransitionSheet {
     this.watcher.stop();
     this.stopWatching?.();
     this.stopWatching = undefined;
+    this.still?.removeEventListener('change', this.onMotionSetting);
     this.observer?.disconnect();
     this.observer = null;
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = 0;
     this.queue.clear();
     this.tracked.clear();
+    this.moved = null;
     this.images.clear();
     this.loading.clear();
     this.seenFrames = null;
     this.seenChosen = undefined;
+    this.seenOps = null;
+    // The GL context goes back NOW rather than when the element is collected: the page only has a
+    // handful, and a sheet opened and shut a few times would otherwise cost the preview its own.
+    this.thumbs?.dispose();
+    this.thumbs = null;
   }
 
   /* ========================================================================================= */
@@ -246,14 +298,14 @@ export class VeTransitionSheet {
   /* ========================================================================================= */
 
   /**
-   * One answer to all three of the effect's inputs.
+   * One answer to all four of the effect's inputs.
    *
    * Another cut - a different dot tapped while the sheet is open - is a new sheet in all but the
-   * element: it opens on that cut's own tab with its own tile in the middle. New frames make every
-   * still out of date. A new choice restarts the loop from its first frame, and the tile that was
-   * looping goes back to its still.
+   * element: it opens on that cut's own tab with its own tile in the middle. New frames, or a new
+   * colour, make every still out of date. A new choice restarts the loop from its first frame, and
+   * the tile that was looping goes back to its still.
    */
-  private follow(target: string | null, frames: CutFrames, chosen: string | null): void {
+  private follow(target: string | null, frames: CutFrames, chosen: string | null, ops: FilterOp[]): void {
     if (this.destroyed) return;
     if (target !== this.seenTarget) {
       this.seenTarget = target;
@@ -273,13 +325,21 @@ export class VeTransitionSheet {
     if (target === null && this.seenFrames !== null) return;
     const framesChanged = this.seenFrames !== frames;
     const chosenChanged = this.seenChosen !== chosen;
+    const colourChanged = this.seenOps !== ops;
     this.seenFrames = frames;
     this.seenChosen = chosen;
+    if (colourChanged) {
+      this.seenOps = ops;
+      // Folded here, once per filter, exactly as the preview folds it; an identity is no colour at all.
+      const matrix = ops.length === 0 ? null : fold(ops);
+      this.colour = ops.length === 0 ? null : { matrix: matrix && !isIdentity(matrix) ? matrix : null, css: cssFor(ops) };
+      this.colourVersion += 1;
+    }
     if (chosenChanged) {
       this.loopFrom = performance.now();
       this.lastLoopDraw = 0;
     }
-    if (framesChanged || chosenChanged) this.requeueVisible();
+    if (framesChanged || chosenChanged || colourChanged) this.requeueVisible();
   }
 
   /**
@@ -292,8 +352,15 @@ export class VeTransitionSheet {
     if (typeof IntersectionObserver !== 'undefined' && this.row) {
       this.observer = new IntersectionObserver(entries => this.onEntries(entries), { root: this.row, rootMargin: '0px 96px' });
     }
-    // Tiles tracked before there was an observer are observed now, and everything starts over.
-    for (const canvas of this.tracked.keys()) this.observer?.observe(canvas);
+    // Tiles tracked before there was an observer are observed now, and everything starts over. They
+    // were taken to be on screen while nothing could say otherwise; from here the observer says, and
+    // it answers for every tile it is given. Left as they were, the whole row would be drawn in the
+    // first frame, which the painter is quick enough to do - the tiles far off the row's end included.
+    for (const [canvas, state] of this.tracked) {
+      if (!this.observer) break;
+      state.visible = false;
+      this.observer.observe(canvas);
+    }
     this.syncThumbs();
   }
 
@@ -367,7 +434,7 @@ export class VeTransitionSheet {
   /**
    * The two frames as pictures, or null while either is still loading - in which case its load
    * wakes the pump again. A frame with no URL, or one that failed, is null inside the pair, which
-   * [drawThumb] draws as its stand-in.
+   * [ThumbPainter.drawThumb] draws as its stand-in.
    */
   private sources(frames: CutFrames): { from: ThumbSource | null; to: ThumbSource | null; key: string } | null {
     const from = this.image(frames.from);
@@ -376,13 +443,27 @@ export class VeTransitionSheet {
     return { from, to, key: `${from ? frames.from : '-'}|${to ? frames.to : '-'}` };
   }
 
-  private image(url: string | null): HTMLImageElement | null | undefined {
+  private image(url: string | null): ThumbSource | null | undefined {
     if (!url) return null;
-    if (this.images.has(url)) return this.images.get(url) ?? null;
+    if (this.images.has(url)) {
+      const known = this.images.get(url) ?? null;
+      // Moved to the young end on every read, so the frame let go when the cache is full is the one
+      // looked at longest ago. Let go by age of arrival instead, a cut sharing a frame with one seen
+      // earlier - a clip shorter than a filmstrip step leaves on the picture it entered on - loses
+      // that frame to the decode of its other one, and the row waits for it to be decoded again.
+      this.images.delete(url);
+      this.images.set(url, known);
+      return known;
+    }
     this.load(url);
     return undefined;
   }
 
+  /**
+   * Decodes one frame and keeps it at the tile's size, once per URL: the animated tile draws the
+   * pair thirty times a second, and a picture resampled on every one of those would be resampled
+   * worse (a bilinear read) for no gain.
+   */
   private load(url: string): void {
     if (this.loading.has(url)) return;
     this.loading.add(url);
@@ -392,7 +473,7 @@ export class VeTransitionSheet {
     const settle = (ok: boolean): void => {
       this.loading.delete(url);
       if (this.destroyed) return;
-      this.images.set(url, ok ? img : null);
+      this.images.set(url, ok ? prepareFrame(img, img.naturalWidth, img.naturalHeight, CELL_PX) : null);
       while (this.images.size > FRAME_CACHE_MAX) {
         const oldest = this.images.keys().next().value;
         if (oldest === undefined) break;
@@ -421,9 +502,11 @@ export class VeTransitionSheet {
 
     const started = performance.now();
     const looping = this.looping();
+    if (this.moved && this.moved !== looping) this.queue.add(this.moved);
+    this.moved = looping;
     if (looping && now - this.lastLoopDraw >= ANIMATE_EVERY_MS) {
       this.lastLoopDraw = now;
-      drawThumb(looping, sources.from, sources.to, looping.dataset.kind ?? '', loopProgress(now - this.loopFrom));
+      this.painter().drawThumb(looping, sources.from, sources.to, looping.dataset.kind ?? '', loopProgress(now - this.loopFrom));
       const state = this.tracked.get(looping);
       // No longer the still: when it stops looping, the queue has to draw that again.
       if (state) state.drawnKey = null;
@@ -436,14 +519,25 @@ export class VeTransitionSheet {
       const state = this.tracked.get(canvas);
       const kind = canvas.dataset.kind;
       if (!state?.visible || !kind) continue;
-      const key = `${kind}|${sources.key}`;
+      const key = `${kind}|${sources.key}|${this.colourVersion}`;
       if (state.drawnKey === key) continue;
-      drawThumb(canvas, sources.from, sources.to, kind, transitionPreset(kind)?.posterAt ?? 0.5);
+      this.painter().drawThumb(canvas, sources.from, sources.to, kind, transitionPreset(kind)?.posterAt ?? 0.5);
       state.drawnKey = key;
     }
 
     if (this.queue.size || looping) this.schedule();
   };
+
+  /**
+   * The sheet's one painter, built by the first tile that is actually drawn and so inside that
+   * frame's budget: compiling its shaders is most of what a first frame costs, and the budget then
+   * leaves the rest of the row to the next one. Never built for a sheet shut before it drew.
+   */
+  private painter(): ThumbPainter {
+    const thumbs = this.thumbs ?? (this.thumbs = new ThumbPainter(CELL_PX));
+    thumbs.setColour(this.colour);
+    return thumbs;
+  }
 
   /* ========================================================================================= */
   /* Render                                                                                    */
@@ -474,9 +568,12 @@ export class VeTransitionSheet {
                     type="button"
                     key={preset.id}
                     class={{ 'ts__tile': true, 'ts__tile--on': on }}
-                    // A string, because the vdom drops an attribute set to boolean false and a tile
-                    // with no `aria-pressed` at all is announced as a plain button.
-                    aria-pressed={String(on)}
+                    // The choice is in the NAME rather than in `aria-pressed`. On the WebView still
+                    // shipping on the Samsung A13 (Chrome 99), a change to `aria-pressed` inside a
+                    // shadow root never reaches Android's accessibility tree - the tile tapped reads
+                    // unpressed for as long as the sheet is open - while a change to the name does,
+                    // as the dots' names show. The same move the gallery made with ", clip N".
+                    aria-label={on ? `${preset.label}, selected` : preset.label}
                     onClick={() => this.choose(preset)}
                   >
                     <span class="ts__frame">
@@ -494,8 +591,24 @@ export class VeTransitionSheet {
 
             {boundary ? this.durationRow(boundary.transition !== null, boundary.effectiveMs, boundary.maxMs) : null}
 
+            {/*
+              Offered only once the cut HAS a transition to apply. On a plain cut the same tap took
+              every transition off the video, under a label that says nothing of the kind.
+
+              Hidden rather than left out, so the space stays: the sheet stacks up from the bottom
+              of the screen, and a pill arriving with the first tile tapped would lift the whole row
+              46px under the finger that tapped it - the very move the dimmed duration row is there
+              to prevent. `visibility: hidden` also takes it out of the accessibility tree, and
+              `disabled` out of reach of a click that does not come from a pointer.
+            */}
             {manyCuts ? (
-              <button type="button" class="ts__apply-all" key="apply-all" onClick={this.applyToAll}>
+              <button
+                type="button"
+                class={{ 'ts__apply-all': true, 'ts__apply-all--off': !boundary?.transition }}
+                key="apply-all"
+                disabled={!boundary?.transition}
+                onClick={this.applyToAll}
+              >
                 Apply to all clips
               </button>
             ) : null}
@@ -511,21 +624,30 @@ export class VeTransitionSheet {
    *
    * On a plain cut it is still there, dimmed and out of reach, so choosing a transition does not
    * push the row down under the finger - and so the customer can see there is a length to set.
-   * Two clips too short to hold any transition get a sentence instead, because a slider whose two
-   * ends are the same place is not a control.
+   * Two clips that cannot hold more than the shortest transition get a sentence instead, because a
+   * slider whose two ends are the same place is not a control. That is a clip under 400 ms on either
+   * side, not only one under 200: from 200 the pair holds exactly the shortest transition, which a
+   * tile still puts on, so the sentence there says how long it runs rather than that there is no
+   * room for one at all.
+   *
+   * Out of reach is `pointer-events: none` on the row (see the stylesheet), the slider's own
+   * `disabled` for focus and keys, and `aria-disabled` for the row as a whole - and not `inert`,
+   * which it was. The A13's Chrome 99 ignores `inert` outright, so there it held nothing, and a
+   * current WebView that does honour it takes the whole row out of the accessibility tree: the word
+   * and the readout went with the slider, and Maestro could no longer find the number it checks.
    */
   private durationRow(set: boolean, effectiveMs: number, maxMs: number) {
-    if (maxMs < MIN_TRANSITION_MS) {
+    if (maxMs <= MIN_TRANSITION_MS) {
       return (
         <p class="ts__hint" key="hint">
-          These clips are too short for a transition
+          {maxMs < MIN_TRANSITION_MS ? 'These clips are too short for a transition' : `These clips are too short for more than a ${durationChip(MIN_TRANSITION_MS)} transition`}
         </p>
       );
     }
     // On a cut, the duration the first tile tapped will get, so the number does not jump when it is.
     const ms = set ? effectiveMs : this.ctx.store.nextTransitionMs.value;
     return (
-      <div class={{ 'ts__duration': true, 'ts__duration--off': !set }} key="duration" inert={!set} aria-disabled={set ? undefined : 'true'}>
+      <div class={{ 'ts__duration': true, 'ts__duration--off': !set }} key="duration" aria-disabled={set ? undefined : 'true'}>
         {/*
           A visible word as well as the slider's own name: on a current Android WebView the slider
           reaches the accessibility tree with no name at all, and the word is what is left.
@@ -540,6 +662,7 @@ export class VeTransitionSheet {
           max={maxMs}
           step={TRANSITION_STEP_MS}
           pin="press"
+          disabled={!set}
           format={this.formatDuration}
           onVeLive={this.onDuration}
         />

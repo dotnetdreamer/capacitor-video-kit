@@ -11,11 +11,13 @@ The video at the top of the editor: the edit played back live, every layer drawn
 bitmap the render will place, and the layers moved, scaled and turned by hand right on the frame.
 
 The picture is ONE CANVAS, composited by `Painter` - the browser renderer's own compositor - from
-one hidden `<video>` element per video track. It is not a second implementation of the render
-contract that agrees with the first by inspection: it is the first, handed the same layers, so
-where a clip sits here, at the size, angle and colour it shows, is where the finished video has
-it. See [PreviewCanvas]. Each overlay layer is still the PNG `OverlayBitmaps` rasterised for it,
-drawn over the canvas as an `<img>`, because that is what the render places too.
+one hidden `<video>` element per video track, and two for the base track, which take turns so
+that a cut is never a load and a transition has both of its clips. It is not a second
+implementation of the render contract that agrees with the first by inspection: it is the first,
+handed the same layers, so where a clip sits here, at the size, angle and colour it shows, is
+where the finished video has it. See [PreviewCanvas]. Each overlay layer is still the PNG
+`OverlayBitmaps` rasterised for it, drawn over the canvas as an `<img>`, because that is what the
+render places too.
 
 ONE ELEMENT PER TRACK, with no cap on how many. It was two - the base and the front-most layer -
 because a phone decodes two video streams comfortably and the feed behind this editor may already

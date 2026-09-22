@@ -117,11 +117,13 @@ function baseLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | 
  * bitmap the render will place, and the layers moved, scaled and turned by hand right on the frame.
  *
  * The picture is ONE CANVAS, composited by `Painter` - the browser renderer's own compositor - from
- * one hidden `<video>` element per video track. It is not a second implementation of the render
- * contract that agrees with the first by inspection: it is the first, handed the same layers, so
- * where a clip sits here, at the size, angle and colour it shows, is where the finished video has
- * it. See [PreviewCanvas]. Each overlay layer is still the PNG `OverlayBitmaps` rasterised for it,
- * drawn over the canvas as an `<img>`, because that is what the render places too.
+ * one hidden `<video>` element per video track, and two for the base track, which take turns so
+ * that a cut is never a load and a transition has both of its clips. It is not a second
+ * implementation of the render contract that agrees with the first by inspection: it is the first,
+ * handed the same layers, so where a clip sits here, at the size, angle and colour it shows, is
+ * where the finished video has it. See [PreviewCanvas]. Each overlay layer is still the PNG
+ * `OverlayBitmaps` rasterised for it, drawn over the canvas as an `<img>`, because that is what the
+ * render places too.
  *
  * ONE ELEMENT PER TRACK, with no cap on how many. It was two - the base and the front-most layer -
  * because a phone decodes two video streams comfortably and the feed behind this editor may already
@@ -170,6 +172,8 @@ export class VePreview implements EditorPlayer {
   private stageEl?: HTMLDivElement;
   private canvasEl?: HTMLCanvasElement;
   private videoEl?: HTMLVideoElement;
+  /** The base track's second element; see [PreviewPlayer] for why the base plays on two. */
+  private partnerEl?: HTMLVideoElement;
   /** One `<video>` per extra video track, by track id. */
   private readonly extraEls = new Map<string, HTMLVideoElement>();
   /** What each track's element was last attached to the player as, so a repaint does not re-attach. */
@@ -186,6 +190,9 @@ export class VePreview implements EditorPlayer {
   };
   private readonly keepVideo = (el?: HTMLElement) => {
     this.videoEl = el as HTMLVideoElement | undefined;
+  };
+  private readonly keepPartner = (el?: HTMLElement) => {
+    this.partnerEl = el as HTMLVideoElement | undefined;
   };
   /**
    * The ref for one track's element, made once per track id and never again.
@@ -455,8 +462,13 @@ export class VePreview implements EditorPlayer {
   /** Each extra layer's source shape, by track id. Absent is "its metadata has not landed yet". */
   private readonly extraAspects = signal<ReadonlyMap<string, number>>(new Map());
 
+  /**
+   * Read off whichever base element is showing the clip under the playhead, which is the player's to
+   * say: the two trade places at every cut, and the one listened to may be the spare loading the
+   * next clip, whose shape is not the one on screen yet. The player calls this at every swap too.
+   */
   private readonly readBaseAspect = (): void => {
-    const video = this.videoEl;
+    const video = this.player?.baseVideo ?? this.videoEl;
     if (video && video.videoWidth > 0 && video.videoHeight > 0) {
       this.baseAspect.value = video.videoWidth / video.videoHeight;
     }
@@ -577,7 +589,7 @@ export class VePreview implements EditorPlayer {
 
   /**
    * Everything is wired from here rather than from `componentDidLoad`, because what it waits for is
-   * the five elements the player needs and a ref callback that never fires says nothing at all - it
+   * the six elements the player needs and a ref callback that never fires says nothing at all - it
    * simply leaves the field undefined. Running on every render and returning early once the player
    * exists is what that costs, and it is also what hands the second track's element over as it
    * comes and goes: a ref plus this call replace the effect Angular needed for it. It is the moment
@@ -598,10 +610,9 @@ export class VePreview implements EditorPlayer {
     this.watcher.stop();
     for (const dispose of this.disposers) dispose();
     this.disposers.length = 0;
-    const video = this.videoEl;
-    if (video) {
-      video.removeEventListener('loadedmetadata', this.readBaseAspect);
-      video.removeEventListener('resize', this.readBaseAspect);
+    for (const video of [this.videoEl, this.partnerEl]) {
+      video?.removeEventListener('loadedmetadata', this.readBaseAspect);
+      video?.removeEventListener('resize', this.readBaseAspect);
     }
     this.detachExtras();
     this.canvas?.destroy();
@@ -623,13 +634,16 @@ export class VePreview implements EditorPlayer {
     const stage = this.stageEl;
     const canvas = this.canvasEl;
     const video = this.videoEl;
+    const partner = this.partnerEl;
     const music = this.musicEl;
     const voice = this.voiceEl;
-    if (!stage || !canvas || !video || !music || !voice) return;
+    if (!stage || !canvas || !video || !partner || !music || !voice) return;
 
     // `resize` covers the next clip being a different shape; both fire once per load, not per frame.
-    video.addEventListener('loadedmetadata', this.readBaseAspect);
-    video.addEventListener('resize', this.readBaseAspect);
+    for (const base of [video, partner]) {
+      base.addEventListener('loadedmetadata', this.readBaseAspect);
+      base.addEventListener('resize', this.readBaseAspect);
+    }
     // The base element is written before it has a source, so its event is still to come - but this
     // costs a comparison and closes the same hole `attachExtras` had, for a remount onto an element
     // that is already loaded.
@@ -637,15 +651,19 @@ export class VePreview implements EditorPlayer {
 
     const store = this.ctx.store;
     this.canvas = new PreviewCanvas(store, canvas);
-    this.canvas.attach(null, video);
     this.player = new PreviewPlayer(store, {
       video,
+      partner,
       music,
       voice,
       // The store's list and not [shownExtras], which holds its value while only `sourceMs` has
       // moved: where the layer has got to in its file is the one thing the element needs.
       extraLayers: () => store.previewLayers.value.filter(layer => layer.trackId !== null),
+      onSwap: this.readBaseAspect,
     });
+    // The base track is drawn from the player's own reading of its two elements, one reading a
+    // frame, so a swap between them can never pair one clip's framing with the other's picture.
+    this.canvas.attachBase(() => this.player?.baseShot() ?? null, [video, partner]);
     store.attachPlayer(this);
     this.player.start();
 
@@ -921,15 +939,22 @@ export class VePreview implements EditorPlayer {
               <canvas key="composite" class="pv__canvas" aria-hidden="true" ref={this.keepCanvas}></canvas>
 
               {/*
-                The sources. One `<video>` per video track, seeked by `PreviewPlayer` and its
-                followers exactly as before and drawn from by the canvas above.
+                The sources. One `<video>` per extra video track and two for the base, seeked by
+                `PreviewPlayer` and its followers and drawn from by the canvas above.
 
                 Invisible, and deliberately NOT `display: none`: some WebViews stop decoding a
                 video that is not laid out, and an element that has stopped decoding is a black
                 layer. They keep a real box at the corner of the frame, at zero opacity and taking
                 no touch, which is enough for every platform to go on presenting frames into them.
               */}
-              <video key="base-video" ref={this.keepVideo} class="pv__source" playsinline webkit-playsinline="" preload="auto" aria-hidden="true"></video>
+              <video key="base-video" ref={this.keepVideo} class="pv__source" data-deck="a" playsinline webkit-playsinline="" preload="auto" aria-hidden="true"></video>
+              {/*
+                The base track's second element, always there. The two take turns being the clock:
+                the one that is not is parked on the next clip before every cut and plays the
+                outgoing clip's tail under every transition - see [PreviewPlayer]. Keyed like the
+                first and never conditional, because the player holds both for its whole life.
+              */}
+              <video key="base-video-2" ref={this.keepPartner} class="pv__source" data-deck="b" playsinline webkit-playsinline="" preload="auto" aria-hidden="true"></video>
 
               {extras.map(view => (
                 <video

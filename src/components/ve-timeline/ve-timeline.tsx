@@ -1714,6 +1714,7 @@ export class VeTimeline {
       // screen, and a click a moment after a wheel is a click rather than a brake.
       consumed: event.pointerType !== 'mouse' && this.userScrollActive && performance.now() - this.flingAt < FLING_STOP_MS,
       timer: null,
+      downAt: performance.now(),
     };
     // A base segment lifts once there is a second one: with only one, there is nothing to reorder it
     // past and nowhere to carry it either, because the base track may not be emptied. A segment on a
@@ -1821,8 +1822,12 @@ export class VeTimeline {
         return;
       case 'transition':
         // A tap and only a tap: a swipe that began on the dot was the browser's scroll, which ended
-        // the press with a pointercancel before it could get here.
-        if (id) store.openTransition(id);
+        // the press with a pointercancel before it could get here. A finger HELD on the dot is not a
+        // tap either, however still it stayed: everywhere else on the timeline a hold means something
+        // other than a tap (it lifts a segment), so somebody who holds a dot and lets go has not
+        // asked for the sheet, and it opening under their finger on the way up is a surprise. The
+        // browser's click after the lift lands in [onDotClick]'s echo window and opens nothing either.
+        if (id && performance.now() - press.downAt <= LONG_PRESS_MS) store.openTransition(id);
         return;
       default:
         if (store.selection.value) store.select(null);

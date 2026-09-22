@@ -98,7 +98,8 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
 
   const painter = new Painter(plan.output);
   painter.setColour(plan.colorMatrix, cssFor(spec.filter));
-  const layers = new LayerReaders();
+  // Each element closed is one the painter will never be handed again, so its texture goes with it.
+  const layers = new LayerReaders(video => painter.forget(video));
   const overlays = new OverlayBitmaps();
   // Opened last, and immediately before the loop: the recorder engine starts recording the moment
   // it is opened, and every millisecond between that and the first frame is a millisecond of the
@@ -345,14 +346,21 @@ async function probeInputs(spec: ComposeSpec, signal: AbortSignal): Promise<Map<
  * A post of ten clips is ten files and one decoder, because the clips play one after another and
  * only one of them is on screen at a time. A clip split into six segments does not even cost a
  * re-open: the URI has not changed, so the same element seeks on.
+ *
+ * Re-pointing a layer at another file is a NEW element, though, and so is every transition tail,
+ * and whatever was drawing from the old one kept something for it - the painter a texture per
+ * element, a frame of GPU memory each. `onClose` hears about every element as it goes, whichever
+ * way it goes, so that can be let go of at the same moment rather than at the end of the render.
  */
 class LayerReaders {
   private readonly open = new Map<string, { uri: string; reader: FrameReader }>();
 
+  constructor(private readonly onClose: (video: HTMLVideoElement) => void) {}
+
   async reader(layerId: string, uri: string, clipKey: string): Promise<FrameReader> {
     const current = this.open.get(layerId);
     if (current && current.uri === uri) return current.reader;
-    current?.reader.close();
+    if (current) this.closeReader(current.reader);
     this.open.delete(layerId);
     try {
       const reader = await FrameReader.open(uri);
@@ -365,13 +373,19 @@ class LayerReaders {
 
   /** Closes one layer's element, which will not be asked for again; a later ask simply reopens it. */
   release(layerId: string): void {
-    this.open.get(layerId)?.reader.close();
+    const current = this.open.get(layerId);
+    if (current) this.closeReader(current.reader);
     this.open.delete(layerId);
   }
 
   close(): void {
-    for (const entry of this.open.values()) entry.reader.close();
+    for (const entry of this.open.values()) this.closeReader(entry.reader);
     this.open.clear();
+  }
+
+  private closeReader(reader: FrameReader): void {
+    this.onClose(reader.video);
+    reader.close();
   }
 }
 

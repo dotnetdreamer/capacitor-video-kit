@@ -4,6 +4,7 @@ import { DEFAULT_TRANSITION_MS, emptyManifest, type EditClip, type EditManifest 
 import { resolveEditorHost } from '../host/defaults';
 import type { EditorSource } from '../host/host.types';
 import { EditorStore } from './editor-store';
+import type { EditorPlayer } from './editor.types';
 
 /*
  * The transition sheet as the store runs it. Three four-second clips, a, b and c, so the boundary
@@ -25,6 +26,30 @@ describe('EditorStore transitions', () => {
   }
 
   const kinds = () => store.manifest.value.clips.map(c => c.transitionIn?.kind ?? null);
+
+  /**
+   * A player that does at once what the preview's does in a frame or two: a seek lands, and play and
+   * pause say so on `playing`. What it was asked to do, in order, is in the list it hands back.
+   */
+  function attachPlayer(): string[] {
+    const calls: string[] = [];
+    const player: EditorPlayer = {
+      seek: ms => {
+        calls.push(`seek ${ms}`);
+        store.playheadMs.value = ms;
+      },
+      play: () => {
+        calls.push('play');
+        store.playing.value = true;
+      },
+      pause: () => {
+        calls.push('pause');
+        store.playing.value = false;
+      },
+    };
+    store.attachPlayer(player);
+    return calls;
+  }
 
   beforeEach(() => {
     store = new EditorStore(resolveEditorHost({}));
@@ -165,5 +190,188 @@ describe('EditorStore transitions', () => {
     store.seek(4100);
     expect(store.previewTransition.value).toBeNull();
     expect(store.totalMs.value).toBe(11_500);
+  });
+
+  describe('the visit’s one undo step', () => {
+    it('keeps a change made outside the sheet out of it', () => {
+      load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      // The mute on the timeline, tapped with the sheet still open.
+      store.toggleOriginalMuted();
+      store.closePanel();
+
+      store.undo();
+      expect(store.manifest.value.originalMuted).toBe(false);
+      expect(kinds()).toEqual([null, 'dissolve', null]);
+      store.undo();
+      expect(kinds()).toEqual([null, null, null]);
+      expect(store.canUndo.value).toBe(false);
+    });
+
+    it('starts a step of its own for what the sheet does after that change', () => {
+      load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      store.toggleOriginalMuted();
+      store.chooseTransition('blur');
+      store.chooseTransition('spin');
+      store.closePanel();
+
+      store.undo();
+      expect(kinds()).toEqual([null, 'dissolve', null]);
+      expect(store.manifest.value.originalMuted).toBe(true);
+      store.undo();
+      expect(store.manifest.value.originalMuted).toBe(false);
+      expect(kinds()).toEqual([null, 'dissolve', null]);
+      store.undo();
+      expect(kinds()).toEqual([null, null, null]);
+      expect(store.canUndo.value).toBe(false);
+    });
+
+    it('keeps a drag that is not the sheet’s out of it', () => {
+      const before = load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      store.beginGesture();
+      store.previewFilterIntensity(0.25);
+      store.endGesture('Filter strength');
+      store.closePanel();
+
+      store.undo();
+      expect(store.manifest.value.filterIntensity).toBe(before.filterIntensity);
+      expect(kinds()).toEqual([null, 'dissolve', null]);
+    });
+
+    it('folds the duration slider’s drags in, even one a tile tap closes while it is held', () => {
+      load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      // The slider's own shape: its gesture, its live values, and the label it ends with.
+      store.beginGesture();
+      store.setTransitionDuration(800, true);
+      store.endGesture('Transition duration');
+      // Still held when a tile is tapped: the tap closes the gesture as 'Change' on its way in.
+      store.beginGesture();
+      store.setTransitionDuration(1200, true);
+      store.chooseTransition('blur');
+      expect(store.manifest.value.clips[1].transitionIn).toEqual({ kind: 'blur', durationMs: 1200 });
+      store.closePanel();
+
+      store.undo();
+      expect(kinds()).toEqual([null, null, null]);
+      expect(store.canUndo.value).toBe(false);
+    });
+  });
+
+  describe('the playhead, as the boundary moves under it', () => {
+    it('follows the middle of the transition to its new length, committed and live', () => {
+      load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      // The audition has taken it to just before the window.
+      expect(store.playheadMs.value).toBe(2900);
+
+      // A second long: b starts at 3000, and the middle is half way through the second.
+      store.setTransitionDuration(1000);
+      expect(store.playheadMs.value).toBe(3500);
+
+      store.beginGesture();
+      store.setTransitionDuration(1500, true);
+      expect(store.playheadMs.value).toBe(3250);
+      store.endGesture('Transition duration');
+      expect(store.playheadMs.value).toBe(3250);
+    });
+
+    it('goes back to the cut when the transition is taken off', () => {
+      load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      store.removeTransition();
+      expect(store.playheadMs.value).toBe(4000);
+    });
+
+    it('follows the boundary along when Apply to all dresses the cuts before it', () => {
+      load();
+      store.openTransition('c');
+      store.chooseTransition('dissolve');
+      store.applyTransitionToAll();
+      // b's transition pulls c in by another 500: c starts at 7000, its window runs to 7500.
+      expect(store.targetBoundary.value?.atMs).toBe(7000);
+      expect(store.playheadMs.value).toBe(7250);
+    });
+
+    it('ends a running audition first, so it cannot park on the old middle later', async () => {
+      load();
+      const calls = attachPlayer();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      expect(store.playing.value).toBe(true);
+
+      store.setTransitionDuration(1000);
+      expect(store.playing.value).toBe(false);
+      expect(calls.slice(-2)).toEqual(['pause', 'seek 3500']);
+
+      // Played on by the customer, past where the audition would have stopped: nothing takes the
+      // playhead back to the 500 ms transition's middle.
+      store.play();
+      store.playheadMs.value = 5000;
+      await Promise.resolve();
+      expect(store.playheadMs.value).toBe(5000);
+      expect(store.playing.value).toBe(true);
+    });
+
+    it('leaves the customer’s own playback where it is', async () => {
+      load();
+      const calls = attachPlayer();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      // The audition runs to its end and parks.
+      store.playheadMs.value = 4500;
+      await Promise.resolve();
+      expect(store.playing.value).toBe(false);
+
+      store.play();
+      store.playheadMs.value = 6000;
+      const seen = calls.length;
+      store.setTransitionDuration(1000);
+      expect(calls.slice(seen)).toEqual([]);
+      expect(store.playheadMs.value).toBe(6000);
+    });
+  });
+
+  describe('a split near a transition', () => {
+    function dissolveIntoB(): void {
+      load();
+      store.openTransition('b');
+      store.chooseTransition('dissolve');
+      store.closePanel();
+    }
+
+    it('puts the playhead on the cut it made inside the window, which the shrunk transition moved', () => {
+      dissolveIntoB();
+      store.seek(3750);
+      store.splitAtPlayhead();
+
+      const [, left, right] = store.manifest.value.clips;
+      // b's first 250 ms holds the transition now, and half of it is 100 ms at the slider's step.
+      expect([left.id, left.inMs, left.outMs]).toEqual(['b', 0, 250]);
+      expect(store.boundaryOf('b')?.effectiveMs).toBe(100);
+      // a runs to 3900, b's short piece to 4150, and the cut just made is there.
+      expect(store.playheadMs.value).toBe(4150);
+      expect(store.previewLayers.value[0].clipId).toBe(right.id);
+      expect(store.selection.value).toEqual({ kind: 'clip', id: right.id });
+    });
+
+    it('does the same for a split just after the window', () => {
+      dissolveIntoB();
+      store.seek(4100);
+      store.splitAtPlayhead();
+
+      const right = store.manifest.value.clips[2];
+      expect(store.boundaryOf('b')?.effectiveMs).toBe(300);
+      expect(store.playheadMs.value).toBe(4300);
+      expect(store.previewLayers.value[0].clipId).toBe(right.id);
+    });
   });
 });

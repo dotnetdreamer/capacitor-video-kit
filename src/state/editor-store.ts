@@ -257,10 +257,21 @@ export class EditorStore {
   private readonly future = signal<HistoryEntry[]>([]);
   private gestureStart: EditManifest | null = null;
   /**
-   * While a group is open, every step after its first folds into the entry the first one made - see
-   * [beginHistoryGroup]. `entry` is that entry's index in [past], or -1 before it exists.
+   * While a group is open, each of the transition sheet's own steps after its first folds into the
+   * entry the first one made - see [beginHistoryGroup]. `entry` is that entry's index in [past], or
+   * -1 before it exists and again once anything else has been recorded on top of it.
    */
   private historyGroup: { entry: number } | null = null;
+  /**
+   * The open gesture is the transition sheet's duration slider, so its end is one of the sheet's
+   * steps and folds with the rest of the visit.
+   *
+   * Marked by [setTransitionDuration] as it previews into the gesture rather than read off the label
+   * the gesture ends with. A gesture the sheet did not start never passes through there, and one it
+   * did start can be closed under another name: [flushGesture] ends a slider still held when a
+   * button is tapped as 'Change', and that is still the sheet's own step.
+   */
+  private gestureInGroup = false;
   readonly canUndo = computed(() => this.past.value.length > 0);
   readonly canRedo = computed(() => this.future.value.length > 0);
   /**
@@ -542,11 +553,20 @@ export class EditorStore {
    * or null (not possible), and neither touches the history. Returns whether anything changed.
    */
   commit(label: string, fn: (m: EditManifest) => EditManifest | null): boolean {
+    return this.commitStep(label, fn, false);
+  }
+
+  /**
+   * [commit], saying whether the step is one of the transition sheet's own - the only kind an open
+   * history group folds (see [pushHistory]). Private, because nothing outside the sheet's own actions
+   * below has any business joining the step the sheet is building.
+   */
+  private commitStep(label: string, fn: (m: EditManifest) => EditManifest | null, grouped: boolean): boolean {
     this.flushGesture();
     const before = this.manifest.value;
     const after = fn(before);
     if (!after || after === before) return false;
-    this.pushHistory(before, label);
+    this.pushHistory(before, label, grouped);
     this.manifest.value = after;
     return true;
   }
@@ -592,19 +612,22 @@ export class EditorStore {
    */
   endGesture(label: string): void {
     const start = this.gestureStart;
+    const grouped = this.gestureInGroup;
     this.gestureStart = null;
+    this.gestureInGroup = false;
     if (!start || start === this.manifest.value) return;
     if (sameValue(start, this.manifest.value)) {
       this.manifest.value = start;
       return;
     }
-    this.pushHistory(start, label);
+    this.pushHistory(start, label, grouped);
   }
 
   /** Throws a gesture away, putting back the manifest it started from. */
   cancelGesture(): void {
     const start = this.gestureStart;
     this.gestureStart = null;
+    this.gestureInGroup = false;
     if (start) this.manifest.value = start;
   }
 
@@ -646,32 +669,43 @@ export class EditorStore {
     return true;
   }
 
-  private pushHistory(manifest: EditManifest, label: string): void {
+  /**
+   * Records one finished step. `grouped` says it is one of the transition sheet's own, and only
+   * those fold into an open group.
+   *
+   * Anything else that lands while the sheet happens to be open - the mute on the timeline tapped,
+   * a clip added - is a step of its own. Folded, one undo of "Transition" took it back as well,
+   * without a word about it. Such a step also ends the folding, so the sheet's next step starts an
+   * entry of its own above it and undo keeps to the order things were done in.
+   */
+  private pushHistory(manifest: EditManifest, label: string, grouped = false): void {
     const group = this.historyGroup;
     // Folded into the group's entry when that entry is still the newest step: the manifest it holds
     // is the one from before the group began, which is exactly what one undo of the whole group has
     // to put back. The revision still moves, so a host filing drafts sees every change.
-    if (group && group.entry >= 0 && group.entry === this.past.value.length - 1 && this.future.value.length === 0) {
+    if (grouped && group && group.entry >= 0 && group.entry === this.past.value.length - 1 && this.future.value.length === 0) {
       this.revision.value++;
       return;
     }
     this.past.value = [...this.past.value, { manifest, label }].slice(-HISTORY_LIMIT);
     this.future.value = [];
     this.revision.value++;
-    if (group) group.entry = this.past.value.length - 1;
+    if (group) group.entry = grouped ? this.past.value.length - 1 : -1;
   }
 
   /**
-   * Opens a history GROUP: every step committed until [endHistoryGroup] lands as ONE undo step, the
-   * label being the first step's.
+   * Opens a history GROUP: every step the transition sheet itself takes until [endHistoryGroup] -
+   * a tile, None, the duration - lands as ONE undo step, the label being the first step's.
    *
    * For a sheet a customer browses rather than uses once. Ten transitions tried one after another
    * before settling on one are one decision, and ten undo steps to get back past them would make
    * undo the least useful button on the screen. A gesture cannot do this job: the sheet's slider
    * opens and closes its own, and a gesture never outlives one.
    *
-   * An undo or redo inside the group ends the folding - the entry it folded into is no longer the
-   * newest - so the next change after one starts an entry of its own, as it should.
+   * Only the sheet's steps fold (see [pushHistory]); anything else recorded while it is open is a
+   * step of its own and ends the folding. So does an undo or redo inside the group - the entry it
+   * folded into is no longer the newest - and in both cases the next change the sheet makes starts
+   * an entry of its own, as it should.
    */
   beginHistoryGroup(): void {
     this.flushGesture();
@@ -827,23 +861,27 @@ export class EditorStore {
     }
     const wanted = boundary.transition?.durationMs ?? this.lastTransitionMs.value;
     const durationMs = Math.max(MIN_TRANSITION_MS, Math.min(wanted, boundary.maxMs));
-    this.commit('Transition', m => setClipTransition(m, boundary.clipId, { kind, durationMs }));
+    this.commitStep('Transition', m => setClipTransition(m, boundary.clipId, { kind, durationMs }), true);
     this.haptic('selection');
     this.auditionTransition();
   }
 
-  /** None: the boundary goes back to a cut. */
+  /** None: the boundary goes back to a cut, and the preview to the cut. */
   removeTransition(): void {
     const boundary = this.targetBoundary.value;
     if (!boundary?.transition) return;
     this.endAudition();
-    this.commit('Transition', m => setClipTransition(m, boundary.clipId, null));
+    this.commitStep('Transition', m => setClipTransition(m, boundary.clipId, null), true);
     this.haptic('selection');
+    this.parkOnBoundary();
   }
 
   /**
    * The duration slider. Live while it is dragged (the slider wraps the drag in a gesture), one step
    * otherwise. Held to what the two clips can take, which is the slider's own end as well.
+   *
+   * The preview follows the transition's middle as it moves: a longer transition starts the incoming
+   * clip earlier, so the moment the sheet is about slides along under a playhead left where it was.
    */
   setTransitionDuration(durationMs: number, live = false): void {
     const boundary = this.targetBoundary.value;
@@ -852,28 +890,59 @@ export class EditorStore {
     const ms = Math.round(Math.max(MIN_TRANSITION_MS, Math.min(boundary.maxMs, durationMs)));
     this.lastTransitionMs.value = ms;
     const fn = (m: EditManifest): EditManifest => setClipTransition(m, boundary.clipId, { kind: current.kind, durationMs: ms });
-    if (live) this.preview(fn);
-    else this.commit('Transition', fn);
+    if (live) {
+      this.preview(fn);
+      // After the preview, which is what opens the gesture when the slider has not already.
+      this.gestureInGroup = true;
+    } else if (!this.commitStep('Transition', fn, true)) {
+      return;
+    }
+    this.parkOnBoundary();
   }
 
   /**
    * The boundary's transition - or its cut - on every boundary of the base track, as a step of its
    * own rather than folded into the rest of the sheet: it changes clips the customer was not looking
-   * at, and undo should be able to take back exactly that.
+   * at, and undo should be able to take back exactly that. An ordinary [commit] is exactly that, and
+   * it also ends the sheet's folding, so what is tried in the sheet afterwards is a step above it.
+   *
+   * Every boundary before the target that it dresses or undresses moves the target along the
+   * timeline, so the preview is put back on it afterwards.
    */
   applyTransitionToAll(): void {
     const boundary = this.targetBoundary.value;
     if (!boundary) return;
     const transition = boundary.transition;
-    if (this.historyGroup) this.historyGroup.entry = -1;
     const changed = this.commit(transition ? 'Transition for all' : 'Remove transitions', m => setAllTransitions(m, transition));
-    if (this.historyGroup) this.historyGroup.entry = -1;
     if (changed) {
       this.showToast(transition ? 'Transition applied to all clips' : 'Transitions removed from all clips');
       this.haptic('success');
+      this.parkOnBoundary();
     } else {
       this.showToast(transition ? 'All clips already have this transition' : 'No clip has a transition');
     }
+  }
+
+  /**
+   * Puts the preview back on the target boundary after a change that moved it: the middle of its
+   * transition, or the cut itself when it has none - where [openTransition] put it to begin with.
+   *
+   * A new duration, None and Apply to all each re-time the base track. The incoming clip starts
+   * earlier or later by however much the overlap changed, and every boundary after one that was
+   * dressed moves with it, while the playhead stays where it was: on a frame of one clip alone,
+   * as often as not, nowhere near the transition the sheet is showing.
+   *
+   * An audition still running is ended first rather than argued with. Left alone it plays on to the
+   * end of the OLD window and then parks on the old middle, undoing this a second later. The
+   * customer's own playback is left alone: a playhead they set moving is not the sheet's to take.
+   */
+  private parkOnBoundary(): void {
+    const auditioning = this.stopAudition !== null;
+    this.endAudition();
+    if (auditioning) this.pause();
+    else if (this.playing.value) return;
+    const boundary = this.targetBoundary.value;
+    if (boundary) this.seek(boundary.atMs + boundary.effectiveMs / 2);
   }
 
   /**
@@ -960,6 +1029,13 @@ export class EditorStore {
       this.haptic('warning');
       return;
     }
+    // Onto the cut just made, the start of the right-hand piece. With no transition near, that is
+    // where the playhead already is. A split inside a transition, or just after one, leaves a short
+    // left piece that holds the transition into it, and a transition is held to half of either
+    // clip, so it shrinks: the track re-times, the new cut moves later, and a playhead left where it
+    // was is in the OUTGOING clip, a clip away from the cut the customer is looking for.
+    const right = this.slots.value.find(slot => slot.clip.id === newId);
+    if (right) this.seek(right.startMs);
     this.select({ kind: 'clip', id: newId });
     this.haptic('light');
     // Two halves can be carried past each other, but only a long press lifts one and nothing on the
