@@ -16,7 +16,7 @@
 
 /** Bumped only to ADD a store. Anything else would need a migration, and there is nothing to migrate. */
 const DB_VERSION = 2;
-const DB_NAME = '@capacitor-video-kit/core';
+const DB_NAME = 'capacitor-video-kit';
 
 /** Durable bytes: rendered videos, posters, and every file an upload still has to send. */
 export const FILES_STORE = 'files';

@@ -1,5 +1,5 @@
 {
-  "name": "@capacitor-video-kit/core",
+  "name": "capacitor-video-kit",
   "version": "1.3.0",
   "description": "Native video composition and native background publishing for Capacitor, and the editor that drives them as framework free web components: edit and encode on the device, then upload in a way that survives the app being killed.",
   "license": "UNLICENSED",
@@ -17,6 +17,16 @@
   ],
   "exports": {
     ".": {
+      "import": {
+        "types": "./plugin/esm/plugin.d.ts",
+        "default": "./plugin/esm/plugin.js"
+      },
+      "require": {
+        "types": "./plugin/cjs/plugin.d.ts",
+        "default": "./plugin/cjs/plugin.js"
+      }
+    },
+    "./core": {
       "import": {
         "types": "./plugin/esm/plugin.d.ts",
         "default": "./plugin/esm/plugin.js"
@@ -147,7 +157,7 @@
     "@types/node": "^22.13.5",
     "@vitest/browser-playwright": "^4.0.0",
     "capacitor-core-build": "npm:@capacitor/core@^8.0.2",
-    "@capacitor-video-kit/core": "file:.",
+    "capacitor-video-kit": "file:.",
     "playwright": "^1.52.0",
     "rimraf": "^6.0.1",
     "typescript": "~5.9.3",

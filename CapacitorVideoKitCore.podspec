@@ -6,7 +6,7 @@ Pod::Spec.new do |s|
   # The name is not a choice. The Capacitor CLI writes `pod 'CapacitorVideoKitCore', :path => ...` into
   # the host's Podfile from the npm package name - dropping the `@`, treating every `/` and `-` as a
   # word break and uppercasing what follows one (`fixName` in @capacitor/cli) - and CocoaPods then
-  # looks for a podspec of exactly that name at the package root. `@capacitor-video-kit/core` gives
+  # looks for a podspec of exactly that name at the package root. `capacitor-video-kit` gives
   # `CapacitorVideoKitCore`, the scope's `/core` being what puts `Core` on the end.
   s.name = 'CapacitorVideoKitCore'
   s.version = package['version']

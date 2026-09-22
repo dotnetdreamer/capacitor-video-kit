@@ -1,16 +1,11 @@
-import { signal } from '@preact/signals-core';
-import {
-  MAX_LAYERS,
-  MAX_VIDEO_TRACKS,
-  defaultClipEdit,
-  insertClip,
-  replaceClipSource,
-} from '../editor';
+import { effect, signal } from '@preact/signals-core';
+import { MAX_LAYERS, MAX_VIDEO_TRACKS, defaultClipEdit, insertClip, replaceClipSource } from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
+import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
-import type { Filmstrip } from './editor.types';
+import { clipWaveKey, type Filmstrip } from './editor.types';
 
 /** One filmstrip frame per second of source, the TikTok density at the default zoom. */
 const FILMSTRIP_STEP_MS = 1000;
@@ -31,6 +26,9 @@ const FILMSTRIP_MAX_HEIGHT = 160;
  * Only the first cut of a clip pays either way, where the host caches its frames.
  */
 const PRECISE_FILMSTRIP_MAX_FRAMES = 6;
+
+/** How long one file may hold the waveform queue before it is given up on. */
+const WAVEFORM_TIMEOUT_MS = 60_000;
 
 /**
  * Everything in the editor that asks the host for media: the pickers, the duration probe and the
@@ -79,16 +77,65 @@ export class EditorMedia {
   /** Filmstrips are cut one clip at a time: each batch holds a hardware decoder the preview needs. */
   private filmstripQueue: Promise<void> = Promise.resolve();
   private readonly filmstripsPending = new Map<string, Promise<void>>();
+  /** Waveforms too, and for the same reason: decoding a track is a decoder the preview wants back. */
+  private waveformQueue: Promise<void> = Promise.resolve();
+  private readonly waveformsPending = new Map<string, Promise<void>>();
+  private stopWatchingAudio: (() => void) | null = null;
   private destroyed = false;
 
   constructor(
     private readonly store: EditorStore,
     private readonly host: ResolvedEditorHost,
-  ) {}
+    /**
+     * How a file is measured. A parameter only so the unit tests can supply their own: the real
+     * one needs Web Audio, which the mock DOM they run in does not have.
+     */
+    private readonly measure: typeof extractPeaks = extractPeaks,
+  ) {
+    /*
+     * Waveforms follow the MANIFEST rather than being asked for at each place a sound can arrive.
+     *
+     * There are four such places - the picker, the sound library, a draft being reopened, and a
+     * voiceover take finishing - and a fifth that has no call site at all: an undo that brings a
+     * removed sound back. Watching the manifest covers all five in one subscription, and it is
+     * exact, because the manifest is the only thing that decides which audio the post has.
+     */
+    this.stopWatchingAudio = effect(() => {
+      const manifest = this.store.manifest.value;
+      // Each with its length, so a track too long to decode can be turned down before it is read.
+      const audio: { uri: string; key: string; durationMs: number }[] = manifest.music
+        ? [{ uri: manifest.music.uri, key: manifest.music.uri, durationMs: manifest.music.sourceDurationMs }]
+        : [];
+      for (const take of manifest.voiceovers) audio.push({ uri: take.uri, key: take.uri, durationMs: take.durationMs });
+
+      /*
+       * Every video the post uses, for the sound inside it.
+       *
+       * Read off `clips` rather than off the manifest, because the manifest names sources by key
+       * and the file behind a key is the host's business. A source with neither a playable URL nor
+       * a path is one nothing can open, and is simply left alone.
+       *
+       * Filed under a name of its own, so a source key can never be mistaken for an audio URI.
+       */
+      for (const source of this.store.clips.value) {
+        const url = source.playbackUrl || (source.sourcePath ? this.host.platform.fileUrl(source.sourcePath) : '');
+        if (url) audio.push({ uri: url, key: clipWaveKey(source.key), durationMs: this.store.sourceDurationMs(source.key) });
+      }
+      /*
+       * Read inside the effect, which subscribes it: a measurement landing wakes this again, and
+       * the file it recorded is then skipped. That is the whole job of the read - what keeps two
+       * decodes from overlapping is `waveformQueue`, not this.
+       */
+      const known = this.store.waveforms.value;
+      for (const { uri, key, durationMs } of audio) if (uri && !known.has(key)) void this.loadWaveform(uri, durationMs, key);
+    });
+  }
 
   /** Called by the shell when the editor leaves the document. */
   dispose(): void {
     this.destroyed = true;
+    this.stopWatchingAudio?.();
+    this.stopWatchingAudio = null;
   }
 
   /* ========================================================================================= */
@@ -153,6 +200,31 @@ export class EditorMedia {
     return job;
   }
 
+  /**
+   * Measures one audio file into `store.waveforms`, queued behind any file already being measured.
+   * Asking twice for the same URI joins the first request.
+   *
+   * Called for you when the manifest changes, which is every way a sound can arrive; it is public
+   * because a host that knows a track is coming can warm it, and because the tests drive it.
+   */
+  loadWaveform(uri: string, sourceDurationMs = 0, key: string = uri): Promise<void> {
+    const pending = this.waveformsPending.get(key);
+    if (pending) return pending;
+    if (this.store.waveforms.value.has(key)) return Promise.resolve();
+
+    const job = this.waveformQueue
+      .then(() => this.cutWaveform(uri, sourceDurationMs, key))
+      .catch((error: unknown) => {
+        // Caught here rather than left to the queue, so one file that will not decode cannot stop
+        // every file after it from being measured.
+        debugWarn('[EditorMedia] waveform failed', uri, error);
+      })
+      .finally(() => this.waveformsPending.delete(key));
+    this.waveformsPending.set(key, job);
+    this.waveformQueue = job;
+    return job;
+  }
+
   /** Adds one more video straight after the selected segment, or at the end. */
   async addClip(): Promise<void> {
     // A second picker while the first result is still being read would commit into a manifest
@@ -173,9 +245,7 @@ export class EditorMedia {
       this.store.clips.value = [...this.store.clips.value, source];
       const segmentId = this.store.newId('seg');
       const afterId = this.store.selectedClip.value?.id ?? null;
-      const added = this.store.commit('Add clip', (m) =>
-        insertClip(m, defaultClipEdit(source.key, durationMs, segmentId), afterId),
-      );
+      const added = this.store.commit('Add clip', m => insertClip(m, defaultClipEdit(source.key, durationMs, segmentId), afterId));
       if (added) {
         this.store.select({ kind: 'clip', id: segmentId });
         this.store.haptic('light');
@@ -249,9 +319,7 @@ export class EditorMedia {
       this.landOpenTextEdit();
       this.store.clips.value = [...this.store.clips.value, source];
       // The segment is looked up again by id: it may have been deleted while the picker was open.
-      const replaced = this.store.commit('Replace', (m) =>
-        replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength),
-      );
+      const replaced = this.store.commit('Replace', m => replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength));
       if (!replaced) {
         this.dropUnusedSource(source);
         return;
@@ -382,7 +450,7 @@ export class EditorMedia {
       // Ahead of the reload, so the new sound is in the list the moment the sheet repaints rather
       // than after a round trip to the library. Newest first, like the library's own order.
       const sound = saved;
-      this.sounds.value = [sound, ...this.sounds.value.filter((one) => one.id !== sound.id)];
+      this.sounds.value = [sound, ...this.sounds.value.filter(one => one.id !== sound.id)];
       this.landOpenTextEdit();
       this.useTrack(sound.uri, sound.fileName || 'Sound', sound.durationMs);
       void this.loadSounds();
@@ -405,7 +473,7 @@ export class EditorMedia {
     const library = this.host.media.sounds;
     if (!library) return;
     const before = this.sounds.value;
-    this.sounds.value = before.filter((sound) => sound.id !== id);
+    this.sounds.value = before.filter(sound => sound.id !== id);
     try {
       await library.remove(id);
     } catch (error) {
@@ -524,7 +592,7 @@ export class EditorMedia {
    * revoke at all.
    */
   private dropUnusedSource(source: EditorSource): void {
-    this.store.clips.value = this.store.clips.value.filter((clip) => clip !== source);
+    this.store.clips.value = this.store.clips.value.filter(clip => clip !== source);
   }
 
   private async cutFilmstrip(source: EditorSource): Promise<void> {
@@ -533,10 +601,7 @@ export class EditorMedia {
 
     // Frames sit at whole multiples of the step so a host that caches them by time hands the same
     // strip back when the editor is opened again.
-    const stepMs =
-      durationMs > FILMSTRIP_STEP_MS * FILMSTRIP_MAX_FRAMES
-        ? Math.ceil(durationMs / FILMSTRIP_MAX_FRAMES)
-        : FILMSTRIP_STEP_MS;
+    const stepMs = durationMs > FILMSTRIP_STEP_MS * FILMSTRIP_MAX_FRAMES ? Math.ceil(durationMs / FILMSTRIP_MAX_FRAMES) : FILMSTRIP_STEP_MS;
     const count = Math.max(1, Math.min(FILMSTRIP_MAX_FRAMES, Math.ceil(durationMs / stepMs)));
     const timesMs = Array.from({ length: count }, (_, i) => i * stepMs);
 
@@ -567,5 +632,54 @@ export class EditorMedia {
     if (!strip || this.destroyed) return;
 
     this.store.filmstrips.value = new Map(this.store.filmstrips.value).set(source.key, strip);
+  }
+
+  /**
+   * Reads one audio file and writes what it found - or `null` - into `store.waveforms`.
+   *
+   * `null` is recorded rather than nothing, and that is the point of the method: a file this
+   * WebView cannot decode must be remembered as such, or the manifest watcher would ask for it
+   * again on the very next edit and the editor would spend the rest of the session retrying a
+   * decode that has already failed.
+   *
+   * The URL goes through `platform.fileUrl` first. On this package's own browser host that is the
+   * identity function and costs nothing, but a native host hands out URIs that only it can turn
+   * into something fetchable.
+   */
+  private async cutWaveform(uri: string, sourceDurationMs: number, key: string): Promise<void> {
+    if (this.destroyed) return;
+
+    let peaks: Peaks | null = null;
+    try {
+      /*
+       * Raced against a clock, because everything else waits behind this one.
+       *
+       * `decodeAudioData` has no timeout of its own, and a file that never settles would leave
+       * `waveformQueue` pointing at a promise that never resolves - no track measured again for
+       * the rest of the session, and nothing to say why. A minute is far longer than any file
+       * inside [MAX_SOURCE_MS] needs and short enough that a stuck one does not cost the session.
+       */
+      peaks = await Promise.race([
+        this.measure(this.host.platform.fileUrl(uri), undefined, sourceDurationMs),
+        new Promise<null>(done => setTimeout(() => done(null), WAVEFORM_TIMEOUT_MS)),
+      ]);
+      if (!peaks) debugWarn('[EditorMedia] nothing to draw for', uri);
+    } catch (error) {
+      /*
+       * A THROW has to be recorded too, and that is the whole reason for this try.
+       *
+       * `extractPeaks` answers null rather than throwing, but `platform.fileUrl` is the host's own
+       * code and a native one can refuse a URI it did not expect. Letting that escape would leave
+       * no entry in the map - and the manifest watcher runs on every write of the manifest, which
+       * during a gesture is every frame, so one refused URI would start a decode thirty times a
+       * second for the rest of the session.
+       */
+      debugWarn('[EditorMedia] waveform failed', uri, error);
+    }
+
+    // Checked again on the way out: measuring is slow enough for the editor to have been closed,
+    // or for this very track to have been replaced, while it was happening.
+    if (this.destroyed) return;
+    this.store.waveforms.value = new Map(this.store.waveforms.value).set(key, peaks);
   }
 }

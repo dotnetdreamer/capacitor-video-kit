@@ -75,6 +75,7 @@ import {
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
+import type { Peaks } from '../web-runtime/waveform';
 import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './editor.types';
 
 interface HistoryEntry {
@@ -120,7 +121,7 @@ export interface PreviewVideoLayer {
  *    handle, a slider, a pinch). The manifest follows the finger live, and the whole gesture lands
  *    as ONE undo step when it ends - or none, if nothing actually changed.
  *
- * Every manifest change is a pure function from `@capacitor-video-kit/core`'s edit ops, so snapshots are
+ * Every manifest change is a pure function from `capacitor-video-kit`'s edit ops, so snapshots are
  * shared by reference and undo is just putting an older object back.
  *
  * The high-level actions (`splitAtPlayhead`, `deleteSelection`, ...) live here rather than in the
@@ -162,6 +163,23 @@ export class EditorStore {
   readonly unreadable = signal<ReadonlySet<string>>(new Set());
   /** Filmstrip frames per clip key, filled in as they are cut. */
   readonly filmstrips = signal<ReadonlyMap<string, Filmstrip>>(new Map());
+  /**
+   * Peak amplitudes per audio URI - the music track and every voiceover take - as they are measured.
+   *
+   * Three states, and the timeline draws each of them differently. No entry is "not measured yet"
+   * and keeps the plain bar; a [Peaks] is a picture; `null` is "measured, and there is nothing to
+   * draw" - a codec this WebView has no decoder for, a file too big to decode, a browser with no
+   * Web Audio - which also keeps the plain bar, and stops anything trying again.
+   *
+   * Keyed by URI rather than by clip key, because audio has no `EditorSource`: a track arrives from
+   * the picker, from the sound library or from a saved draft, and the URI is the only name all
+   * three share.
+   *
+   * Never pruned, deliberately. A measurement is 100 bytes per second of audio, so ten tracks
+   * auditioned and discarded is well under a megabyte - and keeping them is what lets an undo that
+   * brings a removed sound back show its picture at once instead of decoding it a second time.
+   */
+  readonly waveforms = signal<ReadonlyMap<string, Peaks | null>>(new Map());
   readonly maxClips = signal(10);
 
   /* -- the edit ---------------------------------------------------------------------------- */

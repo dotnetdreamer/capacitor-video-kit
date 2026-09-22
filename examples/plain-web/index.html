@@ -3,23 +3,23 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>@capacitor-video-kit/core in a plain page</title>
+    <title>capacitor-video-kit in a plain page</title>
     <link rel="stylesheet" href="./example.css" />
 
     <!--
       No bundler, so the import map is what resolves a bare specifier, and it names real files
       rather than the package's exports map, which only a bundler or Node reads. Both entries below
-      are the paths that map would have given: `@capacitor-video-kit/core/dist/components/*.js` is a public
+      are the paths that map would have given: `capacitor-video-kit/dist/components/*.js` is a public
       subpath of this package, and the signals library is its one runtime import.
 
-      Everything the page needs comes out of `dist/components`, on purpose. `@capacitor-video-kit/core/ui`
+      Everything the page needs comes out of `dist/components`, on purpose. `capacitor-video-kit/ui`
       is the same code compiled a second time for bundlers, and a page that imported the editor
       from one and `setEditorAssetPath` from the other would download both.
     -->
     <script type="importmap">
       {
         "imports": {
-          "@capacitor-video-kit/core/": "/node_modules/@capacitor-video-kit/core/",
+          "capacitor-video-kit/": "/node_modules/capacitor-video-kit/",
           "@preact/signals-core": "/node_modules/@preact/signals-core/dist/signals-core.mjs"
         }
       }

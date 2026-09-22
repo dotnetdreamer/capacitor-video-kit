@@ -1,5 +1,5 @@
 /**
- * `@capacitor-video-kit/core/ui`: the editor's public surface, everything in it that is not a component.
+ * `capacitor-video-kit/ui`: the editor's public surface, everything in it that is not a component.
  *
  * It is a subpath rather than the package root because the root is the Capacitor plugin, which a
  * React or Vue host never wants and which imports `@capacitor/core` statically. Nothing here does.
@@ -8,8 +8,8 @@
  * for two events; everything else in this package is something that element renders.
  *
  * ```ts
- * import { installEditorFonts, setEditorAssetPath } from '@capacitor-video-kit/core/ui';
- * import { defineCustomElement } from '@capacitor-video-kit/core/dist/components/ve-editor.js';
+ * import { installEditorFonts, setEditorAssetPath } from 'capacitor-video-kit/ui';
+ * import { defineCustomElement } from 'capacitor-video-kit/dist/components/ve-editor.js';
  *
  * defineCustomElement();                 // ve-editor, and with it the other twenty tags
  * setEditorAssetPath('/video-editor/');  // where this package's `assets` directory is served
@@ -28,7 +28,7 @@
  * Defining that one tag is all the registration there is: under `dist-custom-elements` a
  * component's generated `defineCustomElement` also defines every tag it renders, transitively. A
  * React, Vue or Angular host uses the wrapper for its framework instead, and a page with no build
- * step uses `@capacitor-video-kit/core/loader`.
+ * step uses `capacitor-video-kit/loader`.
  *
  * The component classes themselves are deliberately not exported from here, because those three
  * doors are what a host actually uses and a fourth one that needs `@stencil/core` at the call site
@@ -39,7 +39,7 @@
  * a result, the editor's own state for a host that wants to drive it from outside, the catalogues
  * the sheets are built from, and the two functions that have to run before the editor renders. The
  * manifest itself - `EditManifest` and the edit operations over it - is the contract the Swift and
- * Kotlin engines are written against, so it lives at `@capacitor-video-kit/core` and `@capacitor-video-kit/core/editor`
+ * Kotlin engines are written against, so it lives at `capacitor-video-kit` and `capacitor-video-kit/editor`
  * rather than here.
  */
 

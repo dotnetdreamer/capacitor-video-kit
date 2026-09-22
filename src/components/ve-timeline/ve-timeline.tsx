@@ -15,6 +15,7 @@ import {
   findVideoTrack,
   moveLayerTo,
   musicSectionMs,
+  musicSourceMsAt,
   musicWindow,
   overlayEndMs,
   timelineSlots,
@@ -25,7 +26,7 @@ import {
   type OverlayKind,
 } from '../../editor';
 import { computedWith } from '../../state/computed-with';
-import type { EditorSelection } from '../../state/editor.types';
+import { clipWaveKey, type EditorSelection } from '../../state/editor.types';
 import {
   musicEndTrim,
   musicStartTrim,
@@ -65,6 +66,10 @@ import {
   type DropRow,
   type FilmTile,
 } from './timeline-geometry';
+import { WAVE_VIEW_H, waveView, type WaveSource, type WaveView } from './timeline-waveform';
+
+/** Shared, so a timeline with no voiceover hands back the same empty map every time it is asked. */
+const EMPTY_WAVES: ReadonlyMap<string, WaveView> = new Map();
 
 /** Movement that turns a press into a scroll or a drag, and cancels a long press. */
 const MOVE_SLOP_PX = 8;
@@ -635,6 +640,241 @@ export class VeTimeline {
     },
     (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.selected === y.selected),
   );
+
+  /*
+   * ------------------------------------------------------------------------------------------
+   * The waveforms.
+   *
+   * Each is a pair: a KEY that is cheap to compute and a PICTURE that is not. The key is a plain
+   * string, so a computed holding one only wakes its dependents when the string actually changes -
+   * and the picture, which depends on nothing else, is simply not rebuilt on the frames where it
+   * would come out the same.
+   *
+   * That split is load-bearing rather than tidy. The timeline re-renders on every frame of every
+   * gesture anywhere in the editor - a pinch on a sticker, an opacity drag, the playhead during a
+   * voiceover - and `computedWith` cannot help here the way it helps the tile arrays, because it
+   * runs its body first and compares afterwards. Building a few hundred bars and a path string to
+   * discover they were identical is exactly the work worth not doing.
+   * ------------------------------------------------------------------------------------------
+   */
+
+  private readonly musicWaveKey = computed<string | null>(() => {
+    const store = this.ctx.store;
+    const music = store.manifest.value.music;
+    const lane = this.musicLane.value;
+    if (!music || !lane) return null;
+    // Absent is "not measured yet" and null is "nothing to draw"; neither is a picture.
+    const wave = store.waveforms.value.get(music.uri);
+    if (!wave) return null;
+    const win = this.renderWindow.value;
+    return [
+      music.uri,
+      music.inMs,
+      music.outMs,
+      music.startMs,
+      music.loop ? 1 : 0,
+      music.sourceDurationMs,
+      store.totalMs.value,
+      store.pps.value,
+      // Everything the build reads off the measurement, so a key can never outlive its picture.
+      wave.peaks.length,
+      wave.max,
+      wave.durationMs,
+      Math.round(this.pad.value),
+      Math.round(win.left),
+      Math.round(win.right),
+      Math.round(lane.x),
+      Math.round(lane.w),
+    ].join('|');
+  });
+
+  private readonly musicWave = computed<WaveView | null>(() => {
+    if (this.musicWaveKey.value === null) return null;
+    // Untracked because the key above already names every input: subscribing again here would
+    // undo the memo by waking this computed on signals the key has decided do not matter.
+    return untracked(() => {
+      const store = this.ctx.store;
+      const music = store.manifest.value.music;
+      const lane = this.musicLane.value;
+      const wave = music && store.waveforms.value.get(music.uri);
+      if (!music || !lane || !wave) return null;
+
+      const totalMs = store.totalMs.value;
+      const section = musicSectionMs(music);
+      const win = this.renderWindow.value;
+      const { startMs, endMs } = musicWindow(music, totalMs);
+      const heardMs = Math.max(0, endMs - startMs);
+      const repeats = music.loop && section > 0;
+      const source: WaveSource = {
+        at: outputMs => musicSourceMsAt(music, outputMs, totalMs),
+        /*
+         * Where the sound actually stops, which is rarely where the trim does.
+         *
+         * A track longer than the post is cut off by the post; a repeating one is cut off partway
+         * through whichever pass the post ends in, so the last bar reads to that point inside the
+         * section and not to the section's end. `heardMs % section` of 0 means the post ended
+         * exactly on a join, and the pass that finished there ran the whole way.
+         */
+        endsAtMs: music.inMs + (repeats ? heardMs % section || section : heardMs),
+        // A track that repeats shows the same stretch of itself several times over, and the bar
+        // that straddles the join hears the end of one pass and the start of the next.
+        repeat: repeats ? { fromMs: music.inMs, toMs: music.inMs + section } : null,
+      };
+      return waveView({
+        wave,
+        source,
+        pps: store.pps.value,
+        itemStartMs: startMs,
+        itemX: lane.x,
+        itemW: lane.w,
+        winLeft: win.left,
+        winRight: win.right,
+      });
+    });
+  });
+
+  private readonly clipWaveKeySig = computed<string | null>(() => {
+    const store = this.ctx.store;
+    const slots = store.slots.value;
+    if (!slots.length) return null;
+    const waves = store.waveforms.value;
+    const win = this.renderWindow.value;
+    const parts: (string | number)[] = [store.pps.value, Math.round(this.pad.value), Math.round(win.left), Math.round(win.right)];
+    // The speaker on the video row turns EVERY clip's own sound off in one go.
+    parts.push(store.manifest.value.originalMuted ? 'muted' : 'heard');
+    const shift = this.trimShift.value;
+    parts.push(shift ? `${shift.trackId}/${shift.index}/${Math.round(shift.px)}` : '');
+    for (const slot of slots) {
+      const clip = slot.clip;
+      const wave = waves.get(clipWaveKey(clip.clipKey));
+      /*
+       * `muted` and `volume` are in the key because they decide whether there is a picture at all.
+       * A clip whose sound is turned off is a clip with nothing to draw, and the moment the
+       * customer turns it back up the bars have to come back - which they only can if the key
+       * they are memoised against noticed the difference.
+       */
+      parts.push(
+        clip.id,
+        clip.clipKey,
+        clip.inMs,
+        clip.outMs,
+        clip.speed,
+        clip.muted ? 1 : 0,
+        clip.volume,
+        slot.startMs,
+        slot.durationMs,
+        wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '',
+      );
+    }
+    return parts.join('|');
+  });
+
+  /** One picture per segment, by segment id. A clip with its sound off has no entry at all. */
+  private readonly clipWaves = computed<ReadonlyMap<string, WaveView>>(() => {
+    if (this.clipWaveKeySig.value === null) return EMPTY_WAVES;
+    return untracked(() => {
+      const store = this.ctx.store;
+      const waves = store.waveforms.value;
+      const win = this.renderWindow.value;
+      const pps = store.pps.value;
+      const pad = this.pad.value;
+      const shift = this.trimShift.value;
+      /*
+       * Silenced means no picture, and there are two ways to silence a clip.
+       *
+       * `originalMuted` is the speaker beside the video row and turns the lot off at once;
+       * `muted`/`volume` are this one clip's own, which the Volume sheet sets together - turning a
+       * clip down to zero mutes it in the same write. Either way there is nothing left to draw.
+       */
+      if (store.manifest.value.originalMuted) return EMPTY_WAVES;
+
+      const built = new Map<string, WaveView>();
+      this.ctx.store.slots.value.forEach((slot, i) => {
+        const clip = slot.clip;
+        if (clip.muted || clip.volume <= 0) return;
+        const wave = waves.get(clipWaveKey(clip.clipKey));
+        if (!wave) return;
+
+        const speed = clip.speed || 1;
+        const nudge = shift && shift.trackId === null && i >= shift.index ? shift.px : 0;
+        const view = waveView({
+          wave,
+          source: {
+            /*
+             * Output time into the SOURCE, through the trim and the speed together. A clip at 2x
+             * covers twice as much of the file per second on the screen, which is exactly what the
+             * filmstrip's own tiles do - the picture and the sound have to agree about where in
+             * the file they are.
+             */
+            at: outputMs => {
+              const into = (outputMs - slot.startMs) * speed;
+              return into >= 0 && clip.inMs + into < clip.outMs ? clip.inMs + into : null;
+            },
+            endsAtMs: clip.outMs,
+            repeat: null,
+          },
+          pps,
+          itemStartMs: slot.startMs,
+          itemX: pad + (slot.startMs / 1000) * pps + nudge,
+          itemW: Math.max(2, (slot.durationMs / 1000) * pps),
+          winLeft: win.left,
+          winRight: win.right,
+        });
+        if (view) built.set(clip.id, view);
+      });
+      return built;
+    });
+  });
+
+  private readonly voiceWaveKey = computed<string | null>(() => {
+    const store = this.ctx.store;
+    const lanes = this.voiceLane.value;
+    if (!lanes.length) return null;
+    const takes = store.manifest.value.voiceovers;
+    const waves = store.waveforms.value;
+    const win = this.renderWindow.value;
+    const parts: (string | number)[] = [store.pps.value, Math.round(this.pad.value), Math.round(win.left), Math.round(win.right)];
+    for (const take of takes) {
+      const wave = waves.get(take.uri);
+      // The URI as well as the id: a take re-recorded in place keeps both its id and its length,
+      // and a key that could not tell the two files apart would leave the old picture on screen.
+      parts.push(take.id, take.uri, take.startMs, take.durationMs, wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '');
+    }
+    for (const lane of lanes) parts.push(Math.round(lane.x), Math.round(lane.w));
+    return parts.join('|');
+  });
+
+  /** One picture per take, by take id. A take still being measured simply has no entry. */
+  private readonly voiceWaves = computed<ReadonlyMap<string, WaveView>>(() => {
+    if (this.voiceWaveKey.value === null) return EMPTY_WAVES;
+    return untracked(() => {
+      const store = this.ctx.store;
+      const waves = store.waveforms.value;
+      const win = this.renderWindow.value;
+      const pps = store.pps.value;
+      const byId = new Map(this.voiceLane.value.map(lane => [lane.id, lane] as const));
+
+      const built = new Map<string, WaveView>();
+      for (const take of store.manifest.value.voiceovers) {
+        const lane = byId.get(take.id);
+        const wave = waves.get(take.uri);
+        if (!lane || !wave) continue;
+        // A take is a plain stretch of a recording laid down once: no trim, no repeat, so output
+        // time and source time differ only by where the take starts.
+        const source: WaveSource = {
+          at: outputMs => {
+            const into = outputMs - take.startMs;
+            return into >= 0 && into < take.durationMs ? into : null;
+          },
+          endsAtMs: take.durationMs,
+          repeat: null,
+        };
+        const view = waveView({ wave, source, pps, itemStartMs: take.startMs, itemX: lane.x, itemW: lane.w, winLeft: win.left, winRight: win.right });
+        if (view) built.set(take.id, view);
+      }
+      return built;
+    });
+  });
 
   /** The take being recorded, growing from where it started to the playhead. */
   private readonly recording = computed(() => {
@@ -2543,6 +2783,35 @@ export class VeTimeline {
     );
   }
 
+  /**
+   * The sound inside a video, along the foot of its own filmstrip.
+   *
+   * A band rather than the full height the audio lanes use: the picture is what a customer reads a
+   * video segment by, and a wave drawn over all of it would be competing with the thing it is
+   * meant to annotate. Nothing at all when the clip is muted or turned to zero - see `clipWaves`.
+   *
+   * No clip wrapper of its own: `.seg__frames` is already `overflow: hidden` with the segment's
+   * corner radius, which is exactly the box this has to stay inside.
+   */
+  private clipWave(id: string) {
+    const wave = this.clipWaves.value.get(id);
+    if (!wave) return null;
+    return (
+      <svg
+        class="seg__wave"
+        key="wave"
+        width={wave.w}
+        height="100%"
+        viewBox={`0 0 ${wave.w} ${WAVE_VIEW_H}`}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+        style={{ left: `${wave.x}px` }}
+      >
+        <path d={wave.d}></path>
+      </svg>
+    );
+  }
+
   /** The filmstrip of one segment, and the border and chip it wears while it is selected. */
   private segmentInner(seg: SegmentView | TrackSegmentView) {
     return [
@@ -2557,6 +2826,7 @@ export class VeTimeline {
             <span class="seg__tile seg__tile--empty" key={tile.key} style={{ left: `${tile.x}px` }}></span>
           ),
         )}
+        {this.clipWave(seg.id)}
       </div>,
       seg.selected ? <span class="seg__border" key="border"></span> : null,
       /*
@@ -2572,13 +2842,7 @@ export class VeTimeline {
        * the file the customer still has.
        */
       seg.missing ? (
-        <button
-          type="button"
-          class="seg__missing"
-          key="missing"
-          aria-label="Replace missing video"
-          onClick={event => this.onReplaceMissing(event, seg.id)}
-        >
+        <button type="button" class="seg__missing" key="missing" aria-label="Replace missing video" onClick={event => this.onReplaceMissing(event, seg.id)}>
           Video missing
         </button>
       ) : seg.selected ? (
@@ -2732,6 +2996,35 @@ export class VeTimeline {
     }
   }
 
+  /**
+   * The picture of a sound, inside the bar that carries it. Null while it is still being measured,
+   * and for a file this browser could not decode - both of which leave the bar as it was.
+   *
+   * Sized in real pixels across and in percent down: the `viewBox` is as wide as the slice being
+   * drawn and always [WAVE_VIEW_H] tall, and `preserveAspectRatio="none"` stretches that height to
+   * whatever the lane is. So the 40 px lane and the 36 px one above an open sheet share one path,
+   * with nothing measured and nothing redrawn when a sheet opens.
+   *
+   * The wrapper is what clips it, and it is needed for two reasons at once: the slice is rounded
+   * UP to whole bars, so it can finish a couple of pixels past the item's right edge, and the item
+   * is a rounded rectangle whose corners a full-height bar at either end would paint outside of.
+   * It cannot simply go on `.item`: an `overflow` there would make the item its own scroll
+   * container and `.item__label`, which is sticky, would stop following the scroll.
+   *
+   * `pointer-events: none` keeps the whole thing out of the way of `[data-hit]`, the way the
+   * filmstrip's tiles are.
+   */
+  private waveSvg(wave: WaveView | null) {
+    if (!wave) return null;
+    return (
+      <span class="item__wave-clip" key="wave" aria-hidden="true">
+        <svg class="item__wave" width={wave.w} height="100%" viewBox={`0 0 ${wave.w} ${WAVE_VIEW_H}`} preserveAspectRatio="none" style={{ left: `${wave.x}px` }}>
+          <path d={wave.d}></path>
+        </svg>
+      </span>
+    );
+  }
+
   private musicRow(pad: number) {
     const music = this.musicLane.value;
     const handles = this.musicHandles.value;
@@ -2745,6 +3038,7 @@ export class VeTimeline {
               data-hit="music"
               style={{ left: `${music.x}px`, width: `${music.w}px` }}
             >
+              {this.waveSvg(this.musicWave.value)}
               <span class="item__label">
                 <ve-icon name="musical-note"></ve-icon>
                 <span class="item__text">{music.label}</span>
@@ -2767,6 +3061,7 @@ export class VeTimeline {
 
   private voiceRow() {
     const recording = this.recording.value;
+    const waves = this.voiceWaves.value;
     return (
       <div class="lane" key="voice-lane" data-row="voice">
         {this.voiceLane.value.map(take => (
@@ -2778,6 +3073,7 @@ export class VeTimeline {
             style={{ left: `${take.x}px`, width: `${take.w}px` }}
             aria-label="Voiceover"
           >
+            {this.waveSvg(waves.get(take.id) ?? null)}
             <span class="item__label">
               <ve-icon name="mic"></ve-icon>
             </span>

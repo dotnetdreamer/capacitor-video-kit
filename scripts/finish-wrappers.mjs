@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
  *
  * They are built from `packages/<framework>` by three different tools - ng-packagr, tsc and Rollup -
  * and each writes into `<framework>/` at the root here, which `exports` offers as
- * `@capacitor-video-kit/core/<framework>`. What each tool writes beside the code is what this script
+ * `capacitor-video-kit/<framework>`. What each tool writes beside the code is what this script
  * normalises, because none of them knows it is no longer producing a package of its own.
  *
  * `type: module` is the part that is load bearing. Every one of these emits ES modules, two of them

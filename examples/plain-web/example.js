@@ -12,8 +12,8 @@
 
 /* One tag. Under `dist-custom-elements` this call defines every tag `ve-editor` renders, and the
    report at the bottom of the page is that claim, checked. */
-import { defineCustomElement as defineVideoEditor } from '@capacitor-video-kit/core/dist/components/ve-editor.js';
-import { installEditorFonts, setEditorAssetPath } from '@capacitor-video-kit/core/dist/components/index.js';
+import { defineCustomElement as defineVideoEditor } from 'capacitor-video-kit/dist/components/ve-editor.js';
+import { installEditorFonts, setEditorAssetPath } from 'capacitor-video-kit/dist/components/index.js';
 
 /**
  * Two clips to open with.

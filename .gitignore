@@ -9,7 +9,7 @@ www/
 .stencil/
 
 # The three framework wrappers, built from `packages/<framework>` into the root so that the exports
-# map can offer them as `@capacitor-video-kit/core/<framework>`. Anchored, because `react` and `vue`
+# map can offer them as `capacitor-video-kit/<framework>`. Anchored, because `react` and `vue`
 # are ordinary words and an unanchored rule would swallow a source directory that ever takes one of
 # those names.
 /angular/

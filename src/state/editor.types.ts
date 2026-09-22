@@ -1,30 +1,13 @@
 import type { RasterisedOverlay } from '../editor';
 
 /** What the customer has picked on the timeline or the preview. At most one thing at a time. */
-export type EditorSelection =
-  | { kind: 'clip'; id: string }
-  | { kind: 'overlay'; id: string }
-  | { kind: 'music' }
-  | { kind: 'voice'; id: string };
+export type EditorSelection = { kind: 'clip'; id: string } | { kind: 'overlay'; id: string } | { kind: 'music' } | { kind: 'voice'; id: string };
 
 /**
  * The sheets that can slide up over the timeline and the toolbar. One at a time; opening one closes
  * whatever was open.
  */
-export type EditorPanel =
-  | 'text'
-  | 'stickers'
-  | 'effects'
-  | 'filters'
-  | 'adjust'
-  | 'crop'
-  | 'layout'
-  | 'speed'
-  | 'volume'
-  | 'opacity'
-  | 'voiceover'
-  | 'sound'
-  | 'quality';
+export type EditorPanel = 'text' | 'stickers' | 'effects' | 'filters' | 'adjust' | 'crop' | 'layout' | 'speed' | 'volume' | 'opacity' | 'voiceover' | 'sound' | 'quality';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the
@@ -37,12 +20,19 @@ export type ToolbarMode = 'root' | 'text';
  * What a volume sheet is adjusting. The clips' own sound has no level of its own - the timeline's
  * speaker and the voiceover sheet turn it on and off - so it is not one of these.
  */
-export type VolumeTarget =
-  | { kind: 'clip'; id: string }
-  | { kind: 'music' }
-  | { kind: 'voice'; id: string };
+export type VolumeTarget = { kind: 'clip'; id: string } | { kind: 'music' } | { kind: 'voice'; id: string };
 
 /** Frames cut from one source clip for the filmstrip, one every `stepMs` of SOURCE time. */
+/**
+ * What a video source's own sound is filed under in `store.waveforms`.
+ *
+ * Prefixed, because that map is keyed by audio URI and a source is named by the host's key. The
+ * two namespaces have no reason to agree and every reason not to collide.
+ */
+export function clipWaveKey(sourceKey: string): string {
+  return `clip:${sourceKey}`;
+}
+
 export interface Filmstrip {
   stepMs: number;
   /** WebView-loadable URLs, index `i` being the frame at `i * stepMs`. */

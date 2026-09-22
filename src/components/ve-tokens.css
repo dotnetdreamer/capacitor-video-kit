@@ -40,6 +40,9 @@
    * @prop --ve-lane-effect: The timeline lane colour for an effect layer
    * @prop --ve-lane-music: The timeline lane colour for music
    * @prop --ve-lane-voice: The timeline lane colour for a voiceover
+   * @prop --ve-clip-wave: The waveform drawn on a video clip that has sound
+   * @prop --ve-lane-music-wave: The waveform drawn on the music lane
+   * @prop --ve-lane-voice-wave: The waveform drawn on a voiceover lane
    * @prop --ve-lane-ink: Text on a lane, dark because every lane colour is light
    * @prop --ve-frame-edge: The hairline around the video frame, which is where the finished post is cut
    * @prop --ve-stage-gutter: What the preview keeps free either side of the video for Back and Next, together
@@ -78,6 +81,14 @@
   --ve-lane-effect: #b99bff;
   --ve-lane-music: #0b8e87;
   --ve-lane-voice: #ff9f5a;
+  /*
+   * The sound drawn on those two lanes. Translucent rather than a third and fourth colour, so a
+   * host that restyles a lane gets a wave that still reads on it without restyling this as well.
+   */
+  /* A video's own sound, over its filmstrip and its own darkening scrim. */
+  --ve-clip-wave: rgba(255, 255, 255, 0.85);
+  --ve-lane-music-wave: rgba(255, 255, 255, 0.5);
+  --ve-lane-voice-wave: rgba(42, 10, 51, 0.45);
   --ve-lane-ink: #2a0a33;
 
   /*

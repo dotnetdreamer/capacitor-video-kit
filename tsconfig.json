@@ -40,7 +40,7 @@
        A consumer that links this repository rather than installing the tarball resolves bare
        specifiers from inside it, so anything sitting in this package's `node_modules` shadows the
        consumer's own copy. With `@capacitor/core` installed here under that name, the app bundled
-       two copies of it, from `node_modules/@capacitor-video-kit/core/node_modules/@capacitor/core` and from
+       two copies of it, from `node_modules/capacitor-video-kit/node_modules/@capacitor/core` and from
        its own, each with its own plugin registry. Installed as `capacitor-core-build` there is no
        `@capacitor/core` in this tree for a consumer to find, and the mapping below is what keeps
        the specifier in the source, and therefore in the emitted JavaScript, the real one.

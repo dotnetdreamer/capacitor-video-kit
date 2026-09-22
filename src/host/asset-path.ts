@@ -127,10 +127,10 @@ function stencilAssetUrl(relativePath: string): string {
     return getAssetPath(relativePath);
   } catch (cause) {
     throw new Error(
-      `@capacitor-video-kit/core cannot work out where its own files are served from, so "${relativePath}" ` +
+      `capacitor-video-kit cannot work out where its own files are served from, so "${relativePath}" ` +
         `cannot be resolved. Nothing has called setEditorAssetPath() and this build carries no base of its ` +
         `own, which is what the standalone build behind the React, Vue and Angular wrappers always looks ` +
-        `like. Serve a copy of node_modules/@capacitor-video-kit/core/dist/components/assets and call ${CALL} ` +
+        `like. Serve a copy of node_modules/capacitor-video-kit/dist/components/assets and call ${CALL} ` +
         `once, before the editor renders.`,
       { cause },
     );

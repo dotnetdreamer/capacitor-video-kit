@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>@capacitor-video-kit/core harness</title>
+    <title>capacitor-video-kit harness</title>
     <style>
       /*
        * Chrome only. Nothing here styles the component under test and nothing here declares a
@@ -313,6 +313,12 @@
           fadeOutMs: 800,
         },
         voiceovers: [],
+        /*
+         * The frame. Required, because this harness calls `store.load()` straight: the editor
+         * shell fills a missing `output` in from the host before it loads, and a bare tag has no
+         * shell to do it, so without this every tag threw on the first read of `output.width`.
+         */
+        output: { width: 720, height: 1280, fps: 30 },
       };
 
       /** What is selected when nothing in the query string says otherwise. */

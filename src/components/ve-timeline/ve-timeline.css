@@ -224,6 +224,31 @@
   pointer-events: none;
 }
 
+/*
+ * A video's own sound, along the foot of its filmstrip.
+ *
+ * A band at the bottom rather than the full height the audio lanes use: on those rows the wave IS
+ * the content, but here the picture is what the segment is read by and a wave over all of it would
+ * compete with the thing it annotates.
+ *
+ * The scrim is what makes it legible at all. A translucent white wave over a bright frame - a sky,
+ * a white wall - would otherwise vanish exactly where the footage is lightest, so the band carries
+ * its own darkening underneath and the bars sit on that.
+ *
+ * `.seg__frames` already clips to the segment's rounded box, so this needs no wrapper of its own.
+ */
+.seg__wave {
+  position: absolute;
+  bottom: 0;
+  height: 38%;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0));
+}
+
+.seg__wave path {
+  fill: var(--ve-clip-wave, rgba(255, 255, 255, 0.85));
+}
+
 .seg__tile--empty {
   background: #2c2c2e;
   box-shadow: inset -1px 0 rgba(0, 0, 0, 0.35);
@@ -508,6 +533,48 @@
 
 .item--voice {
   background: var(--ve-lane-voice, #ff9f5a);
+}
+
+/*
+ * The sound itself, drawn on the bar that carries it.
+ *
+ * Under `.item__label`, which comes after it and is sticky, so the filename keeps its place over
+ * the wave while the bar scrolls - the same order the filmstrip puts its chip in over its tiles.
+ * `pointer-events: none` for the reason `.seg__tile` has it: every press on this row is routed by
+ * `[data-hit]` on the item, and a child that could swallow one is a drag that never starts.
+ *
+ * The fill is deliberately translucent rather than a second solid colour. It reads on both lanes
+ * without either needing a matched shade, and it keeps the lane's own colour as the thing that
+ * says which row this is.
+ */
+/*
+ * Clipped to the bar, matching its corner radius. A slice is rounded up to whole bars so it can
+ * end a couple of pixels past the item, and a full-height bar at either end would otherwise paint
+ * outside the rounded corner - a bright notch sitting on the lane background.
+ *
+ * On a wrapper and not on `.item` itself: `overflow` there would make the item a scroll container,
+ * and the sticky `.item__label` would stop following the timeline's scroll.
+ */
+.item__wave-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.item__wave {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+
+.item--music .item__wave path {
+  fill: var(--ve-lane-music-wave, rgba(255, 255, 255, 0.5));
+}
+
+.item--voice .item__wave path {
+  fill: var(--ve-lane-voice-wave, rgba(42, 10, 51, 0.45));
 }
 
 .item--recording {

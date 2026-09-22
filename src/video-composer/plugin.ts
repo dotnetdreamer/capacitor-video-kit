@@ -3,7 +3,7 @@
  *
  * It is a file of its own rather than part of `definitions.ts` for one reason: it is the only thing
  * in the composer's contract that names a Capacitor type, and `definitions.ts` is reached by
- * `@capacitor-video-kit/core/editor`, which a web editor imports with no Capacitor anywhere in its tree.
+ * `capacitor-video-kit/editor`, which a web editor imports with no Capacitor anywhere in its tree.
  * Keeping the two apart is what lets that entry point's declarations resolve on their own.
  */
 import type { PluginListenerHandle } from '@capacitor/core';

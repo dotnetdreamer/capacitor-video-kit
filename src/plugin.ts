@@ -1,5 +1,5 @@
 /**
- * `@capacitor-video-kit/core` - native video composition and native background publishing.
+ * `capacitor-video-kit` - native video composition and native background publishing.
  *
  * One package, two Capacitor plugins. They ship together because they are always used together and
  * two installs for one feature is a worse wart than an unused dependency; they stay two plugin
@@ -15,7 +15,7 @@
  * would become a promise, and every call site in the app would have to await it.
  *
  * `@capacitor/core` stays an optional peer dependency because of the other entry point. A host that
- * only edits reaches `@capacitor-video-kit/core/editor`, which is pure TypeScript that touches no bridge, and
+ * only edits reaches `capacitor-video-kit/editor`, which is pure TypeScript that touches no bridge, and
  * a mandatory peer would install a native bridge into the `node_modules` of every such host.
  * The editor's own web components are exactly that host. They are in this same package, under
  * `src/components` and the rest of `src`, and they reach the contract through `../editor` rather

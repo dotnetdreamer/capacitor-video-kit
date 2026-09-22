@@ -28,12 +28,12 @@
      *
      * This is half of the answer and it is the half that only helps here: it lets `tsc` read the
      * wrappers, and a consumer never sees it. `rollup.config.mjs` is the other half, rewriting that
-     * same specifier in the shipped declarations to `@capacitor-video-kit/core/dist/components`, which is the
+     * same specifier in the shipped declarations to `capacitor-video-kit/dist/components`, which is the
      * file named below and the one the exports map resolves. The two are deliberately the same file,
      * so the types this package is built against are the types a consumer compiles.
      */
     "paths": {
-      "@capacitor-video-kit/core": ["../../dist/components/index.d.ts"]
+      "capacitor-video-kit": ["../../dist/components/index.d.ts"]
     }
   },
   "include": ["src"],

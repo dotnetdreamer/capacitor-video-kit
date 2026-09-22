@@ -2,7 +2,7 @@
   "$schema": "../../node_modules/ng-packagr/ng-package.schema.json",
   "dest": "../../angular",
   "allowedNonPeerDependencies": [
-    "@capacitor-video-kit/core",
+    "capacitor-video-kit",
     "@stencil/core"
   ],
   "lib": {

@@ -2,13 +2,8 @@ import { MAX_LAYERS, MAX_VIDEO_TRACKS, emptyManifest, type EditClip, type EditMa
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
-import type {
-  EditorMediaHost,
-  EditorSoundLibrary,
-  EditorSource,
-  ResolvedEditorHost,
-  SavedSound,
-} from '../host/host.types';
+import type { EditorMediaHost, EditorSoundLibrary, EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
+import type { Peaks, extractPeaks } from '../web-runtime/waveform';
 import { EditorMedia } from './editor-media';
 import { EditorStore } from './editor-store';
 
@@ -39,10 +34,17 @@ describe('EditorMedia', () => {
     { key: 'b', fileName: 'b.mp4' },
   ];
 
-  function open(mediaHost: EditorMediaHost = fakeMedia()): void {
+  /**
+   * How audio is measured, injected. The real one needs Web Audio, which the mock DOM these run
+   * in has none of, so every test gets a stub and the waveform ones get one they can steer.
+   */
+  let measure: ReturnType<typeof vi.fn>;
+
+  function open(mediaHost: EditorMediaHost = fakeMedia(), peaks: Peaks | null = null): void {
     host = resolveEditorHost({ media: mediaHost });
     store = new EditorStore(host);
-    media = new EditorMedia(store, host);
+    measure = vi.fn(async () => peaks);
+    media = new EditorMedia(store, host, measure as unknown as typeof extractPeaks);
     base = { ...emptyManifest(), clips: [clip('a', 0, 4000), clip('b', 0, 2000)] };
     store.load(sources, new Map([['a', 4000]]), base);
   }
@@ -59,7 +61,13 @@ describe('EditorMedia', () => {
     });
 
     it('records a length of zero for a file the host could not open, without throwing', async () => {
-      open(fakeMedia({ probeDuration: vi.fn(async () => { throw new Error('unreadable'); }) }));
+      open(
+        fakeMedia({
+          probeDuration: vi.fn(async () => {
+            throw new Error('unreadable');
+          }),
+        }),
+      );
 
       expect(await media.probe(sources[1])).toBe(0);
       expect(store.durations.value.get('b')).toBe(0);
@@ -71,8 +79,8 @@ describe('EditorMedia', () => {
       store.select({ kind: 'clip', id: 'a' });
       await media.addClip();
 
-      expect(store.clips.value.map((source) => source.key)).toEqual(['a', 'b', 'picked']);
-      expect(store.manifest.value.clips.map((c) => c.clipKey)).toEqual(['a', 'picked', 'b']);
+      expect(store.clips.value.map(source => source.key)).toEqual(['a', 'b', 'picked']);
+      expect(store.manifest.value.clips.map(c => c.clipKey)).toEqual(['a', 'picked', 'b']);
       expect(store.selection.value?.kind).toBe('clip');
       expect(store.canUndo.value).toBe(true);
       expect(media.busy.value).toBe(false);
@@ -91,7 +99,13 @@ describe('EditorMedia', () => {
     });
 
     it('says so when the picker itself failed, which a cancel must never look like', async () => {
-      open(fakeMedia({ pickVideo: vi.fn(async () => { throw new Error('no permission'); }) }));
+      open(
+        fakeMedia({
+          pickVideo: vi.fn(async () => {
+            throw new Error('no permission');
+          }),
+        }),
+      );
       await media.addClip();
 
       expect(store.clips.value).toEqual(sources);
@@ -155,7 +169,7 @@ describe('EditorMedia', () => {
           probeDuration: vi.fn(async () => 4000),
         }),
       );
-      host.platform.fileUrl = (uri) => `native://${uri}`;
+      host.platform.fileUrl = uri => `native://${uri}`;
 
       await media.loadFilmstrip({ key: 'c', fileName: 'c.mp4', thumbnailUrl: 'file:///poster.jpg' });
 
@@ -166,16 +180,169 @@ describe('EditorMedia', () => {
     });
 
     it('leaves the strip absent when the host has neither frames nor a poster', async () => {
-      open(fakeMedia({ thumbnails: vi.fn(async () => { throw new Error('no decoder'); }) }));
+      open(
+        fakeMedia({
+          thumbnails: vi.fn(async () => {
+            throw new Error('no decoder');
+          }),
+        }),
+      );
       await media.loadFilmstrip(sources[0]);
 
       expect(store.filmstrips.value.has('a')).toBe(false);
     });
   });
 
+  describe('waveforms', () => {
+    const PEAKS: Peaks = { stepMs: 10, peaks: Uint8Array.of(0, 128, 255), durationMs: 30, max: 255 };
+
+    /** Lets the manifest watcher run and the measurement it started settle. */
+    const settle = () => new Promise(done => setTimeout(done, 0));
+
+    it('measures a track as soon as the manifest has one', async () => {
+      open(fakeMedia(), PEAKS);
+      media.useSound({ id: 's1', uri: 'blob:tune', fileName: 'tune', durationMs: 5000, savedAt: 0 });
+      await settle();
+
+      expect(store.waveforms.value.get('blob:tune')).toEqual(PEAKS);
+    });
+
+    it('measures a track that was already on a draft being reopened', async () => {
+      open(fakeMedia(), PEAKS);
+      store.commit('Seed', m => ({
+        ...m,
+        music: { uri: 'blob:saved', fileName: 'saved', sourceDurationMs: 9000, inMs: 0, outMs: 0, startMs: 0, volume: 1, loop: true, fadeOutMs: 0 },
+      }));
+      await settle();
+
+      expect(store.waveforms.value.get('blob:saved')).toEqual(PEAKS);
+    });
+
+    it('measures every voiceover take as well as the music', async () => {
+      open(fakeMedia(), PEAKS);
+      store.commit('Seed', m => ({
+        ...m,
+        voiceovers: [
+          { id: 'v1', uri: 'blob:take-1', startMs: 0, durationMs: 800, volume: 1 },
+          { id: 'v2', uri: 'blob:take-2', startMs: 900, durationMs: 400, volume: 1 },
+        ],
+      }));
+      await settle();
+
+      expect(store.waveforms.value.get('blob:take-1')).toEqual(PEAKS);
+      expect(store.waveforms.value.get('blob:take-2')).toEqual(PEAKS);
+    });
+
+    it('joins a measurement already in flight rather than reading the file twice', async () => {
+      open(fakeMedia(), PEAKS);
+      await Promise.all([media.loadWaveform('blob:tune'), media.loadWaveform('blob:tune')]);
+
+      expect(measure).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks again for nothing it has already measured', async () => {
+      open(fakeMedia(), PEAKS);
+      await media.loadWaveform('blob:tune');
+      await media.loadWaveform('blob:tune');
+
+      expect(measure).toHaveBeenCalledTimes(1);
+    });
+
+    it('turns the URI into something readable through the host first', async () => {
+      open(fakeMedia(), PEAKS);
+      host.platform.fileUrl = uri => `native://${uri}`;
+      await media.loadWaveform('videokit-file:sounds/one');
+
+      expect(measure).toHaveBeenCalledWith('native://videokit-file:sounds/one', undefined, 0);
+      // Still filed under the URI the manifest knows, not the one the platform made.
+      expect(store.waveforms.value.has('videokit-file:sounds/one')).toBe(true);
+    });
+
+    it('remembers a file it could not measure, so nothing retries it for ever', async () => {
+      // A codec with no decoder here, a file too big, a browser with no Web Audio: all arrive as
+      // null, and all have to be recorded - the watcher runs on every edit, and an unrecorded
+      // failure would start the same decode again on each one.
+      open(fakeMedia(), null);
+      await media.loadWaveform('blob:broken');
+
+      expect(store.waveforms.value.has('blob:broken')).toBe(true);
+      expect(store.waveforms.value.get('blob:broken')).toBeNull();
+
+      await media.loadWaveform('blob:broken');
+      expect(measure).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps measuring after one file throws, and does not come back to it', async () => {
+      open(fakeMedia(), PEAKS);
+      measure.mockRejectedValueOnce(new Error('unreadable'));
+
+      await media.loadWaveform('blob:bad');
+      await media.loadWaveform('blob:good');
+
+      // The throw is recorded as null rather than left absent. The manifest watcher runs on every
+      // write of the manifest - during a gesture, every frame - so a file it could not read has
+      // to be remembered, or it would be tried again thirty times a second for ever.
+      expect(store.waveforms.value.get('blob:bad')).toBeNull();
+      await media.loadWaveform('blob:bad');
+      expect(measure).toHaveBeenCalledTimes(2);
+
+      // And it did not take the queue down with it.
+      expect(store.waveforms.value.get('blob:good')).toEqual(PEAKS);
+    });
+
+    it('passes the track length through, so a file too long to decode is turned down early', async () => {
+      open(fakeMedia(), PEAKS);
+      await media.loadWaveform('blob:tune', 9_000);
+
+      expect(measure).toHaveBeenCalledWith('blob:tune', undefined, 9_000);
+    });
+
+    it('publishes a new map rather than changing the one it has', async () => {
+      // The timeline reads this through a signal, and a map mutated in place would not wake it.
+      open(fakeMedia(), PEAKS);
+      const before = store.waveforms.value;
+      await media.loadWaveform('blob:tune');
+
+      expect(store.waveforms.value).not.toBe(before);
+      expect(before.has('blob:tune')).toBe(false);
+    });
+
+    it('keeps a measurement after its track is removed, so an undo shows it at once', async () => {
+      open(fakeMedia(), PEAKS);
+      media.useSound({ id: 's1', uri: 'blob:tune', fileName: 'tune', durationMs: 5000, savedAt: 0 });
+      await settle();
+      store.removeMusic();
+      await settle();
+
+      expect(store.waveforms.value.get('blob:tune')).toEqual(PEAKS);
+
+      store.undo();
+      await settle();
+      expect(measure).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops watching the manifest once the editor is disposed', async () => {
+      open(fakeMedia(), PEAKS);
+      media.dispose();
+      media.useSound({ id: 's1', uri: 'blob:tune', fileName: 'tune', durationMs: 5000, savedAt: 0 });
+      await settle();
+
+      expect(measure).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing that lands after the editor has gone', async () => {
+      open(fakeMedia(), PEAKS);
+      const job = media.loadWaveform('blob:tune');
+      media.dispose();
+      await job;
+
+      expect(store.waveforms.value.has('blob:tune')).toBe(false);
+    });
+  });
+
   describe('photos', () => {
     it('refuses at the layer cap before opening the picker', async () => {
-      store.commit('Fill', (m) => ({
+      store.commit('Fill', m => ({
         ...m,
         overlays: Array.from({ length: MAX_LAYERS }, (_, i) => ({
           id: `s${i}`,
@@ -219,7 +386,13 @@ describe('EditorMedia', () => {
     });
 
     it('says so for a file that could not be read, and adds nothing', async () => {
-      open(fakeMedia({ pickAudio: vi.fn(async () => { throw new Error('bad container'); }) }));
+      open(
+        fakeMedia({
+          pickAudio: vi.fn(async () => {
+            throw new Error('bad container');
+          }),
+        }),
+      );
       await media.pickMusic();
 
       expect(store.manifest.value.music).toBeNull();
@@ -274,14 +447,22 @@ describe('EditorMedia', () => {
     });
 
     it('leaves the list alone but settles when the library will not answer', async () => {
-      open(fakeMedia({ sounds: fakeLibrary({ list: vi.fn(async () => { throw new Error('no disk'); }) }) }));
+      open(
+        fakeMedia({
+          sounds: fakeLibrary({
+            list: vi.fn(async () => {
+              throw new Error('no disk');
+            }),
+          }),
+        }),
+      );
       await media.loadSounds();
 
       expect(media.sounds.value).toEqual([]);
       expect(media.soundsLoaded.value).toBe(true);
     });
 
-    it('extracts a video\'s sound, puts it on the post and keeps it in the list', async () => {
+    it("extracts a video's sound, puts it on the post and keeps it in the list", async () => {
       const library = fakeLibrary();
       open(fakeMedia({ sounds: library }));
       await media.extractSound();
@@ -302,7 +483,15 @@ describe('EditorMedia', () => {
     });
 
     it('says so when the extraction failed, and adds nothing', async () => {
-      open(fakeMedia({ sounds: fakeLibrary({ extract: vi.fn(async () => { throw new Error('no space'); }) }) }));
+      open(
+        fakeMedia({
+          sounds: fakeLibrary({
+            extract: vi.fn(async () => {
+              throw new Error('no space');
+            }),
+          }),
+        }),
+      );
       await media.extractSound();
 
       expect(store.manifest.value.music).toBeNull();
@@ -343,7 +532,15 @@ describe('EditorMedia', () => {
     });
 
     it('puts the row back when the delete failed', async () => {
-      open(fakeMedia({ sounds: fakeLibrary({ remove: vi.fn(async () => { throw new Error('read only'); }) }) }));
+      open(
+        fakeMedia({
+          sounds: fakeLibrary({
+            remove: vi.fn(async () => {
+              throw new Error('read only');
+            }),
+          }),
+        }),
+      );
       await media.loadSounds();
       await media.removeSound(saved.id);
 

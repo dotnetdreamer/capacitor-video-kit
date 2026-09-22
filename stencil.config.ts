@@ -6,7 +6,7 @@ import { vueOutputTarget, type ComponentModelConfig } from '@stencil/vue-output-
 import { requireVueComponentModels } from './build/vue-component-models';
 
 /** The name the generated wrappers import the custom elements from, so it must be what we publish. */
-const componentCorePackage = '@capacitor-video-kit/core';
+const componentCorePackage = 'capacitor-video-kit';
 
 /**
  * Where `dist-custom-elements` writes, repeated on all three wrapper targets because they disagree

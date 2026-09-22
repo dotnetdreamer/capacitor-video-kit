@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest, type EditVideoTrack } from '../../editor';
+import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
+import type { Peaks } from '../../web-runtime/waveform';
 
 /*
  * The timeline as more than one row of video: what the rows are, and the long press that carries a
@@ -430,5 +431,238 @@ describe('the end of the post', () => {
     // Before the tail existed this clamped back to the base track's end, and a layer could only ever
     // be placed where the footage underneath it already reached.
     expect(store.videoTrack.value!.startMs).toBe(16_000);
+  });
+});
+
+/*
+ * The picture of a sound on its bar.
+ *
+ * A browser rather than the mock DOM for the same reason the rest of this file needs one: which
+ * bars get built is decided by the render window, and the render window is measured off the real
+ * width of a real scroller. In a mock DOM every rectangle is zero and there would be no window to
+ * clip to.
+ *
+ * Measurements are written straight into `store.waveforms` rather than decoded. Decoding is
+ * `web-runtime/waveform.cmp.test.ts`'s job; what is being tested here is the drawing.
+ */
+describe('the waveform on an audio bar', () => {
+  /** Twenty seconds of source, loud in the middle and quiet at both ends. */
+  const PEAKS: Peaks = {
+    stepMs: 10,
+    peaks: Uint8Array.from({ length: 2000 }, (_, i) => (i > 600 && i < 1400 ? 255 : 12)),
+    durationMs: 20_000,
+    max: 255,
+  };
+
+  function music(over: Partial<EditMusic> = {}): EditMusic {
+    return { uri: 'blob:tune', fileName: 'tune.mp3', sourceDurationMs: 20_000, inMs: 0, outMs: 0, startMs: 0, volume: 0.8, loop: true, fadeOutMs: 0, ...over };
+  }
+
+  function wave(tl: HTMLElement): SVGPathElement | null {
+    return root(tl).querySelector<SVGPathElement>('[data-hit="music"] .item__wave path');
+  }
+
+  /** The height of every bar in the path, in the 100-unit lane the viewBox describes. */
+  function barHeights(path: SVGPathElement): number[] {
+    return [...(path.getAttribute('d') ?? '').matchAll(/v([\d.]+)/g)].map(m => Number(m[1]));
+  }
+
+  async function withMusic(over: Partial<EditMusic> = {}, peaks: Peaks | null = PEAKS) {
+    const mountedTl = await mount();
+    const { store } = mountedTl;
+    /*
+     * Seeded BEFORE the track goes on, which is not tidiness: adding music wakes the manifest
+     * watcher in `EditorMedia`, and it would try to read `blob:tune` - a URL no one minted - and
+     * record the failure as `null` over the top of this. A measurement already in the map is the
+     * one thing that stops it, so this is also where that guard gets exercised.
+     */
+    if (peaks !== null) store.waveforms.value = new Map(store.waveforms.value).set('blob:tune', peaks);
+    store.setMusic(music(over));
+    await frames(2);
+    return mountedTl;
+  }
+
+  it('draws nothing until the track has been measured', async () => {
+    const { tl } = await withMusic({}, null);
+
+    // The bar itself is there; it simply keeps the colour it has always had.
+    expect(root(tl).querySelector('[data-hit="music"]')).not.toBeNull();
+    expect(wave(tl)).toBeNull();
+  });
+
+  it('draws nothing for a file that could not be measured', async () => {
+    // `null` in the map is "measured, and there is nothing to draw" - a codec with no decoder
+    // here, or a file too big to decode. It reads on screen exactly like not-yet-measured, and it
+    // is the map that tells the two apart so nothing tries the same file again.
+    const { store, tl } = await withMusic({}, null);
+    store.waveforms.value = new Map(store.waveforms.value).set('blob:tune', null);
+    await frames(2);
+
+    expect(root(tl).querySelector('[data-hit="music"]')).not.toBeNull();
+    expect(wave(tl)).toBeNull();
+  });
+
+  it('draws the sound once it has been measured', async () => {
+    const { tl } = await withMusic();
+
+    await until('the waveform', () => wave(tl) !== null);
+    const heights = barHeights(wave(tl)!);
+
+    expect(heights.length).toBeGreaterThan(20);
+    // Loud in the middle and quiet at the ends: the shape has to come through as more than one height.
+    expect(new Set(heights).size).toBeGreaterThan(1);
+    expect(Math.max(...heights)).toBeGreaterThan(Math.min(...heights) * 3);
+  });
+
+  it('sizes the drawing to the slice it draws, in real pixels across and percent down', async () => {
+    const { tl } = await withMusic();
+    await until('the waveform', () => wave(tl) !== null);
+    const svg = root(tl).querySelector('[data-hit="music"] .item__wave')!;
+
+    const width = Number(svg.getAttribute('width'));
+    expect(width).toBeGreaterThan(0);
+    expect(svg.getAttribute('viewBox')).toBe(`0 0 ${width} 100`);
+    // Normalised height is what lets the 40 px lane and the 36 px compact one share one path.
+    expect(svg.getAttribute('preserveAspectRatio')).toBe('none');
+    expect(svg.getAttribute('height')).toBe('100%');
+  });
+
+  it('keeps the drawing out of the way of the press that drags the bar', async () => {
+    const { tl } = await withMusic();
+    await until('the waveform', () => wave(tl) !== null);
+    const clip = root(tl).querySelector('[data-hit="music"] .item__wave-clip')!;
+
+    // A child that could swallow a touch is a drag that never starts.
+    expect(getComputedStyle(clip).pointerEvents).toBe('none');
+    expect(clip.getAttribute('aria-hidden')).toBe('true');
+    // And it clips, so a full-height bar cannot paint outside the bar's rounded corner.
+    expect(getComputedStyle(clip).overflow).toBe('hidden');
+  });
+
+  it('redraws when the timeline is zoomed', async () => {
+    const { store, tl } = await withMusic();
+    await until('the waveform', () => wave(tl) !== null);
+    const before = wave(tl)!.getAttribute('d');
+
+    store.pps.value = store.pps.value * 2;
+    await until('a redraw', () => wave(tl)!.getAttribute('d') !== before);
+
+    expect(wave(tl)!.getAttribute('d')).not.toBe(before);
+  });
+
+  it('redraws when the track is trimmed', async () => {
+    const { store, tl } = await withMusic();
+    await until('the waveform', () => wave(tl) !== null);
+    const before = wave(tl)!.getAttribute('d');
+
+    // Trimming re-periodises a looping track: every pass after the first shows something new.
+    store.previewMusic({ outMs: 3000 });
+    await until('a redraw', () => wave(tl)!.getAttribute('d') !== before);
+
+    expect(wave(tl)!.getAttribute('d')).not.toBe(before);
+  });
+
+  it('goes away with the track it belongs to', async () => {
+    const { store, tl } = await withMusic();
+    await until('the waveform', () => wave(tl) !== null);
+
+    store.removeMusic();
+    await until('the bar to go', () => root(tl).querySelector('[data-hit="music"]') === null);
+
+    expect(wave(tl)).toBeNull();
+  });
+
+  it('draws a measured silence as a hairline rather than as nothing', async () => {
+    const silent: Peaks = { stepMs: 10, peaks: new Uint8Array(2000), durationMs: 20_000, max: 0 };
+    const { tl } = await withMusic({}, silent);
+
+    await until('the waveform', () => wave(tl) !== null);
+    const heights = barHeights(wave(tl)!);
+
+    // Every bar at the floor: "measured, and there is nothing here", which a bar with no path at
+    // all could not say.
+    expect(heights.length).toBeGreaterThan(20);
+    expect(new Set(heights)).toEqual(new Set([3]));
+  });
+});
+
+/*
+ * A video's own sound, on its filmstrip - and what turning that sound off does to it.
+ */
+describe('the waveform on a video clip', () => {
+  const PEAKS: Peaks = {
+    stepMs: 10,
+    peaks: Uint8Array.from({ length: 400 }, (_, i) => (i > 120 && i < 280 ? 255 : 16)),
+    durationMs: 4000,
+    max: 255,
+  };
+
+  function waveOf(tl: HTMLElement, id: string): SVGPathElement | null {
+    return root(tl).querySelector<SVGPathElement>(`.seg[data-id="${id}"] .seg__wave path`);
+  }
+
+  async function withClipSound() {
+    const mounted = await mount();
+    // Seeded before anything asks for it, so the real decoder is never reached: `clip-a` has no
+    // file behind it here, and a measurement already in the map is what stops the watcher trying.
+    mounted.store.waveforms.value = new Map(mounted.store.waveforms.value).set('clip:clip-a', PEAKS);
+    await frames(2);
+    return mounted;
+  }
+
+  it('draws the sound inside a video on its own segment', async () => {
+    const { tl } = await withClipSound();
+
+    await until('the clip waveform', () => waveOf(tl, 'seg-a') !== null);
+    const d = waveOf(tl, 'seg-a')!.getAttribute('d') ?? '';
+    const heights = [...d.matchAll(/v([\d.]+)/g)].map(m => Number(m[1]));
+
+    expect(heights.length).toBeGreaterThan(10);
+    // Loud in the middle, quiet at the ends: more than one height, or it is not a waveform.
+    expect(new Set(heights).size).toBeGreaterThan(1);
+  });
+
+  it('draws nothing for a video whose sound was never measured', async () => {
+    const { tl } = await mount();
+
+    expect(root(tl).querySelector('.seg[data-id="seg-a"]')).not.toBeNull();
+    expect(waveOf(tl, 'seg-a')).toBeNull();
+  });
+
+  it('takes every wave away when the original sound is switched off, and puts them back', async () => {
+    // The speaker beside the video row: one toggle, every clip.
+    const { store, tl } = await withClipSound();
+    await until('the clip waveform', () => waveOf(tl, 'seg-a') !== null);
+
+    store.toggleOriginalMuted();
+    await until('the wave to go', () => waveOf(tl, 'seg-a') === null);
+
+    store.toggleOriginalMuted();
+    await until('the wave to come back', () => waveOf(tl, 'seg-a') !== null);
+  });
+
+  it('takes the wave away at zero volume, and puts it back above it', async () => {
+    // Turning a clip down to nothing is the same statement as muting it, and has to read the same.
+    const { store, tl } = await withClipSound();
+    await until('the clip waveform', () => waveOf(tl, 'seg-a') !== null);
+
+    store.setVolume({ kind: 'clip', id: 'seg-a' }, 0, false);
+    await until('the wave to go', () => waveOf(tl, 'seg-a') === null);
+
+    store.setVolume({ kind: 'clip', id: 'seg-a' }, 0.6, false);
+    await until('the wave to come back', () => waveOf(tl, 'seg-a') !== null);
+  });
+
+  it('leaves the other segments of the same source alone when one is silenced', async () => {
+    // Every segment here is a different source, so use the one that shares nothing: muting seg-a
+    // must not touch seg-b, which has its own clip and its own sound.
+    const { store, tl } = await withClipSound();
+    store.waveforms.value = new Map(store.waveforms.value).set('clip:clip-b', PEAKS);
+    await until('both waveforms', () => waveOf(tl, 'seg-a') !== null && waveOf(tl, 'seg-b') !== null);
+
+    store.setVolume({ kind: 'clip', id: 'seg-a' }, 0, false);
+    await until('the first to go', () => waveOf(tl, 'seg-a') === null);
+
+    expect(waveOf(tl, 'seg-b')).not.toBeNull();
   });
 });
