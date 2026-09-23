@@ -52,10 +52,14 @@ async function mount(videoTracks: EditVideoTrack[] = []): Promise<{ store: Edito
   // The editor's own column on the phone it was drawn for, and the height `ve-editor` gives the
   // timeline: the rows have to be where they really are or none of this measures anything.
   const column = document.createElement('div');
-  column.style.cssText = 'width: 393px; height: 250px';
+  column.style.cssText = 'width: 393px; height: 286px';
   document.body.append(column);
 
   const tl = document.createElement('ve-timeline');
+  // The column's height is the timeline's only if the host takes it, as `.ve__timeline` does in the
+  // editor. Left alone the host is a block of no height that clips everything in it out of reach of
+  // a finger, and the lanes have no view to pan in.
+  tl.style.height = '100%';
   // Set before the element is in the document, which is the order every parent in the editor sets
   // it in and the one the first render assumes.
   Object.assign(tl, { ctx });
@@ -142,6 +146,43 @@ describe('the rows', () => {
     // rather than with whichever order the layers happen to sit in the manifest.
     const { tl } = await mount([layer('vt-2', 2, [{ id: 'seg-y', key: 'clip-y' }]), layer('vt-1', 1, [{ id: 'seg-x', key: 'clip-x' }])]);
     expect(rows(tl).map(r => r.dataset.vrow)).toEqual(['base', 'vt-1', 'vt-2']);
+  });
+
+  /*
+   * More rows than fit pan up and down, and the pan is kept inside the rows - but only when the
+   * timeline renders, and a timeline that only gets TALLER renders nothing: a split screen's divider
+   * dragged, a window made taller. Rows panned to their end were left past the new one, with a band
+   * of black under the last of them, until something else repainted.
+   */
+  it('keeps the rows panned inside themselves when the timeline gets taller', async () => {
+    const { tl } = await mount([1, 2, 3, 4, 5].map(n => layer(`vt-${n}`, n, [{ id: `seg-${n}`, key: n % 2 ? 'clip-x' : 'clip-y' }])));
+    const view = root(tl).querySelector<HTMLElement>('.tl__lanes-view')!;
+    const lanes = root(tl).querySelector<HTMLElement>('.tl__lanes')!;
+    const room = () => lanes.offsetHeight - view.clientHeight;
+    const panned = () => -Number(/translate3d\([^,]+,\s*(-?[\d.]+)px/.exec(lanes.style.transform)?.[1] ?? 0);
+    expect(room()).toBeGreaterThan(0);
+
+    // Up past the end, held still long enough to leave no fling behind it, and let go.
+    const box = view.getBoundingClientRect();
+    const x = box.left + 20;
+    const y = box.top + 20;
+    pointer(view, 'pointerdown', x, y);
+    pointer(view, 'pointermove', x, y - 20);
+    await frames(1);
+    pointer(view, 'pointermove', x, y - 600);
+    await frames(2);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    pointer(view, 'pointerup', x, y - 600);
+    await until('the rows to be panned to their end', () => panned() > 0 && Math.abs(panned() - room()) < 0.5);
+    // Letting go asks for a render of its own, which clamps; the timeline has to get taller after it
+    // has landed, as it would in the hand, or that render does the job this test is about.
+    await frames(3);
+
+    tl.parentElement!.style.height = '600px';
+    await until('the view to take the new height', () => room() <= 0);
+    await frames(2);
+
+    expect(panned()).toBeLessThanOrEqual(Math.max(0, room()) + 0.5);
   });
 });
 
@@ -771,9 +812,6 @@ describe('the transition dots', () => {
 
   it('leaves a short segment between two dots enough of itself to be selected', async () => {
     const { store, tl } = await mount();
-    // The column's height, as `ve-editor` gives it, so the point below is really hit-tested: the
-    // host is otherwise a block of no height that clips everything in it out of reach of a finger.
-    tl.style.height = '100%';
     // A second, then a 0.6 s piece of the kind a split leaves: 33 px drawn at the opening zoom. Two
     // full 44 px targets on its two cuts would cover every pixel of it, and a tap anywhere on it
     // would open a transition instead of selecting it.

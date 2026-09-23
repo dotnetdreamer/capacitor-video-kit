@@ -406,6 +406,35 @@ describe('ve-toolbar', () => {
     await until('the row to go back to its first tile', () => scroller.scrollLeft === 0);
   });
 
+  /*
+   * The tiles have no plate, so an edge of the screen that falls between two of them cuts nothing
+   * off, and the tools past it look as if they are not there. The end that has more fades instead,
+   * and a row that fits fades neither.
+   */
+  it('fades whichever end of the row still has tools past it', async () => {
+    const { store, bar } = await mount();
+    const scroller = root(bar).querySelector<HTMLElement>('.tb__scroller')!;
+    const faded = () => ['before', 'after'].filter(end => scroller.classList.contains(`tb__scroller--${end}`)).join();
+
+    await until('the end of the root row to fade', () => faded() === 'after');
+    // The first row's scroll reset lands a paint late, and would undo the scroll below.
+    await frames(3);
+
+    scroller.scrollLeft = scroller.scrollWidth;
+    await until('the start to fade instead', () => faded() === 'before');
+
+    scroller.scrollLeft = 120;
+    await until('both ends, from the middle', () => faded() === 'before,after');
+
+    // Inside the track's end padding: not at the end of the scroll, but with no tool past the edge.
+    scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth - 5;
+    await until('the end to clear once the last tool is whole', () => faded() === 'before');
+
+    store.toolbarMode.value = 'text';
+    await until('the text row', () => ids(bar).join() === 'add-text,captions');
+    await until('neither end of a row that fits', () => faded() === '');
+  });
+
   it('opens the Sound menu over the whole editor and gives the tile its focus back', async () => {
     const { store, bar } = await mount();
 
@@ -454,5 +483,27 @@ describe('ve-toolbar', () => {
     expect(root(bar).activeElement).toBe(tile(bar, 'edit'));
     press(toolbar, 'ArrowLeft');
     expect(root(bar).activeElement).toBe(tile(bar, 'edit'));
+  });
+
+  /*
+   * A tile the arrow keys bring in from off the edge is scrolled only as far as it takes to show it,
+   * which left it flush with the edge - under the fade there, its focus ring faded out with it.
+   */
+  it('stops a tile the arrow keys bring into view clear of the fade at the edge', async () => {
+    const { bar } = await mount();
+    const toolbar = root(bar).querySelector('.tb')!;
+    const scroller = root(bar).querySelector<HTMLElement>('.tb__scroller')!;
+    await frames(3);
+
+    tile(bar, 'edit').focus();
+    for (const id of ['crop', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
+      press(toolbar, 'ArrowRight');
+      expect(root(bar).activeElement).toBe(tile(bar, id));
+      await frames(1);
+      const edge = scroller.getBoundingClientRect();
+      const box = tile(bar, id).getBoundingClientRect();
+      expect(box.right).toBeLessThanOrEqual(edge.right - 32 + 0.5);
+      expect(box.left).toBeGreaterThanOrEqual(edge.left);
+    }
   });
 });

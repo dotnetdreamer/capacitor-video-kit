@@ -1,5 +1,7 @@
 /*
- * TikTok's tool row: dark rounded tiles on black, a white outline icon over a short white label.
+ * LightCut's tool row: a white outline icon over a short white label, straight on black, with no
+ * tile behind it. The row is kept short on purpose: every pixel it does not take is given to the
+ * timeline above it (`.ve__timeline` in ve-editor.css), which is where the layers are.
  *
  * The host is the Sound menu's anchor and must not clip it: the menu rises out of the top of the
  * toolbar over the timeline. Its z-index lifts the menu (and the tap catcher behind it) over the
@@ -14,7 +16,8 @@
   position: relative;
   z-index: 10;
   display: block;
-  padding: 8px 0 calc(var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px)) + 8px);
+  /* 4 + 52 + 4: a 60px row. `.ve__timeline` adds the 36px this saves over the old 96px one. */
+  padding: 4px 0 calc(var(--ve-safe-bottom, env(safe-area-inset-bottom, 0px)) + 4px);
   background: var(--ve-bg, #000);
   color: var(--ve-text, #fff);
 }
@@ -22,16 +25,31 @@
 /*
  * Capped at a width of its own, and the number matters in both directions.
  *
- * Too NARROW and the row scrolls for no reason: the root row is about 970px of tiles, and holding
- * it to the width a sheet wants (760px) hid the last two behind a scroll on a screen with most of a
- * thousand pixels to spare. Too WIDE - which is to say uncapped - and the collapse chevron, which
- * stands outside the tiles in the corner while the tiles centre themselves, drifts out to the edge
- * of the screen: at 1280px it sat 211px from the first tool, and on a 2560px monitor some 850px.
+ * Too NARROW and the row scrolls for no reason on a screen with room to spare. Too WIDE - which is
+ * to say uncapped - and the collapse chevron, which stands outside the tiles in the corner while the
+ * tiles centre themselves, drifts out to the edge of the screen: at 1280px it sat 211px from the
+ * first tool, and on a 2560px monitor some 850px.
  *
- * `--ve-toolbar-max` is 1000px from a tablet up, which clears the longest row and still keeps the
- * chevron with the tools it belongs to. On a phone it is `none` and this row is what it always was.
+ * `--ve-toolbar-max` is 800px from a tablet up. The longest row is the clip row with Join on it:
+ * twelve 58px tiles behind the chevron, 10 + 40 + 4 + 696 + 10 = 760px, so it fits with the
+ * chevron still beside the tools it belongs to. On a phone it is `none` and the row scrolls.
+ *
+ * The row's own numbers are custom properties here, and the balanced row below is worked out from
+ * them. Three copies live elsewhere and are kept in step by hand: `--tb-edge` is `MENU_EDGE_PX` in
+ * ve-toolbar.tsx and the 10px fallback of `--tb-menu-x` on the menu, and the tile's 52px with the
+ * host's 4px either side is the `+ 36px` on `.ve__timeline` in ve-editor.css, which a test in
+ * ve-editor.cmp.test.ts holds to.
  */
 .tb {
+  /* The row's padding at either end. */
+  --tb-edge: 10px;
+  /* Every label fits at 11px with a few pixels in hand: "Transition" is the longest, 49px in Roboto,
+     and a tile leaves its label 54 of its 58. Six and a bit fit on a 384px phone. */
+  --tb-tile-w: 58px;
+  --tb-back-w: 40px;
+  /* Between the chevron and the first tool. */
+  --tb-back-gap: 4px;
+
   display: flex;
   align-items: center;
   max-width: var(--ve-toolbar-max, none);
@@ -45,11 +63,38 @@
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
+  /* The width of the fade below, so a tile the arrow keys bring into view stops clear of it rather
+     than flush with the edge, its focus ring faded out with it. */
+  scroll-padding-inline: 32px;
   scrollbar-width: none;
 }
 
 .tb__scroller::-webkit-scrollbar {
   display: none;
+}
+
+/*
+ * A fade over whichever end of the row still has tools past it, marked by `updateEdges` in
+ * ve-toolbar.tsx. The tiles have no plate, so where the edge of the screen falls between two of them
+ * nothing at all is cut off, and the tools past it look as if they are not there. The fade says so
+ * at every width, and on every row.
+ *
+ * A mask, so it is the tools that fade and not the page behind them, and on the scroller, which the
+ * Sound menu's fixed tap catcher is beside rather than inside. Prefixed for WebViews before 120.
+ */
+.tb__scroller--after {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+}
+
+.tb__scroller--before {
+  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+}
+
+.tb__scroller--before.tb__scroller--after {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
 }
 
 /*
@@ -60,42 +105,46 @@
  */
 .tb__track {
   display: flex;
-  gap: 8px;
   width: max-content;
   margin: 0 auto;
-  padding: 0 10px;
+  padding: 0 var(--tb-edge);
 }
 
-/* Next to the collapse tile the usual tile gap is the spacing, not the row's edge padding. */
+/* Next to the collapse tile the spacing is the chevron's own gap, not the row's edge padding. */
 .tile--collapse + .tb__scroller .tb__track {
-  padding-left: 8px;
+  padding-left: var(--tb-back-gap);
 }
 
 /*
  * A short row beside the collapse tile is centred on the SCREEN, as TikTok's Add text and Captions
  * row is, not in the space the collapse tile leaves: the right padding mirrors the collapse tile
- * (10px edge + 56px tile + 8px gap) so the auto margins balance around the middle.
+ * (edge + chevron + gap) so the auto margins balance around the middle.
  */
 .tb--balanced .tb__track {
-  padding-right: 74px;
+  padding-right: calc(var(--tb-edge) + var(--tb-back-w) + var(--tb-back-gap));
 }
 
 /* ------------------------------------------------------------------------------------- tiles */
 
+/*
+ * No plate at rest: the icon and its label are the button, and the 58x52 box around them is only
+ * the finger's target, which is still well over 44px each way. A plate appears while a tile is
+ * pressed, and stays while the Sound menu it opened is open.
+ */
 .tile {
   position: relative;
   display: flex;
-  flex: 0 0 72px;
+  flex: 0 0 var(--tb-tile-w);
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  width: 72px;
-  height: 80px;
-  padding: 0 4px;
+  gap: 4px;
+  width: var(--tb-tile-w);
+  height: 52px;
+  padding: 0 2px;
   border: 0;
-  border-radius: 16px;
-  background: var(--ve-surface, #1e1e1e);
+  border-radius: 10px;
+  background: transparent;
   color: var(--ve-text, #fff);
   font: inherit;
   /* Lets the row pan sideways from a tile while dropping the double-tap-zoom wait on the tap. */
@@ -108,7 +157,7 @@
 
 .tile:active:not(.tile--dim),
 .tile--pressed {
-  background: var(--ve-raised-2, #3a3a3c);
+  background: var(--ve-raised, #2c2c2e);
 }
 
 /* Inset, because the scroller clips anything drawn outside the tile. */
@@ -117,23 +166,28 @@
   outline-offset: -2px;
 }
 
+/*
+ * The way back out of a row, and the one tile that keeps a plate at rest: it stands apart from the
+ * tools beside it, and a bare chevron at the edge of the screen reads as decoration.
+ */
 .tile--collapse {
-  flex-basis: 56px;
-  width: 56px;
-  margin-left: 10px;
+  flex-basis: var(--tb-back-w);
+  width: var(--tb-back-w);
+  margin-left: var(--tb-edge);
+  background: var(--ve-surface, #1e1e1e);
 }
 
 .tile__icon {
   flex: 0 0 auto;
-  font-size: 26px;
+  font-size: 24px;
 }
 
 .tile__label {
   max-width: 100%;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 500;
-  line-height: 16px;
+  line-height: 14px;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -146,13 +200,19 @@
   color: var(--ve-accent, #a6ff2e);
 }
 
+/*
+ * Over the icon's top corner, the way a store badge sits on an app icon: a tile this small has no
+ * empty corner left to put it in. The page's own black behind it is what keeps it legible over the
+ * stroke it covers, and it stays inside the tile because the scroller clips anything that is not.
+ */
 .tile__soon {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 2px;
+  right: 2px;
   padding: 1px 3px;
   border: 1px solid var(--ve-accent, #a6ff2e);
   border-radius: 4px;
+  background: var(--ve-bg, #000);
   color: var(--ve-accent, #a6ff2e);
   font-size: 7px;
   font-weight: 800;
@@ -242,7 +302,13 @@
  * lit up until another one is, which reads as a selection that will not clear.
  */
 @media (hover: hover) and (pointer: fine) {
-  .tile:not(.tile--dim):hover {
+  /* Not on the pressed tile: the Sound tile under the pointer would let go of its held look. */
+  .tile:not(.tile--dim):not(.tile--pressed):hover {
+    background: var(--ve-surface, #1e1e1e);
+  }
+
+  /* The chevron already wears the hover plate at rest, so it takes the next step up. */
+  .tile--collapse:not(.tile--dim):not(.tile--pressed):hover {
     background: var(--ve-raised, #2c2c2e);
   }
 

@@ -7,9 +7,10 @@
 
 ## Overview
 
-TikTok's bottom tool row: dark rounded tiles that scroll sideways, and that turn into the tools for
-whatever is selected - a clip, a layer, the music, a voiceover - with a chevron at the far left to
-step back out.
+The bottom tool row, in LightCut's compact shape: small icons over short labels that scroll
+sideways, and that turn into the tools for whatever is selected - a clip, a layer, the music, a
+voiceover - with a chevron at the far left to step back out. It is short so the timeline above it
+can have the height for its layers.
 
 The toolbar decides nothing itself. Every tile calls a store action (or the media layer for the
 ones that open a picker), so a tool behaves the same here as from the timeline or the preview, and

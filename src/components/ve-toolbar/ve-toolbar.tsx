@@ -49,13 +49,14 @@ type LayerPlace = 'only' | 'top' | 'bottom' | 'middle';
 const SOUND_TILE = 'sound';
 
 /** How close the Sound menu may come to either side of the toolbar, which is also where it opens
- *  when the tile cannot be measured. It matches the tool row's own edge padding. */
+ *  when the tile cannot be measured. It matches the tool row's own edge padding, `--tb-edge`. */
 const MENU_EDGE_PX = 10;
 
 /**
- * TikTok's bottom tool row: dark rounded tiles that scroll sideways, and that turn into the tools for
- * whatever is selected - a clip, a layer, the music, a voiceover - with a chevron at the far left to
- * step back out.
+ * The bottom tool row, in LightCut's compact shape: small icons over short labels that scroll
+ * sideways, and that turn into the tools for whatever is selected - a clip, a layer, the music, a
+ * voiceover - with a chevron at the far left to step back out. It is short so the timeline above it
+ * can have the height for its layers.
  *
  * The toolbar decides nothing itself. Every tile calls a store action (or the media layer for the
  * ones that open a picker), so a tool behaves the same here as from the timeline or the preview, and
@@ -82,6 +83,9 @@ export class VeToolbar {
   private readonly watcher = new SignalWatcher(this);
 
   private scrollerEl?: HTMLElement;
+
+  /** Watches the scroller's width for `updateEdges`, and goes with it. */
+  private edgeWatch?: ResizeObserver;
 
   /** The row the scroller was last put back to the start for. */
   private scrolledFor = '';
@@ -121,8 +125,7 @@ export class VeToolbar {
 
   disconnectedCallback() {
     this.watcher.stop();
-    this.scrollerEl?.removeEventListener('wheel', this.onWheel);
-    this.scrollerEl = undefined;
+    this.keepScroller(undefined);
   }
 
   /**
@@ -132,6 +135,7 @@ export class VeToolbar {
    */
   componentDidRender() {
     this.resetScroll();
+    this.updateEdges();
     this.anchorSoundMenu();
     this.focusFirstMenuItem();
   }
@@ -198,10 +202,41 @@ export class VeToolbar {
   private readonly keepScroller = (el?: HTMLElement) => {
     if (this.scrollerEl === el) return;
     this.scrollerEl?.removeEventListener('wheel', this.onWheel);
+    this.scrollerEl?.removeEventListener('scroll', this.updateEdges);
+    this.edgeWatch?.disconnect();
+    this.edgeWatch = undefined;
     this.scrollerEl = el;
+    if (!el) return;
     // Not passive: the whole point is to take the wheel away from the page, and a passive listener
     // may not. Attached by hand rather than through the vdom for that reason alone.
-    el?.addEventListener('wheel', this.onWheel, { passive: false });
+    el.addEventListener('wheel', this.onWheel, { passive: false });
+    el.addEventListener('scroll', this.updateEdges, { passive: true });
+    // A new row repaints, and `componentDidRender` answers that; a screen turned on its side does
+    // not, and only this sees the row's width change.
+    this.edgeWatch = new ResizeObserver(this.updateEdges);
+    this.edgeWatch.observe(el);
+  };
+
+  /**
+   * Marks which ends of the row have tools past them, for the stylesheet to fade.
+   *
+   * The tiles have no plate, so a row cut off between two of them shows nothing at the edge of the
+   * screen, and the tools past it look as if they are not there: on a 360px phone the root row ended
+   * cleanly after Effects with six more to come. Straight on the element rather than through the
+   * render, because it follows a scroll and the row does not need repainting for it; the vdom only
+   * ever adds and removes the classes it wrote itself, so it leaves these two alone.
+   */
+  private readonly updateEdges = () => {
+    const el = this.scrollerEl;
+    const track = el?.firstElementChild;
+    if (!el || !track) return;
+    // The tools themselves against the edges, not the scroll against its ends: the track has padding
+    // at either end, and a row resting inside it has nothing past it, yet is not at its end.
+    const box = el.getBoundingClientRect();
+    const first = track.firstElementChild?.getBoundingClientRect();
+    const last = track.lastElementChild?.getBoundingClientRect();
+    el.classList.toggle('tb__scroller--before', !!first && first.left < box.left - 1);
+    el.classList.toggle('tb__scroller--after', !!last && last.right > box.right + 1);
   };
 
   /**

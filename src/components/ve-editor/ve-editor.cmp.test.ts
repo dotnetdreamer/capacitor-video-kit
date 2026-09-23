@@ -57,10 +57,10 @@ function manifest(): EditManifest {
   };
 }
 
-async function mount(host: VideoEditorHost = HOST): Promise<{ editor: HTMLElement; window: DOMRect }> {
+async function mount(host: VideoEditorHost = HOST, screen = SCREEN): Promise<{ editor: HTMLElement; window: DOMRect }> {
   /* The WebView's own window, which is what the editor is told to be the height of. */
   const column = document.createElement('div');
-  column.style.cssText = `width: ${SCREEN.width}px; height: ${SCREEN.height}px`;
+  column.style.cssText = `width: ${screen.width}px; height: ${screen.height}px`;
   document.body.append(column);
 
   const editor = document.createElement('ve-editor');
@@ -288,5 +288,87 @@ describe('ve-editor fits the window it is given', () => {
       // Above the home indicator's strip, which is the only part of the sheet a finger cannot use.
       expect(box.bottom).toBeLessThanOrEqual(window.bottom - SAFE_BOTTOM + 0.5);
     }
+  });
+
+  /*
+   * The trade the tool row made: its tiles came down from 80px to 52 so that the layers would have
+   * the room, and the timeline is the only thing that got it. Two stylesheets hold the two halves
+   * (the row's height in ve-toolbar.css, the timeline's `+ 36px` in ve-editor.css), and a change to
+   * one of them alone breaks nothing that throws: the stage quietly takes the difference and every
+   * row of the timeline moves, which is what the device scripts tap by position.
+   */
+  it('gives the layers the height the tool row gave up, and the video none of it', async () => {
+    const { editor } = await mount();
+    const toolbar = inside(editor, 've-toolbar')!;
+    const timeline = inside(editor, 've-timeline')!;
+    await (toolbar as StencilElement).componentOnReady?.();
+
+    const row = toolbar.getBoundingClientRect();
+    const lanes = timeline.getBoundingClientRect();
+    const tile = toolbar.shadowRoot!.querySelector('.tile')!.getBoundingClientRect();
+    // `vh` is the browser's window, not the column the editor was mounted in.
+    const before = Math.min(250, globalThis.innerHeight * 0.31);
+
+    expect(tile.height).toBe(52);
+    // 4 + 52 + 4, over the home indicator's strip.
+    expect(row.height).toBe(60 + SAFE_BOTTOM);
+    expect(lanes.height).toBeCloseTo(before + 36, 1);
+    expect(lanes.bottom).toBeCloseTo(row.top, 1);
+    // What the two of them took before the change, to the pixel: the stage above is untouched.
+    expect(lanes.height + row.height).toBeCloseTo(before + 96 + SAFE_BOTTOM, 1);
+  });
+
+  /*
+   * The column never scrolls, so on a window too short for everything in it - a phone on its side,
+   * a split screen - something has to give. It used to be the tool row, cut off by the bottom of the
+   * screen with its labels gone; it is the timeline now, whose lanes pan anyway.
+   */
+  it('lets the timeline give way on a short window rather than cut off the tools', async () => {
+    const { editor, window } = await mount(HOST, { width: SCREEN.width, height: 480 });
+    const toolbar = inside(editor, 've-toolbar')!;
+    await (toolbar as StencilElement).componentOnReady?.();
+
+    const tiles = [...toolbar.shadowRoot!.querySelectorAll('.tile')].map(tile => tile.getBoundingClientRect());
+    const timeline = inside(editor, 've-timeline')!.getBoundingClientRect();
+    const stage = inside(editor, '.ve__stage')!.getBoundingClientRect();
+
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const tile of tiles) {
+      expect(tile.height).toBe(52);
+      expect(tile.bottom).toBeLessThanOrEqual(window.bottom - SAFE_BOTTOM + 0.5);
+    }
+    expect(timeline.height).toBeLessThan(Math.min(250, globalThis.innerHeight * 0.31) + 36);
+    expect(stage.height).toBeGreaterThanOrEqual(120);
+  });
+
+  it('never gives the timeline less than its ruler and base track', async () => {
+    // Too short for even that: 59 + 130 + 52 + 94 leaves 65 of 400.
+    const { editor } = await mount(HOST, { width: SCREEN.width, height: 400 });
+    // The tool row's height is what the timeline gives way to, and it has none until it has drawn.
+    await (inside(editor, 've-toolbar') as StencilElement).componentOnReady?.();
+
+    expect(inside(editor, 've-timeline')!.getBoundingClientRect().height).toBe(90);
+  });
+
+  /*
+   * The trade above, on a WebView too old for container queries (Chrome 104 and before, which is
+   * what an A13 ships with). There `container-type` is ignored, the stage's content counts toward
+   * its flex basis, and that content is the whole preview frame: the column overflowed, the stage
+   * and the timeline shared the shrink, and the video took back most of what the tool row gave up.
+   * The browser these tests run in has container queries, so what such an engine sees is put in by
+   * hand - no containment, and a frame far taller than the stage - and nothing may move.
+   */
+  it('keeps the same layout on a WebView without container queries', async () => {
+    const { editor } = await mount();
+    await (inside(editor, 've-toolbar') as StencilElement).componentOnReady?.();
+    const layout = () => ['.ve__stage', 've-timeline', 've-toolbar'].map(selector => inside(editor, selector)!.getBoundingClientRect().toJSON());
+    const modern = layout();
+
+    const old = document.createElement('style');
+    // `!important` because the component's own sheets are adopted, and those come after this one.
+    old.textContent = '.ve__stage { container-type: normal !important } .ve__stage::before { content: ""; display: block; height: 900px }';
+    editor.shadowRoot!.append(old);
+
+    expect(layout()).toEqual(modern);
   });
 });

@@ -88,7 +88,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 | `--ve-safe-top`        | What the status bar covers, replaced by a measurement once the host reports one                        |
 | `--ve-sheet`           | The background of an open sheet                                                                        |
 | `--ve-stage-gutter`    | What the preview keeps free either side of the video for Back and Next, together                       |
-| `--ve-surface`         | The toolbar's own background, a step up from the page                                                  |
+| `--ve-surface`         | The tool row's back chevron, and a tool under a mouse, a step up from the page                         |
 | `--ve-text`            | Text and glyphs at full strength                                                                       |
 | `--ve-toolbar-max`     | The same for the tool row, wide enough that its longest row still fits                                 |
 | `--ve-transport-max`   | The same for the clock and transport row, which wants to stay tighter                                  |

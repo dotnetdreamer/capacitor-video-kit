@@ -1275,6 +1275,11 @@ export class VeTimeline {
       const width = el.clientWidth;
       if (width !== this.viewportWidth.value) this.viewportWidth.value = width;
       this.updateChunk(el.scrollLeft);
+      // A change of HEIGHT alone renders nothing, and the lanes' pan is only clamped on a render. A
+      // timeline that got taller - a split screen's divider dragged, a window made taller - left
+      // lanes panned to their end past the new one, a band of black under the last row, until
+      // something else repainted. Shorter is harmless: it only gives the pan more room.
+      if (this.laneY > 0) this.setLaneY(this.laneY);
     });
     resize.observe(el);
     offs.push(() => resize.disconnect());

@@ -1,6 +1,6 @@
 /*
  * TikTok's editor on pure black: the video is the subject and the chrome around it is quiet grey
- * tiles. Every value is read from a `--ve-` token, and `ve-tokens.css` - which this component
+ * and white. Every value is read from a `--ve-` token, and `ve-tokens.css` - which this component
  * includes ahead of this file, and which nothing else includes - is where the tokens are declared.
  * So the colours here can be read bare, with no fallback: inside this element they always resolve.
  *
@@ -59,7 +59,15 @@
 
 .ve__stage {
   position: relative;
-  flex: 1 1 auto;
+  /*
+   * A basis of 0 rather than `auto`, so the stage asks for nothing and takes what the other rows
+   * leave. With `auto` its basis is its content, which is nothing where `container-type` below
+   * holds - and the whole preview frame on a WebView too old for container queries (Chrome 104 and
+   * before), where the column then overflowed and the stage and the timeline shared the shrink: the
+   * video took back most of the height the tool row had given the layers, and the timeline started
+   * lower than it does everywhere else.
+   */
+  flex: 1 1 0;
   min-height: 120px;
   padding: 6px 0 4px;
   /*
@@ -294,13 +302,30 @@
 
 /* ---------------------------------------------------------------------------- timeline & tools */
 
+/*
+ * What the tool row under it does not take. The `+ 36px` is the height the row gave up when its
+ * tiles came down from 80px to LightCut's 52 (96px of row to 60), and it is added OUTSIDE the
+ * `min()` so that it goes to the layers on every screen and never to the video: the stage above
+ * is exactly the size it was, and so is where the timeline starts. Raising the 250 alone would do
+ * nothing on a window under 806px tall, where 31vh is the smaller of the two - the A13's WebView
+ * between its bars is 785 - and the stage would take the room instead. On a 384x856 phone the
+ * lanes go from three whole rows to four.
+ *
+ * It is the one row that may give way. The column never scrolls, and on a phone on its side the
+ * stage reaches its 120px floor with the tool row still to fit: something has to be shorter, and
+ * lanes that pan anyway can lose height where a row of buttons cut off at the bottom of the screen
+ * cannot. 90px is the ruler and the base track, which it never goes below.
+ */
 .ve__timeline {
   display: block;
-  flex: 0 0 min(250px, 31vh);
+  flex: 0 1 calc(min(250px, 31vh) + 36px);
+  min-height: 90px;
 }
 
+/* No tool row in compact, and none of the above: the whole `flex`, or the shrink leaks into it. */
 .ve--compact .ve__timeline {
-  flex-basis: 96px;
+  flex: 0 0 96px;
+  min-height: 0;
 }
 
 .ve__toolbar {
