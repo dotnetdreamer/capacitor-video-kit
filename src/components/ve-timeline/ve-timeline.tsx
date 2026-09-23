@@ -78,9 +78,9 @@ const EMPTY_WAVES: ReadonlyMap<string, WaveView> = new Map();
 /** Movement that turns a press into a scroll or a drag, and cancels a long press. */
 const MOVE_SLOP_PX = 8;
 /**
- * How long after a press lets go a click on a transition dot is still that press's own click. A
- * browser fires it straight after the pointer's up, a few milliseconds at most; a screen reader's
- * click comes with no pointer at all, and never this close behind one.
+ * How long after a press lets go a click on a transition dot or on "Add sound" is still that press's
+ * own click. A browser fires it straight after the pointer's up, a few milliseconds at most; a
+ * screen reader's click comes with no pointer at all, and never this close behind one.
  */
 const CLICK_ECHO_MS = 700;
 const LONG_PRESS_MS = 350;
@@ -1016,6 +1016,11 @@ export class VeTimeline {
    */
   private pressEndedAt = -Infinity;
   /**
+   * When the pointer path last took a press on "Add sound" for a tap, which is what lets the click
+   * that follows it open the Sound sheet. See [onAddSoundClick].
+   */
+  private soundTapAt = -Infinity;
+  /**
    * The identifiers of the touches that went down on the timeline. `event.touches` counts EVERY
    * finger on the screen, and a finger resting on the preview or on an open sheet is not ours: it
    * must neither start a pinch here nor hold the timeline waiting for a lift it will never hear.
@@ -1802,14 +1807,15 @@ export class VeTimeline {
   private onTap(press: Press): void {
     // The press that caught a coasting fling has already done its job by stopping it.
     if (press.consumed) return;
-    const { store, media } = this.ctx;
+    const { store } = this.ctx;
     const id = press.id;
     switch (press.kind) {
       case 'mute':
         store.toggleOriginalMuted();
         return;
       case 'add-sound':
-        media.openSound();
+        // Not opened here: the click this tap is about to become opens it. See [onAddSoundClick].
+        this.soundTapAt = performance.now();
         return;
       case 'clip':
       // A segment on either layer selects the same way; the tools it opens differ, not the tap.
@@ -1872,6 +1878,39 @@ export class VeTimeline {
     if (performance.now() - this.pressEndedAt < CLICK_ECHO_MS) return;
     const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
     if (id) this.ctx.store.openTransition(id);
+  };
+
+  /**
+   * "Add sound" opens on its CLICK, where every other press on the timeline acts on the pointer's
+   * way up, and the reason is what opens.
+   *
+   * The Sound sheet comes up over the bottom of the editor, which is where the music lane was a
+   * moment before, and WebKit on iOS fires the click that follows a tap AFTER the lift, aiming it at
+   * whatever is under the finger by then. Opened on the way up, the sheet was under the finger, so
+   * that click landed inside it - on Extract from video, which opened the video picker over the
+   * sheet the customer had not yet seen. An Android WebView never showed it. Opened by the click,
+   * the sheet cannot be there to receive it. The click is also what every browser allows a file
+   * picker from, which matters to a host with no sound library, where this opens the audio picker
+   * itself.
+   *
+   * The pointer path still decides what was a TAP, as it does for every press here: a click after a
+   * press it answered as something else - a drag or a scrub that ended over the button, a tap that
+   * stopped a fling - opens nothing, because [onTap] never marked it. A click no pointer came before
+   * at all is a key, a screen reader's double tap or switch access, and opens it, which the pointer
+   * path alone never could.
+   *
+   * A finger HELD on it and let go opens nothing, where the way up used to open it at any length.
+   * That is the price, and it is paid on Android too: Chrome there fires `contextmenu` half a second
+   * into a press, which the timeline cancels, and sends no click after it (measured in an Android
+   * emulator's Chrome: let go at 450ms, a click; at 700ms, none). A hold is not a tap anywhere else
+   * on the timeline either - a transition dot held and let go opens nothing, and a segment held
+   * lifts - so this is the one place it had not been true yet, rather than a new rule.
+   */
+  private readonly onAddSoundClick = (): void => {
+    const now = performance.now();
+    const tapped = now - this.soundTapAt < CLICK_ECHO_MS;
+    this.soundTapAt = -Infinity;
+    if (tapped || now - this.pressEndedAt >= CLICK_ECHO_MS) this.ctx.media.openSound();
   };
 
   private toggleSelection(selection: EditorSelection): void {
@@ -3234,7 +3273,14 @@ export class VeTimeline {
             handles?.canTrimEnd ? <span class="handle handle--out" key="music-out" data-hit="music-end" style={{ left: `${handles.outX}px` }}></span> : null,
           ]
         ) : (
-          <button type="button" class="item item--add-sound" key="add-sound" data-hit="add-sound" style={{ left: `${pad}px`, width: `${this.addSoundWidth.value}px` }}>
+          <button
+            type="button"
+            class="item item--add-sound"
+            key="add-sound"
+            data-hit="add-sound"
+            style={{ left: `${pad}px`, width: `${this.addSoundWidth.value}px` }}
+            onClick={this.onAddSoundClick}
+          >
             <span class="item__label">
               <ve-icon name="musical-note"></ve-icon>
               <span class="item__text">Add sound</span>

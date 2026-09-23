@@ -1,185 +1,129 @@
 # iOS: pictures on the timeline
 
-A picture (a still photo) can now be a clip on the editor's timeline, mixed with videos: trimmed,
-cut, joined, reordered, cropped, fitted, and dressed with transitions like any clip. The web engine
-and the Android engine render it. **The iOS engine does not**, and the iOS gallery does not list
-photos. This is the work to close that gap. All of it is in this repo (`capacitor-video-kit`),
-almost all of it in `ios/Sources/CapacitorVideoKitCore/`.
+A picture (a still photo) can be a clip on the editor's timeline, mixed with videos: trimmed, cut,
+joined, reordered, cropped, fitted and dressed with transitions like any clip. Every engine renders
+one now - web, Android and iOS - and the iOS gallery lists photos beside videos when it is asked to.
+This file was the work order for the iOS half. It is now the record of how that half works, and of
+the little that is still open, for whoever touches it next.
 
-The editor UI is shared web code and already handles pictures, so there is no UI work here.
+The contract is `ComposeClip.image` in `src/video-composer/definitions.ts`, and the implementations
+iOS was held to are Android's `pictureItem` in `CompositionBuilder.kt` with `Pictures.kt`, and the
+web's `StillReader` and `probePicture` in `src/video-composer/web/media.ts`. The editor's UI is
+shared web code and needed nothing.
 
-## Where things stand
+## Who turns it on
 
-- Hosts opt in with `editing.pictures` (`src/host/host.types.ts`). It is off by default.
-- lighsnip turns it on everywhere except iOS (`lighsnip/src/app/core/media/pictures.ts`).
-- choisy turns it off explicitly, and that stays as it is.
-- So no iOS user can reach this code yet. Once the iOS engine renders pictures and the gallery
-  lists them, the iOS exception in lighsnip can go.
-- Today a spec with a picture fails on iOS in `SourceCache.source(for:)` (`CompositionBuilder.swift`,
-  about line 140) with `unreadable(clip.key, "no video track")`, which reaches JS as `unreadable_input`.
+- Hosts opt in with `editing.pictures` (`src/host/host.types.ts`), off by default. It governs what
+  the pickers offer; a manifest that already holds a picture is rendered either way.
+- lighsnip answers true everywhere, iOS included (`lighsnip/src/app/core/media/pictures.ts`). That
+  is right only with a kit that has both halves below, so lighsnip must not ship on iOS against an
+  older one: a post with a picture would fail at the very end, after the editing.
+- choisy leaves it off, and that stays as it is.
 
-## The contract (read this first)
+## The parser (`ComposeSpecParser.swift`, `ComposeSpec.swift`)
 
-`ComposeClip.image?: boolean` in `src/video-composer/definitions.ts`. When true:
+`ComposeClip.image` is read by the one clip reader that serves base clips, layer clips and every
+transition's `from`, so all three get it. It is read last, after `rect`, so a clip that is wrong in
+an older field still reports that field, and a value that is not a boolean reads as a video, the
+lenient reading `muted` gets. A picture is forced to speed 1 and muted; everything else - trim,
+fit, volume, crop, placement - is kept exactly as sent. A spec with no `image` key anywhere parses
+as it always did.
 
-- `uri` is a picture (JPEG, PNG, HEIC, WebP, anything the platform decodes), not a video.
-- It is ONE frame held for `outMs - inMs` of output time, turned upright by its EXIF orientation.
-- It has no sound and no speed: render it silent at 1x whatever `muted`, `volume` and `speed` say.
-- Never clamp its trim to a probed duration, because a still has none.
-- `crop`, `fit`, `rect` (placement and rotation) and transitions apply exactly as they do to a
-  video frame.
-- It can appear on the base track, on an extra layer (`tracks[].clips`), and as a transition's
-  outgoing side (`clips[i].transitionIn.from`).
+## The render (`PictureStills.swift`, `CompositionBuilder.swift`)
 
-What JS actually sends (`toComposeSpec` in `src/editor/compose.ts`): pictures always arrive with
-`inMs: 0`, `speed: 1`, `muted: true`. A transition's `from` on a picture has the same `uri` and an
-`inMs` greater than 0.
+AVFoundation has no still-image item: an `AVMutableComposition` is built from time ranges of tracks,
+and a JPEG has no track. So each distinct picture becomes a short H.264 file of one frame, and from
+then on nothing downstream can tell it from a video. Orientation, crop, fit, placement, turn and every
+transition apply to a picture because they apply to a frame.
 
-```json
-{ "key": "seg-2", "uri": "file:///.../IMG_0042.HEIC", "inMs": 0, "outMs": 3000,
-  "speed": 1, "volume": 1, "muted": true, "fit": "cover", "image": true }
-```
+- **Where.** `SourceCache.source(for:)` is the choke point every clip goes through - base, layer and
+  transition tail - and it asks `PictureStills` first. The still is written the first time its `uri`
+  is asked for, into `pictures/<digest of the uri>.mp4` in the job folder, and one file serves every
+  clip that names the picture: a picture cut in two, duplicated, or used as a transition's tail.
+- **How long.** Before the first clip is laid, one pass over the spec finds the furthest `outMs` any
+  clip asks of each picture, because a transition's tail reads the same picture from later on. The
+  still runs that long plus one frame at 30 fps of margin, is read back, and is refused if its track
+  comes out short.
+- **Decoding.** ImageIO's thumbnail path, which turns the picture upright by its EXIF orientation,
+  never holds a 48 MP photo whole, and reads the file's content rather than its name - so a picture
+  `prepareJob` named `.mp4` still decodes. At most twice the output's long side, capped at 4096 and
+  at H.264's 3840x2160 area.
+- **Shape and colour.** The still keeps the picture's own shape, never letterboxed or cropped, because
+  the compositor measures fit and crop against a source's natural size; each side is rounded down to
+  an even number. It is drawn into sRGB, so a Display P3 photo lands in the space the compositor
+  blends in, and tagged BT.709. There is no audio track. A transparent picture is drawn over black,
+  because H.264 has no alpha.
+- **Order and blame.** Pictures and videos are opened in one pass in the builder's order, which is
+  Android's preflight order for every spec the editor builds, so when a broken video comes before a
+  broken picture both platforms name the video. A picture that will not open or decode fails with
+  `BuildError.unreadable(clip.key, ...)`, which reaches JS as `unreadable_input` naming the first clip
+  that uses it. A still the writer cannot encode surfaces as the writer's own error, sorted by
+  `ErrorMapping` like an export's.
+- **Cancellation** is checked before each still and while one is written, and a cancelled still is
+  deleted rather than left half written.
+- **Lifetime.** A still is the render's alone, about 0.4 MB per 12 MP photo. `JobRegistry.run`
+  deletes `pictures/`, with the links `RenderInputs` made in `named/`, once the export has finished,
+  failed or been cancelled, or the build has thrown, and before it reports how the render ended, so a
+  retry the app starts on `failed` never has its own stills deleted under it. A render whose app was
+  killed leaves them for `JobFolders.cleanup` or the launch sweep.
+- **Sound.** A picture is silent, and the clips either side of one keep their own level right up to
+  their cut: `CompositionBuilder.hold` sets each level again a millisecond before its range ends,
+  because AVFoundation otherwise draws a straight line from one clip's volume to the next and a video
+  before a picture faded out across its whole length.
 
-A spec with no `image` key anywhere must build exactly as it does today, with no extra work.
+A spec with no picture in it never creates `pictures/` and reads no byte more than it did.
 
-## Reference implementations to mirror
+## The gallery (`GalleryLibrary.swift`, `VideoComposerPlugin.swift`)
 
-- **Android parser:** `android/.../ComposeSpecParser.kt`, `parseClip`. `image` forces speed 1 and
-  muted true.
-- **Android probe:** `android/.../Pictures.kt`, a header-only decode that fails early for a file
-  that is not a picture. The picture branch of preflight is in `VideoComposerPlugin.kt`.
-- **Android render:** `android/.../CompositionBuilder.kt`, `pictureItem`. Media3 has native image
-  items, which AVFoundation does not, so the approach differs; the behaviour must not.
-- **Web:** `src/video-composer/web/spec.ts` (`readClip`), `media.ts` (`StillReader`,
-  `probePicture`), and `render.ts`.
-- **Tests to mirror:** the picture cases in `android/src/test/.../ComposeSpecParserTest.kt` and
-  `RenderPlanTest.kt`, and "a picture on the timeline, end to end" in
-  `src/video-composer/web/render.cmp.test.ts`.
+- `listGalleryVideos({ images: true })` fetches photos and videos in one `PHAsset` fetch, newest first
+  by `creationDate` - the order the Photos app shows; Android orders by the date a file was added,
+  which PhotoKit has no public key for. Every item carries `kind`, and a photo's `durationMs` is 0.
+  Without `images` the list is videos alone, as before.
+- `galleryThumbnail` serves a photo as it serves a video, through `PHImageManager`, fitted inside a
+  `maxSize` square.
+- `resolveGalleryVideo` on a photo copies its image resource in the format it is stored in - a HEIC
+  stays a HEIC, which the renderer decodes - into the same `videokit-gallery/<id>/<version>/<name>`
+  scheme videos use. The copied resource is `.fullSizePhoto`, falling back to `.photo`, so an edit
+  made in Photos is what renders; the name is the original's, with the extension of the bytes copied.
+- `requestGalleryAccess` accepts `images` and changes nothing: the one photo library grant covers
+  photos and videos alike.
+- A photo stays a copy, like a video, until the host lets it go with `releaseMedia` or `sweepMedia`
+  (README, **Keeping picked media**). One picked through the system picker rather than this gallery
+  is kept with `retainMedia`, which moves it out of Caches into `videokit-picked/` under its own
+  extension, so a HEIC stays a HEIC there too; `requestMediaAccess` answers granted without a prompt
+  whatever `images` says. `gallerySource` and `retainPickedFile`, from `capacitor-video-kit`, are
+  that glue for a host, the first marking a listed photo `kind: 'image'` (README, **Native hosts**).
 
-## 1. Parser (`ComposeSpecParser.swift`, `ComposeSpec.swift`)
+## How it is checked
 
-- Add `let image: Bool` to `ComposeClip` (`ComposeSpec.swift`, about line 63).
-- In `ClipDTO` (about line 639): add `image` to `CodingKeys` and read it with
-  `c.flag(.image, false)` next to `muted`. Read it last, after `rect`, so an older field that is
-  wrong is still the one reported.
-- In `clip(_:transitionIn:)` (about line 161), which builds the `ComposeClip`: when `image` is true,
-  set `speed` to 1 and `muted` to true.
-- This one reader serves base clips, layer clips and transition `from`s, so all three get it.
+In the package's own test target, on the iOS Simulator (`README.md`, **Build and test**).
+`PicturesParserTests` covers a picture on the base track, on a layer and as a transition's side, a
+clip without the key, and what a picture keeps. `PicturesRenderTests` renders real files and reads
+frames and sound back:
 
-## 2. Render (`CompositionBuilder.swift`)
+1. 0.5 s of video then a 1 s cover picture is a 1.5 s file, the picture edge to edge at 1.0 s and the
+   video at 0.25 s, and a cover picture keeps its own shape.
+2. Pictures alone render with no sound track, and with their music when there is some.
+3. A dissolve from a picture into a video and from a video into a picture.
+4. A picture on a layer with a `rect` and a turn.
+5. EXIF orientation 6 renders upright, a HEIC renders, and a picture named as a video still decodes.
+6. A broken picture fails as `unreadable_input` naming its clip, and a broken video before it is the
+   clip blamed instead.
+7. Cancelling while stills are written leaves no part of one.
+8. A spec with no pictures writes no stills.
+9. The sound either side of a picture stays whole, on the base track and on a layer.
+10. A render through the registry leaves neither `pictures/` nor `named/` behind, whether it
+    finished or its build failed after a still was written.
 
-AVFoundation cannot insert a still into an `AVMutableComposition`. So before the build, turn each
-distinct picture `uri` into a short H.264 still-frame video, then let the existing code treat it as
-a video source. Nothing downstream (transitions, layers, the compositor) should need to know.
+The gallery's PhotoKit paths cannot run there, because the test runner cannot be granted the photo
+library. They were run in a throwaway app on the simulator instead: listing with kinds, thumbnails,
+and eight photos and nine videos resolved.
 
-**The choke point is `SourceCache.source(for:)`** (about line 132). Every clip goes through it:
-base, layer and tail.
+## Still open
 
-**How long each still must be.** At the start of `build(_:)` (about line 187), before the clip loop,
-work out for each picture `uri` the longest length it is needed for: the max `outMs` over every clip
-that names it. That includes base clips, `tracks[].clips`, and every `transitionIn.from`. The
-builder clamps each source range to the video track's range, so the file must run at least that
-long. Add a frame of margin.
-
-**Writing the still** (`AVAssetWriter`), into the job folder, e.g.
-`JobFolders.jobDir(spec.batchId)/pictures/<hash of uri>.mp4`. `JobFolders.cleanup` deletes the
-whole job folder, so these files go with it.
-
-- **Decode with ImageIO** (`CGImageSourceCreateThumbnailAtIndex` with
-  `kCGImageSourceCreateThumbnailWithTransform: true`,
-  `kCGImageSourceCreateThumbnailFromImageAlways: true`, and
-  `kCGImageSourceThumbnailMaxPixelSize` about `min(4096, 2 * output long side)`). That turns the
-  image upright by EXIF and never holds a 48 MP image in memory. ImageIO reads the file's content,
-  not its extension: `prepareJob` names an input with no extension `.mp4`
-  (`JobFolders.defaultExtension`), and a picture must still decode then.
-- **Keep the picture's own shape.** Do not letterbox or crop it: the compositor measures fit and
-  crop against the source's natural size. Round each side to an even number for H.264.
-- **Orientation is baked in**, so `preferredTransform` stays identity. The file has no audio track.
-- **Frames:** H.264, append the same pixel buffer at t=0 and at t = length − 1/30 s, then
-  `endSession(atSourceTime: length)`. Load the result and assert its video `timeRange` covers
-  `length`.
-- **Reuse one file per `uri`** within a build. A picture cut in two, duplicated, or used as a tail
-  is the same file.
-
-**Loading the still.** Map the picture `uri` to the generated file and load it in `SourceCache`
-exactly as a video. Its `audioTrack` is nil and `gain(of:)` (about line 818) is 0 for a muted clip.
-Confirm a mixed spec (a video with sound, then a picture, then a video with sound) keeps each
-video's sound in place and is silent over the picture.
-
-**Failures.** A picture that will not open or decode must throw
-`BuildError.unreadable(clip.key, "...")`, so JS gets `unreadable_input` naming the clip, as on
-Android and the web. Respect cancellation while writing the stills.
-
-**Transitions.** In and out of a picture should just work, because both sides are video tracks by
-then (`EditCompositor.swift`, `TransitionRender.swift`). Verify a dissolve both ways.
-
-## 3. Gallery (`GalleryLibrary.swift`, `VideoComposerPlugin.swift`)
-
-The contract, in `definitions.ts`:
-
-- `requestGalleryAccess({ images?: boolean })`.
-- `listGalleryVideos({ offset, limit, images?: boolean })` returns items with
-  `kind: 'video' | 'image'`, and `durationMs: 0` for a photo.
-- `galleryThumbnail` and `resolveGalleryVideo` take a photo's id exactly as they take a video's.
-- Without `images`, everything behaves exactly as today.
-
-Changes:
-
-- **`list`** (about line 74). With `images`, fetch photos and videos together, newest first by
-  `creationDate` as now: `PHAsset.fetchAssets(with: options)` and a predicate
-  `mediaType == image || mediaType == video`. Emit `kind` on each item.
-- **`fileName(of:)`** (about line 189, with the resource choice at about line 186). For a photo,
-  use the `.fullSizePhoto` resource, falling back to `.photo`. Keep `.fullSizeVideo` then `.video`
-  for videos.
-- **`resolve`** (about line 135). For a photo, write the image resource to a file where videos are
-  written today, with its own extension (`.heic`, `.jpg`), and keep its format: the renderer decodes
-  HEIC. Allow network access for iCloud, as videos already do. Return the `file://` URI and file
-  name.
-- **`thumbnail`.** It uses `PHImageManager`, which already serves photos. Verify it.
-- **Access.** The photo library grant already covers photos and videos, so accept the `images`
-  argument and change nothing else.
-- **Plugin.** Read `images` in `listGalleryVideos` and pass it through, and add `kind` to each
-  item's JSON.
-
-## 4. Docs and the lighsnip switch
-
-- **`src/video-composer/definitions.ts`.** In `ComposeClip.image` (about line 135), drop "iOS does
-  not render pictures yet…". In `ListGalleryVideosOptions.images` (about line 634), drop "Android
-  only for now…".
-- **`src/host/host.types.ts`.** In `EditorEditingOptions.pictures`, drop the iOS caveat.
-- **lighsnip `src/app/core/media/pictures.ts`.** Make it return true on iOS as well. lighsnip has
-  no iOS project today, so this is ready for when it does.
-- **choisy.** Leave `editing: { pictures: false }` alone.
-
-## Acceptance
-
-There is no Swift test target. Build the kit (`npm run build`) and use choisy-mobile's iOS project,
-the only host with one. Drive `VideoComposer.compose` with hand-built specs from its lab page
-(`src/app/modules/video-kit-lab/`), or turn `editing.pictures` on in a local debug build and revert
-it before committing. Adding a Swift test target for the parser is welcome.
-
-**Render** (pull the file and check frames):
-
-1. 0.5 s of video then a 1 s picture (`fit: "cover"`): the file is 1.5 s long. At 1.0 s the frame
-   is the picture edge to edge; at 0.25 s it is the video. Mirror the web test.
-2. Only pictures: renders, with no sound unless music is set.
-3. A dissolve from a picture into a video, and from a video into a picture: blended mid-window,
-   and each side correct outside it.
-4. A picture on an extra layer with a `rect` (picture in picture) and a rotation.
-5. A portrait JPEG with EXIF orientation 6 renders upright, and a HEIC from the library renders.
-6. A broken file with `image: true`: a `failed` event with code `unreadable_input` and that clip's
-   `clipKey`.
-7. A spec with no pictures renders exactly as before.
-
-**Gallery:**
-
-- `listGalleryVideos({ images: true })` returns photos with `kind: "image"`, and their thumbnails
-  load.
-- `resolveGalleryVideo` on a photo gives a file that `compose` accepts with `image: true`.
-- Without `images`, the list is unchanged.
-
-## Out of scope
-
-- No TypeScript, Android or UI changes beyond the doc lines in step 4.
-- The preview is web code and already handles pictures.
-- Do not turn pictures on in choisy.
+- **Nothing here has run on a device.** In particular the H.264 size cap for stills, a HEIC or a
+  ProRAW picture from a real library, and limited photo library access, which the simulator cannot
+  grant.
+- **The two halves have not met.** The render and the gallery were each checked on their own, so a
+  photo resolved out of the library and then composed with `image: true` has not been run end to
+  end on iOS. It is the first thing to try with the two together.

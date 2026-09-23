@@ -29,6 +29,7 @@ import {
   startPlayback,
   volumeIsWritable,
 } from './preview-media';
+import { PreviewMixer, levelsInUse, playableHere } from './preview-mixer';
 import {
   MAX_START_LEAD_MS,
   TAIL_SEEK_MS,
@@ -225,8 +226,16 @@ export class PreviewPlayer implements EditorPlayer {
   private readonly decks: readonly [BaseDeck, BaseDeck];
   /** The base element that is the clock. The other is [spare]. */
   private active: BaseDeck;
-  private readonly musicEl: HTMLAudioElement;
-  private readonly voiceEl: HTMLAudioElement;
+  /** The component's own elements for the music and the voiceover. */
+  private readonly ownAudio: Readonly<Record<'music' | 'voice', HTMLAudioElement>>;
+  /**
+   * The elements the music and the voiceover are on now: the component's own, unless one of those
+   * is in [mixer]'s graph and its file is one the graph cannot play - see [PreviewMixer.elementFor].
+   */
+  private musicEl: HTMLAudioElement;
+  private voiceEl: HTMLAudioElement;
+  /** How the music and the voiceover are heard at their levels where the WebView ignores `volume`. */
+  private readonly mixer: PreviewMixer;
   private readonly onSwap: (() => void) | undefined;
 
   /** The segment the clock is showing, by segment id - indices move when the manifest changes. */
@@ -301,8 +310,10 @@ export class PreviewPlayer implements EditorPlayer {
     this.decks = [new BaseDeck(media.video), new BaseDeck(media.partner)];
     this.active = this.decks[0];
     this.extraLayers = media.extraLayers;
+    this.ownAudio = { music: media.music, voice: media.voice };
     this.musicEl = media.music;
     this.voiceEl = media.voice;
+    this.mixer = new PreviewMixer([media.music, media.voice]);
     this.onSwap = media.onSwap;
 
     for (const deck of this.decks) this.listenTo(deck);
@@ -386,6 +397,8 @@ export class PreviewPlayer implements EditorPlayer {
   play(): void {
     const total = this.store.totalMs.value;
     if (!this.store.slots.value.length || total <= 0) return;
+    // Before anything is started, and whatever is still loading: this is the tap.
+    this.startMixer();
     // Decided before the busy cases below. A scrub or fling that has just landed on the end is
     // usually still loading or seeking there, and playing on from where the element is going
     // would play nothing and stop at the end again - Play looked dead.
@@ -411,6 +424,9 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   pause(): void {
+    // First, so the audio session is the app's again before whoever paused goes on to use it: the
+    // voiceover sheet pauses and then opens the microphone. See [PreviewMixer].
+    this.mixer.stop();
     this.autoplay = false;
     // The exact position first: the frame loop's last write can be a tick old, and in the tail
     // nothing else knows where the playhead had got to.
@@ -637,6 +653,7 @@ export class PreviewPlayer implements EditorPlayer {
     if (this.seekTimer) clearTimeout(this.seekTimer);
     for (const deck of this.decks) this.clearPut(deck);
     for (const off of this.unlisten) off();
+    this.mixer.release();
     // Both base elements are stripped, the spare too: it holds a decoder whatever it is doing.
     for (const el of [...this.decks.map(deck => deck.video), this.musicEl, this.voiceEl]) {
       el.pause();
@@ -1270,6 +1287,8 @@ export class PreviewPlayer implements EditorPlayer {
       this.stopTail();
       this.store.playheadMs.value = total;
       this.pauseAudio();
+      // The post is over, which lets go of the sound mixer as a pause does; see [PreviewMixer].
+      this.mixer.stop();
       this.readPlayState();
       return;
     }
@@ -1336,6 +1355,8 @@ export class PreviewPlayer implements EditorPlayer {
       }
       this.video.pause();
       this.pauseAudio();
+      // The post is over, which lets go of the sound mixer as a pause does; see [PreviewMixer].
+      this.mixer.stop();
       this.store.playheadMs.value = this.store.totalMs.value;
       this.readPlayState();
       return;
@@ -1429,7 +1450,8 @@ export class PreviewPlayer implements EditorPlayer {
    *
    * Where the WebView will not let a page set a volume (iOS), a fade is two clips at full volume at
    * once, so it is not attempted: the incoming clip is heard from the first frame of the window, and
-   * the tail not at all.
+   * the tail not at all. The music and the voiceover are heard at their levels there all the same,
+   * through [PreviewMixer]; a clip's own sound is not put through it, for the reason written there.
    */
   private applyBaseAudio(clip: EditClip, window: TransitionWindow | null): void {
     const silenced = clipsSilenced(this.store);
@@ -1462,7 +1484,7 @@ export class PreviewPlayer implements EditorPlayer {
     const live = playing && this.store.recordingFromMs.value === null;
 
     const music = manifest.music;
-    this.setSource(this.musicEl, music?.uri ?? null, 'music');
+    this.setSource('music', music?.uri ?? null);
     // Sound that is about to be due is started NOW, a stall before it is needed: the position it is
     // put at is still counted from the playhead, so what comes out starts exactly on time - and the
     // first moment of a track or a take is heard rather than swallowed by the output starting up.
@@ -1486,7 +1508,7 @@ export class PreviewPlayer implements EditorPlayer {
       ? manifest.voiceovers.find((t) => ms >= t.startMs - voiceLead && ms < t.startMs + t.durationMs)
       : undefined;
     if (take) {
-      this.setSource(this.voiceEl, take.uri, 'voice');
+      this.setSource('voice', take.uri);
       this.playAt(this.voiceEl, ms - take.startMs, clamp(take.volume, 0, 1), running);
     } else if (!this.voiceEl.paused) {
       this.voiceEl.pause();
@@ -1495,7 +1517,7 @@ export class PreviewPlayer implements EditorPlayer {
 
   /** @param running see [syncAudio]. */
   private playAt(el: HTMLAudioElement, positionMs: number, volume: number, running: boolean): void {
-    if (el.volume !== volume) el.volume = volume;
+    this.mixer.setLevel(el, volume);
     if (el.paused) {
       this.putAudio(el, positionMs, running ? 'warm' : 'cold');
       startPlayback(el);
@@ -1556,14 +1578,33 @@ export class PreviewPlayer implements EditorPlayer {
     return leads;
   }
 
-  private setSource(el: HTMLAudioElement, uri: string | null, which: 'music' | 'voice'): void {
+  /**
+   * Puts the music or the voiceover on `uri`, on the element [PreviewMixer.elementFor] says it is to
+   * play on - which is the component's own everywhere but where that element has been routed and the
+   * file is one the graph would hear as silence. An element the sound moves off is stripped, as the
+   * preview strips every element it has finished with, so it holds no decoder and has nothing to play.
+   */
+  private setSource(which: 'music' | 'voice', uri: string | null): void {
     const current = which === 'music' ? this.musicUri : this.voiceUri;
     if (current === uri) return;
-    if (which === 'music') this.musicUri = uri;
-    else this.voiceUri = uri;
+    const url = uri ? this.store.host.platform.fileUrl(uri) : null;
+    const was = which === 'music' ? this.musicEl : this.voiceEl;
+    const el = url ? this.mixer.elementFor(this.ownAudio[which], url) : this.ownAudio[which];
+    if (which === 'music') {
+      this.musicUri = uri;
+      this.musicEl = el;
+    } else {
+      this.voiceUri = uri;
+      this.voiceEl = el;
+    }
+    if (was !== el) {
+      was.pause();
+      was.removeAttribute('src');
+      was.load();
+    }
     el.pause();
-    if (uri) {
-      el.src = this.store.host.platform.fileUrl(uri);
+    if (url) {
+      el.src = url;
     } else {
       el.removeAttribute('src');
     }
@@ -1573,6 +1614,21 @@ export class PreviewPlayer implements EditorPlayer {
   private pauseAudio(): void {
     if (!this.musicEl.paused) this.musicEl.pause();
     if (!this.voiceEl.paused) this.voiceEl.pause();
+  }
+
+  /**
+   * Puts the music and the voiceover through [PreviewMixer] for this play, where the WebView ignores
+   * `volume` and the post has levels for them that would otherwise not be heard; the mixer is where
+   * everything else that has to hold first is written down. Asked from `play()` alone, which is the
+   * customer's tap and so the one moment WebKit lets a page start sound of its own - and never during
+   * a voiceover take, whose microphone the audio session belongs to until the take is over.
+   */
+  private startMixer(): void {
+    if (volumeIsWritable() || this.store.recordingFromMs.value !== null) return;
+    const manifest = this.store.manifest.value;
+    const uris = [manifest.music?.uri, ...manifest.voiceovers.map(take => take.uri)];
+    const own = uris.every(uri => !uri || playableHere(this.store.host.platform.fileUrl(uri)));
+    this.mixer.start(own && levelsInUse(manifest));
   }
 
   /* ========================================================================================= */

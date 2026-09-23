@@ -78,8 +78,10 @@ let volumeWritable: boolean | null = null;
  *
  * iOS does not: the volume is the hardware buttons' alone, and `volume` reads back 1 whatever was
  * written to it. Everything that FADES a clip's own sound - a transition's crossfade - has to know,
- * because a fade written to an element that ignores it is two clips at full volume at once. Asked of
- * a detached element once and remembered; the answer cannot change while the page is up.
+ * because a fade written to an element that ignores it is two clips at full volume at once. So do
+ * the music and the voiceover, which are heard at their levels there through [PreviewMixer]
+ * instead. Asked of a detached element once and remembered; the answer cannot change while the page
+ * is up.
  */
 export function volumeIsWritable(): boolean {
   if (volumeWritable === null) {

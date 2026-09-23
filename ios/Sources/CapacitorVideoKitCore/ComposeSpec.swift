@@ -97,6 +97,17 @@ struct ComposeClip: Sendable {
     /// says an engine ignores it. nil for the reason `crop` is nil: a post without transitions is
     /// what the builder tests for, once, to keep the single-timeline path it has always taken.
     let transitionIn: ComposeTransition?
+    /// `uri` is a PICTURE rather than a video: one frame, turned upright by its EXIF orientation and
+    /// held for `outMs - inMs` of output time. false is a video, which is every spec written before
+    /// this field.
+    ///
+    /// The parser has already made a picture silent at 1x - `speed` is 1 and `muted` is true
+    /// whatever the wire said - so the builder reads its timing and its sound off the fields it
+    /// reads for any clip, which is how Android's `parseClip` arranges it too. The one question
+    /// left for this flag is where the frame comes from: `PictureStills` turns each picture into a
+    /// short still-frame video before the composition is laid, and from there on it is footage like
+    /// any other, cropped, fitted, placed and transitioned by code that never asks what it was.
+    let image: Bool
 }
 
 /// How one base clip gives way to the next: `ComposeTransition` in `definitions.ts`, whose doc
@@ -214,7 +225,8 @@ struct ComposeTrack: Sendable {
     let startMs: Int64
     /// Higher draws later, so on top. The base track is 0 and a tie breaks on spec order. It is the
     /// whole of the ordering now that a post may hold fifteen of these: with one layer z was
-    /// reliably 1 and nothing depended on reading it.
+    /// reliably 1 and nothing depended on reading it. A track that arrived without one carries its
+    /// index in `tracks` plus one, Android's default.
     let z: Int
     /// 0...1 over the whole layer, already clamped, multiplied into whatever each clip carries.
     let opacity: Double
@@ -324,8 +336,11 @@ struct ComposeSpec: Sendable {
     /// clip, and these numbers end up in a `no_space` message both platforms are compared on.
     ///
     /// This is an UPPER BOUND: `CompositionBuilder` produces less whenever a clip's `outMs` runs
-    /// past the real file and gets clamped. Use it for the disk estimate and the wall-clock budget,
-    /// never for a `timeRange`.
+    /// past the real file and gets clamped. It has two uses: the disk estimate in `JobRegistry`,
+    /// where running long is the safe direction, and the clip placement `ErrorMapping.blamedClip`
+    /// repeats when it names the clip a failed export was on. It is never a `timeRange`, which is
+    /// `BuiltComposition.totalMs`, and there is no wall-clock budget for it to set: a render is
+    /// stopped only when it stops moving (`StallWatch`).
     ///
     /// Transitions need nothing here. The overlap is already taken out of `clips` before the spec
     /// leaves the editor - each outgoing clip stops where the next one starts - and a transition's
@@ -343,6 +358,20 @@ struct ComposeSpec: Sendable {
         // The tail counts: it is output that has to be written, encoded and fitted on disk like any
         // other, even though nothing decodes for it.
         return max(1, max(sum, durationMs))
+    }
+
+    /// Every clip the render lays, wherever it sits: the base track, the outgoing side each
+    /// transition draws under its clip, and each layer's clips. `PictureStills` finds the pictures
+    /// among them.
+    var everyClip: [ComposeClip] {
+        clips + clips.compactMap { $0.transitionIn?.from } + (tracks ?? []).flatMap { $0.clips }
+    }
+
+    /// The name of every file the render opens, as the spec gives it: `everyClip`'s, the music's and
+    /// each voiceover take's. `RetainedMedia.sweep` keeps what a render in progress reads through
+    /// `JobRegistry.liveInputURIs`.
+    var inputURIs: [String] {
+        everyClip.map(\.uri) + (audio.music.map { [$0.uri] } ?? []) + audio.voiceover.map(\.uri)
     }
 }
 
@@ -363,9 +392,10 @@ struct SpecError: Error, LocalizedError {
     let path: String
     let message: String
 
-    /// `detail` is only ever passed for the two Android exceptions that carry a custom message,
-    /// `filter[i].op unknown op '<op>'` and the video track cap. Both are compared literally by the
-    /// port tests, so the wording here is Android's wording and not a paraphrase of it.
+    /// `detail` is only ever passed for the three Android exceptions that carry a custom message:
+    /// `filter[i].op unknown op '<op>'`, the video track cap, and `tracks[i].clips track '<id>' has
+    /// no clips`. All three are compared literally by the port tests, so the wording here is
+    /// Android's wording and not a paraphrase of it.
     init(_ path: String, _ detail: String? = nil) {
         self.path = path
         self.message = detail ?? "invalid_spec:\(path)"

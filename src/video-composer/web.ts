@@ -8,6 +8,8 @@ import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime
 
 import type {
   CapabilitiesResult,
+  CheckMediaOptions,
+  CheckMediaResult,
   DeleteSoundOptions,
   EncodeFrame,
   EncodeSupport,
@@ -21,14 +23,22 @@ import type {
   ListGalleryVideosResult,
   JobState,
   ListSoundsResult,
+  MediaAccessResult,
+  PickAudioFileResult,
   PrepareJobOptions,
   PrepareJobResult,
   ProbeOptions,
   ProbeResult,
+  ReleaseMediaOptions,
   ResolveGalleryVideoResult,
+  RetainMediaOptions,
+  RetainMediaResult,
   SaveToGalleryOptions,
   SaveToGalleryResult,
+  StageRenderInputResult,
   StartVoiceRecordingOptions,
+  SweepMediaOptions,
+  SweepMediaResult,
   SystemInsetsResult,
   ThumbnailsOptions,
   ThumbnailsResult,
@@ -206,6 +216,70 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
     throw coded('a browser has no video library to list', 'unsupported');
   }
 
+  /*
+   * The honest answers rather than refusals, so a host that keeps picks makes the same five calls
+   * everywhere and never asks which platform it is on.
+   *
+   * A page's pick has no durable name AT ALL: it is a `File` behind a `blob:` URL that dies with the
+   * document, so `retainMedia` says as much, and a host reads `durable: false` as "keep the bytes",
+   * in IndexedDB, which is where a draft in a browser keeps them anyway. `checkMedia` answers true
+   * for any name it is given because the question is not the plugin's to answer here: the host holds
+   * those bytes, and only the host knows whether they are still there. No name at all is false, as
+   * it is natively. Nothing needs a permission to read what the page holds, and the page holds no
+   * copy of the kit's to release or to sweep - but the arguments of those two are checked as iOS
+   * checks them, where they decide what is deleted, so a host's mistake is refused here too rather
+   * than passing on the one platform where it happens to cost nothing. That includes a release's
+   * `keep`, which deletes nothing anywhere but must still be a list when it is anything but absent
+   * or null.
+   */
+  async retainMedia(options: RetainMediaOptions): Promise<RetainMediaResult> {
+    return { uri: required(options?.uri, 'uri'), durable: false };
+  }
+
+  async checkMedia(options: CheckMediaOptions): Promise<CheckMediaResult> {
+    const uri = options?.uri ?? '';
+    return { exists: uri.length > 0, uri };
+  }
+
+  async requestMediaAccess(): Promise<MediaAccessResult> {
+    return { granted: true };
+  }
+
+  async releaseMedia(options: ReleaseMediaOptions): Promise<void> {
+    if (!Array.isArray(options?.uris)) throw coded('uris is required', 'invalid_spec');
+    // `undefined` is absent, as it is once a call is JSON on its way to a phone, and so is `null`,
+    // which survives that trip and names nothing to spare: Android's `releaseMedia` reads it as left
+    // out too, as Capacitor's getters read a JSON null on both phones.
+    if (options.keep != null && !Array.isArray(options.keep)) throw coded('keep must be a list of URIs', 'invalid_spec');
+  }
+
+  async sweepMedia(options: SweepMediaOptions): Promise<SweepMediaResult> {
+    if (!Array.isArray(options?.keep)) throw coded('keep is required', 'invalid_spec');
+    if (!Number.isFinite(options?.before)) throw coded('before is required', 'invalid_spec');
+    return { removed: 0 };
+  }
+
+  /*
+   * The three calls a page has no use for, refused with `UNIMPLEMENTED`: the code Capacitor's own
+   * `unimplemented()` gives and Android's `call.unimplemented` rejects `pickAudioFile` with, made by
+   * `coded` like every other refusal here so a test can stand in for the base class.
+   *
+   * A browser picks a sound through its own file input, which is what the editor's default does
+   * everywhere but iOS, and needs no render input staged: the web engine reads a `blob:` URL as it
+   * is, which is why `withNativeRenderInputs` never calls either of the other two off a phone.
+   */
+  async pickAudioFile(): Promise<PickAudioFileResult> {
+    throw coded('pickAudioFile is iOS only: a browser picks a sound through a file input', 'UNIMPLEMENTED');
+  }
+
+  async stageRenderInput(): Promise<StageRenderInputResult> {
+    throw coded('stageRenderInput is for a native engine: the web engine reads a blob: URL as it is', 'UNIMPLEMENTED');
+  }
+
+  async releaseRenderInputs(): Promise<void> {
+    throw coded('releaseRenderInputs is for a native engine: the web stages no render inputs', 'UNIMPLEMENTED');
+  }
+
   async listSounds(): Promise<ListSoundsResult> {
     const sounds = await listSounds();
     return {
@@ -318,11 +392,6 @@ function asVoiceError(error: unknown): Error {
   return coded(describe(error), 'recording_failed');
 }
 
-/**
- * An `Error` carrying a `code`, which is what a Capacitor rejection looks like on the other side of
- * the bridge. `WebPlugin.unavailable()` makes one with a fixed code of its own; a host that
- * branches on `error.code` needs the real one.
- */
 /** The last segment of a URI, which for a picked file is the name the customer would recognise. */
 function nameOf(uri: string): string {
   const path = uri.split('?')[0]?.split('#')[0] ?? '';
@@ -335,6 +404,11 @@ function withoutExtension(fileName: string): string {
   return dot > 0 ? fileName.slice(0, dot) : fileName;
 }
 
+/**
+ * An `Error` carrying a `code`, which is what a Capacitor rejection looks like on the other side of
+ * the bridge. `WebPlugin.unavailable()` makes one with a fixed code of its own; a host that
+ * branches on `error.code` needs the real one.
+ */
 function coded(message: string, code: string): Error {
   const error = new Error(message) as Error & { code: string };
   error.code = code;

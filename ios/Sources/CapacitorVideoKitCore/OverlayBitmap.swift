@@ -62,22 +62,16 @@ enum OverlayBitmap {
         let sx = CGFloat(o.wPx) / bw
         let sy = CGFloat(o.hPx) / bh
 
-        // Opacity as a FOUR-channel multiply, before the geometry, while the image is still small
-        // and axis aligned. Core Image images are premultiplied, so source-over with a foreground
-        // scaled by k is `dst * (1 - k*a) + k*src.rgb`, which is exactly source-over at alpha k*a -
-        // what a CSS `opacity` on the layer does and what Android's `setAlphaScale` does. Scaling
-        // only the alpha vector, which is the obvious-looking thing, leaves the colour unattenuated
-        // and gives a faded overlay a bright halo. This filter has no bias, so the transparent
-        // surround stays transparent and the extent is unchanged.
-        if o.opacity < 1 {
-            let k = CGFloat(min(1, max(0, o.opacity)))
-            img = img.applyingFilter("CIColorMatrix", parameters: [
-                "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
-                "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
-                "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
-                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: k),
-            ])
-        }
+        // Opacity before the geometry, while the image is still small and axis aligned, and on the
+        // ALPHA alone: `Alpha.scaled`, the call every video layer's opacity goes through. The
+        // colour rows are left alone because `CIColorMatrix` does not act on premultiplied values -
+        // it unpremultiplies, multiplies and premultiplies again - so scaling all four channels
+        // would attenuate the colour once in the matrix and again in the premultiply, and an overlay
+        // at 50% would come out at a quarter of its colour. Scaling the alpha row is source-over at
+        // `k * a`, which is what a CSS `opacity` on the layer does in the preview and what
+        // Android's `setAlphaScale` does; `Alpha` records the measurement. The filter has no bias,
+        // so the transparent surround stays transparent and the extent is unchanged.
+        img = Alpha.scaled(img, by: o.opacity)
 
         // Two sign flips, in two different places, and no flip at all on x:
         //   cx/cy are the CENTRE in 0...1 with a TOP-LEFT origin and y DOWN, while Core Image is

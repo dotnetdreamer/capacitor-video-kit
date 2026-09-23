@@ -938,6 +938,31 @@ describe('ve-preview on a free canvas', () => {
     expect(select.querySelector('[data-handle="edit"]')).toBeNull();
   });
 
+  /*
+   * WebKit reports a button's box as its own joined to those of its in-flow children, and puts a
+   * child with a transform - every glyph here has one - up and to the left of where it is drawn. On
+   * iOS that joined box is what VoiceOver and a UI test aim at, so a tap on Duplicate layer landed
+   * on the picture. Out of flow the glyph adds nothing to the handle's box, which only WebKit's
+   * accessibility tree could show; what Chrome can show is that nothing moved on the screen for it.
+   */
+  it('keeps each corner’s glyph out of the corner’s own box, still in the middle of it', async () => {
+    const { store, preview } = await mount(false);
+    store.commitClipFraming('seg-a', { rect: { x: 0.25, y: 0.25, w: 0.5, h: 0.5, rotationDeg: 30 } }, 'Move');
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await frames(3);
+
+    const handles = [...preview.querySelectorAll<HTMLElement>('.pv__handle')];
+    expect(handles.length).toBeGreaterThan(0);
+    for (const handle of handles) {
+      const glyph = handle.querySelector('ve-icon') as HTMLElement;
+      expect(getComputedStyle(glyph).position).toBe('absolute');
+      const box = handle.getBoundingClientRect();
+      const drawn = glyph.getBoundingClientRect();
+      expect(drawn.left + drawn.width / 2).toBeCloseTo(box.left + box.width / 2, 1);
+      expect(drawn.top + drawn.height / 2).toBeCloseTo(box.top + box.height / 2, 1);
+    }
+  });
+
   it('puts the video back over the whole frame from that corner', async () => {
     const { store, preview } = await mount(false);
     store.commitClipFraming('seg-a', { rect: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 } }, 'Move');

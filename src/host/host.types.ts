@@ -60,8 +60,11 @@ export interface EditorEditingOptions {
    * that already holds a picture, or a `sources` list with one in it, is still edited and rendered
    * as one.
    *
-   * The render has to be able to draw one too. The package's web and Android engines can; its iOS
-   * engine cannot yet, so an iOS host should leave this off.
+   * The render has to be able to draw one too, and all three of the package's engines do: web,
+   * Android and iOS. So does the gallery a host may draw its own picker from, which lists pictures
+   * among the videos on Android and iOS when it is asked to (`listGalleryVideos({ images: true })`).
+   * A host that renders some other way has to be able to draw a picture before it turns this on,
+   * or a post with one fails at the very end, with the editing already done.
    */
   pictures?: boolean;
 }
@@ -197,6 +200,22 @@ export interface PickedAudio {
   fileName: string;
   /** 0 when the file plays but reports no finite length. */
   sourceDurationMs: number;
+}
+
+/**
+ * One clip from `pickMediaFiles`, and how long it runs.
+ *
+ * The length travels beside the source rather than on it because [EditorSource] has no room for
+ * one, and the step before the editor often needs it: a template's four second slot cannot be cut
+ * out of a three second clip, and something has to notice that before a manifest is written.
+ */
+export interface PickedMediaFile {
+  source: EditorSource;
+  /**
+   * 0 for a picture, which has no length of its own - the editor gives it one - and for a video
+   * that opens but reports no finite length, or never opens at all.
+   */
+  durationMs: number;
 }
 
 /**

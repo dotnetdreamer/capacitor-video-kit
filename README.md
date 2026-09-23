@@ -21,12 +21,12 @@ handed.
 | Platform | Composer | Publisher | Status |
 |---|---|---|---|
 | Android | Media3 Transformer 1.11.x | WorkManager + OkHttp | implemented, verified on device |
-| iOS | AVFoundation | background `URLSession` | implemented, 6,567 lines of Swift, compiles for device; no device run recorded here |
-| Web | none | none | stub - `capabilities()` answers `supported: false` |
+| iOS | AVFoundation: `AVAssetReader` into `AVAssetWriter`, `AVAssetExportSession` as the fallback | background `URLSession` | implemented, 11,136 lines of Swift in 28 files; builds for device and for the iOS Simulator with no compiler warning, and 159 XCTest cases run on the simulator (see **Build and test**); no device run recorded here |
+| Web | WebCodecs through Mediabunny, `MediaRecorder` as the fallback | `XMLHttpRequest`, files staged in IndexedDB | implemented, covered by the Vitest and Playwright Chromium suites; see **Web** below |
 
 > ### An iOS host has to be on iOS 16, and a new Capacitor 8 app is on 15
 >
-> `Package.swift` and `CapacitorVideoKitCore.podspec` both declare iOS 16, and both iOS templates
+> `Package.swift` and `CapacitorVideoKit.podspec` both declare iOS 16, and both iOS templates
 > `@capacitor/cli` 8.5.0 unpacks, the SwiftPM one and the CocoaPods one, set
 > `IPHONEOS_DEPLOYMENT_TARGET = 15.0` in all four build configurations, the CocoaPods one adding
 > `platform :ios, '15.0'` to the Podfile as well. So a stock app stops on its first build until that
@@ -34,11 +34,11 @@ handed.
 > package manager, and neither message names the line to change.
 >
 > **SwiftPM resolves the graph and then refuses to plan the build.** `xcodebuild` fetches
-> `capacitor-swift-pm`, lists `CapacitorVideoKitCore` under `Resolved source packages`, and fails before the
+> `capacitor-swift-pm`, lists `CapacitorVideoKit` under `Resolved source packages`, and fails before the
 > first `SwiftCompile`:
 >
 > ```
-> error: The package product 'CapacitorVideoKitCore' requires minimum platform version 16.0 for the iOS
+> error: The package product 'CapacitorVideoKit' requires minimum platform version 16.0 for the iOS
 > platform, but this target supports 15.0 (in target 'CapApp-SPM' from project 'CapApp-SPM')
 > ```
 >
@@ -48,11 +48,11 @@ handed.
 > **CocoaPods stops earlier, at dependency analysis**, and names the pod rather than the platform:
 >
 > ```
-> [!] CocoaPods could not find compatible versions for pod "CapacitorVideoKitCore":
+> [!] CocoaPods could not find compatible versions for pod "CapacitorVideoKit":
 >   In Podfile:
->     CapacitorVideoKitCore (from `../../node_modules/capacitor-video-kit`)
+>     CapacitorVideoKit (from `../../node_modules/capacitor-video-kit`)
 >
-> Specs satisfying the `CapacitorVideoKitCore (from `../../node_modules/capacitor-video-kit`)` dependency were
+> Specs satisfying the `CapacitorVideoKit (from `../../node_modules/capacitor-video-kit`)` dependency were
 > found, but they required a higher minimum deployment target.
 > ```
 >
@@ -79,7 +79,7 @@ handed.
 >
 > ```
 > ld: warning: building for iOS-15.0, but linking with dylib
-> '@rpath/CapacitorVideoKitCore.framework/CapacitorVideoKitCore' which was built for newer version 16.0
+> '@rpath/CapacitorVideoKit.framework/CapacitorVideoKit' which was built for newer version 16.0
 > ```
 >
 > **Why 16 and not the 18 this package declared until it was measured.** `AVAssetExportSession`'s
@@ -168,6 +168,120 @@ Gradle versions come from the host's `android/variables.gradle` (`kotlin_version
 `workManagerVersion`, `okhttpVersion`, `kotlinxCoroutinesVersion`), with the plugin's own pins as a
 fallback.
 
+### iOS host setup
+
+Everything an iOS host adds by hand, in one place. Little of it is optional where it applies,
+because the way iOS reports a missing usage string is not a failed call but an app terminated at
+the moment the call asks.
+
+**The deployment target is iOS 16.** The callout at the top of this file is the whole of it,
+including the generated file an edit there does not survive.
+
+**The names.** The npm package is `capacitor-video-kit`, so `npx cap sync ios` writes a SwiftPM
+package and product called `CapacitorVideoKit` into the host, or a pod of that name on a CocoaPods
+host. The Swift module inside is `CapacitorVideoKitCore` whichever manager installed it - the
+podspec sets `module_name` to match the SwiftPM target - and that is the name a host imports when
+it writes Swift against the kit. Only the publisher's hooks below ask it to.
+
+**`npx cap sync ios` on every checkout, before Xcode opens the project.** The
+`CapApp-SPM/Package.swift` it generates records the path the kit resolved to on the machine that
+ran it, and for a `file:` dependency reached through a symlink that is the real folder behind the
+link. A copy of that file made on one machine can therefore name a folder the next one does not
+have, and the sync is what writes the right one.
+
+**`Info.plist`**, one key per thing the app may be asked for:
+
+| Key | Asked for by | Without it |
+|---|---|---|
+| `NSPhotoLibraryAddUsageDescription` | `saveToGallery` | the app is terminated on the first save |
+| `NSPhotoLibraryUsageDescription` | `requestGalleryAccess`, and so the other three gallery calls; `saveToGallery` with an `album` | the app is terminated when access is asked for; a save with an album never asks, and goes to Recents |
+| `NSMicrophoneUsageDescription` | `startVoiceRecording` | the app is terminated when the first take starts |
+| `NSCameraUsageDescription` | no call of the kit's: the editor's default pickers, which are `<input type="file">` elements, and a WKWebView offers the camera from every one that takes images or video | the app is terminated when somebody taps Take Photo or Video |
+
+A host that only saves needs only the first key. Filing into an album is what the second is for on
+such a host, and **Saving the finished video to the gallery** below says what happens without it.
+
+**The editor's default audio picker is the kit's own document picker, and needs nothing from the
+host.** A WKWebView cannot be trusted with an `<input type="file">` for a sound. It copies what the
+input picks into a `tmp/WKFileUploadPanel-*` folder of its own before the page is told, and that
+copy comes out empty when the same song is picked again about a minute after the first time -
+Replace on a track somebody has just set up - so the page is handed a `File` of 0 bytes and a good
+song reads as one the app cannot use. On an iOS 26.5 simulator a second pick 61 s after the first
+failed every time, and picks 22 to 34 s or 70 to 79 s apart did not. So on iOS in a Capacitor app
+the default `pickAudio` calls `VideoComposer.pickAudioFile`, which presents
+`UIDocumentPickerViewController` for any audio type and copies the choice into
+`tmp/videokit-audio/`, then reads that copy into an object URL typed as the picker said, exactly the
+answer the input gives. It reaches the plugin through the `window.Capacitor` the native side puts in
+the page, so it works whether or not the app has imported `capacitor-video-kit` yet, and only when
+that native side lists `pickAudioFile` among the plugin's methods: iOS's bridge answers nothing at
+all for a method it lacks, so a binary older than the JS gets the input rather than a pick that never
+comes back. Nothing has to be called once the copy is read: iOS may empty `tmp` while the app is not
+running, and the kit's launch sweep deletes a copy there once it is a day old. A host keeps all this by keeping the
+default: supply a media host of its own as `{ ...browserMediaHost(), pickVideo, ... }` and leave
+`pickAudio` out. No file picker plugin is needed for sounds.
+
+Everywhere else the default is still an `<input type="file">`, and it names its formats, because
+`accept="audio/*"` alone is the input's other trap on iOS, for Safari and any page without the kit's
+native side: WebKit turns each accepted type into a Uniform Type Identifier for the Files browser,
+has none for that wildcard and makes one up that no file has, so the browser opened with every song
+in it greyed out. So `accept` is `audio/*` followed by MP3, M4A, AAC, WAV, AIFF, CAF, FLAC and Ogg,
+each by its MIME types and by its extensions, which are what WebKit can map to real types. Every
+other engine goes by the wildcard, which stays first, and offers exactly what it did before. The
+list is `AUDIO_FORMATS` in `src/host/defaults.ts`, one line per format.
+
+**The publisher needs two lines in the `AppDelegate`**, and only the publisher. A finished upload is
+handed back to the app through the application delegate, and when iOS relaunches an app in the
+background for one it usually connects no scene - so there is no Capacitor bridge and no plugin for
+anything to reach. The Capacitor template's `AppDelegate` already has the first method, and the
+second goes beside it:
+
+```swift
+import CapacitorVideoKitCore
+
+func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+) -> Bool {
+    // Makes the background session again at every launch, so it can deliver what finished while
+    // the app was gone.
+    PublisherSession.warmUp()
+    return true
+}
+
+func application(
+    _ application: UIApplication,
+    handleEventsForBackgroundURLSession identifier: String,
+    completionHandler: @escaping () -> Void
+) {
+    // Calls the handler once everything the session held has been delivered.
+    PublisherSession.handleEvents(identifier: identifier, completionHandler: completionHandler)
+}
+```
+
+Without them a finalize call that falls due while the app is in the background waits until the
+customer next opens it, and UIKit's handler is never called, so iOS is never told the app has dealt
+with a wake and may hold back the ones that follow. `handleEvents` answers an identifier that is not
+the kit's session by calling its handler straight away, so an app with background sessions of its
+own handles those first and passes on the rest. Android needs none of this: WorkManager starts from
+the manifest.
+
+**The editor's preview takes the audio session while it plays.** A WKWebView ignores a page setting a
+media element's `volume`, so on iOS the preview plays the music and the voiceover through Web Audio
+instead - one `AudioContext` for the page and a gain for each element - and the music's volume, its
+fade-out and each take's level are heard as the render will mix them. That needs WebKit's Audio
+Session API, `navigator.audioSession`, which iOS has from 16.4, because Web Audio is otherwise
+ambient sound the ringer switch silences. The preview sets its type to `playback` only while the
+page has left it at `auto`, gives it back as `auto` on every pause, at the end of the post and when
+the preview closes, and never touches it during a voiceover take. A host that sets a type of its own
+keeps it: under `playback` the levels are heard, and under any other type the music and the voiceover
+play at full volume, as they did before and as they do in a WebView without the API. A file served
+from another origin plays at full volume on a stand-in element, because the graph hears such a file
+as silence. A clip's
+own volume and a transition's crossfade are still not heard in the iOS preview - a clip keeps its
+mute, and a transition is a cut - because the way WebKit hands a media element to Web Audio does not
+follow `playbackRate`, and a clip plays at anything from a quarter to four times its speed. The
+export is unaffected by all of it, and none of it has been listened to on a device yet.
+
 ### Entry points
 
 Every consumer resolves the built package through its exports map, and every entry below has been
@@ -175,7 +289,7 @@ resolved, loaded and type checked out of an `npm pack` tarball installed into a 
 
 | Specifier | What it is | Needs |
 |---|---|---|
-| `capacitor-video-kit` | Both plugin proxies, their definitions and the edit contract | `@capacitor/core` |
+| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
 | `capacitor-video-kit/editor` | The edit contract on its own, reaching no `registerPlugin` call and no Capacitor at all | nothing |
 | `capacitor-video-kit/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath` | `@preact/signals-core` |
 | `capacitor-video-kit/loader` | `defineCustomElements()`, which registers every component at once | `@preact/signals-core` |
@@ -236,9 +350,9 @@ imported from `capacitor-video-kit` exactly as before.
 
 `files` carries both builds, `plugin/` and `dist/` with `loader/`, the three framework wrappers as
 `angular/`, `react/` and `vue/`, and the native sources the Capacitor CLI reads: `ios/Sources/`,
-`Package.swift`, `android/src/main/`, `android/build.gradle` and `android/proguard-rules.pro`. No
-`src/`, no `packages/`, no tests, no configuration. A native app can install the tarball and
-`npx cap sync` it.
+`Package.swift`, `CapacitorVideoKit.podspec`, `android/src/main/`, `android/build.gradle` and
+`android/proguard-rules.pro`. No `src/`, no `packages/`, no tests, no configuration. A native app can
+install the tarball and `npx cap sync` it.
 
 The wrapper directories are why `prepare` runs the whole `build` rather than `build:package`. `npm
 pack` and `npm publish` both run `prepare`, and `build:package` starts with `clean`: a `prepare` that
@@ -645,13 +759,15 @@ import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { Keyboard } from '@capacitor/keyboard';
 import { VideoComposer } from 'capacitor-video-kit';
-import type { VideoEditorHost } from 'capacitor-video-kit/ui';
+import { browserMediaHost, type VideoEditorHost } from 'capacitor-video-kit/ui';
 
 const host: VideoEditorHost = {
   media: {
-    pickVideo,       // the app's own picker, resolving null on a cancel
-    pickImage,
-    pickAudio,
+    // The defaults for what the app does not replace: `pickImage`, and `pickAudio`, which on iOS is
+    // already the kit's own document picker (see iOS host setup).
+    ...browserMediaHost(),
+    pickVideo,       // the app's own clip pickers, resolving null on a cancel (see Native hosts)
+    pickMedia,
     probeDuration: async (source) => (await VideoComposer.probe({ uri: source.sourcePath! })).durationMs,
     thumbnails: async ({ source, timesMs, maxHeight, precise }) => {
       const { uris } = await VideoComposer.thumbnails({
@@ -721,7 +837,13 @@ editor has already made every layer's bitmap current before it calls this, so th
 `EditorSource`:
 
 ```ts
-import { MissingClipError, VideoComposer, toComposeSpec, type ComposeSpec } from 'capacitor-video-kit';
+import {
+  MissingClipError,
+  VideoComposer,
+  toComposeSpec,
+  withNativeRenderInputs,
+  type ComposeSpec,
+} from 'capacitor-video-kit';
 import {
   RenderFailedError,
   createEditorRasterContext,
@@ -758,13 +880,25 @@ const nativeRenderHost: EditorRenderHost = {
     }
 
     signal.addEventListener('abort', () => void VideoComposer.cancel({ jobId }));
-    const result = await runJob(spec, onProgress);   // progress, completed and failed listeners
+    // Every `blob:` URL the spec names - a sound from the browser's library, a track the default
+    // picker read in - written out as a file the engine can open, and deleted once the job is over.
+    // `runJob` settles on the `completed` or `failed` event, never on `compose`'s answer.
+    const result = await withNativeRenderInputs(spec, (prepared) => runJob(prepared, onProgress), signal);
     return { key: `edited-${jobId}`, fileName: 'edited.mp4', sourcePath: result.uri };
   },
 };
 ```
 
-Three things about that are worth more than the code around them.
+Four things about that are worth more than the code around them.
+
+**Hand the engine files, not blobs.** A page holds some of a post as `blob:` URLs in the WebView's
+own memory - a sound from the browser's sound library, a track the default picker read in on iOS -
+and neither native engine can open one, so a post that used one failed at the last step as
+`unreadable_input`. `withNativeRenderInputs(spec, render, signal)` stages each distinct blob the spec
+names through `stageRenderInput`, a mebibyte per call, renders a copy of the spec that names the
+staged files instead, and releases them once `render` has settled, however it settled. So `render`
+must settle on the job's terminal event, as `runJob` does, and not on `compose`'s answer. In a
+browser it is `render(spec)` and nothing else.
 
 **Throw `RenderFailedError` with a code on the union, and map everything else onto `unknown`.** The
 editor shows a different sentence for each of `no_space`, `unreadable_input` and `unknown`, and a
@@ -885,7 +1019,7 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 
 | What the host gives | What it is for | With nothing supplied |
 |---|---|---|
-| `media.pickVideo`, `pickImage`, `pickAudio` | Add a clip, an overlay photo, a track | a hidden `<input type="file">` |
+| `media.pickVideo`, `pickImage`, `pickAudio` | Add a clip, an overlay photo, a track | a hidden `<input type="file">`, except `pickAudio` on iOS in a Capacitor app, which is the kit's own document picker |
 | `media.probeDuration` | How long a source runs | a throwaway `<video>` and a ten second timeout |
 | `media.thumbnails` | The timeline's filmstrip | one `<video>`, seeked to each time in turn, onto one canvas |
 | `media.sounds` | The customer's kept sounds: list, extract one from a video, delete one | audio decoded in the page and kept in IndexedDB |
@@ -1280,8 +1414,9 @@ all, so the web implementation decodes with `decodeAudioData` and writes WAV: ab
 against well under one for the remux.
 
 **`prepareJob` copies a library sound rather than moving it.** It moves app-owned inputs, and a
-sound moved out of the library is a row that plays nothing from the next post onwards. Both native
-sides ask `SoundLibrary.owns` before they choose.
+sound moved out of the library is a row that plays nothing from the next post onwards. Android asks
+`SoundLibrary.owns` before it chooses. iOS moves from only three folders, all of them written for
+one post, and the library is not one of them, so it copies without having to ask (see **iOS**).
 
 **Colour is CSS maths, folded into one matrix**, applied in a single gamma-space fragment pass. That
 is what makes the native render and a browser preview agree by construction. The one known deviation
@@ -1399,21 +1534,26 @@ Three behaviour changes to read carefully:
 
 ### iOS
 
-**The two plugin classes are one SwiftPM target.** `Package.swift` declares `CapacitorVideoKitCore` and
-Capacitor registers each `@objc` class it finds separately, so `VideoComposerPlugin` and
-`BackgroundPublisherPlugin` ship in one library and share `JobFolders`, `PublishStore` and the error
-mapping rather than repeating them.
+**The two plugin classes are one SwiftPM target.** `Package.swift` declares the package and product
+`CapacitorVideoKit` over one target, `CapacitorVideoKitCore`, and Capacitor registers each `@objc`
+class it finds separately, so `VideoComposerPlugin` and `BackgroundPublisherPlugin` ship in one
+library and share `JobFolders`, `PublishStore` and the error mapping rather than repeating them.
 
-**CocoaPods gets a hand written podspec beside `Package.swift`.** `CapacitorVideoKitCore.podspec` declares
+The package and product names are not choices either. `npx cap sync ios` writes
+`.package(name: "CapacitorVideoKit", path: ...)` and `.product(name: "CapacitorVideoKit", ...)` into
+the host's generated `CapApp-SPM/Package.swift`, from the npm package name by the same `fixName` as
+the pod line below, and a host whose kit declares any other product fails to resolve the graph. The
+target's name is free: nothing outside `Package.swift` refers to it.
+
+**CocoaPods gets a hand written podspec beside `Package.swift`.** `CapacitorVideoKit.podspec` declares
 the same single target, the same `ios/Sources/**` glob and the same iOS 16 floor, because a host that
 adds its project with `npx cap add ios --packagemanager CocoaPods` compiles exactly the Swift a
 SwiftPM host compiles. Three things in it are not choices. The name is one: the Capacitor CLI writes
-`pod 'CapacitorVideoKitCore', :path => ...` into the host's Podfile from the npm package name,
+`pod 'CapacitorVideoKit', :path => ...` into the host's Podfile from the npm package name,
 dropping the `@`, treating every `/` and `-` as a word break and uppercasing each word that follows
 one (`fixName` in `@capacitor/cli`); CocoaPods then looks for a podspec of exactly that name at the
-package root, so `capacitor-video-kit` can only ever be `CapacitorVideoKitCore.podspec`. The
-scope is part of it: the `/core` is what puts `Core` on the end, and a rename of the npm package is a
-rename of this file, of the SwiftPM product and of `ios/Sources/<name>/`. The single `s.dependency 'Capacitor'` is another: `Package.swift` names the
+package root, so `capacitor-video-kit` can only ever be `CapacitorVideoKit.podspec`. A rename of
+the npm package is a rename of this file and of the SwiftPM package and product. The single `s.dependency 'Capacitor'` is another: `Package.swift` names the
 `Capacitor` and `Cordova` products separately, while the `Capacitor` pod already depends on
 `CapacitorCordova`, whose module name is `Cordova`. And the deployment target is the third, because
 two hosts of the same package disagreeing about what it runs on is a bug that only one of them sees.
@@ -1423,30 +1563,128 @@ decides `Package.swift`. Without the entry a CocoaPods host installs cleanly, `n
 writes the pod line, and `pod install` stops at `No podspec found`, naming a file the developer has
 no way to know should exist.
 
-**A render outlives the screen on iOS too, and for a second reason.** `JobRegistry` holds the jobs
-outside the plugin instance, the way Android's does, and it also takes a `UIApplication` background
-task assertion for the length of a render, so a customer who leaves the app mid encode gets the
-suspension window rather than an immediate kill. Backgrounding stops the work deliberately and
-reports `interrupted`: the registry writes the stop reason synchronously inside the notification,
-and `Exporter` asks for it before it retries anything.
+**A render outlives the screen on iOS, and not the app leaving the foreground.** `JobRegistry` holds
+the jobs outside the plugin instance, the way Android's does, so a WebView reload or a route change
+mid encode still finds its outcome. What iOS has no equivalent of is the foreground service: a
+backgrounded app is denied Metal and the hardware encoder, and a background task assertion does not
+give them back - it only trades a clean stop for AVFoundation's confusing -11847. So the render is
+deliberately given no assertion. The registry observes `didEnterBackgroundNotification`
+synchronously, stops every render in that same call, and reports it `interrupted` with the message
+`did_enter_background`; `Exporter` asks for that stop reason before it would retry anything, so a
+backgrounded render never starts a second engine into the same wall. The only assertion covers the
+unwind - the `failed` event, letting go of the files, and closing the microphone of a voiceover take
+in progress. `willResignActive` is deliberately not a trigger: Control Centre, a call banner and
+Face ID all leave the app in the foreground with its GPU. Nothing restarts an interrupted render. A
+host that still wants the video composes the same spec again when the app is back, under a new
+`jobId`, because a repeat id answers with the job that already exists. While any render runs the
+idle timer is held off, so the phone does not lock itself in the middle of one.
 
-**The encoder is `AVAssetExportSession` with a preset ladder**, chosen on the longer edge, with one
-retry at a lower preset for the AVError family Android also retries. A preset picks its own bitrate,
-which is why `fileLengthLimit` and two guards after the fact stand in for the rate control the
-Android engine sets directly, and why `Exporter.swift` logs the delivered rate against the ladder
-the spec asked for: that number is the evidence for or against writing the `AVAssetWriter` engine
-the `RenderEngine` protocol exists to allow.
+**The encoder is an `AVAssetReader` feeding an `AVAssetWriter`** (`WriterEngine.swift`): one reader
+over the composition, with a video-composition output that draws every frame through
+`EditCompositor` and an audio-mix output that mixes every sound through the audio mix, one writer
+with an input for each, and a pump per input. It asks the encoder for what Android's
+`newTransformer` asks for, field for field: H.264 High with the level left to the encoder, an
+average - variable - rate of `output.videoBitrate`, a key frame at most every second, `output.fps`
+as the expected rate, BT.709 tags and the index at the front of the file; and AAC-LC stereo at
+48 kHz, at the rate nearest `output.audioBitrate` that the encoder accepts. That last step is not a
+nicety: Apple's AAC takes 64 to 320 kbps for stereo, in thirteen steps, and a rate outside the set
+passes every check the writer makes up front and then fails the first append. A file gets no audio
+track at all when no source has sound. Measured on the simulator, 64 and 256 kbps asked for come
+out within a fifth of that. So one quality chip is one file size on both native platforms, and the
+quality sheet's estimate, which is that same arithmetic, now describes an iOS file as well.
 
-**Progress has two implementations.** `states(updateInterval:)` from iOS 18, and the session's own
-`progress` polled on the same interval below it. Both feed the same callback, so nothing above them
-knows which ran.
+**There is no size ceiling.** Earlier versions carried one host's 100 MiB upload cap inside the
+engine - a `fileLengthLimit` of 90 MiB on the export session, a check that refused a timeline the
+preset estimated would not fit, and a guard after the encode - so a long or high-quality render
+failed as `unsupported`, sometimes after the whole encode had run. All three are gone. A ceiling is a
+host's policy: `MAX_UPLOAD_BYTES` in `edit-manifest.ts` says it is applied to nothing here, and a
+host with a limit expresses it by the rungs it offers (`EditorOutputOptions`). Android and the web
+engine have never had one. What stays is the check that the file came out as long as the timeline.
+
+**One fallback, to `AVAssetExportSession`.** An encoder that turns the writer down - no encoder for
+the request, the encoder busy, or the settings refused, before the first frame or at it - gets one
+more attempt through the export session at the preset that matches the render size, which is
+Android's one relaxed retry. A preset picks its own bitrate, so the switch is logged, with the rate
+the file actually came out at. Nothing else is retried: not a frame the encoder had accepted and
+then failed, and not a render that is being cancelled or stopped.
+
+**Progress comes from frame timestamps**, as on Android: the fraction of the timeline the last frame
+written has reached. The preset fallback has two implementations of its own, `states(updateInterval:)`
+from iOS 18 and the session's `progress` polled on the same interval below it, and both feed the
+same callback, so nothing above them knows which ran.
+
+**A render is stopped for time only when it stops moving.** There is no deadline: a render that
+keeps reporting frames is slow, not wedged, and how slow is too slow is the customer's call, with the
+cancel button. A render whose progress has not changed for 90 seconds is stopped and reported
+`unknown` with the message `timeout`, and if its export has not unwound five seconds after that the
+registry writes the ending itself, so a job never says `rendering` for the rest of the process. A
+cancel is answered within about half a second even when a decoder or the GPU never hands back
+another frame; an ordinary one still waits for the writer to cancel and delete what it wrote, which
+took up to 1.6 seconds on the simulator. A cancel that lands while the file is being closed is still
+a cancel: the file is deleted and the job reports `cancelled`, as Android does.
+
+**A failure partway through names a clip.** `EditCompositor` records the last frame it drew, and an
+`unreadable_input` thrown during the encode is blamed on the base clip under that frame, which is
+Android's `blameClip`. It is a best guess with a known blind side: AVFoundation reads the sound far
+ahead of the picture, and a clip whose audio was damaged was measured failing the render while the
+clip before it was still on screen, which is then the clip named.
+
+**`encodeSupport` asks the encoder about the rate as well as the size.** iOS has no table like
+Android's `MediaCodecInfo` to read, so each frame is asked of VideoToolbox: a compression session is
+made at that size with the rate as its expected frame rate, and thrown away, and the frame is held
+to the limits of the highest H.264 level the encoder lists, which is where a device that takes a
+size at 30 fps and not at 60 shows it. Each size is tried both ways round, as Android tries it, the
+reason names the rate only when the rate is what was refused, and every answer is kept for the life
+of the process, as `plugin.ts` promises.
+
+**Inputs are opened by what they hold.** `AVURLAsset` chooses its reader by the file's extension and
+never looks at the bytes, so a file with none fails with -11828 and a WAV named `.m4a` with -11829,
+and a blob `withNativeRenderInputs` stages from a type it has no extension for is written with none.
+`RenderInputs` therefore reads the first bytes of each distinct input, and a file whose name does
+not say what they are is hard-linked into `named/` in the job folder under one that does - copied
+only when a link cannot be made - and opened from there. The original is never touched. The link
+costs nothing while the host's file is there, but it does keep those bytes on disk after the host
+deletes its own copy, until `cleanup` or the launch sweep takes the job folder.
+
+**Pictures become footage.** AVFoundation has no still-image item, so each distinct picture on the
+timeline is written as a short H.264 file of one frame, under `pictures/` in the job folder, when the
+builder first needs it, and opened from then on like any video. `ios/PICTURES.md` has the details.
+
+**A clip's sound holds its level to its cut.** AVFoundation's export draws a straight line from each
+volume point to the next, so one point per clip ramped every clip towards the next one's level: a
+clip before a picture, a held frame, a muted clip or a quieter voiceover take faded out across the
+whole of its length, and every clip a transition leads out of faded towards the silence its
+successor's fade-in starts from. The builder sets each level again a millisecond before its range
+ends, which to the ear is the step Android's and the web's per-clip gain makes. Music fades follow
+Android's `planMusic` and the web's `fadeGain`, with the one exception `ComposeMusic.fadeOutMs`
+describes.
+
+**A spec Android plans around, iOS plans around too.** A track with no `z` sits at its index plus
+one, an empty track is refused with Android's own message, a clip whose in-point is at or past the
+end of its footage holds its last frame for the millisecond Android and the web plan it rather than
+failing the post, and music whose trim lies wholly past the end of its file leaves the post without
+music rather than failing it.
+
+**`prepareJob` moves only what was written for one post.** Three places qualify: `Documents/`,
+`Library/Application Support/video-batches/` and `Library/Caches/video-composer/`. Everything else is
+copied - the sound library, the gallery copies a draft points at, whatever the host keeps in
+Application Support - and the source is deleted after its copy only when it is a scratch file under
+`tmp/` or `Library/Caches/`, which is where the file picker leaves a pick.
 
 **The publisher is one background `URLSession`.** Uploads continue while the app is suspended and
-are handed back through `application(_:handleEventsForBackgroundURLSession:completionHandler:)`;
-`PublishStore` is what survives the process dying, and a fresh plugin instance replays whatever JS
-has not acknowledged. Job folders are rooted in Application Support rather than Caches, because the
-system purges Caches under pressure and a half purged job folder is a post that can never be
-retried, and every directory created there is marked excluded from backup.
+are handed back through `application(_:handleEventsForBackgroundURLSession:completionHandler:)`,
+which the host forwards (see **iOS host setup**); `PublishStore` is what survives the process dying,
+and a fresh plugin instance replays whatever JS has not acknowledged. Unlike Android, every upload
+without an id is handed to the session at once, so a server sees them in whatever order the system
+sends them, and a failure does not cancel the others, which keep their ids for the retry. Every
+body is a private copy of the caller's file - for a `PUT` an APFS clone, which costs no space,
+unless the file's data protection class would leave a clone unreadable while the phone is locked,
+when it is copied - so a send in flight survives the caller deleting its file; the next send reads
+the file again. A 401 or 403 is never sent again on the plugin's own account; other retryable
+failures are, up to three more times, the first after 30 seconds and the rest after 60. Job folders
+are rooted in Application Support rather than Caches, because the system purges Caches under
+pressure and a half purged job folder is a post that can never be retried, and every directory
+created there is marked excluded from backup.
 
 ### Web
 
@@ -1543,9 +1781,28 @@ const { uri } = await VideoComposer.saveToGallery({
 ```
 
 Android inserts into MediaStore under `Movies/<album>`, which needs no permission from API 29 and
-survives the app being uninstalled. iOS creates a `PHAsset` and adds it to an album of that name.
+survives the app being uninstalled, and answers with the `content://` row. iOS creates a `PHAsset`
+from the file as it is - the name handed to PhotoKit with it, rather than put on a second copy a
+nearly full phone would fail to write - and answers with `ph://` and the asset's local identifier.
 The web hands the file to the browser's own download, ignoring `album` and `directory` because a
 page has neither.
+
+`directory` means nothing to the iOS photo library, which has no folders, but it is checked there
+all the same: a value other than `movies` or `dcim`, like an album with a `/` or `\` in it, is
+refused with `invalid_spec` on both platforms, before the file is looked at, rather than being
+accepted on one and refused on the other.
+
+The album is where iOS is least like Android. Finding an album and making one both need READ access
+to the photo library, which is more than adding a video needs, so iOS files into one only with full
+access, and only when the host's `Info.plist` also declares `NSPhotoLibraryUsageDescription`. When
+read access has never been asked about, the first save with an album asks for it, and that one
+prompt settles adding as well - which has a price: a person who answers it with Don't Allow may have
+refused adding along with reading, and the save is then refused with `permission_denied` where a
+prompt for adding alone might have been allowed. With add-only or limited access, or on a host
+without the key, the video is saved to Recents and the album is left out with no error, because a
+save is not lost over the folder it was to go in. Limited access skips the album on purpose: PhotoKit
+does not promise that an album made on an earlier save is visible under it, and a save that could
+not see one would make another of the same name every time.
 
 Two traps this exists to avoid, both of which look right and are not: copying into
 `getExternalMediaDirs()` puts the video in `Android/media/<package>/`, which Android **deletes when
@@ -1553,9 +1810,18 @@ the app is uninstalled**, and announcing the copy with `ACTION_MEDIA_SCANNER_SCA
 broadcast deprecated at API 29 and ignored after it. Either one produces a save that reports
 success over a video no gallery ever shows.
 
-On iOS the host's `Info.plist` needs `NSPhotoLibraryAddUsageDescription`; without it the app is
-terminated when the permission is asked for. Android needs nothing added - the kit's manifest
-declares the pre-API-29 storage permission, capped so modern installs do not carry it.
+On iOS the host's `Info.plist` needs `NSPhotoLibraryAddUsageDescription`, and that is all a plain
+save needs; without it the app is terminated when the permission is asked for. Filing into an
+`album` needs `NSPhotoLibraryUsageDescription` as well, as above, and without that key the kit never
+asks for read access - iOS would terminate the app if it did - and saves to Recents. Android needs
+nothing added - the kit's manifest declares the pre-API-29 storage permission, capped so modern
+installs do not carry it.
+
+The failures are `invalid_spec` for an option that cannot be honoured, `permission_denied`,
+`unreadable_input` for a file that is missing or is not a video, `no_space` for a full disk,
+`unsupported` from a browser that cannot download, and `unknown` for whatever else the platform
+says. One of those is not yet true everywhere: Android looks for a full disk by the words of the
+error rather than by its cause, misses a real `ENOSPC`, and reports it as `unreadable_input`.
 
 ## Reading the gallery, for a host that draws its own picker
 
@@ -1578,6 +1844,26 @@ On Android that is instant - the MediaStore URI is already readable - and on iOS
 video out of the photo library (from iCloud first when it lives there) into Application Support, so
 a draft that stores the path can still open it next week.
 
+The iOS copy is one per version of an item, never one per pick:
+`videokit-gallery/<id>/original/<name>` for an item nobody has edited, whatever else happens to it in
+Photos - a favourite or a caption does not make another - and `videokit-gallery/<id>/<modification
+stamp>/<name>` for an edited one, so an edit made after the first pick is a fresh copy rather than
+the old cut served again, and reverting it goes back to the original copy already there. `<name>`
+is the name the item was taken under, `IMG_0042.MOV`, never the `FullSizeRender` Photos calls every
+edit, so the sound library and a save read a real name off the path. The kit deletes none of them
+on its own, because only the host knows whether a draft still points at one: every pick stays on the
+phone as a copy until the host lets it go, with `releaseMedia` or `sweepMedia` (**Keeping picked
+media**, below). A flat copy made by an earlier version of the kit is hard-linked into its new place
+rather than downloaded again, and both paths go on working.
+
+With `images: true`, `listGalleryVideos` lists pictures among the videos, newest first together,
+and every item on Android and iOS says which it is in `kind`; a picture's `durationMs` is 0.
+`galleryThumbnail` and `resolveGalleryVideo` take a picture's id as they take a video's, and on iOS
+the picture is copied in the format it is stored in, a HEIC as a HEIC, for the renderer to decode.
+Newest first means the date a file was added on Android and the `creationDate` the Photos app sorts
+by on iOS, which has no public key for the date added, so a video downloaded today but shot last year
+sits in a different place on each. A thumbnail's `maxSize` is its long edge on both.
+
 `limited` is the person having chosen a few videos rather than all of them; the calls work and list
 fewer. `denied` is an answer rather than a rejection, because the fallback - the system picker -
 needs no permission. The web answers `unsupported` and refuses the other three.
@@ -1590,16 +1876,235 @@ app, so the kit does not put one on every host that only renders. Android:
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 ```
 
+and `READ_MEDIA_IMAGES` beside `READ_MEDIA_VIDEO` for a host that lists pictures, which
+`requestGalleryAccess({ images: true })` then asks for in the same prompt.
+
 iOS: `NSPhotoLibraryUsageDescription` in `Info.plist`, without which the app is terminated when
-access is asked for.
+access is asked for. The one grant covers pictures and videos alike, so `images` changes nothing
+about the prompt there.
+
+## Keeping picked media
+
+What a native picker hands over is good for the launch that picked it. A host that keeps picks past
+that - drafts that name their clips - has to make each one last, and the two phones break the
+promise in opposite ways. Android's photo picker hands over a `content://` URI and a read grant, and
+the grant dies with the process: the URI then names a video the app may no longer open. iOS hands
+over a file of the app's own, copied into `Library/Caches`, which the system empties by itself when
+space runs low, while the app is closed. Either way a draft came back to a clip it could not open and
+could not tell from one the customer had deleted. Five calls on `VideoComposer` settle it, with the
+same names and shapes on every platform:
+
+| Call | Android | iOS | Web |
+|---|---|---|---|
+| `retainMedia({ uri })` answers `{ uri, durable }` | takes a persistable read grant, or from Android 12 swaps a photo-picker URI for the MediaStore URI behind it; copies nothing; a name that already lasts (a MediaStore URI, a file in app storage) comes back as it came, `durable: false` | moves a file in Caches or `tmp` to `Application Support/videokit-picked/<uuid>.<ext>`, a rename rather than a copy; a file elsewhere in the app's container answers itself | the URI, `durable: false` |
+| `checkMedia({ uri })` answers `{ exists, uri }` | opens a read descriptor; `uri` as given | reads the file, after moving a path into an old container onto the current one, and answers with that path | `exists: true` |
+| `requestMediaAccess({ images })` answers `{ granted }` | `READ_MEDIA_VIDEO`, and `READ_MEDIA_IMAGES` with `images`, from 13; `READ_EXTERNAL_STORAGE` below | granted, without a prompt | granted |
+| `releaseMedia({ uris, keep })` | nothing | deletes the kit's own copies among `uris`, except any `keep` also names | nothing |
+| `sweepMedia({ keep, before })` answers `{ removed }` | 0 | deletes every copy of the kit's own that no URI in `keep` names and that was made before `before` | 0 |
+
+`retainMedia` rejects only when there is no `uri`: every other way it can fail answers with the URI
+as it came and `durable: false`, because that URI still opens for the rest of the launch. False is
+not a reason to refuse the pick; for a picker's own name it is the truth a draft store needs, that
+this clip will be missing on a later launch. On Android it says what retaining did rather than
+whether the name lasts, so a name that needed no help - a `resolveGalleryVideo` answer, which is a
+MediaStore URI, or a file in the app's own storage - is `durable: false` there too, and iOS says true
+for its counterpart. `requestMediaAccess` never rejects for a refusal either, and the permissions it
+asks for are the ones **Reading the gallery** has the host declare. The two that delete are the ones
+strict about their arguments, on every platform alike: an absent `uris`, a sweep's absent `keep` or
+`before`, and a release's `keep` that is there but not a list are refused with `invalid_spec` rather
+than given a default, because a `keep` read as empty would delete every copy a draft still uses and
+`before` read as now would take a clip being picked that moment. A release's `keep` may be left out,
+and then every copy `uris` names goes, as it did before `keep` existed.
+
+The kit's own copies on iOS are the ones `retainMedia` moves into `videokit-picked/` and the ones
+`resolveGalleryVideo` copies into `videokit-gallery/`, both under Application Support, which nothing
+else ever empties. `releaseMedia` and `sweepMedia` match a URI to a copy by its path under
+Application Support rather than by the whole path, because the whole path names the install's
+container folder, `.../Containers/Data/Application/<UUID>/`, and iOS gives an app a new one when it is
+updated or restored and carries every file across. A name a draft stored before an update therefore
+names a folder that no longer exists, while its file sits in the new one under the same name. That
+is also what `checkMedia` answers for, and `currentMediaUri(uri)`, from `capacitor-video-kit`, asks it
+only when it has to: on iOS, for a path with a container in it. Every other path comes back as it went
+in without a bridge call, and a call that fails answers the path as it came. A URL Capacitor's local
+server plays a file by (what `Capacitor.convertFileSrc` answers) names the container too, and comes
+back moved the same way, still that URL, for a host that stored one, such as a poster.
+
+A list of names to KEEP - `sweepMedia`'s `keep`, and `releaseMedia`'s - is read in every form a host
+is likely to have stored a copy's name in: a `file://` URI, percent-encoded as the kit hands one out
+or written literally, also as `file://localhost/...` or `file:/...`; a bare absolute path; either one
+into an earlier install's container; the local server's URL for the copy, under whatever scheme and
+host the app configured; a path relative to Application Support, `videokit-picked/<name>` or
+`videokit-gallery/<id>/...`; and any of these with a query or a fragment after it. A name read more
+ways than it meant can only keep more, which is the side to err on when a misreading loses a clip for
+good. `releaseMedia`'s `uris`, the names to DELETE, are read as file names only, a `file://` URI or a
+bare path moved onto this install's container, because a name misread there costs only some space
+until the next sweep. So a copy `uris` names by its path and `keep` by the URL the web view plays it
+by is one copy, and stays. The file's own path is the better thing to store and convert on the way
+out: it is the one form both lists read, and the URL's front is the app's configuration, which a
+later version is free to change.
+
+Two kinds of copy survive a sweep whatever `keep` says and however old they are. One is a copy this
+process has handed a host - moved in by `retainMedia` or answered by `resolveGalleryVideo` since the
+app started, which a web view reload does not restart - so a clip picked while the host gathers
+`keep`, or earlier in the launch and not saved yet, is safe; `before` alone could not promise that,
+because a gallery copy made in an earlier launch is dated then however recently it was picked again.
+The other is an input of a render still running, or of one whose outcome JS has not collected,
+because a launch sweep runs again when the web view reloads and the edit being rendered may be in
+no draft. `releaseMedia` does delete a copy handed out in this launch: that is the host saying it is
+done with it.
+
+A host with drafts uses the five like this, and **Native hosts**, below, is the same glue with the
+helpers that wrap it:
+
+```ts
+import { Capacitor } from '@capacitor/core';
+import { VideoComposer, currentMediaUri } from 'capacitor-video-kit';
+
+// Every file a system picker hands over that a draft may keep, before anything is written down
+// (a `resolveGalleryVideo` answer already lasts). Store the answer, and play it through the local
+// server: on iOS the picker's own webPath names where the file was.
+const { uri, durable } = await VideoComposer.retainMedia({ uri: picked.path });
+source.sourcePath = uri;
+source.playbackUrl = Capacitor.convertFileSrc(uri);
+void VideoComposer.requestMediaAccess({ images: picked.isPicture }).catch(() => undefined);
+
+// A draft read back: every stored path, as this install has to open it, before it is converted.
+const path = await currentMediaUri(stored.sourcePath);
+const { exists } = await VideoComposer.checkMedia({ uri: path }); // before calling the clip missing
+
+// A draft deleted: what it named, and what every draft still kept names. Two drafts can share one
+// pick, and the kit keeps whatever both lists name.
+await VideoComposer.releaseMedia({ uris: pathsIn(deleted), keep: pathsIn(remaining) });
+
+// Once per launch: every media path any draft names. `before` spares a clip picked while this runs.
+const startedAt = Date.now();
+await VideoComposer.sweepMedia({ keep: await everyPathInEveryDraft(), before: startedAt });
+```
+
+The sweep is what makes the rest affordable. Most copies stop mattering without anybody saying so:
+a clip deleted from the edit, a Replace, a video Extract from video only read the sound out of, an
+edit left without a draft, a draft whose app was killed before it saved. What the drafts name is the
+whole of what a copy can still be for, so whatever else is in the two folders goes. A host that also
+draws its own gallery puts the `resolveGalleryVideo` paths its drafts use in `keep`, since those copies
+are swept too.
+
+A browser keeps none of this: a pick there is a `blob:` URL that dies with the page, which is what
+`durable: false` says, and a draft keeps the bytes instead. The pick itself, for the step before the
+editor - a new project, a template's slots - is `pickMediaFiles({ limit, pictures })` from
+`capacitor-video-kit/ui`: the browser's own file input asked for several files at once, answering
+each with its source and its length in milliseconds, a picture as `kind: 'image'` with a length of
+0, and a cancel as an empty array. The object URLs it mints are the caller's to revoke.
+
+## Native hosts
+
+A Capacitor app with drafts was writing the same glue around the calls above whatever it edited:
+turning a pick into a source that lasts, turning a gallery item into one, giving the engine files
+rather than blobs, and letting go of copies nothing uses. That glue is in `capacitor-video-kit`, so
+what is left in the app is its picker plugin, its keys and its drafts. The whole of it:
+
+```ts
+import {
+  VideoComposer,
+  gallerySource,
+  retainPickedFile,
+  withNativeRenderInputs,
+} from 'capacitor-video-kit';
+import { browserMediaHost, type EditorMediaHost, type EditorSource } from 'capacitor-video-kit/ui';
+
+// A system picker's file as a source a draft can keep. Every Capacitor picker plugin answers a
+// `path` and a `webPath`, and a file picker its `mimeType`; this retains the first and answers what
+// to store and what to play. A picture has to say so, or the editor opens it as a video and reports
+// it missing, and Android asks for pictures as a right of their own.
+async function sourceFor(file: { name: string; mimeType?: string; path?: string; webPath?: string }): Promise<EditorSource> {
+  const picture = file.mimeType?.startsWith('image/') === true;
+  void VideoComposer.requestMediaAccess({ images: picture }).catch(() => undefined); // to read it later
+  const { sourcePath, playbackUrl } = await retainPickedFile(file);
+  return { key: crypto.randomUUID(), fileName: file.name, sourcePath, playbackUrl, ...(picture ? { kind: 'image' } : {}) };
+}
+
+// An item from the app's own gallery (`listGalleryVideos`), resolved into a source. A picture says so.
+const source = await gallerySource(video, crypto.randomUUID());
+
+// The editor's media host: the defaults, with the clip pickers replaced. `pickAudio` stays the
+// default, which on iOS is already the kit's own document picker, so there is no audio picker to write.
+const media: EditorMediaHost = {
+  ...browserMediaHost(),
+  async pickVideo() {
+    const file = await pickOneVideo(); // the app's picker plugin, null on a cancel
+    return file ? sourceFor(file) : null;
+  },
+  async pickMedia() {
+    const file = await pickOneVideoOrPicture(); // with editing.pictures on: the same, offering stills
+    return file ? sourceFor(file) : null;
+  },
+  // ...probeDuration, thumbnails and the rest over VideoComposer, as above
+};
+
+// The render: every blob the spec names staged as a file, and released once the job has settled.
+const result = await withNativeRenderInputs(spec, (prepared) => runJob(prepared, onProgress), signal);
+
+// A draft deleted: what it named, less whatever the drafts still kept name.
+await VideoComposer.releaseMedia({ uris: pathsIn(deleted), keep: pathsIn(remaining) });
+
+// Once per launch, with every media path any draft names.
+const startedAt = Date.now();
+await VideoComposer.sweepMedia({ keep: pathsIn(await allDrafts()), before: startedAt });
+```
+
+**`retainPickedFile({ path, webPath })`** answers `{ sourcePath, playbackUrl, durable }`. It calls
+`retainMedia` when there is a `path` and never throws: a picker that worked must not be undone by the
+step that was only ever about tomorrow, so a call that fails answers the path as it came, `durable:
+false`, which opens for the rest of the launch. `playbackUrl` is the picker's `webPath`, except after
+iOS MOVED the file out of Caches, when the picker's URL names where the file was and the new name
+through `Capacitor.convertFileSrc` is what plays. Android's new name is another name for the same
+bytes, and the picker's URL goes on playing them.
+
+**`gallerySource(video, key)`** resolves a listed item with `resolveGalleryVideo` and answers the
+`EditorSource` the editor opens: the resolved name, or the listing's where the resolve found none,
+the resolved URI as `sourcePath` and through `convertFileSrc` as `playbackUrl`, and `kind: 'image'`
+for a picture, without which the editor opens a picture as a video and reports it missing. It
+rejects as the resolve does, `unreadable_input` for an item gone from the library since it was
+listed. The key is the app's, new for every pick, because the same item picked twice is two clips.
+
+**`withNativeRenderInputs(spec, render, signal?)`** gives the engine files instead of the `blob:`
+URLs a page holds - a sound from the browser's sound library, a track the default picker read in -
+which no native engine can open. Every place a spec names media is covered: the base clips, every
+layer's clips, each transition's outgoing side, the music and every voiceover. Each distinct blob is
+staged through `stageRenderInput` a mebibyte of bytes per call, named with the extension its type
+calls for (a better default rather than a requirement, since iOS's `RenderInputs` and Android's
+Media3 both read what a file holds), and released through `releaseRenderInputs` once `render` has
+settled, whatever it settled with. The caller's spec is not touched. In a browser it is
+`render(spec)` and nothing else.
+
+**The editor's default `pickAudio`** is the kit's document picker on iOS (**iOS host setup** says
+why), so a native host keeps it by spreading `browserMediaHost()` and leaving `pickAudio` out.
+
+The three native calls behind those, for a host that needs them on their own:
+
+| Call | Android | iOS | Web |
+|---|---|---|---|
+| `pickAudioFile()` answers `{ cancelled, uri?, fileName?, mimeType? }` | rejects `UNIMPLEMENTED` | presents the document picker for any audio type and copies the choice to `tmp/videokit-audio/<uuid>.<ext>`, which the launch sweep clears once a day old; rejects `already_picking` while its picker is up | rejects `UNIMPLEMENTED` |
+| `stageRenderInput({ data, uri?, extension? })` answers `{ uri }` | writes or appends to a file in `cacheDir/videokit-render-inputs/` | writes or appends to a file in `tmp/videokit-render-inputs/` | rejects `UNIMPLEMENTED` |
+| `releaseRenderInputs({ uris })` | deletes the named files in that folder, and nothing else | the same | rejects `UNIMPLEMENTED` |
+
+`stageRenderInput` starts a new file, named `<uuid>` and `extension` after a dot, when `uri` is
+absent, and appends to the file `uri` names otherwise. It refuses with `invalid_spec` a `uri` that is
+not a staged file still there, data that is not base64 and an extension that is not one to sixteen
+letters and digits, and answers `no_space` for a full disk. Chunks are written one at a time in the
+order they were sent, on both platforms. A staged file a killed render left behind is deleted by a later launch once it is a
+day old, and not sooner, because the plugin loads again when the web view reloads, which can happen
+while a render is reading its inputs.
 
 ## Failure codes
 
 Composer: `unreadable_input` (blame `clipKey`), `encoder`, `muxer`, `interrupted`, `cancelled`,
-`no_space` (carries `needBytes`), `unsupported`, `unknown`.
+`no_space` (carries `needBytes`), `unsupported`, `unknown`. `interrupted` is the platform stopping a
+render with nothing wrong with the post - on iOS, the app leaving the foreground - and the same spec
+composed again under a new `jobId` can succeed. `unknown` with the message `timeout` is an iOS render
+that stopped moving for 90 seconds.
 
-`saveToGallery`: `permission_denied`, `unreadable_input`, `no_space`, `unsupported` (web only),
-`unknown`.
+`saveToGallery`: `invalid_spec`, `permission_denied`, `unreadable_input`, `no_space`, `unsupported`
+(web only), `unknown`.
 
 Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancelled`, `unknown` - each with `phase`, an optional `httpStatus`, and `retryable`.
 
@@ -1722,7 +2227,7 @@ parsers' reject-versus-clamp boundary, the multipart wire format and the templat
 The iOS half is a Swift package and does build on its own, against the device SDK:
 
 ```sh
-xcodebuild -scheme CapacitorVideoKitCore -destination 'generic/platform=iOS' \
+xcodebuild -scheme CapacitorVideoKit -destination 'generic/platform=iOS' \
   -derivedDataPath /tmp/capacitor-video-kit-build -skipMacroValidation build
 ```
 
@@ -1730,13 +2235,44 @@ The derived data path is not decoration, and neither is removing it first. Run a
 against the same one, that command prints `** BUILD SUCCEEDED **` in 44 lines having run **zero**
 `SwiftCompile` tasks, so it will report success for Swift it has never looked at. The same thing
 happens to the host app's own build, at 342 lines. A path of its own, removed first, is what makes
-the answer mean anything: a real run of this target is 27 `SwiftCompile` lines, and
+the answer mean anything: a real run of this target is 36 `SwiftCompile` lines for its 28 files, and
 `grep -c '^SwiftCompile'` on the output is the cheapest way to know which kind of run you just had.
 
 Add `IPHONEOS_DEPLOYMENT_TARGET=18.0` to compile it the way a host on a later floor does, which is
 worth doing after touching anything behind `#available`: a deprecation that is invisible at 16 is a
 warning at 18, and an `if #available` written as an early return rather than an `else` is how one
 gets in.
+
+The iOS half has tests of its own as well, in `ios/Tests/CapacitorVideoKitCoreTests/`, which run on
+the iOS Simulator and nowhere else - the module imports UIKit and links Capacitor's iOS frameworks,
+so there is no macOS `swift test` for it:
+
+```sh
+xcodebuild test -scheme CapacitorVideoKit \
+  -destination 'platform=iOS Simulator,name=<a simulator you have>' \
+  -derivedDataPath /tmp/capacitor-video-kit-test
+```
+
+Add `-only-testing:CapacitorVideoKitCoreTests/<class>` to run one file's class. The 159 cases make
+their own media rather than shipping any: `TestSupport.swift` writes videos, with a tone in them when
+asked, and pictures into a folder per test, renders a spec through the same parser, builder and
+exporter a job uses, and reads the result back as the colour at a point of a frame; the tests about
+sound measure its level over windows of a tenth of a second. That is what they check: pictures on
+every track and as a transition's side, sound levels held to their cuts, music fades, inputs with no
+extension or the wrong one, the encoder's settings and the file they produce, the fallback,
+cancelling and the stall watch, which clip a failure names, the gallery's copy paths and album
+decisions, `encodeSupport` against the real VideoToolbox, `file://` parsing, and the publisher's
+bodies, templates and resend rules.
+
+Three things they cannot reach. PhotoKit, because the test runner cannot be granted the photo
+library: the gallery's PhotoKit paths were checked in a throwaway app on the simulator instead. A
+data protection class, because the simulator reports none for any file, so the one test that needs
+a real one skips there. And a device, where nothing here has run.
+
+A tarball install carries `Package.swift` and `ios/Sources/` and not `ios/Tests/`, and that is
+fine: SwiftPM builds a dependency's library without looking for its test target's folder (checked
+with a package whose test folder was missing, under Swift 6), and the podspec's glob never reaches
+the tests at all.
 
 ### On a device
 

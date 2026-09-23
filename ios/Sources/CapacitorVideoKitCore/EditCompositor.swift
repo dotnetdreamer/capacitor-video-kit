@@ -11,11 +11,15 @@ import Metal
 /// AVFoundation instantiates a custom compositor by calling a bare `init()`, so there is no way to
 /// hand it anything: whatever it needs travels on the instruction, and whatever is shared travels on
 /// one plan that every instruction references. Immutable after init, which is what makes the
-/// `@unchecked Sendable` honest.
+/// `@unchecked Sendable` honest - `cursor` included, because the reference never changes and the
+/// object behind it guards itself.
 final class RenderPlan: @unchecked Sendable {
     let renderSize: CGSize
     let colorMatrix: ColorMatrix
     let overlays: [PlacedOverlay]
+
+    /// Where the compositor has got to on THIS job's output timeline, read when the encode fails.
+    let cursor = FrameCursor()
 
     /// Decodes every overlay ONCE, here, on the thread that builds the composition. Decoding inside
     /// the compositor would put a PNG decode on the render path thirty times a second.
@@ -27,6 +31,38 @@ final class RenderPlan: @unchecked Sendable {
         // compactMap, because a fully transparent overlay decodes to nil rather than to an
         // invisible image the compositor would blend for nothing.
         overlays = try spec.overlays.compactMap { try OverlayBitmap.decode($0, render: size) }
+    }
+}
+
+/// The output-timeline instant of the last frame the compositor was asked to draw for one job, which
+/// is Android's `job.lastFrameUs` and exists for the same reason: an error out of the encode names a
+/// fault and never a clip, and how far the timeline had got is the only thing that can say which
+/// clip was being read when it happened.
+///
+/// It hangs off the `RenderPlan` rather than off the compositor or a global. AVFoundation builds the
+/// compositor itself, once per reader or session and with a bare `init()`, so the compositor has
+/// nothing it could hand the job; a global would have two concurrent jobs writing over each other's
+/// frame. The plan is the one object every instruction of this job shares and no other job does.
+///
+/// Written on the compositor's queue and read on whichever thread the failure surfaces on, so the
+/// value is behind its own lock rather than the registry's.
+final class FrameCursor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastUs: Int64?
+
+    /// Microseconds, like `request.compositionTime` is read everywhere else in the compositor.
+    func record(_ us: Int64) {
+        lock.lock()
+        lastUs = us
+        lock.unlock()
+    }
+
+    /// nil until the first frame has been asked for, which a failure that surfaces before the encode
+    /// has drawn anything leaves it at.
+    var us: Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastUs
     }
 }
 
@@ -171,8 +207,9 @@ enum CompositorError: Error { case badInstruction, noBuffer }
 
 /// The custom `AVVideoCompositing` that draws every output frame.
 ///
-/// Safe to instantiate more than once per process: the exporter's one relaxed-preset retry builds a
-/// fresh `AVAssetExportSession`, which builds a fresh compositor.
+/// Safe to instantiate more than once per process: the exporter's one fallback builds a fresh
+/// `AVAssetExportSession` after the writer engine's reader has given up, and it builds a fresh
+/// compositor.
 final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
 
     // Both dictionaries must carry a pixel format or AVFoundation raises an ObjC exception. 32BGRA
@@ -279,6 +316,9 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // layers are drawn, not only the overlays after them.
         let tUs = CMTimeConvertScale(request.compositionTime,
                                      timescale: 1_000_000, method: .roundTowardZero).value
+        // Before a single layer is drawn, so that a frame whose drawing throws still counts as the
+        // frame the job had reached.
+        instr.plan.cursor.record(tUs)
 
         // Black under every layer. With one layer it is the same black `Placement` used to hold
         // behind its picture, and the frame a source that arrived nil has always produced; with two

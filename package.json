@@ -94,6 +94,7 @@
     "loader/",
     "ios/Sources/",
     "Package.swift",
+    "CapacitorVideoKit.podspec",
     "android/src/main/",
     "android/build.gradle",
     "android/proguard-rules.pro",

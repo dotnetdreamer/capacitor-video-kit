@@ -271,7 +271,30 @@
   border-radius: 50%;
 }
 
+/*
+ * The glyph is taken OUT OF FLOW and centred by its insets, rather than left to the grid, and the
+ * picture is the same either way: the reason is the handle's box as WebKit reports it.
+ *
+ * Every glyph here carries a `transform` - the `rotate()` that turns it back upright on a turned
+ * layer, written even at 0deg - and in WebKit any transform gives an element a render layer of its
+ * own (a paint layer; a compositing one needs 3D or an animation, and this is neither).
+ * WebKit builds a button's accessibility frame from its own box AND the boxes of its in-flow
+ * children, and places a child that has a layer of its own at the wrong offset: the handle's frame
+ * came back as its own 24px square joined to a second one up and to the left of it, a box several
+ * times the size of the circle whose middle was over the picture instead of the handle. iOS hands
+ * that frame to anything that reads the screen - VoiceOver's focus, Maestro's tap - so a tap aimed
+ * at Duplicate layer landed on the clip underneath and selected that. Measured in a WKWebView
+ * through the accessibility API: with the glyph in flow the frame was 77x106 around a 25x24 handle,
+ * with it out of flow it is the handle's own, on a turned layer too. The finger target `::before`
+ * draws is out of flow already, which is why it never counted.
+ *
+ * Nothing about the drawing changes. The glyph is the same one em square in the middle of the same
+ * circle, to the pixel, in Chrome and in WebKit, and it still takes no touch.
+ */
 .pv__handle ve-icon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
   pointer-events: none;
 }
 

@@ -20,8 +20,9 @@ struct PreparedInput: Sendable {
 /// The rule the whole feature rests on: once a post is pending, every byte it needs is inside one
 /// app-private folder that nothing but `cleanup` deletes. The camera plugin's own housekeeping
 /// deletes its captures, the file picker's temporary copy dies with the pick, and the customer can
-/// clear their library - so inputs are moved in (when they are ours) or copied in (when they are
-/// not) before anything depends on them.
+/// clear their library - so inputs are moved in (when they are ours and made for this one post) or
+/// copied in (when they are not, or are kept for more than one: see `isAppOwned`) before anything
+/// depends on them.
 ///
 /// Android roots this at `filesDir`. iOS roots it at Application Support rather than Caches: the
 /// system purges Caches under disk pressure, and a half-purged job folder is a post that can never
@@ -54,6 +55,22 @@ enum JobFolders {
     private static let legacyDoneMarkerName = ".published"
 
     // MARK: - Paths
+
+    /// This app's container, spelled the way `FileManager.urls(for:in:)` spells every folder in it.
+    ///
+    /// WHY NOT `NSHomeDirectory()`. On a device the two spell one folder two ways: `urls(for:in:)`
+    /// answers `/var/mobile/Containers/...` and `NSHomeDirectory()` answers `/private/var/...`, where
+    /// `/var` is a link to `/private/var`. Both open the same files, but a host compares names as
+    /// strings - a `keep` list, a draft asking whether a clip is already in it - so a name built on
+    /// one is a different clip from the same name built on the other. Every name the kit hands out
+    /// is built on `urls(for:in:)` (`pickedFolder`, `copiesFolder`, `root`, the caches), so this is
+    /// too, and so is everything built on this: the name `rebased` moves a stored path to, and the
+    /// `tmp` folders of `StagedRenderInputs` and `AudioFilePicker`, which is why neither starts from
+    /// `FileManager.temporaryDirectory`, spelled as `NSHomeDirectory()` is. The simulator spells the
+    /// two alike, so there the difference cannot be seen at all.
+    static var home: URL {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].deletingLastPathComponent()
+    }
 
     /// Library/Application Support/video-batches/
     ///
@@ -132,13 +149,77 @@ enum JobFolders {
         return out
     }
 
-    /// `file://` goes through `URL(string:)` so its percent-encoding is decoded once and correctly;
-    /// a bare `/path` is taken literally. Anything else - notably Android's `content://` - has no
-    /// iOS meaning and must be reported rather than guessed at.
+    /// The file a URI names: `file://` or a bare `/path`. Anything else - notably Android's
+    /// `content://` - has no iOS meaning and must be reported rather than guessed at.
+    ///
+    /// `file://` is read by hand rather than through `URL(string:)`, which gets two kinds of URI a
+    /// host builds by hand wrong. On iOS 16 it answers nil for a raw space, where iOS 17 encodes the
+    /// space for the caller; and on every version it takes a raw `#` as the start of a fragment and
+    /// a raw `?` as the start of a query, so `clip#2.mp4` quietly opens `clip`. So a URI with a `%`
+    /// in it is decoded once, which is what every URI this kit hands out needs (`absoluteString`
+    /// encodes), and one without is taken literally, which is what a hand-built one needs. One whose
+    /// `%` signs do not all start valid escapes is taken literally too: it was never encoded.
+    ///
+    /// Then `rebased`, for a path that names a container this app no longer has.
     static func fileURL(from uri: String) -> URL? {
-        if uri.hasPrefix("file://") { return URL(string: uri) }
-        if uri.hasPrefix("/") { return URL(fileURLWithPath: uri) }
-        return nil
+        read(uri).map { rebased(URL(fileURLWithPath: $0.path)) }
+    }
+
+    /// `uri` naming the file `fileURL(from:)` opens for it, written the way `uri` was written.
+    ///
+    /// `uri` itself unless `rebased` moved it: a stored name whose container this install no longer
+    /// has, for a file that is in this one. The moved name is a bare path for a bare path, and for a
+    /// `file://` URI it is encoded as the kit encodes one (`absoluteString`) when `uri` was encoded,
+    /// and literal when it was not, so the answer reads back through `fileURL(from:)` exactly as `uri`
+    /// did. `RetainedMedia.check` answers it, for a host that stored the name before an update.
+    static func rebasedURI(_ uri: String) -> String {
+        guard let read = read(uri) else { return uri }
+        let named = URL(fileURLWithPath: read.path)
+        let moved = rebased(named)
+        guard moved.path != named.path else { return uri }
+        guard uri.hasPrefix("file://") else { return moved.path }
+        return read.encoded ? moved.absoluteString : "file://" + moved.path
+    }
+
+    /// The path `uri` is read as, by the rule `fileURL(from:)` describes, and whether that took
+    /// decoding. Nil for anything that is not a file.
+    private static func read(_ uri: String) -> (path: String, encoded: Bool)? {
+        if uri.hasPrefix("file://") {
+            var rest = Substring(uri.dropFirst("file://".count))
+            // `file://localhost/...` is RFC 8089's other spelling of the same file.
+            if rest.hasPrefix("localhost/") { rest = rest.dropFirst("localhost".count) }
+            guard rest.hasPrefix("/") else { return nil }
+            if rest.contains("%"), let decoded = rest.removingPercentEncoding { return (decoded, true) }
+            return (String(rest), false)
+        }
+        return uri.hasPrefix("/") ? (uri, false) : nil
+    }
+
+    /// A path into an app container that has since moved, pointed at the same place in this one.
+    ///
+    /// An iOS app's data container is `.../Containers/Data/Application/<UUID>/`, and the UUID is
+    /// not promised to survive an app update or a restore onto a new phone - but a host stores
+    /// absolute paths: a draft keeps the gallery copy or the picked file it was made from, a post
+    /// keeps its render. So a file that is not where the path says, when the path names a
+    /// container, is looked for under `home` with everything after the UUID kept. The path is
+    /// answered unchanged when the file is not there either, so what the caller then reports as
+    /// missing is the path it was actually given. The same pattern holds on a device
+    /// (`/private/var/mobile/Containers/...`) and in the simulator (`.../data/Containers/...`).
+    ///
+    /// The moved path is spelled as `home` is, whichever way the stored one was, so it is the very
+    /// name the kit would hand out for that file today: `RetainedMedia.check` answers it, and a host
+    /// that finds it equal to a name it was given since takes the two for the one file they are.
+    static func rebased(_ url: URL) -> URL {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) { return url }
+        let parts = url.pathComponents
+        guard let at = (0..<max(0, parts.count - 4)).first(where: { i in
+            parts[i] == "Containers" && parts[i + 1] == "Data" && parts[i + 2] == "Application"
+                && UUID(uuidString: parts[i + 3]) != nil
+        }) else { return url }
+        var moved = home
+        for part in parts[(at + 4)...] { moved.appendPathComponent(part) }
+        return fm.fileExists(atPath: moved.path) ? moved : url
     }
 
     // MARK: - Directory creation
@@ -243,17 +324,12 @@ enum JobFolders {
             // copyItem and moveItem both throw when the destination exists, and a destination that
             // exists is the normal case on a retry.
             try? fm.removeItem(at: dest)
-            if SoundLibrary.owns(source) {
-                // A sound the customer keeps is app-owned and is still COPIED: moving it, or
-                // copying and then deleting it below, would take it out of their library the first
-                // time a post used it. See `SoundLibrary.owns`.
-                try fm.copyItem(at: source, to: dest)
-            } else if isAppOwned(source) {
+            if isAppOwned(source) {
                 // The whole container is one volume, so this is a rename and a failure is real.
                 try fm.moveItem(at: source, to: dest)
             } else {
                 try fm.copyItem(at: source, to: dest)
-                removeIfInOurContainer(source)
+                removeIfScratch(source)
             }
         } catch {
             throw PrepareFailure(message: "could not place \(key): \(error.localizedDescription)", code: Reject.io)
@@ -261,8 +337,12 @@ enum JobFolders {
         return PreparedInput(key: key, uri: dest.absoluteString)
     }
 
-    /// Nothing reads the extension for dispatch, but `AVURLAsset` uses it as a hint, so a
-    /// wrong-but-plausible container beats the design doc's `bin`.
+    /// A guess, for an input that arrived without an extension, and a better one than the design
+    /// doc's `bin`: `AVURLAsset` picks its reader by the extension and never looks at the bytes, so a
+    /// file with none fails every load with -11828, and one whose extension names the wrong container
+    /// - a WAV named `.m4a` - fails with -11829. A guess that turns out wrong is put right when the
+    /// composition is built: `RenderInputs` reads the file's first bytes and opens it under a name
+    /// that says what they are.
     private static func defaultExtension(for key: String) -> String {
         (key.hasPrefix("vo:") || key == "music") ? "m4a" : "mp4"
     }
@@ -272,36 +352,53 @@ enum JobFolders {
         return Int64(values?.fileSize ?? 0)
     }
 
-    /// True when we may MOVE the file rather than copy it.
+    /// True when we may MOVE the file rather than copy it: when it was written for one post and
+    /// nothing else will want it at that path afterwards.
     ///
     /// Narrower than Android's "any app-owned directory" on purpose. Exactly three prefixes:
-    ///   Documents/                      camera-preview writes cpcp_video_<id>.mp4 here
-    ///   Library/Application Support/    our own job folders
-    ///   Library/Caches/video-composer/  our own voice takes and thumbs
+    ///   Documents/                                  camera-preview writes cpcp_video_<id>.mp4 here
+    ///   Library/Application Support/video-batches/  our own job folders
+    ///   Library/Caches/video-composer/              our own voice takes and thumbs
+    /// The rest of Application Support is ours too, and is kept there on purpose: the sound
+    /// library (`SoundLibrary.dir`), the photo library copies and the picked files a draft points at
+    /// (`GalleryLibrary.copiesFolder`, `RetainedMedia.pickedFolder`), and whatever the host itself
+    /// files there. A post takes a COPY of those, because a sound moved into a job folder is a row in
+    /// the customer's library that plays nothing from the next post on, and a gallery copy or a
+    /// retained pick moved into one is a draft whose clip `cleanup` deletes. That is also Android's
+    /// rule: a sound is copied there, and a gallery pick or a retained one is a `content://` row that
+    /// is only ever read.
     /// `tmp/<uuid>/` and `Library/Caches/<uuid>/` are excluded even though they are inside the
     /// container: that is where the file picker copies a pick, and the thumbnailer or a preview
     /// <video> element may still be reading it. Yanking a file mid read is worse than one copy.
-    ///
-    /// The `.standardizedFileURL` on both sides is load bearing. On device `NSHomeDirectory()`
-    /// answers `/private/var/...` while `FileManager.urls(for:in:)` answers `/var/...`; comparing
-    /// them raw makes this false for our OWN folders and turns every move into a copy.
     static func isAppOwned(_ url: URL) -> Bool {
-        let path = url.standardizedFileURL.path
-        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
-        guard path.hasPrefix(home + "/") else { return false }
-        let relative = String(path.dropFirst(home.count + 1))
+        guard let relative = containerRelativePath(url) else { return false }
         return relative.hasPrefix("Documents/")
-            || relative.hasPrefix("Library/Application Support/")
+            || relative.hasPrefix("Library/Application Support/video-batches/")
             || relative.hasPrefix("Library/Caches/video-composer/")
     }
 
-    /// After a copy, the source is deleted only when it is inside our container. Deleting what is
-    /// not ours is not our call, and the net effect for a picked file is still a move.
-    private static func removeIfInOurContainer(_ url: URL) {
-        let path = url.standardizedFileURL.path
-        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
-        guard path.hasPrefix(home + "/") else { return }
+    /// After a copy, the source is deleted only when it is a scratch copy in our own container -
+    /// under `tmp/` or `Library/Caches/`, where the file picker leaves a pick - so the net effect
+    /// for a picked file is still a move. Deleting what is not ours is not our call, and what is
+    /// ours anywhere else is being kept on purpose (see `isAppOwned`).
+    private static func removeIfScratch(_ url: URL) {
+        guard let relative = containerRelativePath(url),
+              relative.hasPrefix("tmp/") || relative.hasPrefix("Library/Caches/") else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// The path below `home`, or nil for a file outside this app's container.
+    ///
+    /// The `.standardizedFileURL` on both sides is load bearing. On device a name the kit built is
+    /// spelled `/var/...` (see `home`), while one from anywhere else - `NSHomeDirectory()`,
+    /// `FileManager.temporaryDirectory`, a picker - may be spelled `/private/var/...`; comparing
+    /// them raw makes every file look foreign, which turns every move into a copy. Standardizing
+    /// drops the `/private`. `RetainedMedia` compares its copies by this path for the same reason.
+    static func containerRelativePath(_ url: URL) -> String? {
+        let path = url.standardizedFileURL.path
+        let home = self.home.standardizedFileURL.path
+        guard path.hasPrefix(home + "/") else { return nil }
+        return String(path.dropFirst(home.count + 1))
     }
 
     // MARK: - cleanup
@@ -316,6 +413,10 @@ enum JobFolders {
 
     /// Housekeeping on plugin load. Hops to its own queue: `load()` runs on the Capacitor queue,
     /// which is shared by every plugin in the app, and walking a folder tree there stalls them all.
+    ///
+    /// The copies kept for a host, in `videokit-picked/` and `videokit-gallery/`, are never looked
+    /// at here, however old: whether a draft still uses one is something only the host knows, and it
+    /// says so through `sweepMedia` (`RetainedMedia.sweep`).
     static func sweepOnLaunch() {
         DispatchQueue.global(qos: .utility).async {
             sweep(now: Date())
@@ -325,9 +426,16 @@ enum JobFolders {
     /// Deliberately conservative about job folders, because the alternative is deleting the files
     /// behind a post the customer can still retry. Three rules, in order:
     ///
-    /// 1. cache entries older than 24 h
+    /// 1. cache entries, staged render inputs and picked songs older than 24 h
     /// 2. a job folder carrying the done marker, 24 h after the marker was written
     /// 3. an unmarked job folder after 7 days, and only when nothing still claims it
+    ///
+    /// The staged inputs (`StagedRenderInputs`) and the songs (`AudioFilePicker`) are in `tmp`, which
+    /// iOS empties by itself only while the app is not running, and something in this process may
+    /// still be reading one: `load()` runs again when the web view reloads, which can happen in the
+    /// middle of a render, and a host may keep a picked song's name for the rest of its session. A
+    /// day is long past either, so nothing here needs to know who still holds a name. Android's
+    /// `JobFolders.sweep` clears its staged inputs by the same rule.
     static func sweep(now: Date) {
         let fm = FileManager.default
         // A missing root is the normal state on a fresh install, and `contentsOfDirectory` throws
@@ -347,6 +455,8 @@ enum JobFolders {
         }
         sweepCache(thumbsDir(), now: now)
         sweepCache(voiceDir(), now: now)
+        sweepCache(StagedRenderInputs.folder, now: now)
+        sweepCache(AudioFilePicker.folder, now: now)
     }
 
     /// The folder name IS the sanitised batchId, which is what both of the guards below are

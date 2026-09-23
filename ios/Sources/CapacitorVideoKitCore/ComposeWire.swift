@@ -18,8 +18,8 @@ import Foundation
 enum JobState: String, Sendable { case pending, rendering, interrupted, done, failed }
 
 /// What WE decided about a stopped render, recorded before AVFoundation threw anything. It is read
-/// FIRST when a failure is classified, because a user cancel and a wall-clock timeout both surface
-/// as a `CancellationError` and only this tells them apart.
+/// FIRST when a failure is classified, because a user cancel and a stalled render both surface as a
+/// `CancellationError` and only this tells them apart.
 enum StopReason: Sendable { case cancelled, interrupted, timeout }
 
 /// Exactly the eight strings of the TypeScript `ComposeFailureCode` union.
@@ -100,15 +100,14 @@ enum BuildError: Error {
     }
 }
 
-/// Thrown by `Exporter`. Every case here is an iOS-only guard around `AVAssetExportSession`, which
-/// takes a preset rather than a bitrate and therefore has failure modes Android does not have.
+/// Thrown by `Exporter` and its engines, for the failures that are ours rather than AVFoundation's.
+/// The first two are the preset fallback's guards around `AVAssetExportSession`; the writer engine
+/// throws AVFoundation's own errors. The size of the output is not among them: a size ceiling is the
+/// host's to apply, and the package applies none.
 enum ExportError: Error {
     case presetUnavailable
     case fileTypeUnsupported
-    case overCap(bytes: Int64)                             // guard G1
-    case tooLongForPreset(maxMs: Int64, neededMs: Int64)
     case truncated(produced: Int64, expected: Int64)
-    case timedOut
 
     var asFailure: ComposeFailure {
         switch self {
@@ -116,17 +115,10 @@ enum ExportError: Error {
             return ComposeFailure(code: .unsupported, message: "preset_unavailable")
         case .fileTypeUnsupported:
             return ComposeFailure(code: .unsupported, message: "mp4_unsupported")
-        case .overCap(let bytes):
-            return ComposeFailure(code: .unsupported, message: "output_over_cap bytes=\(bytes) limit=104857600")
-        case .tooLongForPreset(let maxMs, let neededMs):
-            return ComposeFailure(code: .unsupported,
-                                  message: "timeline_too_long_for_preset max=\(maxMs) need=\(neededMs)")
         case .truncated(let produced, let expected):
             // The container closed cleanly and is short, which is an encoder that stopped early
             // rather than a muxer that could not write.
             return ComposeFailure(code: .encoder, message: "truncated \(produced)/\(expected)")
-        case .timedOut:
-            return ComposeFailure(code: .unknown, message: "timeout")
         }
     }
 }
@@ -147,6 +139,9 @@ enum Reject {
     static let fileMissing = "file_missing"
     static let invalidRequest = "invalid_request"
     static let notFound = "not_found"
+    /// iOS only, and not in Android's list: `pickAudioFile` asked for while its picker is still up.
+    /// Android refuses the whole call as `unimplemented` and so has no second one to refuse.
+    static let alreadyPicking = "already_picking"
 }
 
 /// Retention is what makes the editor's "add listeners, then call compose" pattern safe: a two

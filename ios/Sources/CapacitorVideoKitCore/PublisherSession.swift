@@ -13,6 +13,8 @@ enum PublishError: Error {
 /// states of one upload rather than answers to a plugin call.
 private enum EnqueueFailure: Error {
     case fileMissing(String)
+    /// The upload's id, and whatever `UploadBody.write` threw.
+    case bodyNotWritten(String, Error)
     case badURL(String)
     case sessionInvalid
 }
@@ -220,10 +222,8 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
 
     func publish(_ request: PublishRequest) throws {
         // Fail now, loudly, rather than in a worker an hour later with the app closed.
-        for u in request.uploads {
-            guard let url = PublishModels.fileURL(u.path), Thumbnailer.fileBytes(url) > 0 else {
-                throw PublishError.fileMissing(u.uploadId)
-            }
+        for u in request.uploads where PublishModels.sourceFile(u.path) == nil {
+            throw PublishError.fileMissing(u.uploadId)
         }
 
         let id = request.batchId
@@ -419,7 +419,7 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
             body = try UploadBody.write(request: request, upload: upload,
                                         into: PublishStore.bodiesDir(r.batchId))
         } catch {
-            throw EnqueueFailure.fileMissing(u.uploadId)
+            throw EnqueueFailure.bodyNotWritten(u.uploadId, error)
         }
 
         var req = URLRequest(url: url)
@@ -435,13 +435,13 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
 
         // uploadTask(with:fromFile:) is the ONLY task factory allowed on a background session. A
         // Data body, a stream body and any data task are unsupported once the app is not running.
-        let task = session.uploadTask(with: req, fromFile: envelope.url)
+        let task = session.uploadTask(with: req, fromFile: body.url)
         let desc = "\(r.batchId)|\(r.attempts)|upload|\(u.uploadId)"
         task.taskDescription = desc
 
         r.uploads[i].taskDescription = desc
-        r.uploads[i].bodyPath = envelope.url.path
-        r.uploads[i].bytesTotal = envelope.length
+        r.uploads[i].bodyPath = body.url.path
+        r.uploads[i].bytesTotal = body.length
         r.uploads[i].bytesSent = 0
         r.uploads[i].status = UploadStatus.queued
         r.uploads[i].httpStatus = nil
@@ -670,9 +670,20 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
     /// "waiting" rather than "it failed". A background session already waits for connectivity, so
     /// only a hard error (a reset mid-body, a 5xx) ever reaches this.
     private func resendUpload(_ r: inout PublishRecord, index i: Int) -> Bool {
-        guard let e = r.uploads[i].lastError, e.retryable, r.uploads[i].sendAttempts < 3 else { return false }
+        guard let e = r.uploads[i].lastError, Self.resends(e), r.uploads[i].sendAttempts < 3 else { return false }
         let attempt = r.uploads[i].sendAttempts + 1
-        guard let task = try? makeUploadTask(&r, index: i) else { return false }
+        let task: URLSessionUploadTask
+        do {
+            task = try makeUploadTask(&r, index: i)
+        } catch {
+            // The body is written again from the caller's file, which can have gone since the
+            // first send, just as Android and the web runner find when they read it for their next
+            // attempt. Why this send could not be made is now why the upload stops, so it replaces
+            // the transport error: a 503 left on the record would call retryable a file that is no
+            // longer there.
+            r.uploads[i].lastError = enqueueFailure(error, guid: r.uploads[i].uploadId)
+            return false
+        }
         r.uploads[i].sendAttempts = attempt
         // makeUploadTask clears the error; put it back, because getState should still show why the
         // chain is taking longer than it looks.
@@ -735,7 +746,7 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
     /// Three attempts on the create call as well, for the same reason Android splits the chain into
     /// two workers: re-sending a hundred megabytes because a create call got a 503 is indefensible.
     private func finishFinalize(_ r: inout PublishRecord, failure: ErrorRecord) {
-        if failure.retryable, r.finalizeAttempts < 3 {
+        if Self.resends(failure), r.finalizeAttempts < 3 {
             let attempt = r.finalizeAttempts + 1
             if (try? enqueueFinalize(&r, delay: attempt == 1 ? 30 : 60)) != nil {
                 r.finalizeAttempts = attempt
@@ -746,6 +757,14 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
         removeFinalizeBody(r)
         fail(&r, failure)
     }
+
+    /// Whether a failure is sent again here, without the caller.
+    ///
+    /// `auth` is retryable and still never re-sent: the request would carry the same token to the
+    /// same 401, and a `retry()` that brings a new one while a resend waits only updates the record,
+    /// not the request already built. It stops at once, as it does in Android's workers and the web
+    /// runner, and waits for that `retry()`.
+    static func resends(_ e: ErrorRecord) -> Bool { e.retryable && e.code != FailureCode.auth }
 
     /* ==================================== recovery ========================================== */
 
@@ -958,6 +977,8 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
         case EnqueueFailure.fileMissing(let missing):
             return ErrorRecord(code: FailureCode.fileMissing, message: "missing \(missing)", httpStatus: nil,
                                phase: Phase.uploading, uploadId: missing, retryable: false)
+        case EnqueueFailure.bodyNotWritten(let uploadId, let cause):
+            return Self.bodyFailure(cause, uploadId: uploadId)
         case EnqueueFailure.badURL(let url):
             return ErrorRecord(code: FailureCode.unknown, message: "upload url is not usable: \(url)",
                                httpStatus: nil, phase: Phase.uploading, uploadId: guid, retryable: false)
@@ -965,6 +986,28 @@ public final class PublisherSession: NSObject, URLSessionDelegate, URLSessionTas
             return ErrorRecord(code: FailureCode.network, message: "session_invalidated", httpStatus: nil,
                                phase: Phase.uploading, uploadId: guid, retryable: true)
         }
+    }
+
+    /// Why an upload's body could not be written, as the caller has to hear it.
+    ///
+    /// Only a source that is not there, or is empty, is `file_missing`, the code the contract
+    /// reserves for a file that is gone, and so the only one that is not retryable. Anything else
+    /// is a failure to make our copy, not evidence against the caller's file. A full disk is the
+    /// common case, and freeing space then calling `retry()` is exactly what fixes it. The contract
+    /// has no code for a full disk, so it is `unknown` with the message led by `no_space`, the
+    /// token the composer uses for the same fault on both platforms. The rest is `unknown` and
+    /// retryable as well, which is what the web engine records for a failure it did not expect.
+    /// Android has no counterpart, because it streams the caller's file and never writes a body;
+    /// its nearest case, a read failing mid-request, is retryable too.
+    static func bodyFailure(_ error: Error, uploadId: String) -> ErrorRecord {
+        if case UploadBodyError.sourceMissing = error {
+            return ErrorRecord(code: FailureCode.fileMissing, message: "missing \(uploadId)", httpStatus: nil,
+                               phase: Phase.uploading, uploadId: uploadId, retryable: false)
+        }
+        let detail = ErrorMapping.describe(error)
+        return ErrorRecord(code: FailureCode.unknown,
+                           message: ErrorMapping.isOutOfSpace(error) ? "no_space \(detail)" : detail,
+                           httpStatus: nil, phase: Phase.uploading, uploadId: uploadId, retryable: true)
     }
 
     /* ====================================== events ========================================== */

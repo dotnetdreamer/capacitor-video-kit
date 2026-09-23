@@ -54,6 +54,8 @@ import kotlin.math.min
  *     main looper is the one that exists everywhere.
  *   - File work goes to [pluginScope] on the IO dispatcher. Resolving a call or emitting an event
  *     is safe from any thread.
+ *   - Staging a render input is file work too, but goes to [stagingScope], which has one worker,
+ *     because the chunks of a file have to be written in the order they came.
  */
 @OptIn(UnstableApi::class)
 @CapacitorPlugin(
@@ -62,13 +64,17 @@ import kotlin.math.min
         Permission(alias = VideoComposerPlugin.MICROPHONE, strings = [Manifest.permission.RECORD_AUDIO]),
         // Only ever asked for below API 29; from there the gallery insert is scoped and free.
         Permission(alias = VideoComposerPlugin.STORAGE, strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE]),
-        // Reading the gallery, for a host that draws its own. Two names for one grant because
-        // Android 13 split the storage permission by media type, and asking for the wrong one is
-        // not a smaller grant but one the system never prompts for. Neither is declared in the
-        // kit's manifest: see [GalleryLibrary] for why that is the host's to do.
+        // Reading the gallery, for a host that draws its own - and going on reading a picked file
+        // through the MediaStore URI [RetainedMedia] kept for it, which is the same grant put to a
+        // second use. Two names for one grant because Android 13 split the storage permission by
+        // media type, and asking for the wrong one is not a smaller grant but one the system never
+        // prompts for. Neither is declared in the kit's manifest: see [GalleryLibrary] for why that
+        // is the host's to do.
         Permission(alias = VideoComposerPlugin.GALLERY_VIDEO, strings = [Manifest.permission.READ_MEDIA_VIDEO]),
-        // The pictures, for a host that lists them beside the videos. A third name for the same
-        // reason there are two above: Android 13 split pictures from videos as well.
+        // The pictures, for a host that lists them beside the videos - and for going on reading a
+        // picked picture through its MediaStore URI, which from Android 13 READ_MEDIA_VIDEO does
+        // not cover. A third name for the same reason there are two above: Android 13 split
+        // pictures from videos as well.
         Permission(alias = VideoComposerPlugin.GALLERY_IMAGES, strings = [Manifest.permission.READ_MEDIA_IMAGES]),
         Permission(alias = VideoComposerPlugin.GALLERY_STORAGE, strings = [Manifest.permission.READ_EXTERNAL_STORAGE]),
     ],
@@ -77,6 +83,16 @@ class VideoComposerPlugin : Plugin() {
 
     private val main = Handler(Looper.getMainLooper())
     private val pluginScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * [StagedRenderInputs]' work, one call at a time and in the order the calls came, as iOS's
+     * `VideoComposerPlugin.staging` queue runs it. The chunks of one render input are appended in
+     * the order they were sent only if they are WRITTEN in that order: the plugin thread hands them
+     * over in order, and [pluginScope]'s many threads would not keep it for a page that sends the
+     * next chunk before the last has answered.
+     */
+    private val stagingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+
     private var voiceRecorder: VoiceRecorder? = null
 
     override fun load() {
@@ -776,6 +792,22 @@ class VideoComposerPlugin : Plugin() {
         }
     }
 
+    /**
+     * iOS only, and refused here with `UNIMPLEMENTED`, the code Capacitor gives a call a platform
+     * does not have, which a host reads as "use the file input". The web refuses it the same way.
+     *
+     * It exists for a fault in WebKit: WKWebView copies a file picked through an `<input type="file">`
+     * before the page sees it, and that copy comes out empty when the same song is picked again about
+     * a minute after the first time. Android's WebView is not WebKit. Capacitor answers its file input
+     * with the system's own content picker (`FileChooserParams.createIntent`) and the page reads the
+     * file that picker chose, so the kit's browser media host keeps the input here, and a native
+     * picker would be a second way to do what already works.
+     */
+    @PluginMethod
+    fun pickAudioFile(call: PluginCall) {
+        call.unimplemented("pickAudioFile is iOS only; a file input picks a sound on Android")
+    }
+
     /* ======================================================================================== */
     /* saveToGallery                                                                             */
     /* ======================================================================================== */
@@ -858,18 +890,31 @@ class VideoComposerPlugin : Plugin() {
      */
     @PluginMethod
     fun requestGalleryAccess(call: PluginCall) {
-        val aliases = galleryAliases(images = call.getBoolean("images") ?: false)
+        val aliases = readAliases(Build.VERSION.SDK_INT, images = call.getBoolean("images") ?: false)
         if (aliases.all { getPermissionState(it) == PermissionState.GRANTED }) {
             answerGalleryAccess(call)
             return
         }
         // Asked together, which Android shows as the one "photos and videos" prompt it is.
-        requestPermissionForAliases(aliases, call, "galleryPermissionCallback")
+        requestPermissionForAliases(aliases, call, "readPermissionCallback")
     }
 
+    /**
+     * Where the answer to a read-permission prompt lands, for [requestGalleryAccess] and
+     * [requestMediaAccess] alike, and it answers the call in the shape that call's method promised.
+     *
+     * One callback, and sorting by the call rather than by the prompt, because Capacitor queues the
+     * calls waiting on a permission per PLUGIN, not per callback: whichever launcher fires is handed
+     * the oldest call still waiting. The two can overlap - Android answers a second request made
+     * while the first is still up at once, with nothing granted - so a callback per method would
+     * answer each method's promise in the other one's shape.
+     */
     @PermissionCallback
-    private fun galleryPermissionCallback(call: PluginCall) {
-        answerGalleryAccess(call)
+    private fun readPermissionCallback(call: PluginCall) {
+        when (call.methodName) {
+            "requestMediaAccess" -> answerMediaAccess(call)
+            else -> answerGalleryAccess(call)
+        }
     }
 
     private fun answerGalleryAccess(call: PluginCall) {
@@ -946,19 +991,7 @@ class VideoComposerPlugin : Plugin() {
     }
 
     /** What this Android calls the right to read the device's videos. */
-    private fun galleryAlias(): String =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) GALLERY_VIDEO else GALLERY_STORAGE
-
-    /**
-     * Every right a gallery listing needs: the videos', and the pictures' too when the host lists
-     * them. Below Android 13 one storage grant covers both, so there is nothing more to ask for.
-     */
-    private fun galleryAliases(images: Boolean): Array<String> =
-        if (images && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(GALLERY_VIDEO, GALLERY_IMAGES)
-        } else {
-            arrayOf(galleryAlias())
-        }
+    private fun galleryAlias(): String = readAliases(Build.VERSION.SDK_INT, images = false).single()
 
     private fun galleryAccess(): String =
         GalleryLibrary.access(context, getPermissionState(galleryAlias()) == PermissionState.GRANTED)
@@ -969,6 +1002,199 @@ class VideoComposerPlugin : Plugin() {
             .put("fileName", video.fileName)
             .put("durationMs", video.durationMs)
             .put("kind", if (video.image) "image" else "video")
+
+    /* ======================================================================================== */
+    /* Retained media                                                                            */
+    /* ======================================================================================== */
+
+    /**
+     * The longest-lived name this device will give for a picked file. See [RetainedMedia] for the
+     * two routes and why neither of them copies anything.
+     *
+     * Rejects only a call with no uri. A pick that cannot be kept is an answer, `durable: false`,
+     * and the name it came with still plays for the rest of this session. So is a name that already
+     * lasts without help - a MediaStore URI, a file in the app's own storage - which iOS would answer
+     * `durable: true`; [RetainedMedia] says why the two differ.
+     */
+    @PluginMethod
+    fun retainMedia(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        // Off the shared plugin thread: both routes are calls into the system, and the MediaStore
+        // one is a query of the photo picker's own provider.
+        pluginScope.launch {
+            val retained = RetainedMedia.retain(context.applicationContext, uri)
+            call.resolve(JSObject().put("uri", retained.uri).put("durable", retained.durable))
+        }
+    }
+
+    /**
+     * Whether a kept name still opens, and the name to open it by - which on Android is the one it
+     * was given. A `content://` URI means the same thing to every install of the host, where an
+     * iOS path names the app container it was written in and has to be rebased onto the current one.
+     *
+     * A call with no uri is answered `exists: false` rather than rejected: there is nothing there to
+     * open, which is the question.
+     */
+    @PluginMethod
+    fun checkMedia(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.resolve(JSObject().put("exists", false).put("uri", ""))
+            return
+        }
+        // Off the shared plugin thread: opening a document can mean its provider fetching it first.
+        pluginScope.launch {
+            val exists = RetainedMedia.opens(context.applicationContext, uri)
+            call.resolve(JSObject().put("exists", exists).put("uri", uri))
+        }
+    }
+
+    /**
+     * Asks for the right to go on reading the customer's media, and answers whether it was given.
+     *
+     * Needed because of what [retainMedia] hands back on a modern device: a MediaStore URI is
+     * durable only for as long as the host is allowed to read media at all. Without the grant the
+     * URI survives perfectly and opens nothing, which is the same blank clip by a longer road. The
+     * aliases are [requestGalleryAccess]'s, because the grant is the same one - see [readAliases].
+     *
+     * Never rejects for a refusal. The customer said no, drafts will report their clips as missing
+     * after a restart, and that is a worse app rather than a broken one. What does reject is a host
+     * that never declared the permissions: Capacitor rejects the ask by naming the missing ones,
+     * which is how the kit tells a host to declare them (see [GalleryLibrary]).
+     */
+    @PluginMethod
+    fun requestMediaAccess(call: PluginCall) {
+        val aliases = readAliases(Build.VERSION.SDK_INT, images = call.getBoolean("images") ?: false)
+        if (aliases.all { getPermissionState(it) == PermissionState.GRANTED }) {
+            answerMediaAccess(call)
+            return
+        }
+        // Asked together, which Android shows as the one "photos and videos" prompt it is, and
+        // answered through [readPermissionCallback] for the reason given there.
+        requestPermissionForAliases(aliases, call, "readPermissionCallback")
+    }
+
+    private fun answerMediaAccess(call: PluginCall) {
+        val aliases = readAliases(Build.VERSION.SDK_INT, images = call.getBoolean("images") ?: false)
+        call.resolve(JSObject().put("granted", aliases.all { getPermissionState(it) == PermissionState.GRANTED }))
+    }
+
+    /**
+     * Deletes nothing on Android: [RetainedMedia] keeps a name, never a copy, and the file behind
+     * the name is the customer's. A persisted grant it took is left in place as well, by choice -
+     * [RetainedMedia] says why. Answered all the same, so a host calls it on every platform alike.
+     *
+     * The arguments are checked as the contract has every platform check them, because on iOS they
+     * decide what gets deleted: an absent `uris` is the caller's mistake and says so here too,
+     * rather than passing on the one platform where it happens to cost nothing. An EMPTY one is
+     * legal. `keep` - the names among `uris` a host still uses, whose copies iOS spares - may be left
+     * out, and changes nothing here. One that is there and is not a list is refused, because a host
+     * that sent a name where a list belongs meant to spare something. A JSON null is read as left
+     * out, as the web's `releaseMedia` reads it (`keep != null`), so the one call is answered alike
+     * by both.
+     */
+    @PluginMethod
+    fun releaseMedia(call: PluginCall) {
+        if (call.getArray("uris") == null) {
+            call.reject("uris is required", INVALID_SPEC)
+            return
+        }
+        if (!call.data.isNull("keep") && call.getArray("keep") == null) {
+            call.reject("keep must be a list of uris", INVALID_SPEC)
+            return
+        }
+        call.resolve()
+    }
+
+    /**
+     * Deletes nothing, for the reason [releaseMedia] deletes nothing, and checks its arguments as
+     * iOS does for the reason [releaseMedia] checks its own. On iOS an absent `keep` read as empty
+     * would delete every copy a draft still uses, and an absent `before` read as now would take a
+     * clip being picked this moment, so both are refused rather than given a default. An EMPTY
+     * `keep` is legal.
+     *
+     * `before` is read as any JSON number, not with `getDouble`: a timestamp in milliseconds is past
+     * what an Int holds, so it arrives as a Long, which `getDouble` answers as absent.
+     */
+    @PluginMethod
+    fun sweepMedia(call: PluginCall) {
+        if (call.getArray("keep") == null) {
+            call.reject("keep is required", INVALID_SPEC)
+            return
+        }
+        val before = (call.data.opt("before") as? Number)?.toDouble()
+        if (before == null || !before.isFinite()) {
+            call.reject("before is required", INVALID_SPEC)
+            return
+        }
+        call.resolve(JSObject().put("removed", 0))
+    }
+
+    /* ======================================================================================== */
+    /* Render inputs                                                                             */
+    /* ======================================================================================== */
+
+    /**
+     * Writes one base64 chunk of a render input the page holds only as bytes, and answers the
+     * `file://` URI of the file it went into. Without `uri` the chunk starts a new file, named with
+     * `extension` when there is one; with it, the chunk is appended to the file `uri` names, which
+     * must be one this call made. See [StagedRenderInputs] for why there is such a file, and why it
+     * may only be one of the kit's own.
+     *
+     * Rejects `invalid_spec` for a call the page got wrong: no `data`, data that is not base64, a
+     * `uri` that names anything but a staged file that is still there, or for a new file an
+     * extension that is not one.
+     * A disk that would not take the chunk is `no_space`, and any other failed write is `unknown`,
+     * in the system's words.
+     */
+    @PluginMethod
+    fun stageRenderInput(call: PluginCall) {
+        val data = call.getString("data")
+        if (data == null) {
+            call.reject("data is required", INVALID_SPEC)
+            return
+        }
+        val uri = call.getString("uri")
+        val extension = call.getString("extension")
+        stagingScope.launch {
+            try {
+                val file = StagedRenderInputs.stage(context.applicationContext, data, uri, extension)
+                call.resolve(JSObject().put("uri", Uri.fromFile(file).toString()))
+            } catch (e: StagedRenderInputs.Refused) {
+                call.reject(e.message, INVALID_SPEC)
+            } catch (e: Exception) {
+                val code = if (ErrorMapping.hasNoSpaceCause(e)) FailureCodes.NO_SPACE else FailureCodes.UNKNOWN
+                call.reject(ErrorMapping.describe(e), code)
+            }
+        }
+    }
+
+    /**
+     * Deletes the staged render inputs among `uris`, and passes over every other name without a
+     * word: a page releases everything it staged in a `finally`, whatever became of each file, and a
+     * name that is not a staged file is one there is nothing to do about. An absent `uris` is refused
+     * as [releaseMedia] refuses one; an empty one is legal.
+     *
+     * On [stagingScope], behind any chunk still being written, so a release sent straight after the
+     * last append finds the file finished rather than racing it.
+     */
+    @PluginMethod
+    fun releaseRenderInputs(call: PluginCall) {
+        val uris = call.getArray("uris")
+        if (uris == null) {
+            call.reject("uris is required", INVALID_SPEC)
+            return
+        }
+        val names = (0 until uris.length()).mapNotNull { uris.opt(it) as? String }
+        stagingScope.launch {
+            StagedRenderInputs.release(context.applicationContext, names)
+            call.resolve()
+        }
+    }
 
     /* ======================================================================================== */
     /* Voice recording                                                                           */
@@ -1235,6 +1461,22 @@ class VideoComposerPlugin : Plugin() {
         const val GALLERY_VIDEO = "galleryVideo"
         const val GALLERY_IMAGES = "galleryImages"
         const val GALLERY_STORAGE = "galleryStorage"
+
+        /**
+         * Every right reading the device's media needs, by the names the Android at [sdk] gives
+         * them: the videos', and the pictures' too with [images]. Below Android 13 one storage
+         * grant covers both, so there is nothing more to ask for.
+         *
+         * One answer for two callers, because they want one right for two uses: listing the
+         * library for a host that draws its own gallery, and opening again a MediaStore URI that
+         * [RetainedMedia] kept for a pick. The version is an argument rather than read here so the
+         * choice can be pinned for each one without a device.
+         */
+        internal fun readAliases(sdk: Int, images: Boolean): Array<String> = when {
+            sdk < Build.VERSION_CODES.TIRAMISU -> arrayOf(GALLERY_STORAGE)
+            images -> arrayOf(GALLERY_VIDEO, GALLERY_IMAGES)
+            else -> arrayOf(GALLERY_VIDEO)
+        }
 
         /** A gallery page, when the host does not say. Two phone screens of a four-column grid. */
         private const val DEFAULT_GALLERY_PAGE = 60

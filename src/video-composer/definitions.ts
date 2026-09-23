@@ -4,12 +4,32 @@
  * The contract is deliberately declarative: JS hands over a fully resolved `ComposeSpec` (every
  * time in milliseconds, every URI already pointing at a file the native side can open) and the
  * platform does ALL of the work - demux, decode, colour, overlays, audio mixing, encode, mux.
- * Nothing is rendered in the WebView, and no media bytes ever cross the bridge.
+ * Nothing is rendered in the WebView, and the render itself moves no media bytes across the bridge.
+ * The one input that has to cross first is a `blob:` URL the page holds, which no native engine can
+ * open: `withNativeRenderInputs` writes each out through `stageRenderInput` before the render and
+ * deletes it after (see **Render inputs a page holds**, below).
+ *
+ * A file is opened by what it holds, not by what it is called. A render input written with no
+ * extension - a blob staged from a type nothing names, or music an older host wrote out as
+ * `render-input-<uuid>` - or with the wrong one renders on Android, whose Media3 reads the content,
+ * and on iOS, which reads the first bytes and opens the file under a name that says what they are.
+ *
+ * A `file://` URI is best percent-encoded, as every URI the plugin hands out already is. iOS
+ * decodes one that holds a `%` once and takes one that holds none literally, so a raw space, `#` or
+ * `?` is part of the file's name there, where Android's `Uri` reads the last two as the start of a
+ * fragment and a query. iOS also looks for a path into an app container the app no longer has - the
+ * container's id can change across an update or a restore - at the same place in the current one,
+ * before anything reports the file missing.
  *
  * Long-running calls do not hold a `PluginCall` open. `compose()` resolves with a `jobId` as soon
  * as the job is registered; the outcome arrives as a `completed` / `failed` event and can always
  * be re-read with `getState({ jobId })`. That is what lets a render survive the Activity being
  * destroyed while a foreground service keeps the process alive.
+ *
+ * iOS has no such service to offer a render. A backgrounded app is denied the GPU and the encoder,
+ * and no background time gives them back, so leaving the app - Home, the lock button, a switch to
+ * another app - stops every render there and reports it `interrupted` (see [ComposeFailureCode]).
+ * What survives is the job record and its answer, exactly as on Android.
  *
  * The `VideoComposerPlugin` interface itself lives next door in `plugin.ts`, and only because it is
  * the one thing here that names a Capacitor type. This file is reached by `capacitor-video-kit/editor`
@@ -81,7 +101,15 @@ export interface ComposeClip {
   uri: string;
   /** Source-relative trim start. */
   inMs: number;
-  /** Source-relative trim end; clamped natively to the probed duration. */
+  /**
+   * Source-relative trim end; clamped natively to the probed duration.
+   *
+   * A trim the clamp leaves empty - an in-point at or past the end of the footage, from a file that
+   * turned out shorter than the manifest believed - is planned rather than refused: Android and the
+   * web floor the clip at a millisecond past its in-point, and iOS holds the footage's last frame
+   * for that long, silent. So the post renders with that clip all but gone, rather than failing on
+   * it as `unreadable_input`.
+   */
   outMs: number;
   /** 0.25..4. Pitch is preserved (D3). */
   speed: number;
@@ -132,8 +160,10 @@ export interface ComposeClip {
    * reads those fields as it would for a video gets the same answer. Crop, fit, `rect` and
    * transitions apply to it exactly as they do to a video frame.
    *
-   * Supported by the web and Android engines. iOS does not render pictures yet and fails such a
-   * spec with `unreadable_input`, naming the clip.
+   * Every engine renders one - web, Android and iOS - on the base track, on a layer and as a
+   * transition's outgoing side. A file that will not decode as a picture fails the render with
+   * `unreadable_input`, naming the first clip that uses it. iOS draws a transparent picture over
+   * black, because the H.264 it turns each picture into has no alpha.
    */
   image?: boolean;
 }
@@ -270,7 +300,15 @@ export interface ComposeTrack {
   clips: ComposeClip[];
   /** Where this track's first clip lands on the OUTPUT timeline. Default 0. */
   startMs?: number;
-  /** Higher draws later, on top. The base track is 0. Ties break on array order. */
+  /**
+   * Higher draws later, on top. The base track is 0. Ties break on array order.
+   *
+   * Required, and `toComposeSpec` always writes it. A hand-built spec that leaves it out is not
+   * refused, and the engines do not fill it in alike: Android and iOS take the track's index in
+   * `tracks` plus one, the web takes 0. Where no track has one the two come out the same, every
+   * layer in array order above the base; a spec that gives some tracks a `z` and not others can
+   * stack differently in a browser.
+   */
   z: number;
   /** 0..1 over the whole track. Default 1. */
   opacity?: number;
@@ -280,10 +318,33 @@ export interface ComposeOutput {
   /** Rounded down to an even number natively - H.264 encoders refuse odd dimensions. */
   width: number;
   height: number;
-  /** Treated as a MAXIMUM frame rate: higher-rate sources are decimated, lower ones are left alone. */
+  /**
+   * The output frame rate, which the engines do not all read the same way.
+   *
+   * Android treats it as a MAXIMUM: Media3 decimates a higher-rate source to it and leaves a
+   * lower-rate one alone, because nothing in Media3 can raise a rate. The web and iOS render a fixed
+   * cadence of one frame every `1 / fps` seconds, drawing whatever frame each source has at that
+   * moment, so a lower-rate source has its frames repeated: 24p footage in a 60 fps post is a 60 fps
+   * file on those two and a 24 fps one on Android. The picture is the same judder a 24p video has on
+   * a 60 Hz screen, and H.264 codes a repeated frame for almost nothing.
+   */
   fps: number;
-  /** Computed by the flow, never by the editor (D2). */
+  /**
+   * The average rate the video is encoded at, in bits per second. Computed by the flow, never by
+   * the editor (D2).
+   *
+   * Every engine encodes at it, as a variable rate - the encoder spends less on a still shot and
+   * more on a busy one - with a key frame at most every second on Android and iOS and every two
+   * seconds on the web. The one exception is a retry: an encoder that refuses the request is given
+   * one more attempt with settings it picks itself (Android's relaxed encoder, iOS's
+   * `AVAssetExportSession` preset), and that file is the encoder's idea of the size, not this one.
+   */
   videoBitrate: number;
+  /**
+   * The AAC rate, in bits per second. An encoder takes a fixed set of rates, so each native engine
+   * moves this onto the nearest one it accepts - on iOS that is 64 to 320 kbps for stereo, at
+   * 48 kHz - rather than failing the render over it.
+   */
   audioBitrate: number;
 }
 
@@ -321,7 +382,10 @@ export interface ComposeOverlay {
   /** Visible while `startMs <= t < endMs`, on the OUTPUT timeline. */
   startMs: number;
   endMs: number;
-  /** 0..1. */
+  /**
+   * 0..1, applied to the bitmap's ALPHA and never to its colour, once: a white layer at 0.5 over
+   * black is mid grey on every engine, which is what the web renderer's `globalAlpha` draws.
+   */
   opacity: number;
 }
 
@@ -329,14 +393,32 @@ export interface ComposeMusic {
   uri: string;
   /** Where the track starts on the OUTPUT timeline. */
   startMs: number;
-  /** Trim inside the track itself. */
+  /**
+   * Trim inside the track itself. A trim that lies wholly past the end of the file - a replaced
+   * sound, a stale duration - is not a failure: every engine renders the post without its music.
+   * A file that will not open at all is another matter: it fails the render on Android and iOS,
+   * and the web leaves the music out.
+   */
   inMs: number;
   outMs: number;
   /** 0..1. */
   volume: number;
   /** Repeat the trimmed section until the video ends. */
   loop: boolean;
+  /**
+   * Up from silence at the start of the FIRST repetition, linear in amplitude at a slope of
+   * `1 / fadeInMs`. A fade longer than that repetition stops short of the level rather than
+   * steepening, and the next repetition starts at the level.
+   */
   fadeInMs: number;
+  /**
+   * Down to silence at the end of the LAST repetition, at a slope of `1 / fadeOutMs`, starting
+   * `fadeOutMs` before its end or at its start, whichever is later - so a last repetition shorter
+   * than the fade ends above silence. That is Android's `planMusic` and the web's `fadeGain`, and
+   * iOS draws the same ramps with one exception: music that plays once and whose two fades overlap
+   * gives each at most half of its length, from silence to the level and back, where the other two
+   * multiply the two curves.
+   */
   fadeOutMs: number;
 }
 
@@ -427,7 +509,46 @@ export interface ComposeResult {
   bytes: number;
 }
 
-export type ComposeFailureCode = 'unreadable_input' | 'encoder' | 'muxer' | 'interrupted' | 'cancelled' | 'no_space' | 'unsupported' | 'unknown';
+/** Why a render ended without a video: the `code` of a `failed` event and of `JobState.error`. */
+export type ComposeFailureCode =
+  /** A file the render needed would not open or decode. `clipKey` names the clip when one can be blamed. */
+  | 'unreadable_input'
+  /** The encoder refused the request, or failed partway through it. */
+  | 'encoder'
+  /** The finished streams could not be written into a file. */
+  | 'muxer'
+  /**
+   * Stopped from outside, by the platform, with nothing wrong with the post: the same spec
+   * composed again can succeed. Android reports it when the foreground service's system budget runs
+   * out, the web for a render its page was closed or reloaded in the middle of, and iOS whenever
+   * the app is backgrounded mid render - Home, the lock button, a switch to another app - because a
+   * backgrounded app is denied the GPU and the encoder and no background time gives them back.
+   * Pulling down Control Centre or a call banner leaves the app in the foreground and the render
+   * running. iOS reports AVFoundation's own interruptions the same way, the media services being
+   * reset among them.
+   *
+   * Nothing restarts the render by itself. A host that still wants the video composes the same spec
+   * again once the app is visible, under a NEW `jobId`: composing with the id of a job that already
+   * exists answers with that job, interrupted as it is, rather than starting another.
+   */
+  | 'interrupted'
+  /**
+   * `cancel` was called. On Android and iOS that includes a cancel that lands while the file is
+   * being closed, whose file is then deleted, so a render the host called off does not turn up as
+   * `completed` a moment later.
+   */
+  | 'cancelled'
+  /** The disk would not take the output. `needBytes` says how much it wanted. */
+  | 'no_space'
+  /** Something this platform cannot do at all: a browser with no encoder, a format it has no decoder for. */
+  | 'unsupported'
+  /**
+   * Everything else, with the platform's own words as `message`. On iOS this includes a render
+   * whose progress has not moved for 90 seconds, which is stopped with the message `timeout`
+   * because something under it has stopped answering; a render that keeps moving, however slowly,
+   * is never stopped for time, and Android has no such watch at all.
+   */
+  | 'unknown';
 
 export interface ComposeError {
   jobId: string;
@@ -435,7 +556,13 @@ export interface ComposeError {
   message: string;
   /** The platform's own error number, for the log. */
   nativeCode?: number;
-  /** Set when the failure can be blamed on one clip. */
+  /**
+   * Set when the failure can be blamed on one clip: the clip whose file would not open, or, for a
+   * file that fails partway through the render, the base clip on screen when it did. The second is
+   * Android's best guess, and iOS makes it the same way for `unreadable_input`; a decoder reads
+   * ahead of the frame being drawn, the sound furthest, so it can name the clip before the damaged
+   * one.
+   */
   clipKey?: string;
   /** Present on `no_space`, so JS can name a figure in the copy. */
   needBytes?: number;
@@ -568,35 +695,58 @@ export interface SaveToGalleryOptions {
    * A folder inside [directory], and the album a gallery app files the video under. Left out, the
    * video goes straight into the directory with nothing around it.
    *
-   * Usually the app's name. A plain segment rather than a path: a separator in here is refused,
-   * because a nested folder is not something every platform can express - on iOS this is an album
-   * in the photo library, which has no folders at all.
+   * Usually the app's name. A plain segment rather than a path: a separator in here is refused
+   * with `invalid_spec`, because a nested folder is not something every platform can express - on
+   * iOS this is an album in the photo library, which has no folders at all.
+   *
+   * On iOS the video is filed in the album only with FULL photo library access, because finding an
+   * album and making one both need read access, and only when the host's `Info.plist` declares
+   * `NSPhotoLibraryUsageDescription`, because iOS terminates an app that asks for read access
+   * without it. When read access has never been asked about, the first save with an album asks for
+   * it, and that one prompt settles adding as well: answering it with Don't Allow may refuse the
+   * save too, with `permission_denied`, where a prompt for adding alone might have been allowed.
+   * With add-only or limited access, or without the key, the video is saved to Recents and the
+   * album is left out, with no error - a save is not lost over the folder it was to be filed in.
    */
   album?: string;
 
-  /** Defaults to `movies`. */
+  /**
+   * Defaults to `movies`. A value other than the two is refused with `invalid_spec` on Android and
+   * iOS. iOS checks it and then has no use for it: the photo library has no folders.
+   */
   directory?: GalleryDirectory;
 }
 
 export interface SaveToGalleryResult {
   /**
    * The gallery's own handle on the video, which is not a file path and is not worth parsing: a
-   * `content://` row on Android, a `ph://` local identifier on iOS, and the object URL the page was
-   * handed on the web. Useful for a follow-up share, and for saying in a log where it went.
+   * `content://` row on Android, `ph://` followed by the new asset's local identifier on iOS, and
+   * the URI the page was handed on the web, which learns nothing about where a download went.
+   * Useful for a follow-up share, and for saying in a log where it went.
    */
   uri: string;
 }
 
 /** Why a save did not happen. Narrower than a render's, because far less can go wrong. */
 export type SaveToGalleryFailureCode =
+  /**
+   * An option that cannot be honoured, refused before the file is looked at: no `uri`, a
+   * `directory` other than `movies` or `dcim`, or an `album` with a separator in it. The web, which
+   * ignores both options, refuses only the missing `uri`.
+   */
+  | 'invalid_spec'
   /** The person said no to the photo library, or the OS has it switched off for this app. */
   | 'permission_denied'
   /** No file at `uri`, or nothing that can be read as one. */
   | 'unreadable_input'
-  /** The disk would not take the copy. */
+  /**
+   * The disk would not take the video. Android recognises a full disk by the words of the error
+   * rather than by its cause, and so reports a real `ENOSPC` as `unreadable_input`.
+   */
   | 'no_space'
-  /** A browser with no way to hand a file to the person, which is the only web failure. */
+  /** A browser with no way to hand a file to the person. Web only. */
   | 'unsupported'
+  /** Whatever else the platform refused the save for, in its own words as the message. */
   | 'unknown';
 
 /**
@@ -631,7 +781,10 @@ export interface ListGalleryVideosOptions {
    * List the device's pictures among its videos, newest first together, each one marked with
    * [GalleryVideo.kind]. Defaults to false, which is the video library alone.
    *
-   * Android only for now; iOS answers with its videos whatever this says.
+   * Newest by what each platform keeps: the date a file was added on Android, and on iOS the
+   * `creationDate` the Photos app sorts by, since PhotoKit has no public key for the date added.
+   * A video downloaded today but shot last year is therefore at the top on Android and down the
+   * list on iOS, with or without pictures.
    */
   images?: boolean;
 }
@@ -644,18 +797,28 @@ export interface GalleryVideo {
    * [resolveGalleryVideo]'s answer to the rest of the plugin, not this.
    */
   id: string;
-  /** What the gallery calls it, extension included. Empty when the platform keeps no name. */
+  /**
+   * What the gallery calls it, extension included. Empty when the platform keeps no name. On iOS
+   * the name the item was taken under, `IMG_0042.MOV`, even once it has been edited in Photos -
+   * which calls every edit `FullSizeRender` - with the extension of the format that is copied.
+   */
   fileName: string;
   /** 0 when the library has not measured it yet; `probe` always can. Always 0 for a picture. */
   durationMs: number;
-  /** A picture rather than a video. Absent is a video, which is every item of a video-only list. */
+  /**
+   * A picture rather than a video. Always present on Android and iOS, in a video-only list as well;
+   * a host that meets an item without it reads it as a video.
+   */
   kind?: 'video' | 'image';
 }
 
 export interface ListGalleryVideosResult {
   /** Newest first. */
   videos: GalleryVideo[];
-  /** How many videos the library holds in all, which is what says whether there is another page. */
+  /**
+   * How many items the list is drawn from in all - the library's videos, or its videos and
+   * pictures together when `images` was set - which is what says whether there is another page.
+   */
   total: number;
 }
 
@@ -676,8 +839,19 @@ export interface ResolveGalleryVideoOptions {
 
 export interface ResolveGalleryVideoResult {
   /**
-   * What to hand `probe`, `thumbnails` and `compose` for this video. The MediaStore URI itself on
-   * Android; on iOS a copy in the app's own storage, because a photo library asset has no path.
+   * What to hand `probe`, `thumbnails` and `compose` for this video, or picture. The MediaStore URI
+   * itself on Android; on iOS a copy in the app's own storage, because a photo library asset has no
+   * path.
+   *
+   * The iOS copy is kept where a draft can go on pointing at it, in Application Support rather than
+   * Caches: `videokit-gallery/<id>/original/<name>` for an item nobody has edited, whatever else
+   * happens to it in Photos, and `videokit-gallery/<id>/<modification stamp>/<name>` for an edited
+   * one, so an edit made later is a new copy rather than the old cut served again. A picture is
+   * copied in the format it is stored in, a HEIC as a HEIC. The kit never deletes a copy on its own -
+   * a draft may still name an older one - so a host that keeps drafts deletes them through
+   * `releaseMedia` and `sweepMedia`. A copy an earlier version of the kit made, flat in
+   * `videokit-gallery/`, is linked into its new place rather than copied again, so both paths keep
+   * working.
    */
   uri: string;
   fileName: string;
@@ -776,6 +950,261 @@ export interface CleanupOptions {
 
 export interface JobIdOptions {
   jobId: string;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Keeping picked media                                                                           */
+/* -------------------------------------------------------------------------------------------- */
+
+/*
+ * What a native picker hands over is good for the launch that asked for it, and both phones break
+ * that promise on a later one, in opposite ways. Android's photo picker hands over a `content://`
+ * URI and a read grant, and the grant belongs to the Activity that asked: when the process dies the
+ * URI is still a perfectly good string, naming a video the app may no longer open. iOS hands over a
+ * file of the app's own and no grant at all, because none is needed - but copied into
+ * `Library/Caches`, the one folder the system empties by itself when space runs low, and does so
+ * while the app is not running. Either way a draft that stored what the picker said came back to a
+ * clip it could not open, and could not tell that clip from one the customer had deleted.
+ *
+ * So a host that keeps picks past a launch hands each one to `retainMedia` and stores the name it
+ * answers, asks `checkMedia` before it calls a stored clip missing, and asks `requestMediaAccess`
+ * once per pick for the right Android needs to go on reading. The other two are the cost of the iOS
+ * answer: a retained copy is a whole video in a folder nothing empties, so `releaseMedia` deletes
+ * the copies a host is done with and `sweepMedia` the ones nothing it keeps still names.
+ *
+ * The kit's own copies live in two folders under `Library/Application Support` on iOS:
+ * `videokit-picked/`, where `retainMedia` moves a pick, and `videokit-gallery/`, where
+ * `resolveGalleryVideo` copies a library item. Both calls that delete match a URI to a copy by its
+ * path under Application Support rather than by the whole path, because the whole path names the
+ * install's container, and a name stored before an update names a container the app no longer has
+ * (see [CheckMediaResult.uri]). A list of names to KEEP is read in every form
+ * [SweepMediaOptions.keep] lists, because a name misread there loses a clip for good; a list of names
+ * to delete only as a file name, because a name misread there costs some space until the next sweep.
+ */
+
+export interface RetainMediaOptions {
+  /** What the picker handed over: a `file://` URI or a bare absolute path on iOS, a `content://` URI on Android. */
+  uri: string;
+}
+
+/** What a picked file is called from now on, and whether that name will still open in a later launch. */
+export interface RetainMediaResult {
+  /**
+   * Use THIS from now on, and store it rather than what went in: on iOS a moved file answers with
+   * its new `file://` name, and on Android a photo-picker URI answers with the MediaStore URI behind
+   * it. Otherwise the URI as it came.
+   */
+  uri: string;
+  /**
+   * Whether retaining made `uri` outlive the process. False is not a failure and not a reason to
+   * refuse the pick - the file opens for the rest of this launch either way - and for a picker's
+   * own name it means a draft that keeps it will find the file missing on a later one, which a host
+   * needs telling rather than finding out.
+   *
+   * On Android it answers what retaining DID, not whether the name will last, so a name that lasts
+   * without help - a MediaStore URI, every [resolveGalleryVideo] answer among them, or a file in the
+   * app's own storage - comes back as it came and `durable: false`, because neither of Android's
+   * routes applies to it (`RetainedMedia.kt`). Such a name needs no retaining. iOS answers true for
+   * its counterpart, a file already in the app's container.
+   */
+  durable: boolean;
+}
+
+export interface CheckMediaOptions {
+  /** A name `retainMedia` answered, as a host stored it - possibly in an earlier install. */
+  uri: string;
+}
+
+export interface CheckMediaResult {
+  /** Whether the bytes can be read, which is the whole of "is the clip still there". */
+  exists: boolean;
+  /**
+   * The name to open the file by in THIS install, which on iOS is not always the one stored.
+   *
+   * An iOS app's files live in a container folder, `.../Containers/Data/Application/<UUID>/`, and
+   * the UUID is the install's rather than the app's: iOS moves the data into a folder with a new one
+   * when the app is updated, restored or installed again over itself, and carries every file across.
+   * A path written down before that names a folder that no longer exists, while the file it meant is
+   * in the new one under the same name. So iOS looks there, and answers with that path when the file
+   * is found, in the same form as the one given - a `file://` URI stays one and keeps its
+   * percent-encoding. Anything else answers the URI as it came, so what a host then reports missing
+   * is what it stored, and that includes a URL the local server plays the file by, which is not a
+   * file name ([currentMediaUri] moves one of those). Android and the web always answer the URI as it
+   * came.
+   */
+  uri: string;
+}
+
+export interface MediaAccessOptions {
+  /**
+   * The right to go on reading PICTURES as well as videos, for a host that let pictures onto the
+   * timeline. Android 13 made that a permission of its own, `READ_MEDIA_IMAGES`, which the host
+   * declares beside `READ_MEDIA_VIDEO`; the two are asked for together, in one prompt. Defaults to
+   * false. Nothing on iOS or the web asks for anything either way.
+   */
+  images?: boolean;
+}
+
+export interface MediaAccessResult {
+  /** Whether a retained name will still open once this process has gone. */
+  granted: boolean;
+}
+
+export interface ReleaseMediaOptions {
+  /**
+   * Every name a host is done with, sorted or not: a URI that is not one of the kit's own copies is
+   * ignored, so a host can hand over everything a deleted draft named without asking which of it
+   * came from where.
+   *
+   * Read on iOS as a file name only - a `file://` URI, encoded or not, or a bare absolute path, moved
+   * onto this install's container when it names an earlier one - and a name in any other form, such
+   * as the URL the web view plays a copy by, is passed over. That leaves its copy to the next sweep,
+   * which costs some space until then; reading a name to DELETE more loosely would be the one way
+   * this call could take a copy nobody meant.
+   */
+  uris: string[];
+  /**
+   * Names still in use, whose copies stay even where `uris` names them as well.
+   *
+   * For a host deleting one draft of several. Two drafts can share one pick, so the copies a deleted
+   * draft named are not all the host's to delete, and working out which are is where a clip another
+   * draft still shows gets deleted. With this the host hands over everything the deleted draft named
+   * in `uris` and everything its other drafts name here, and the kit takes the difference.
+   *
+   * Read on iOS as loosely as [SweepMediaOptions.keep], in every form listed there, so a copy the two
+   * lists spell differently - the stored `file://` name in one, the URL the web view plays it by in
+   * the other - is still one copy, and stays. Absent is empty, which deletes every copy `uris` names,
+   * as the call did before this existed, and `null` is absent, as Capacitor's getters read a JSON
+   * null on both phones: it names nothing to spare. Anything else must be an array, and is refused
+   * with `invalid_spec` otherwise, because a host that put a name where the list belongs meant to
+   * spare that copy, and read as absent it would delete exactly what it was there to keep. Android
+   * and the web check it, and delete nothing either way.
+   */
+  keep?: string[];
+}
+
+export interface SweepMediaOptions {
+  /**
+   * Every name a host's saved state still uses. A copy one of these names is kept.
+   *
+   * iOS reads each name to the copy it means by where it points below the app's container, so a
+   * name keeps its copy in every form a host is likely to have stored it in:
+   *  - a `file://` URI, percent-encoded as the kit hands one out or written literally, and the same
+   *    as `file://localhost/...` or as `file:/...` with one slash;
+   *  - a bare absolute path;
+   *  - either of those into an EARLIER install's container, which iOS replaces on an update or a
+   *    restore (see [CheckMediaResult.uri]);
+   *  - the URL Capacitor's local server plays the copy by, `capacitor://localhost/_capacitor_file_/...`
+   *    under whatever scheme and host the app configured;
+   *  - a path relative to Application Support, `videokit-picked/<name>` or `videokit-gallery/<id>/...`;
+   *  - any of these with a query or a fragment after the path.
+   *
+   * Put shortly, whatever follows `Library/Application Support/videokit-picked/` or
+   * `.../videokit-gallery/` in a name, decoded or as it stands, is a copy kept. A name read more ways
+   * than it meant can only keep more, which is the side a sweep has to err on: a name misread here
+   * loses a clip for good. A `content://` URI or a `blob:` URL can name no copy, and keeps nothing.
+   */
+  keep: string[];
+  /**
+   * Milliseconds since the epoch: only a copy made before this goes. A host passes the moment it
+   * began gathering `keep`, so a clip picked while it was reading its drafts - dated after, because
+   * `retainMedia` dates a copy as it moves it in - is spared even though no draft names it yet.
+   */
+  before: number;
+}
+
+export interface SweepMediaResult {
+  /** How many files went. Always 0 on Android and the web, which keep no copies. */
+  removed: number;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Picking a sound file                                                                           */
+/* -------------------------------------------------------------------------------------------- */
+
+/** What [pickAudioFile] answers: a copy of the sound somebody chose, or that they chose none. */
+export interface PickAudioFileResult {
+  /**
+   * True when the picker was closed without a choice, and every other field is then absent. A
+   * cancel is an answer rather than a failure, as it is for every picker a host hands the editor.
+   */
+  cancelled: boolean;
+  /**
+   * `file://` of the kit's copy, `tmp/videokit-audio/<uuid>.<ext>` with the extension the chosen
+   * file had. For reading once, straight away, through Capacitor's local server: the copy is not
+   * the kit's to keep (see [pickAudioFile]).
+   */
+  uri?: string;
+  /** The chosen file's own name, extension included, which is what a Sound sheet prints. */
+  fileName?: string;
+  /**
+   * The MIME type iOS knows the file's type by (`UTType.preferredMIMEType`), absent when it knows
+   * none. A response from the local server carries no type, and a `Blob` made from one is typed
+   * with this, so a render later names its staged copy after it (`withNativeRenderInputs`).
+   */
+  mimeType?: string;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Render inputs a page holds                                                                     */
+/* -------------------------------------------------------------------------------------------- */
+
+/*
+ * A native engine opens files, and a page holds some of what a post is made of as `blob:` URLs,
+ * which live in the WebView's memory where neither engine can reach: a sound from the browser's
+ * sound library, a track the editor's default picker read in (see [pickAudioFile]). So each is
+ * written out as a file of the kit's own before a render, and deleted after it.
+ *
+ * `stageRenderInput` writes a chunk of base64 per call rather than the whole file at once: a sound
+ * the browser extracted is a WAV of about ten megabytes a minute, and as one message it would be
+ * held whole, a third bigger, as a string on each side of the bridge. `releaseRenderInputs` deletes
+ * what it wrote. Both touch only one folder of the kit's: `tmp/videokit-render-inputs/` on iOS and
+ * `cacheDir/videokit-render-inputs/` on Android. A file left there by a render whose app was killed
+ * is deleted by a later launch once it is a day old - not sooner, because the plugin also loads
+ * again when the web view reloads, which can happen while a render is reading its inputs.
+ *
+ * `withNativeRenderInputs`, from `capacitor-video-kit`, is all of this for a whole `ComposeSpec`,
+ * and the two calls are public for a host that stages something the spec does not name.
+ */
+
+export interface StageRenderInputOptions {
+  /**
+   * The next bytes of the file, as base64 with no `data:` prefix. Any length; each call is decoded
+   * on its own, so a chunk need not end on a multiple of three bytes. `withNativeRenderInputs` sends
+   * 1 MiB of bytes per call.
+   */
+  data: string;
+  /**
+   * Absent starts a NEW file. Present, the bytes are appended to the file an earlier call answered
+   * with, which must be in the render-input folder and still there: a name anywhere else is refused
+   * with `invalid_spec`, so this call can never write into a file it did not make, and so is one
+   * already released, because a file that lost its first chunk would open as a broken sound.
+   */
+  uri?: string;
+  /**
+   * The extension a new file is named with: `wav`, `m4a`. A leading dot is taken as well, and
+   * anything but one to sixteen letters and digits after it is refused with `invalid_spec` rather
+   * than cleaned, because it becomes part of a path. Checked on every call, used only on the first:
+   * the name is settled once the file exists.
+   *
+   * A name that says what the file holds is the better default rather than a requirement: Android's
+   * Media3 reads the content whatever the name, and iOS's `RenderInputs` reads the first bytes and
+   * opens a file under a name that says what they are. Absent or empty, the file has no extension.
+   */
+  extension?: string;
+}
+
+export interface StageRenderInputResult {
+  /** `file://` of the staged file, the same on every append to it. What the spec names it by. */
+  uri: string;
+}
+
+export interface ReleaseRenderInputsOptions {
+  /**
+   * The files [stageRenderInput] answered with. A name outside the render-input folder is ignored,
+   * whatever it names, and so is one already gone.
+   */
+  uris: string[];
 }
 
 /* -------------------------------------------------------------------------------------------- */

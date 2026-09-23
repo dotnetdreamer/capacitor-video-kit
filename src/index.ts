@@ -65,6 +65,7 @@ export type {
   HapticKind,
   PickedAudio,
   PickedImage,
+  PickedMediaFile,
   ReleaseRequest,
   RenderFailureCode,
   RenderRequest,
@@ -77,7 +78,14 @@ export type {
   VideoEditorResult,
 } from './host/host.types';
 export { RenderFailedError } from './host/host.types';
-export { browserMediaHost, browserSoundLibrary, envSafeAreaInsets, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
+export {
+  browserMediaHost,
+  browserSoundLibrary,
+  envSafeAreaInsets,
+  pickMediaFiles,
+  resolveEditorHost,
+  visualViewportKeyboard,
+} from './host/defaults';
 export { installEditorFonts } from './host/fonts';
 
 /* The editor's own state, for a host that wants to read the edit or drive it from outside. */

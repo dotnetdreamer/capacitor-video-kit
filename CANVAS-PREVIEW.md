@@ -88,6 +88,14 @@ moved.
   frame. The GL path matters on phones.
 - **`ctx.filter`** (the 2D fallback's colour) is not universal on older WebKit. The GL path carries
   the matrix and is the real answer; check what the fallback does on the oldest supported WebView.
+- **The sound is already partly in Web Audio on iOS.** `preview-mixer.ts` plays the music and the
+  voiceover elements through an `AudioContext` there, because a WKWebView ignores `volume`, and an
+  element handed to `createMediaElementSource` can never be taken back out. The clip `<video>`
+  elements this work keeps as sources are deliberately not routed - WebKit's route into Web Audio
+  does not follow `playbackRate` - so their sound is still the elements' own. Drawing them to a
+  canvas does not change that, and nothing in this work should route them: whether a routed
+  `<video>` plays whole at 0.5x or 2x is a device check that has not been made, and a routed element
+  stays routed for the life of the page.
 
 ## Tests that will need rewriting
 

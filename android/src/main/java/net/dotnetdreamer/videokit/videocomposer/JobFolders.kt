@@ -27,7 +27,7 @@ object JobFolders {
     /** Headroom demanded on top of the estimated write, so a render cannot fill the disk. */
     const val FREE_SPACE_HEADROOM_BYTES = 32L * 1024 * 1024
 
-    /** Cache entries older than this are swept on plugin load. */
+    /** Cache entries older than this are swept on plugin load, staged render inputs among them. */
     const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
 
     /**
@@ -310,6 +310,10 @@ object JobFolders {
         }
         sweepCache(thumbsCache(ctx), now)
         sweepCache(voiceCache(ctx), now)
+        // What a render whose app was killed left staged: the page that would have released it is
+        // gone. Only after a day, because this also runs for a new Bridge in a process whose render
+        // is still reading its inputs - see [StagedRenderInputs].
+        sweepCache(StagedRenderInputs.folder(ctx), now)
     }
 
     /**

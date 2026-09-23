@@ -24,6 +24,14 @@
 export { VideoComposer } from './video-composer';
 export { BackgroundPublisher } from './background-publisher';
 
+// Here rather than beside the definitions because they call the plugin, which the editor's entry
+// point must never reach. They are the glue a native host with drafts needs between a pick, the
+// editor and a render, and README's **Native hosts** shows them in place.
+export { currentMediaUri } from './video-composer/current-media';
+export { gallerySource, retainPickedFile } from './video-composer/native-sources';
+export type { PickedFileNames, RetainedPick } from './video-composer/native-sources';
+export { withNativeRenderInputs } from './video-composer/render-inputs';
+
 export * from './video-composer/definitions';
 export * from './video-composer/plugin';
 export * from './background-publisher/definitions';

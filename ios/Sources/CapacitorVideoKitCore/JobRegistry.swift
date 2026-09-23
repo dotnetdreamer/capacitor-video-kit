@@ -48,9 +48,11 @@ final class ComposeJob: @unchecked Sendable {
     var progress: Double = 0
     var lastEmittedProgress: Double = 0
     /// What WE decided, recorded before anything AVFoundation threw. The catch path reads this
-    /// first, so a cancel, a backgrounding and the wall-clock timeout all report themselves rather
-    /// than whatever `CancellationError` the export happened to raise.
+    /// first, so a cancel, a backgrounding and a stalled render all report themselves rather than
+    /// whatever `CancellationError` the export happened to raise.
     var stopReason: StopReason?
+    /// When the export last reported any movement. Reset when the job starts rendering.
+    var stall = StallWatch(startedAt: 0)
     /// Set by `cleanup` and checked in `emit`. On Android the silence after a cleanup is an
     /// accident of the Media3 API; on iOS the run task's catch block WILL run, so without this we
     /// would emit a `failed` event Android never sends, rejecting a promise nobody holds.
@@ -67,6 +69,9 @@ final class ComposeJob: @unchecked Sendable {
     var task: Task<Void, Never>?
 
     var isTerminal: Bool { state == .done || state == .failed || state == .interrupted }
+    /// Still rendering, or ended with an outcome JS has not collected yet. See
+    /// `JobRegistry.hasLiveJob` and `JobRegistry.liveInputURIs` for what that keeps.
+    var isLive: Bool { !isTerminal || !acked }
 
     init(spec: ComposeSpec) {
         self.id = spec.jobId
@@ -77,6 +82,44 @@ final class ComposeJob: @unchecked Sendable {
         self.posterURL = JobFolders.poster(spec.batchId)
         self.spec = spec
         self.createdAt = ProcessInfo.processInfo.systemUptime
+    }
+}
+
+/// Whether a render is still moving, judged by the one signal every engine gives: the fraction of
+/// the timeline it reports.
+///
+/// ANY change counts as movement, backwards included. The exporter's fallback starts its second
+/// engine from zero, and a render that has just begun again is the opposite of a wedged one.
+struct StallWatch {
+    /// How long a render may report no movement at all before it is called wedged.
+    ///
+    /// Generous on purpose, because killing a render that would have finished is the worse of the
+    /// two mistakes. The longest silence a healthy render has is the writer closing the file: with
+    /// the index moved to the front for streaming, that is a second pass over the whole file, which
+    /// for ten minutes of 4K60 at the ladder's 41 Mbps is three gigabytes - seconds of flash
+    /// storage, not minutes. Every other stretch of a healthy render reports a frame at a time.
+    static let limit: TimeInterval = 90
+
+    /// `StallWatch.limit` everywhere but the tests, which cannot wait a minute and a half.
+    private let limit: TimeInterval
+    private var lastFraction: Double = -1
+    private var lastMovedAt: TimeInterval
+
+    /// `startedAt` counts as movement: a render that never reports a single frame has stalled
+    /// `limit` after it started.
+    init(startedAt: TimeInterval, limit: TimeInterval = StallWatch.limit) {
+        self.limit = limit
+        lastMovedAt = startedAt
+    }
+
+    mutating func heard(_ fraction: Double, at now: TimeInterval) {
+        guard fraction != lastFraction else { return }
+        lastFraction = fraction
+        lastMovedAt = now
+    }
+
+    func isStalled(at now: TimeInterval) -> Bool {
+        now - lastMovedAt > limit
     }
 }
 
@@ -102,6 +145,11 @@ final class JobRegistry: @unchecked Sendable {
     /// The bar only ever moves on a 1 % step, which caps a whole render at 100 events whatever the
     /// export reports.
     private static let progressStep = 0.01
+
+    /// How often the stall watch looks. A stalled render is stopped this much later than
+    /// `StallWatch.limit` at the outside, and one whose unwind is stuck as well is ended one look
+    /// after that; against that limit, both are nothing.
+    private static let stallCheckInterval: TimeInterval = 5
 
     private let lock = NSLock()
     private var jobs: [String: ComposeJob] = [:]
@@ -199,8 +247,19 @@ final class JobRegistry: @unchecked Sendable {
         return jobs.values.contains { job in
             guard job.batchId == batchId
                     || JobFolders.sanitize(job.batchId) == batchId else { return false }
-            return !job.isTerminal || !job.acked
+            return job.isLive
         }
+    }
+
+    /// For `RetainedMedia.sweep`, which keeps the copies a render reads: the name of every file a
+    /// live job opens, as its spec gives it.
+    ///
+    /// Live as `hasLiveJob` counts it, so an outcome JS has not collected keeps its inputs as well as
+    /// its folder: JS may answer a `failed` by composing the same clips again.
+    func liveInputURIs() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return jobs.values.filter(\.isLive).flatMap(\.spec.inputURIs)
     }
 
     /// nil when the registry has no such job, which is what the plugin turns into `job_not_found`.
@@ -340,27 +399,31 @@ final class JobRegistry: @unchecked Sendable {
         do {
             built = try await CompositionBuilder.build(job.spec)
         } catch {
+            // A build can fail after it has written a still or a link for the inputs it got to.
+            removeWorkingFiles(of: job)
             let reason = stopReason(of: job)
             if let reason { finishStopped(job, reason: reason); return }
             fail(job, ErrorMapping.failure(for: error, stopReason: nil))
             return
         }
 
-        if let reason = stopReason(of: job) { finishStopped(job, reason: reason); return }
+        if let reason = stopReason(of: job) {
+            removeWorkingFiles(of: job)
+            finishStopped(job, reason: reason)
+            return
+        }
         setState(job, .rendering)
 
-        // Three times real time plus half a minute. A render that has not finished by then is not
-        // going to: something upstream is wedged, and `unknown` / `timeout` is a far better answer
-        // than a spinner the customer stares at until they kill the app.
-        let budgetSeconds = 3.0 * max(1.0, Double(job.spec.totalOutputMs) / 1000.0) + 30.0
-        let watchdog = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(budgetSeconds * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
-            // The reason goes in BEFORE the cancel, so the `CancellationError` that comes back is
-            // read as a timeout and not as something the customer asked for.
-            self.setStopReason(job, .timeout)
-            self.cancelTask(job)
-        }
+        // A render is given as long as it keeps moving, and stopped only once it has not moved for
+        // `StallWatch.limit`. Something upstream is then wedged, and `unknown` / `timeout` is a far
+        // better answer than a spinner the customer stares at until they kill the app.
+        //
+        // There is no deadline on top of that. A render that keeps reporting frames is by definition
+        // not wedged, only slow, and how slow is too slow is the customer's call - they have the
+        // cancel button - not a multiple of the timeline this file could pick: 4K60 with fifteen
+        // layers on the oldest phone the package supports is slow and correct. Android has no
+        // deadline at all.
+        let watchdog = watchForStall(job)
 
         do {
             // The exporter describes the part file it has just written; that result is thrown away
@@ -379,10 +442,14 @@ final class JobRegistry: @unchecked Sendable {
         } catch {
             watchdog.cancel()
             try? FileManager.default.removeItem(at: job.partURL)
+            removeWorkingFiles(of: job)
             if let reason = stopReason(of: job) { finishStopped(job, reason: reason); return }
-            fail(job, ErrorMapping.failure(for: error, stopReason: nil))
+            // The plan is the one the compositor recorded its frames on, so its cursor says how far
+            // THIS job's timeline had got when the encode gave up.
+            fail(job, ErrorMapping.exportFailure(for: error, cursor: built.plan.cursor, spec: job.spec))
             return
         }
+        removeWorkingFiles(of: job)
 
         do {
             try? FileManager.default.removeItem(at: job.outputURL)
@@ -407,6 +474,27 @@ final class JobRegistry: @unchecked Sendable {
         } catch {
             fail(job, ErrorMapping.failure(for: error, stopReason: stopReason(of: job)))
         }
+    }
+
+    /// Deletes the files `CompositionBuilder` wrote for this render alone: a still for each picture
+    /// (`PictureStills.folder`) and a link for each input whose name AVFoundation would refuse
+    /// (`RenderInputs.folder`). Nothing reads them once the export has returned, or once the build
+    /// has thrown, and a post of twelve photos is several megabytes that would otherwise wait in the
+    /// job folder for `cleanup` or the launch sweep.
+    ///
+    /// Called by `run` BEFORE the terminal event, never after it: JS may answer `failed` with a new
+    /// compose for the same post at once, and that render writes into these same folders. For the
+    /// same reason it leaves them alone while another job of the post is still pending or rendering,
+    /// which is the case when a stalled export comes back only after the watch has ended its job and
+    /// the retry has started. A render whose app is killed leaves them for `cleanup` and the sweep,
+    /// with the rest of the job folder.
+    private func removeWorkingFiles(of job: ComposeJob) {
+        lock.lock()
+        let shared = jobs.values.contains { $0 !== job && $0.batchId == job.batchId && !$0.isTerminal }
+        lock.unlock()
+        guard !shared else { return }
+        try? FileManager.default.removeItem(at: PictureStills.folder(job.batchId))
+        try? FileManager.default.removeItem(at: RenderInputs.folder(job.batchId))
     }
 
     /// Android's arithmetic exactly, so a device that fails to render on one platform fails on the
@@ -438,6 +526,55 @@ final class JobRegistry: @unchecked Sendable {
         lock.lock()
         if backgrounded, job.stopReason == nil { job.stopReason = .interrupted }
         lock.unlock()
+    }
+
+    /// The stall watch for one job, started as the job begins rendering and cancelled by `run` the
+    /// moment the export returns or throws.
+    ///
+    /// A stall is answered in two steps. The reason goes in and the task is cancelled, which
+    /// unwinds the export in a moment and lets `run` write the terminal state, as it does for every
+    /// other stop, with `job.task` still there for a `cancel` or a `cleanup` to await. But a render
+    /// that has stopped moving is a render something is stuck in, and the unwind can be stuck in
+    /// the same place, so when `run` has not taken over by the next look the terminal state is
+    /// written from here. That is what Android's `cancel` does every time, because Transformer
+    /// sends nothing after a cancel either, and it is the difference between `failed { unknown,
+    /// timeout }` and a job that says `rendering` for the rest of the process.
+    ///
+    /// The reason written is the job's own, which is `timeout` unless a cancel or a backgrounding
+    /// got there first and has been stuck in the same unwind since.
+    ///
+    /// Internal rather than private, with the two figures as parameters, for the tests alone.
+    func watchForStall(_ job: ComposeJob, limit: TimeInterval = StallWatch.limit,
+                       every interval: TimeInterval = stallCheckInterval) -> Task<Void, Never> {
+        lock.lock()
+        job.stall = StallWatch(startedAt: ProcessInfo.processInfo.systemUptime, limit: limit)
+        lock.unlock()
+
+        let nanoseconds = UInt64(interval * 1_000_000_000)
+        return Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                guard !Task.isCancelled, let self else { return }
+                guard self.hasStalled(job) else { continue }
+                // The reason goes in BEFORE the cancel, so the `CancellationError` that comes back
+                // is read as a timeout and not as something the customer asked for.
+                self.setStopReason(job, .timeout)
+                self.cancelTask(job)
+
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                // `run` cancels this task the moment the export comes back, either way, so still
+                // being here is the export not having come back.
+                guard !Task.isCancelled else { return }
+                if let reason = self.stopReason(of: job) { self.finishStopped(job, reason: reason) }
+                return
+            }
+        }
+    }
+
+    private func hasStalled(_ job: ComposeJob) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return job.stall.isStalled(at: ProcessInfo.processInfo.systemUptime)
     }
 
     private func setStopReason(_ job: ComposeJob, _ reason: StopReason) {
@@ -510,7 +647,8 @@ final class JobRegistry: @unchecked Sendable {
 
     // MARK: - Progress
 
-    private func report(progress value: Double, for job: ComposeJob) {
+    /// Internal rather than private for the stall tests, which move a job the way an export does.
+    func report(progress value: Double, for job: ComposeJob) {
         guard value.isFinite else { return }
         // Clamped to 0.99 because `completed` is what takes the bar to 100. Without the clamp a
         // 1.0 progress event can arrive after the completion and the bar walks backwards.
@@ -518,6 +656,9 @@ final class JobRegistry: @unchecked Sendable {
 
         var payload: [String: Any]?
         lock.lock()
+        // The raw value, every time, and not the 1 % steps the bar moves by: at 4K60 on a slow
+        // phone a single step of a long post can take longer than the watch allows.
+        job.stall.heard(value, at: ProcessInfo.processInfo.systemUptime)
         if job.state == .rendering, clamped >= job.lastEmittedProgress + Self.progressStep {
             job.lastEmittedProgress = clamped
             job.progress = clamped
@@ -555,7 +696,8 @@ final class JobRegistry: @unchecked Sendable {
     /// the terminal write, which keeps `cancel` able to await it, keeps `setState` further down
     /// `run` from resurrecting a finished job, and leaves a render that completed during the lock
     /// screen free to report `done`. `getState` covers the gap by projecting `interrupted` for a
-    /// condemned job that has not finished unwinding.
+    /// condemned job that has not finished unwinding. The one unwind that does not own it is one
+    /// that never comes back, which `watchForStall` ends from outside.
     private func interruptAll() {
         lock.lock()
         // Set before the snapshot is taken so a `start` that lands after this point is condemned by

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack } from '../../editor';
@@ -908,6 +908,68 @@ describe('the transition dots', () => {
     store.removeTransition();
     await until('the plain name', () => dot(tl, 'seg-b').getAttribute('aria-label') === 'Transition between clip 1 and clip 2');
     expect(dot(tl, 'seg-b').querySelector('ve-icon')).toBeNull();
+  });
+});
+
+/*
+ * The music lane's placeholder, and the one thing it opens. WebKit on iOS aims the click that follows
+ * a tap at whatever is under the finger AFTER the lift, and the Sound sheet comes up where the lane
+ * was: a sheet opened on the pointer's way up took that click, on Extract from video, and opened the
+ * video picker over itself. So nothing may open before the click, and the click is what opens it.
+ */
+describe('the Add sound bar', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function addSound(tl: HTMLElement): HTMLButtonElement {
+    const found = root(tl).querySelector<HTMLButtonElement>('[data-hit="add-sound"]');
+    if (!found) throw new Error('no Add sound');
+    return found;
+  }
+
+  it('opens the Sound sheet on the click that follows a tap, and not a moment before', async () => {
+    const opened = vi.spyOn(EditorMedia.prototype, 'openSound');
+    const { store, tl } = await mount();
+    const target = addSound(tl);
+    const at = centre(target);
+
+    pointer(target, 'pointerdown', at.x, at.y);
+    pointer(target, 'pointerup', at.x, at.y);
+    // Nothing is up yet for the click to land in, wherever the browser aims it.
+    expect(store.panel.value).toBeNull();
+
+    target.click();
+    expect(store.panel.value).toBe('sound');
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens from a bare click as well, which is how a key or a screen reader presses it', async () => {
+    const { store, tl } = await mount();
+
+    addSound(tl).click();
+
+    expect(store.panel.value).toBe('sound');
+  });
+
+  it('opens nothing for the click after a mouse drag that ended over it', async () => {
+    const { store, tl } = await mount();
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    const target = addSound(tl);
+    const at = centre(target);
+    const mouse = (on: Element, type: string, x: number): void => {
+      on.dispatchEvent(new PointerEvent(type, { pointerId: 7, pointerType: 'mouse', button: 0, isPrimary: true, clientX: x, clientY: at.y, bubbles: true, cancelable: true }));
+    };
+
+    // A scrub that starts and ends on the bar, which runs the whole length of the video.
+    mouse(target, 'pointerdown', at.x);
+    mouse(scroller, 'pointermove', at.x - 60);
+    await frames(2);
+    mouse(scroller, 'pointerup', at.x - 60);
+    target.click();
+    await frames(2);
+
+    expect(store.panel.value).toBeNull();
   });
 });
 

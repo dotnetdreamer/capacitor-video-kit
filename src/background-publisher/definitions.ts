@@ -17,6 +17,19 @@
  *
  * Nothing in this file names a domain. The plugin moves files and then makes one more call; what
  * the files are and what the call creates is entirely yours.
+ *
+ * Android needs nothing from the host for the transaction to outlive the app: WorkManager starts
+ * from the manifest. iOS needs two lines in the host's `AppDelegate`, because the system hands a
+ * finished transfer back to the app through it, and a plugin cannot be reached there - UIKit
+ * usually connects no scene, and so builds no Capacitor bridge, when it relaunches an app in the
+ * background for one. With `import CapacitorVideoKitCore`, `PublisherSession.warmUp()` goes in
+ * `application(_:didFinishLaunchingWithOptions:)`, which makes the background session again at
+ * every launch so it can deliver what finished while the app was gone, and
+ * `application(_:handleEventsForBackgroundURLSession:completionHandler:)` passes its identifier and
+ * handler to `PublisherSession.handleEvents(identifier:completionHandler:)`, which calls that
+ * handler once everything has been delivered. Without them a finalize call that falls due while the
+ * app is in the background waits until the customer next opens it, and iOS, never told that the app
+ * has dealt with a wake, may hold back the ones that follow. The README has the code.
  */
 import type { PluginListenerHandle } from '@capacitor/core';
 
@@ -90,7 +103,21 @@ export interface PublishUpload {
    */
   tag?: string;
 
-  /** `file://` path of the file to send. */
+  /**
+   * `file://` path of the file to send.
+   *
+   * A file that is missing or empty - 0 bytes counts as missing - is refused by `publish()` with
+   * `file_missing` on every platform. On Android and iOS it then has to stay where it is, as it is,
+   * until the batch is done: every send reads it again - an automatic resend after a 5xx or a
+   * dropped connection, a `retry()`, a restart after the app was killed - and a file that has gone
+   * or emptied by then fails the batch as `file_missing`, not retryable. iOS sends from a private
+   * copy, so deleting or rewriting the file does not spoil a send already in flight there, but the
+   * next send still reads the file. The web is the exception: a `blob:` URL dies with the page, so
+   * `publish()` copies the bytes into IndexedDB and every send reads that copy.
+   *
+   * Percent-encoded, as the composer hands its results back: iOS takes a raw `#` or `?` in a
+   * `file://` URI as part of the name, where Android's `Uri` cuts the path there.
+   */
   path: string;
 
   mimeType: string;
@@ -98,7 +125,10 @@ export interface PublishUpload {
   /** Overrides the transport's `url` for this file alone - one presigned URL per file. */
   url?: string;
 
-  /** Overrides the default `<uploadId>.<ext>`. */
+  /**
+   * Overrides the default `<uploadId>.<ext>`, where `<ext>` is the extension of the file `path`
+   * names. Also what `{fileName}` stands for.
+   */
   fileName?: string;
 
   /** `POST` only: extra parts for this file, merged over the transport's, these winning. */
@@ -125,6 +155,10 @@ export interface PublishFinalize {
    * token naming an upload that is not in the batch is left exactly as it is rather than being
    * hunted for - the plugin cannot tell a typo from a sentence - so check your ids. Every upload
    * in the batch must have an id before this body is sent, and that IS enforced.
+   *
+   * An id goes in as JSON: a number bare, a string quoted and escaped. The escaping is
+   * `JSON.stringify`'s on the web and iOS, and Android's `JSONObject.quote` writes a `/` as `\/`
+   * as well, so for an id with a slash in it the text differs while the JSON it parses to does not.
    */
   bodyTemplate: string;
 
@@ -144,7 +178,16 @@ export interface PublishRequest {
 
   upload: PublishTransport;
 
-  /** Sent one at a time, in this order. */
+  /**
+   * The files, in the order `$IDS` and `$IDS:<tag>` list their ids on every platform.
+   *
+   * Not necessarily the order they are SENT in. Android and the web send them one at a time, in
+   * this order, and stop at the first that fails. iOS hands every one that has no id yet to its
+   * background session at once: the system decides how many go together and which arrives first,
+   * and a failure does not stop the others, which keep the ids they get so a `retry()` does not
+   * send them again. A server that cares about arrival order or about one upload at a time has to
+   * be written for that.
+   */
   uploads: PublishUpload[];
 
   finalize: PublishFinalize;
@@ -177,6 +220,18 @@ export interface PublishUploadState {
   bytesTotal: number;
 }
 
+/**
+ * Why a batch stopped.
+ *
+ * `auth` is a 401 or a 403. It is retryable, and no platform sends it again on its own: the same
+ * request would carry the same token to the same answer, so the batch waits for `retry()` with new
+ * `headers`. A dropped connection is sent again automatically before the batch fails as `network`,
+ * and so is a 5xx on Android and iOS; the web fails a 5xx at once, as a retryable `http`.
+ *
+ * `file_missing` is a file that has gone or is empty, and is final. `unknown` whose message begins
+ * `no_space` is iOS failing to write the private copy it sends from, on a full disk; it is
+ * retryable once space is freed.
+ */
 export type PublishFailureCode = 'network' | 'http' | 'auth' | 'server_rejected' | 'file_missing' | 'cancelled' | 'unknown';
 
 export interface PublishError {
