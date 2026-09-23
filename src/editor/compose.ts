@@ -63,12 +63,7 @@ const UNKNOWN_TRACK_END_MS = 3_600_000;
  * @param raster the host's fonts, stickers and file URLs. Its `output` must be `manifest.output`, the frame this spec
  *   renders (`DEFAULT_OUTPUT`), because every `wPx`/`hPx` is measured against it.
  */
-export async function toComposeSpec(
-  manifest: EditManifest,
-  uriByKey: ReadonlyMap<string, string>,
-  ids: ComposeSpecIds,
-  raster: RasterContext,
-): Promise<ComposeSpec> {
+export async function toComposeSpec(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>, ids: ComposeSpecIds, raster: RasterContext): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
   const clips: ComposeClip[] = baseClips(manifest, uriByKey);
@@ -79,9 +74,9 @@ export async function toComposeSpec(
   // the wire entirely and there is nothing in between.
   const tracks: ComposeTrack[] | null =
     manifest.videoTracks.length > 0
-      ? manifest.videoTracks.map((track) => ({
+      ? manifest.videoTracks.map(track => ({
           id: track.id,
-          clips: track.clips.map((edit) => wireClip(edit, manifest.fit, uriByKey)),
+          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey)),
           startMs: Math.max(0, Math.round(track.startMs)),
           z: track.z,
           opacity: clamp(track.opacity, 0, 1),
@@ -136,13 +131,7 @@ export async function toComposeSpec(
             uri: music.uri,
             startMs: Math.max(0, Math.round(music.startMs)),
             inMs: Math.max(0, Math.round(music.inMs)),
-            outMs: Math.round(
-              music.outMs > 0
-                ? music.outMs
-                : music.sourceDurationMs > 0
-                  ? music.sourceDurationMs
-                  : UNKNOWN_TRACK_END_MS,
-            ),
+            outMs: Math.round(music.outMs > 0 ? music.outMs : music.sourceDurationMs > 0 ? music.sourceDurationMs : UNKNOWN_TRACK_END_MS),
             volume: music.volume,
             loop: music.loop,
             fadeInMs: 0,
@@ -151,7 +140,7 @@ export async function toComposeSpec(
         : null,
       voiceover: [...manifest.voiceovers]
         .sort((a, b) => a.startMs - b.startMs)
-        .map((take) => ({
+        .map(take => ({
           uri: take.uri,
           startMs: Math.max(0, Math.round(take.startMs)),
           durationMs: Math.max(0, Math.round(take.durationMs)),
@@ -194,7 +183,7 @@ export async function toComposeSpec(
  */
 function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>): ComposeClip[] {
   const spans = transitionSpans(manifest.clips);
-  const wired = manifest.clips.map((edit) => wireClip(edit, manifest.fit, uriByKey));
+  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey));
   return wired.map((clip, i) => {
     const giving = spans[i + 1]?.sourceMs ?? 0;
     const lowered: ComposeClip = giving > 0 ? { ...clip, outMs: clip.outMs - giving } : clip;
