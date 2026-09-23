@@ -9,6 +9,7 @@ import { cropStageBox, cropWindowBox, orWhole, type FrameBox } from '../../state
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
+import { ClipMedia } from './clip-media';
 import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPlayer } from './preview-player';
@@ -178,6 +179,13 @@ export class VePreview implements EditorPlayer {
   private readonly extraEls = new Map<string, HTMLVideoElement>();
   /** What each track's element was last attached to the player as, so a repaint does not re-attach. */
   private readonly attachedExtras = new Map<string, HTMLVideoElement>();
+  /**
+   * The slot each element plays in, which is what the player and the canvas are handed rather than
+   * the element: it is the element for a video and a picture for a picture. See [ClipMedia].
+   */
+  private baseMedia: ClipMedia | null = null;
+  private partnerMedia: ClipMedia | null = null;
+  private readonly extraMedia = new Map<string, ClipMedia>();
   private readonly extraRefs = new Map<string, (el?: HTMLElement) => void>();
   private musicEl?: HTMLAudioElement;
   private voiceEl?: HTMLAudioElement;
@@ -468,7 +476,7 @@ export class VePreview implements EditorPlayer {
    * next clip, whose shape is not the one on screen yet. The player calls this at every swap too.
    */
   private readonly readBaseAspect = (): void => {
-    const video = this.player?.baseVideo ?? this.videoEl;
+    const video = this.player?.baseVideo ?? this.baseMedia ?? this.videoEl;
     if (video && video.videoWidth > 0 && video.videoHeight > 0) {
       this.baseAspect.value = video.videoWidth / video.videoHeight;
     }
@@ -482,10 +490,10 @@ export class VePreview implements EditorPlayer {
    * remembered per track as well, purely to be taken off again.
    */
   private readonly readExtraAspect = (event: Event): void => {
-    const video = event.target as HTMLVideoElement;
-    for (const [trackId, element] of this.extraEls) {
-      if (element === video) {
-        this.readAspectOf(trackId, video);
+    const media = event.target;
+    for (const [trackId, slot] of this.extraMedia) {
+      if (slot === media) {
+        this.readAspectOf(trackId, slot);
         return;
       }
     }
@@ -508,7 +516,7 @@ export class VePreview implements EditorPlayer {
    * Harmless while the metadata genuinely has not landed: an element with no picture yet reports 0
    * and is left to the event.
    */
-  private readAspectOf(trackId: string, video: HTMLVideoElement): void {
+  private readAspectOf(trackId: string, video: ClipMedia): void {
     if (!(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
     this.setExtraAspect(trackId, video.videoWidth / video.videoHeight);
   }
@@ -610,9 +618,9 @@ export class VePreview implements EditorPlayer {
     this.watcher.stop();
     for (const dispose of this.disposers) dispose();
     this.disposers.length = 0;
-    for (const video of [this.videoEl, this.partnerEl]) {
-      video?.removeEventListener('loadedmetadata', this.readBaseAspect);
-      video?.removeEventListener('resize', this.readBaseAspect);
+    for (const media of [this.baseMedia, this.partnerMedia]) {
+      media?.removeEventListener('loadedmetadata', this.readBaseAspect);
+      media?.removeEventListener('resize', this.readBaseAspect);
     }
     this.detachExtras();
     this.canvas?.destroy();
@@ -626,6 +634,11 @@ export class VePreview implements EditorPlayer {
     // rather than whenever the element is collected.
     this.player?.destroy();
     this.player = null;
+    // After the player, which strips them through these: a picture still held lets its bitmap go.
+    this.baseMedia?.dispose();
+    this.partnerMedia?.dispose();
+    this.baseMedia = null;
+    this.partnerMedia = null;
   }
 
   /** The player, the gestures, the stage measurement and the four effects, once. */
@@ -639,8 +652,13 @@ export class VePreview implements EditorPlayer {
     const voice = this.voiceEl;
     if (!stage || !canvas || !video || !partner || !music || !voice) return;
 
+    const baseMedia = new ClipMedia(video);
+    const partnerMedia = new ClipMedia(partner);
+    this.baseMedia = baseMedia;
+    this.partnerMedia = partnerMedia;
+
     // `resize` covers the next clip being a different shape; both fire once per load, not per frame.
-    for (const base of [video, partner]) {
+    for (const base of [baseMedia, partnerMedia]) {
       base.addEventListener('loadedmetadata', this.readBaseAspect);
       base.addEventListener('resize', this.readBaseAspect);
     }
@@ -652,8 +670,8 @@ export class VePreview implements EditorPlayer {
     const store = this.ctx.store;
     this.canvas = new PreviewCanvas(store, canvas);
     this.player = new PreviewPlayer(store, {
-      video,
-      partner,
+      video: baseMedia,
+      partner: partnerMedia,
       music,
       voice,
       // The store's list and not [shownExtras], which holds its value while only `sourceMs` has
@@ -663,7 +681,7 @@ export class VePreview implements EditorPlayer {
     });
     // The base track is drawn from the player's own reading of its two elements, one reading a
     // frame, so a swap between them can never pair one clip's framing with the other's picture.
-    this.canvas.attachBase(() => this.player?.baseShot() ?? null, [video, partner]);
+    this.canvas.attachBase(() => this.player?.baseShot() ?? null, [baseMedia, partnerMedia]);
     store.attachPlayer(this);
     this.player.start();
 
@@ -771,13 +789,15 @@ export class VePreview implements EditorPlayer {
       if (this.attachedExtras.get(trackId) === video) continue;
       this.releaseExtra(trackId);
       this.attachedExtras.set(trackId, video);
-      video.addEventListener('loadedmetadata', this.readExtraAspect);
-      video.addEventListener('resize', this.readExtraAspect);
+      const media = new ClipMedia(video);
+      this.extraMedia.set(trackId, media);
+      media.addEventListener('loadedmetadata', this.readExtraAspect);
+      media.addEventListener('resize', this.readExtraAspect);
       // And read it straight away, because the event this just subscribed to has very likely
       // already been and gone: see [readAspectOf].
-      this.readAspectOf(trackId, video);
-      this.player?.attachFollower(trackId, { video });
-      this.canvas?.attach(trackId, video);
+      this.readAspectOf(trackId, media);
+      this.player?.attachFollower(trackId, { video: media });
+      this.canvas?.attach(trackId, media);
     }
 
     // And the other way: a track the render no longer writes an element for, whose follower is now
@@ -791,14 +811,18 @@ export class VePreview implements EditorPlayer {
   private releaseExtra(trackId: string): void {
     const attached = this.attachedExtras.get(trackId);
     if (!attached) return;
-    attached.removeEventListener('loadedmetadata', this.readExtraAspect);
-    attached.removeEventListener('resize', this.readExtraAspect);
+    const media = this.extraMedia.get(trackId);
+    media?.removeEventListener('loadedmetadata', this.readExtraAspect);
+    media?.removeEventListener('resize', this.readExtraAspect);
     this.attachedExtras.delete(trackId);
+    this.extraMedia.delete(trackId);
     // The shape belonged to a file that has left the screen, and a stale one would place the next
     // layer's picture against the wrong source for as long as its metadata took to arrive.
     this.setExtraAspect(trackId, 0);
+    // The follower strips the slot on its way out, so the slot goes after it.
     this.player?.attachFollower(trackId, null);
     this.canvas?.attach(trackId, null);
+    media?.dispose();
   }
 
   /** The same, on the way out, where the elements have gone and only the listeners are left. */

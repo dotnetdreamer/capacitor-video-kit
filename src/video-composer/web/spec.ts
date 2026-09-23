@@ -281,6 +281,13 @@ function readClip(input: unknown, path: string): ComposeSpec['clips'][number] {
   if (crop) out.crop = crop;
   const rect = readPlacement(clip['rect'], `${path}.rect`);
   if (rect) out.rect = rect;
+  // A picture is silent at 1x whatever the rest of the clip says - see `ComposeClip.image` - so
+  // the plan and the mixer read the same answer off the fields they already read.
+  if (clip['image'] === true) {
+    out.image = true;
+    out.speed = 1;
+    out.muted = true;
+  }
   return out;
 }
 

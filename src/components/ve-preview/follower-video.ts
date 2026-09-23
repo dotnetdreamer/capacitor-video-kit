@@ -2,6 +2,7 @@ import { findClip } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
+import type { ClipMedia } from './clip-media';
 import {
   BLANK_POSTER,
   SEEK_EPSILON_S,
@@ -23,7 +24,7 @@ import {
 const DRIFT_MS = 80;
 
 export interface FollowerMedia {
-  video: HTMLVideoElement;
+  video: ClipMedia;
 }
 
 /**
@@ -42,7 +43,7 @@ export interface FollowerMedia {
  * a layer the compositor does not repaint. See [PreviewCanvas].
  */
 export class FollowerVideo {
-  private readonly video: HTMLVideoElement;
+  private readonly video: ClipMedia;
   private readonly unlisten: Array<() => void> = [];
 
   /** The host clip key whose source is on the element, whether or not it loaded. */
@@ -134,6 +135,9 @@ export class FollowerVideo {
   private load(source: EditorSource): void {
     const video = this.video;
     this.loadedKey = source.key;
+    // A picture takes the element's place in the slot before anything else is asked of it; see
+    // [ClipMedia]. From here on it is loaded, seeked and started like any clip.
+    video.showPicture(this.store.isPictureKey(source.key));
     // Order matters: the frame has to be copied while the OLD source is still on screen. One line
     // later, after `src` is assigned, there is nothing left to copy.
     this.setPoster(source);
@@ -157,7 +161,7 @@ export class FollowerVideo {
     const speed = clip.speed || 1;
     if (video.playbackRate !== speed) video.playbackRate = speed;
     // Some WebViews reset pitch correction on every source change, so it is set each time.
-    (video as HTMLVideoElement & { preservesPitch?: boolean }).preservesPitch = true;
+    video.preservesPitch = true;
     applyClipAudio(video, clip, clipsSilenced(this.store));
 
     // Running, the element carries itself between playhead writes and only a drift worth a stall is

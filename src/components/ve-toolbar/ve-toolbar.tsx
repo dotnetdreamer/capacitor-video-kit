@@ -467,9 +467,14 @@ export class VeToolbar {
     const store = this.ctx.store;
     const trackId = store.selectedClipTrackId.value;
     if (trackId) return this.trackClipRow(trackId);
+    // A picture has no speed and no sound, so its row has neither tool rather than two that do
+    // nothing. Taken away rather than dimmed: a dimmed tile says "not now", and for a still it is
+    // never.
+    const picture = store.selectedIsPicture.value;
     const tiles: ToolTile[] = [
-      { id: 'split', label: 'Split', icon: 'cut-outline', run: () => store.splitAtPlayhead() },
-      { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') },
+      // Labelled Cut: the tool cuts the segment in two at the playhead. `split` stays its id.
+      { id: 'split', label: 'Cut', icon: 'cut-outline', run: () => store.splitAtPlayhead() },
+      ...(picture ? [] : [this.speedTile()]),
       {
         id: 'transition',
         label: 'Transition',
@@ -479,15 +484,7 @@ export class VeToolbar {
         disabled: this.lastClip.value,
         run: () => this.openTransition(),
       },
-      {
-        id: 'volume',
-        label: 'Volume',
-        icon: 'volume-high-outline',
-        run: () => {
-          const clip = store.selectedClip.value;
-          if (clip) store.openVolume({ kind: 'clip', id: clip.id });
-        },
-      },
+      ...(picture ? [] : [this.volumeTile()]),
       {
         id: 'delete',
         label: 'Delete',
@@ -525,6 +522,26 @@ export class VeToolbar {
     return { kind: 'clip', label: 'Clip tools', collapse: this.deselect('Close clip tools'), tiles };
   }
 
+  /** The selected segment's speed sheet. On both clip rows, and on neither for a picture. */
+  private speedTile(): ToolTile {
+    const store = this.ctx.store;
+    return { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') };
+  }
+
+  /** The selected segment's own volume. On both clip rows, and on neither for a picture. */
+  private volumeTile(): ToolTile {
+    const store = this.ctx.store;
+    return {
+      id: 'volume',
+      label: 'Volume',
+      icon: 'volume-high-outline',
+      run: () => {
+        const clip = store.selectedClip.value;
+        if (clip) store.openVolume({ kind: 'clip', id: clip.id });
+      },
+    };
+  }
+
   /**
    * The Transition tile: the transition sheet on the cut INTO the selected segment, which is the
    * dot at its left edge - or, for the first segment, which has no cut in front of it, the one at
@@ -554,6 +571,7 @@ export class VeToolbar {
    */
   private trackClipRow(trackId: string): ToolRow {
     const store = this.ctx.store;
+    const picture = store.selectedIsPicture.value;
     return {
       kind: 'clip',
       label: 'Video layer tools',
@@ -573,16 +591,8 @@ export class VeToolbar {
           icon: this.fitContain.value ? 'expand-outline' : 'scan-outline',
           run: () => store.toggleFit(),
         },
-        { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') },
-        {
-          id: 'volume',
-          label: 'Volume',
-          icon: 'volume-high-outline',
-          run: () => {
-            const clip = store.selectedClip.value;
-            if (clip) store.openVolume({ kind: 'clip', id: clip.id });
-          },
-        },
+        // Neither for a picture, as on the base row.
+        ...(picture ? [] : [this.speedTile(), this.volumeTile()]),
         {
           id: 'start-here',
           label: 'Start here',
@@ -634,9 +644,9 @@ export class VeToolbar {
     tiles.push(
       {
         id: 'split',
-        label: 'Split',
+        label: 'Cut',
         icon: 'cut-outline',
-        // A split adds a layer, so like Duplicate it cannot at the cap; the store says why.
+        // A cut adds a layer, so like Duplicate it cannot at the cap; the store says why.
         disabled: store.layersFull.value,
         run: () => store.splitSelectedOverlayAtPlayhead(),
       },

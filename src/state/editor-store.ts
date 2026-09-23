@@ -85,6 +85,7 @@ import {
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
+import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
 import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './editor.types';
 
@@ -465,6 +466,8 @@ export class EditorStore {
     return sel?.kind === 'voice' ? findVoiceover(this.manifest.value, sel.id) : null;
   });
   readonly musicSelected = computed(() => this.selection.value?.kind === 'music' && !!this.manifest.value.music);
+  /** The selected segment is a picture, which has no speed and no sound to set. */
+  readonly selectedIsPicture = computed(() => this.selectedClip.value?.image === true);
   readonly canJoinSelected = computed(() => {
     const clip = this.selectedClip.value;
     return !!clip && canJoinWithNext(this.manifest.value, clip.id);
@@ -538,6 +541,18 @@ export class EditorStore {
 
   clipByKey(key: string): EditorSource | undefined {
     return this.clips.value.find(clip => clip.key === key);
+  }
+
+  /**
+   * Whether the source behind a clip key is a picture. Read off the source the host handed over and,
+   * failing that, off the segments the manifest keeps for it: a draft reopened by a host that stored
+   * its sources without their `kind` still knows its pictures from the segments it saved.
+   */
+  isPictureKey(key: string): boolean {
+    if (isPictureSource(this.clipByKey(key))) return true;
+    const manifest = this.manifest.value;
+    const rows = [manifest.clips, ...manifest.videoTracks.map(track => track.clips)];
+    return rows.some(row => row.some(clip => clip.clipKey === key && clip.image === true));
   }
 
   sourceDurationMs(clipKey: string): number {
@@ -1019,13 +1034,16 @@ export class EditorStore {
   /* Clips                                                                                     */
   /* ========================================================================================= */
 
-  /** Splits the selected segment at the playhead, or the one under it when nothing is selected. */
+  /**
+   * Cuts the selected segment in two at the playhead, or the one under it when nothing is selected.
+   * The tool is called Cut on screen; `split` is the name the ops and the tool's id have always had.
+   */
   splitAtPlayhead(): void {
     const newId = this.newId('seg');
     const at = this.playheadMs.value;
-    const ok = this.commit('Split', m => splitClipAt(m, at, newId));
+    const ok = this.commit('Cut', m => splitClipAt(m, at, newId));
     if (!ok) {
-      this.showToast('Move the playhead further into the clip to split it');
+      this.showToast('Move the playhead further into the clip to cut it');
       this.haptic('warning');
       return;
     }
@@ -1517,7 +1535,7 @@ export class EditorStore {
     const newId = this.newId(overlay.kind);
     const total = this.totalMs.value;
     const at = this.playheadMs.value;
-    if (this.commit('Split', m => splitOverlayAt(m, overlay.id, at, newId, total))) {
+    if (this.commit('Cut', m => splitOverlayAt(m, overlay.id, at, newId, total))) {
       this.select({ kind: 'overlay', id: newId });
       this.haptic('light');
     } else if (this.layersFull.value) {
@@ -1526,7 +1544,7 @@ export class EditorStore {
       this.showToast(`You can add up to ${MAX_LAYERS} layers`);
       this.haptic('warning');
     } else {
-      this.showToast('Move the playhead inside the layer to split it');
+      this.showToast('Move the playhead inside the layer to cut it');
       this.haptic('warning');
     }
   }

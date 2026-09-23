@@ -226,6 +226,7 @@ function structuredCloneOf<T>(value: T): T {
 function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<string, string>): ComposeClip {
   const uri = uriByKey.get(edit.clipKey);
   if (!uri) throw new MissingClipError(edit.clipKey);
+  if (edit.image) return pictureClip(edit, manifestFit, uri);
   const clip: ComposeClip = {
     // The segment id, not the clip key: split and duplicate put several segments over one source,
     // and a failure reported against a key could not say which of them it was.
@@ -245,6 +246,35 @@ function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<st
   // for the ABSENCE of these fields once, when it builds its plan, to keep taking that path with no
   // extra work per frame. Writing a full-frame rectangle here would be the same picture at a real
   // cost, and it would stop an untouched clip producing the spec it produces today.
+  const crop = wireRect(edit.crop);
+  if (crop) clip.crop = crop;
+  const rect = wirePlacement(edit.rect);
+  if (rect) clip.rect = rect;
+  return clip;
+}
+
+/**
+ * A picture segment on the wire: its length from 0, silent, at 1x (see [ComposeClip.image]).
+ *
+ * The trim is REBASED to start at 0 rather than sent as the manifest has it. A picture's segment
+ * sits in the middle of the long source it is given (see [EditClip.image]), and that number means
+ * something to the editor's trim handles and nothing to an engine - which would only have to be
+ * told to ignore it. What an engine needs is the length, and a picture's source time IS its output
+ * time, so the transition arithmetic in [baseClips] that subtracts source milliseconds off `outMs`
+ * works on the rebased numbers unchanged.
+ */
+function pictureClip(edit: EditClip, manifestFit: EditFit, uri: string): ComposeClip {
+  const clip: ComposeClip = {
+    key: edit.id,
+    uri,
+    inMs: 0,
+    outMs: Math.max(100, Math.round(edit.outMs - edit.inMs)),
+    speed: 1,
+    volume: edit.volume,
+    muted: true,
+    fit: edit.fit ?? manifestFit,
+    image: true,
+  };
   const crop = wireRect(edit.crop);
   if (crop) clip.crop = crop;
   const rect = wirePlacement(edit.rect);

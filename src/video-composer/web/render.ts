@@ -1,14 +1,14 @@
 import { cssFor } from '../../editor/edit-manifest';
 import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
-import type { ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
+import type { ComposeClip, ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
 
 import { mixdown } from './audio';
 import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
 import { pictureDest } from './geometry';
-import { decodeImage, FrameReader, probeMedia } from './media';
-import { Painter, WHOLE_FRAME, type LayerDraw, type TransitionDraw } from './painter';
+import { decodeImage, FrameReader, probeMedia, probePicture, StillReader, type SourceReader } from './media';
+import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from './painter';
 import { buildPlan, clipIndexAt, sourceTimeUs, transitionAt, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
 
 /**
@@ -99,7 +99,10 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   const painter = new Painter(plan.output);
   painter.setColour(plan.colorMatrix, cssFor(spec.filter));
   // Each element closed is one the painter will never be handed again, so its texture goes with it.
-  const layers = new LayerReaders(video => painter.forget(video));
+  // A picture is decoded at twice the output's long side, so a crop can zoom into it before it
+  // softens, and never past 4096, the largest texture every GL implementation guarantees.
+  const pictureEdge = Math.min(4096, 2 * Math.max(plan.output.width, plan.output.height));
+  const layers = new LayerReaders(source => painter.forget(source), pictureEdge);
   const overlays = new OverlayBitmaps();
   // Opened last, and immediately before the loop: the recorder engine starts recording the moment
   // it is opened, and every millisecond between that and the first frame is a millisecond of the
@@ -293,7 +296,7 @@ async function layerDraw(
    */
   extraFrameAspect: number | null = null,
 ): Promise<LayerDraw | null> {
-  const reader = await layers.reader(layerId, clip.clip.uri, clip.clip.key);
+  const reader = await layers.reader(layerId, clip.clip);
   await reader.seek(sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000, frameSeconds);
   if (reader.width <= 0 || reader.height <= 0) return null;
   // An extra layer's `rect` became its destination when the plan was built and was taken off the
@@ -301,7 +304,7 @@ async function layerDraw(
   // between a clip on the base track and one on a layer.
   const framing = { fit: clip.clip.fit, crop: clip.clip.crop, rect: clip.clip.rect };
   return {
-    source: reader.video,
+    source: reader.source,
     sourceWidth: reader.width,
     sourceHeight: reader.height,
     framing,
@@ -327,11 +330,15 @@ async function probeInputs(spec: ComposeSpec, signal: AbortSignal): Promise<Map<
   const every = [...spec.clips, ...tails, ...(spec.tracks ?? []).flatMap(track => track.clips)];
   const uris = new Set(every.map(clip => clip.uri));
 
+  // A picture is opened as one, which a `<video>` cannot do. The same file on the timeline twice is
+  // the same kind twice, so the first clip that names a uri says which it is.
+  const pictures = new Set(every.filter(clip => clip.image).map(clip => clip.uri));
+
   const probes = new Map<string, ProbedInput>();
   for (const uri of uris) {
     throwIfAborted(signal);
     try {
-      probes.set(uri, await probeMedia(uri));
+      probes.set(uri, pictures.has(uri) ? await probePicture(uri) : await probeMedia(uri));
     } catch (error) {
       const clip = every.find(candidate => candidate.uri === uri);
       throw new RenderFailure('unreadable_input', describe(error), clip?.key);
@@ -353,21 +360,34 @@ async function probeInputs(spec: ComposeSpec, signal: AbortSignal): Promise<Map<
  * way it goes, so that can be let go of at the same moment rather than at the end of the render.
  */
 class LayerReaders {
-  private readonly open = new Map<string, { uri: string; reader: FrameReader }>();
+  private readonly open = new Map<string, { uri: string; reader: SourceReader }>();
 
-  constructor(private readonly onClose: (video: HTMLVideoElement) => void) {}
+  /**
+   * @param pictureEdge the long side a picture is decoded at: enough for a crop to zoom into it
+   *   before it softens, and no more than every GL implementation can hold in one texture.
+   */
+  constructor(
+    private readonly onClose: (source: LayerSource) => void,
+    private readonly pictureEdge: number,
+  ) {}
 
-  async reader(layerId: string, uri: string, clipKey: string): Promise<FrameReader> {
+  /**
+   * The layer's reader for this clip's file, reused while the layer stays on the same file. A
+   * picture is a [StillReader] and anything else a [FrameReader], so a layer that goes from a
+   * video to a picture re-points exactly as it does between two videos.
+   */
+  async reader(layerId: string, clip: ComposeClip): Promise<SourceReader> {
+    const uri = clip.uri;
     const current = this.open.get(layerId);
     if (current && current.uri === uri) return current.reader;
     if (current) this.closeReader(current.reader);
     this.open.delete(layerId);
     try {
-      const reader = await FrameReader.open(uri);
+      const reader = clip.image ? await StillReader.open(uri, this.pictureEdge) : await FrameReader.open(uri);
       this.open.set(layerId, { uri, reader });
       return reader;
     } catch (error) {
-      throw new RenderFailure('unreadable_input', describe(error), clipKey);
+      throw new RenderFailure('unreadable_input', describe(error), clip.key);
     }
   }
 
@@ -383,8 +403,8 @@ class LayerReaders {
     this.open.clear();
   }
 
-  private closeReader(reader: FrameReader): void {
-    this.onClose(reader.video);
+  private closeReader(reader: SourceReader): void {
+    this.onClose(reader.source);
     reader.close();
   }
 }

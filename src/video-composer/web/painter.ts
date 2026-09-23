@@ -388,12 +388,18 @@ export class Painter {
     };
     const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
 
+    // A bitmap cannot change once it is made - it is a picture on the timeline, decoded once - so it
+    // is uploaded the first time it is drawn and never again. Anything else is re-uploaded below.
+    const still = typeof ImageBitmap !== 'undefined' && layer.source instanceof ImageBitmap;
+    const uploaded = still && this.textures.has(layer.source);
     gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, layer.source));
     try {
       // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
       // texture object itself is kept, which is what saves the allocation.
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
+      if (!uploaded) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
     } catch {
+      // Not uploaded after all, so a bitmap must not be taken for one that was on its next frame.
+      if (still) this.textures.delete(layer.source);
       // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
       // canvas: `texImage2D` throws a SecurityError outright. Every source this package loads is
       // same-origin (a blob, or the host's own file scheme), so this is the editor being pointed
@@ -568,6 +574,7 @@ export class Painter {
   private textureFor(gl: WebGL2RenderingContext, source: LayerSource): WebGLTexture {
     const existing = this.textures.get(source);
     if (existing) return existing;
+    if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) this.sweepClosedBitmaps(gl);
     const texture = gl.createTexture();
     if (!texture) throw new Error('the GPU would not allocate a texture for the render');
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -579,6 +586,23 @@ export class Painter {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     this.textures.set(source, texture);
     return texture;
+  }
+
+  /**
+   * Lets go of the texture of every picture that has since been closed.
+   *
+   * A picture on the timeline is a bitmap, and a new one is a new texture; the old one's owner
+   * closes it when it moves on, and nothing else would ever tell the painter. A closed bitmap
+   * reports a size of 0, which is how it is found. Run only when a new bitmap arrives, so it costs a
+   * walk of a few entries per picture change and nothing per frame.
+   */
+  private sweepClosedBitmaps(gl: WebGL2RenderingContext): void {
+    for (const [source, texture] of this.textures) {
+      if (source instanceof ImageBitmap && source.width === 0 && source.height === 0) {
+        gl.deleteTexture(texture);
+        this.textures.delete(source);
+      }
+    }
   }
 }
 

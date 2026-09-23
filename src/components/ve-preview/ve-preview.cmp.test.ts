@@ -2,7 +2,7 @@ import { BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from 'me
 import { afterEach, describe, expect, it, type TestContext } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { defaultClipEdit, emptyManifest, type EditManifest } from '../../editor';
+import { PICTURE_SOURCE_MS, defaultClipEdit, defaultPictureEdit, emptyManifest, type EditManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -1588,4 +1588,136 @@ describe('ve-preview paused right at a join', () => {
     store.pause();
     expect(loads()).toEqual(before);
   }, 20_000);
+});
+
+describe('ve-preview with a picture on the timeline', () => {
+  /*
+   * A picture plays on the same two base elements a video does - see [ClipMedia] - so everything the
+   * player does at a join has to work when one side of it is a still: the cut into it, the clock
+   * running through it with no file to read the time off, and a transition with a picture on one
+   * side. What is asserted is what the customer sees: pixels off the composite.
+   */
+
+  /** A solid-colour picture, as a customer's photo would arrive: a PNG behind a blob URL. */
+  async function makePicture(colour: string): Promise<string> {
+    const canvas = document.createElement('canvas');
+    canvas.width = 120;
+    canvas.height = 160;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = colour;
+    ctx.fillRect(0, 0, 120, 160);
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+    const url = URL.createObjectURL(blob!);
+    revoke.push(url);
+    return url;
+  }
+
+  /** Three seconds of video, then two of a picture - or the picture first, with `pictureFirst`. */
+  async function mountMixed(
+    files: { video: string; picture: string },
+    options: { pictureFirst?: boolean; transition?: string } = {},
+  ): Promise<{ store: EditorStore; preview: HTMLElement }> {
+    const host = resolveEditorHost({});
+    const store = new EditorStore(host);
+    const ctx: EditorContext = { store, media: new EditorMedia(store, host) };
+    const video = defaultClipEdit('clip-v', 3000, 'seg-v');
+    const picture = defaultPictureEdit('clip-p', 'seg-p', 2000);
+    const [first, second] = options.pictureFirst ? [picture, video] : [video, picture];
+    store.load(
+      [
+        { key: 'clip-v', fileName: 'v.mp4', playbackUrl: files.video },
+        { key: 'clip-p', fileName: 'p.png', playbackUrl: files.picture, kind: 'image' },
+      ],
+      new Map([
+        ['clip-v', 3000],
+        ['clip-p', PICTURE_SOURCE_MS],
+      ]),
+      {
+        ...emptyManifest(),
+        originalMuted: true,
+        clips: [first, options.transition ? { ...second, transitionIn: { kind: options.transition, durationMs: 1000 } } : second],
+      },
+    );
+
+    const column = document.createElement('div');
+    column.style.cssText = 'width: 393px; height: 720px';
+    document.body.append(column);
+    const preview = document.createElement('ve-preview');
+    Object.assign(preview, { ctx });
+    column.append(preview);
+    mounted.push({ store, column });
+    await (preview as StencilElement).componentOnReady?.();
+    return { store, preview };
+  }
+
+  it(
+    'shows the picture wherever the playhead is parked in its segment, and the video either side',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { video: await makeSourceVideo('#ff0000', 3), picture: await makePicture('#0000ff') };
+      const { store, preview } = await mountMixed(files);
+      await until('the video to be composited', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+
+      store.seek(4200);
+      await until('the picture to be composited', () => colourAt(preview, 0.5, 0.5) === 'blue', PIXEL_TIMEOUT_MS);
+
+      store.seek(1000);
+      await until('the video to come back', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+    },
+    PIXEL_TIMEOUT_MS * 2,
+  );
+
+  it(
+    'plays from the video into the picture and on through it to the end, on a clock of its own',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { video: await makeMovingVideo('red', 3), picture: await makePicture('#0000ff') };
+      const { store, preview } = await mountMixed(files);
+      await until('the video to be composited', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+      store.seek(2200);
+      await frames(10);
+
+      const watch = sampleFrames(preview, store, files.picture);
+      const started = performance.now();
+      store.play();
+      await until('the post to have played to its end', () => !store.playing.value && store.playheadMs.value >= 4990, 15_000);
+      const took = performance.now() - started;
+      watch.stop();
+      const samples = watch.samples;
+
+      // The picture was on screen through its segment - which runs on the picture's own clock, as
+      // there is no file to read the time off - and the playhead crossed the whole of it.
+      const during = samples.filter(s => s.playheadMs > 3200 && s.playheadMs < 4800);
+      expect(during.length).toBeGreaterThan(10);
+      expect(during.every(s => s.rgb[2] > 150 && s.rgb[0] < 90)).toBe(true);
+      // Red before the cut.
+      expect(samples.filter(s => s.playheadMs > 2300 && s.playheadMs < 2900).every(s => s.rgb[0] > 150)).toBe(true);
+      // In real time: 2.8 s of post, so neither skipped through nor stalled on the still.
+      expect(took).toBeGreaterThan(2400);
+      expect(took).toBeLessThan(6000);
+      expect(store.playheadMs.value).toBe(store.totalMs.value);
+    },
+    40_000,
+  );
+
+  it(
+    'dissolves out of a picture into the video after it',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { video: await makeMovingVideo('red', 3), picture: await makePicture('#0000ff') };
+      // The picture runs 0..2000, and the video comes in over its last second: the window is 1000..2000.
+      const { store, preview } = await mountMixed(files, { pictureFirst: true, transition: 'dissolve' });
+      await until('the picture to be composited', () => colourAt(preview, 0.5, 0.5) === 'blue', PIXEL_TIMEOUT_MS);
+
+      store.seek(1500);
+      await until('both sides of the window to be blended', () => {
+        const [r, , b] = pixelAt(preview, 0.5, 0.5);
+        return r > 60 && b > 60;
+      }, PIXEL_TIMEOUT_MS);
+
+      store.seek(2600);
+      await until('the video alone after the window', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+    },
+    PIXEL_TIMEOUT_MS * 2,
+  );
 });

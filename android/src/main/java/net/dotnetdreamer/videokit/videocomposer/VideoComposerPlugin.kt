@@ -67,6 +67,9 @@ import kotlin.math.min
         // not a smaller grant but one the system never prompts for. Neither is declared in the
         // kit's manifest: see [GalleryLibrary] for why that is the host's to do.
         Permission(alias = VideoComposerPlugin.GALLERY_VIDEO, strings = [Manifest.permission.READ_MEDIA_VIDEO]),
+        // The pictures, for a host that lists them beside the videos. A third name for the same
+        // reason there are two above: Android 13 split pictures from videos as well.
+        Permission(alias = VideoComposerPlugin.GALLERY_IMAGES, strings = [Manifest.permission.READ_MEDIA_IMAGES]),
         Permission(alias = VideoComposerPlugin.GALLERY_STORAGE, strings = [Manifest.permission.READ_EXTERNAL_STORAGE]),
     ],
 )
@@ -167,6 +170,23 @@ class VideoComposerPlugin : Plugin() {
             val tails = spec.clips.mapNotNull { it.transitionIn?.from }
             for (clip in spec.clips + tails + spec.tracks.flatMap { it.clips }) {
                 if (probes.containsKey(clip.uri)) continue
+                // A picture has a header to read rather than a container, and no length or sound of
+                // its own - see [Pictures]. It fails the post here like a video that will not open.
+                if (clip.image) {
+                    val picture = try {
+                        Pictures.probe(appContext, clip.uri)
+                    } catch (e: Exception) {
+                        failJob(job, FailureCodes.UNREADABLE_INPUT, ErrorMapping.describe(e), clipKey = clip.key)
+                        return
+                    }
+                    probes[clip.uri] = ProbedInput(
+                        durationMs = 0L,
+                        hasAudio = false,
+                        hasVideo = true,
+                        imageMimeType = picture.mimeType,
+                    )
+                    continue
+                }
                 val info = try {
                     Thumbnailer.probe(appContext, clip.uri)
                 } catch (e: Exception) {
@@ -838,12 +858,13 @@ class VideoComposerPlugin : Plugin() {
      */
     @PluginMethod
     fun requestGalleryAccess(call: PluginCall) {
-        val alias = galleryAlias()
-        if (getPermissionState(alias) == PermissionState.GRANTED) {
+        val aliases = galleryAliases(images = call.getBoolean("images") ?: false)
+        if (aliases.all { getPermissionState(it) == PermissionState.GRANTED }) {
             answerGalleryAccess(call)
             return
         }
-        requestPermissionForAlias(alias, call, "galleryPermissionCallback")
+        // Asked together, which Android shows as the one "photos and videos" prompt it is.
+        requestPermissionForAliases(aliases, call, "galleryPermissionCallback")
     }
 
     @PermissionCallback
@@ -863,10 +884,11 @@ class VideoComposerPlugin : Plugin() {
         }
         val offset = (call.getInt("offset") ?: 0).coerceAtLeast(0)
         val limit = (call.getInt("limit") ?: DEFAULT_GALLERY_PAGE).coerceIn(1, MAX_GALLERY_PAGE)
+        val images = call.getBoolean("images") ?: false
 
         pluginScope.launch {
             try {
-                val page = GalleryLibrary.list(context.applicationContext, offset, limit)
+                val page = GalleryLibrary.list(context.applicationContext, offset, limit, images)
                 val videos = JSArray()
                 page.videos.forEach { videos.put(galleryVideoJson(it)) }
                 call.resolve(JSObject().put("videos", videos).put("total", page.total))
@@ -927,6 +949,17 @@ class VideoComposerPlugin : Plugin() {
     private fun galleryAlias(): String =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) GALLERY_VIDEO else GALLERY_STORAGE
 
+    /**
+     * Every right a gallery listing needs: the videos', and the pictures' too when the host lists
+     * them. Below Android 13 one storage grant covers both, so there is nothing more to ask for.
+     */
+    private fun galleryAliases(images: Boolean): Array<String> =
+        if (images && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(GALLERY_VIDEO, GALLERY_IMAGES)
+        } else {
+            arrayOf(galleryAlias())
+        }
+
     private fun galleryAccess(): String =
         GalleryLibrary.access(context, getPermissionState(galleryAlias()) == PermissionState.GRANTED)
 
@@ -935,6 +968,7 @@ class VideoComposerPlugin : Plugin() {
             .put("id", video.id)
             .put("fileName", video.fileName)
             .put("durationMs", video.durationMs)
+            .put("kind", if (video.image) "image" else "video")
 
     /* ======================================================================================== */
     /* Voice recording                                                                           */
@@ -1199,6 +1233,7 @@ class VideoComposerPlugin : Plugin() {
         const val MICROPHONE = "microphone"
         const val STORAGE = "storage"
         const val GALLERY_VIDEO = "galleryVideo"
+        const val GALLERY_IMAGES = "galleryImages"
         const val GALLERY_STORAGE = "galleryStorage"
 
         /** A gallery page, when the host does not say. Two phone screens of a four-column grid. */

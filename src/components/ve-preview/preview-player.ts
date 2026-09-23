@@ -15,6 +15,7 @@ import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
+import type { ClipMedia } from './clip-media';
 import { FollowerVideo, type FollowerMedia } from './follower-video';
 import type { BaseShot } from './preview-canvas';
 import {
@@ -133,9 +134,9 @@ let lastVideoLeadMs = DEFAULT_VIDEO_LEAD_MS;
 
 export interface PreviewMedia {
   /** The base track's first element. It starts as the clock. */
-  video: HTMLVideoElement;
+  video: ClipMedia;
   /** The base track's second element: the spare. See [PreviewPlayer] for what the two are for. */
-  partner: HTMLVideoElement;
+  partner: ClipMedia;
   music: HTMLAudioElement;
   voice: HTMLAudioElement;
   /**
@@ -178,7 +179,7 @@ class BaseDeck {
   putTimer: ReturnType<typeof setTimeout> | null = null;
   posterIsBlank = true;
 
-  constructor(readonly video: HTMLVideoElement) {}
+  constructor(readonly video: ClipMedia) {}
 }
 
 /**
@@ -274,9 +275,9 @@ export class PreviewPlayer implements EditorPlayer {
   /** How long each element's clock stands still after a start and after a seek, as last measured. */
   private readonly audioLeadMs = new Map<HTMLAudioElement, Partial<Record<AudioPut, number>>>();
   /** Base elements started from a standing frame and not yet measured; see [DEFAULT_VIDEO_LEAD_MS]. */
-  private readonly starts = new Map<HTMLVideoElement, { putAtMs: number; wallMs: number; rate: number }>();
+  private readonly starts = new Map<ClipMedia, { putAtMs: number; wallMs: number; rate: number }>();
   /** How long each base element's clock stands still after `play()`, as last measured. */
-  private readonly videoLeadMs = new Map<HTMLVideoElement, number>();
+  private readonly videoLeadMs = new Map<ClipMedia, number>();
 
   private destroyed = false;
   private readonly unlisten: Array<() => void> = [];
@@ -311,7 +312,7 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   /** The clock's element, whose events are the transport's. */
-  private get video(): HTMLVideoElement {
+  private get video(): ClipMedia {
     return this.active.video;
   }
 
@@ -323,7 +324,7 @@ export class PreviewPlayer implements EditorPlayer {
    * The base element showing the clip under the playhead: the one whose picture's shape the crop
    * tool measures against.
    */
-  get baseVideo(): HTMLVideoElement {
+  get baseVideo(): ClipMedia {
     return this.active.video;
   }
 
@@ -541,7 +542,7 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   /** The element, when it has a frame of `clipKey` to give. */
-  private presentable(deck: BaseDeck | null, clipKey: string): HTMLVideoElement | null {
+  private presentable(deck: BaseDeck | null, clipKey: string): ClipMedia | null {
     if (!deck || deck.key !== clipKey || deck.failed) return null;
     const video = deck.video;
     if (video.readyState < HAVE_CURRENT_DATA || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return null;
@@ -736,13 +737,20 @@ export class PreviewPlayer implements EditorPlayer {
     if (!underway) this.point(deck, clip, sourceMsAt(slot, ms));
   }
 
-  /** Points one base element at a source, from nothing: whatever it had loaded is gone with this. */
+  /**
+   * Points one base element at a source, from nothing: whatever it had loaded is gone with this.
+   *
+   * A picture puts the slot's picture in the element's place first (see [ClipMedia]), which is the
+   * only thing about a picture this player ever has to know: from here on it is seeked, started,
+   * swapped and read like any clip.
+   */
   private point(deck: BaseDeck, source: EditorSource, sourceMs: number): void {
     this.clearPut(deck);
     this.starts.delete(deck.video);
     deck.key = source.key;
     deck.hasMeta = false;
     deck.failed = false;
+    deck.video.showPicture(this.store.isPictureKey(source.key));
     // The poster first, for where the element is going; see [FollowerVideo.load].
     this.setPoster(deck, source, sourceMs);
     deck.video.src = previewSrc(this.store, source);
@@ -753,7 +761,7 @@ export class PreviewPlayer implements EditorPlayer {
     const video = this.video;
     video.playbackRate = slot.clip.speed || 1;
     // Some WebViews reset pitch correction on every source change, so it is set each time.
-    (video as HTMLVideoElement & { preservesPitch?: boolean }).preservesPitch = true;
+    video.preservesPitch = true;
     this.applyVideoAudio(slot.clip, ms);
 
     const sourceSec = sourceMsAt(slot, ms) / 1000;
@@ -937,7 +945,7 @@ export class PreviewPlayer implements EditorPlayer {
     const video = deck.video;
     const speed = clip.speed || 1;
     if (video.playbackRate !== speed) video.playbackRate = speed;
-    (video as HTMLVideoElement & { preservesPitch?: boolean }).preservesPitch = true;
+    video.preservesPitch = true;
     if (deck.role === 'next') {
       // Not heard until it is the clock; see [preroll].
       if (!video.muted) video.muted = true;
@@ -1099,9 +1107,11 @@ export class PreviewPlayer implements EditorPlayer {
    * standing start on a frame that is there: a start that still has a load or a seek to finish is
    * waiting on those, and that wait would be learned as the element's stall.
    */
-  private startVideo(video: HTMLVideoElement): void {
+  private startVideo(video: ClipMedia): void {
     if (!video.paused) return;
-    if (video.readyState >= HAVE_FUTURE_DATA && !video.seeking) {
+    // A picture starts the instant it is asked to, so there is no stall to measure - and one
+    // measured as zero would teach this slot's NEXT video to start late.
+    if (!video.isPicture && video.readyState >= HAVE_FUTURE_DATA && !video.seeking) {
       this.starts.set(video, { putAtMs: video.currentTime * 1000, wallMs: performance.now(), rate: video.playbackRate || 1 });
     } else {
       this.starts.delete(video);
@@ -1130,7 +1140,10 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   /** How far ahead of a boundary this element has to be started to be moving at it. */
-  private leadFor(video: HTMLVideoElement): number {
+  private leadFor(video: ClipMedia): number {
+    // No stall, so no early start: a picture started ahead of its cut would reach the cut already
+    // that far into its segment, and end that much early.
+    if (video.isPicture) return 0;
     return clamp(this.videoLeadMs.get(video) ?? lastVideoLeadMs, 0, MAX_START_LEAD_MS);
   }
 
@@ -1632,7 +1645,7 @@ export class PreviewPlayer implements EditorPlayer {
  * An element's mute and volume, each written only when it has moved: a crossfade writes these on
  * every frame of a transition, and a WebView may do real work for a write that changes nothing.
  */
-function setSound(video: HTMLVideoElement, muted: boolean, volume: number): void {
+function setSound(video: ClipMedia, muted: boolean, volume: number): void {
   if (video.muted !== muted) video.muted = muted;
   const level = clamp(Number.isFinite(volume) ? volume : 0, 0, 1);
   if (video.volume !== level) video.volume = level;

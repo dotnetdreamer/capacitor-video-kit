@@ -204,6 +204,46 @@ describe('ve-toolbar on a desktop', () => {
 });
 
 describe('ve-toolbar', () => {
+  it('calls the tool that cuts a segment in two Cut, on the clip row and the layer row', async () => {
+    const { store, bar } = await mount();
+
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the clip row', () => label(bar) === 'Clip tools');
+    expect(tile(bar, 'split').textContent?.trim()).toBe('Cut');
+
+    store.select({ kind: 'overlay', id: 'ov-text' });
+    await until('the text layer row', () => label(bar) === 'Text layer tools');
+    expect(tile(bar, 'split').textContent?.trim()).toBe('Cut');
+  });
+
+  it('gives a picture no Speed and no Volume, on the base track and on a layer', async () => {
+    const { store, bar } = await mount();
+    const still = { image: true as const, inMs: 1_800_000, outMs: 1_803_000 };
+    store.commit('Pictures', m => ({
+      ...m,
+      clips: [m.clips[0], { ...m.clips[1], ...still }],
+      videoTracks: m.videoTracks.map(t => ({ ...t, clips: t.clips.map(c => ({ ...c, ...still })) })),
+    }));
+
+    store.select({ kind: 'clip', id: 'seg-b' });
+    await until('the clip row', () => label(bar) === 'Clip tools');
+    expect(ids(bar)).not.toContain('speed');
+    expect(ids(bar)).not.toContain('volume');
+    // Everything else a segment has, a picture has.
+    for (const id of ['split', 'transition', 'delete', 'duplicate', 'replace', 'crop', 'fit', 'filters', 'adjust']) {
+      expect(ids(bar)).toContain(id);
+    }
+
+    // A video beside it keeps both.
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the video row', () => ids(bar).includes('speed'));
+    expect(ids(bar)).toContain('volume');
+
+    store.select({ kind: 'clip', id: 'seg-c' });
+    await until('the video layer row', () => label(bar) === 'Video layer tools');
+    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'start-here', 'replace', 'delete']);
+  });
+
   it('shows the tools for whatever is selected, and a way back out of them', async () => {
     const { store, bar } = await mount();
 

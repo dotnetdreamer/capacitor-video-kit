@@ -97,6 +97,12 @@ class RenderPlan private constructor(
          * frame, and leaving it on would place the picture inside the layer a second time.
          */
         val frame: Output,
+        /**
+         * The type a PICTURE's bytes decode as, from its probe, so the builder can tell Media3 what
+         * the item is rather than leave it to guess from a name that may have no extension. Null for
+         * a video, and for a picture no probe was made for.
+         */
+        val imageMimeType: String? = null,
     )
 
     /**
@@ -441,6 +447,7 @@ class RenderPlan private constructor(
                 reframed = clip.crop != null || clip.rect != null,
                 rotationGlDeg = rotationGlDegOf(clip.rect),
                 frame = frame,
+                imageMimeType = if (clip.image) probe?.imageMimeType else null,
             )
         }
 

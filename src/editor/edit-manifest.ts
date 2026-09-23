@@ -15,7 +15,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 8;
+export const MANIFEST_VERSION = 9;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -125,6 +125,21 @@ export interface EditClip {
    * transition back as it was.
    */
   transitionIn?: EditTransition;
+  /**
+   * The source is a PICTURE rather than a video: one still frame, held for as long as the segment
+   * runs. Absent is a video, which is every segment of every manifest written before version 9.
+   *
+   * A picture has no length of its own, so it is given a source [PICTURE_SOURCE_MS] long and its
+   * segment starts in the MIDDLE of it (see [defaultPictureEdit]). That is what lets it be trimmed,
+   * cut, joined and duplicated by the very ops a video segment is, with no op learning a second kind
+   * of clip: both handles have room to pull the picture longer, and a cut leaves two halves that meet
+   * exactly, which is what Join asks of them. The numbers are otherwise meaningless - every engine
+   * reads a picture's length off `outMs - inMs` and nothing else.
+   *
+   * A picture plays at 1x and has no sound. [normaliseManifest] and [setClipSpeed] hold the first,
+   * and [toComposeSpec] mutes it on the wire.
+   */
+  image?: true;
 }
 
 /** A transition between two base clips: which one, and how long the customer asked for it to run. */
@@ -1149,6 +1164,40 @@ export function defaultClipEdit(clipKey: string, durationMs: number, id: string 
   };
 }
 
+/**
+ * How long a picture is held when it lands on the timeline. Three seconds is what every phone
+ * editor gives a photo: long enough to be seen, short enough that a run of them reads as a
+ * slideshow rather than a wait.
+ */
+export const PICTURE_CLIP_MS = 3000;
+
+/**
+ * The "source" a picture is given, which is how far either of its handles can be pulled.
+ *
+ * Twice the longest post, with the segment starting in the middle of it, so that a picture can be
+ * pulled out to the length of a whole post from EITHER end and no trim ever meets the source's own
+ * edge. A picture's segment is placed there rather than at 0 because the left handle of a segment
+ * at 0 can only ever shorten it, and a customer pulling a photo's left edge expects it to grow.
+ */
+export const PICTURE_SOURCE_MS = 2 * MAX_POST_MS;
+
+/** Where a picture's segment starts in its source: the middle, so both handles have room. */
+const PICTURE_IN_MS = MAX_POST_MS;
+
+/** A picture segment running `lengthMs`, trimmed out of the middle of its source. */
+export function defaultPictureEdit(clipKey: string, id: string = clipKey, lengthMs: number = PICTURE_CLIP_MS): EditClip {
+  return {
+    id,
+    clipKey,
+    inMs: PICTURE_IN_MS,
+    outMs: PICTURE_IN_MS + Math.max(MIN_CLIP_MS, Math.round(lengthMs)),
+    speed: 1,
+    volume: 1,
+    muted: false,
+    image: true,
+  };
+}
+
 export function emptyManifest(): EditManifest {
   return {
     version: MANIFEST_VERSION,
@@ -1204,6 +1253,10 @@ export function emptyManifest(): EditManifest {
  * Version 7 to version 8 adds transitions between base clips, and nothing is written into an older
  * manifest for them: a version-7 manifest simply has no `transitionIn` on any clip, and absent is a
  * cut, which is all a boundary could be before.
+ *
+ * Version 8 to version 9 adds pictures on the timeline, and again nothing is written into an older
+ * manifest: a version-8 manifest has no `image` on any segment, and absent is a video, which is all
+ * a segment could be before.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1344,11 +1397,14 @@ export function normaliseManifest(input: unknown): EditManifest {
  *
  * @param clipKeys the host's clips, in their own order.
  * @param durations source duration per clip key, for trimming new clips to their full length.
+ * @param pictures the keys among `clipKeys` whose source is a picture, which arrive as a picture
+ *   segment of [PICTURE_CLIP_MS] rather than a video trimmed to its whole length.
  */
 export function reconcileManifest(
   manifest: EditManifest | undefined,
   clipKeys: string[],
   durations: ReadonlyMap<string, number>,
+  pictures: ReadonlySet<string> = new Set(),
 ): EditManifest {
   const current = manifest ? normaliseManifest(manifest) : emptyManifest();
   const known = new Set(clipKeys);
@@ -1382,7 +1438,7 @@ export function reconcileManifest(
       let id = key;
       while (usedIds.has(id)) id = `${id}~`;
       usedIds.add(id);
-      return defaultClipEdit(key, durations.get(key) ?? 0, id);
+      return pictures.has(key) ? defaultPictureEdit(key, id) : defaultClipEdit(key, durations.get(key) ?? 0, id);
     });
 
   return { ...current, clips: withoutLeadingTransition([...kept, ...added]), videoTracks };
@@ -1475,6 +1531,9 @@ export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips' | 'videoTrac
  */
 export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<string, number>, sourceAspect = 0): boolean {
   if (manifest.clips.length !== 1) return false;
+  // A picture is not a video, however little was done to it: there is no file on disk to post
+  // instead, only the render that turns the still into one.
+  if (manifest.clips[0].image) return false;
   // A frame that is not this package's own is a render by itself. Posting the file on disk instead
   // would hand back the shape and the size THAT happens to be, which is the one thing a customer
   // who chose a frame said it was not.
@@ -1578,6 +1637,12 @@ function readClips(value: unknown, usedIds: Set<string>, base: boolean): EditCli
     if (fit) clip.fit = fit;
     const transition = base && index > 0 ? normaliseTransition(c?.transitionIn) : null;
     if (transition) clip.transitionIn = transition;
+    // A picture plays at 1x whatever was stored: a still sped up is only a shorter still, and a
+    // speed on one would be a length nobody can see the source of.
+    if (c?.image === true) {
+      clip.image = true;
+      clip.speed = 1;
+    }
     return clip;
   });
 }

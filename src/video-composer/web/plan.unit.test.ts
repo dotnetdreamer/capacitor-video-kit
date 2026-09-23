@@ -89,6 +89,30 @@ describe('buildPlan', () => {
   });
 });
 
+describe('pictures', () => {
+  // What `probePicture` answers: a size, and no length or sound of its own.
+  const still = probed({ durationMs: 0, width: 4000, height: 3000, hasAudio: false });
+
+  it('plans a picture at its whole trim, never clamped to a length it does not have', () => {
+    const plan = buildPlan(
+      spec({ clips: [clip(), clip({ key: 'p', uri: 'blob:photo', inMs: 0, outMs: 45_000, muted: true, image: true })] }),
+      new Map([
+        ['file:///a.mp4', probed()],
+        ['blob:photo', still],
+      ]),
+    );
+    expect(plan.clips[1].outDurUs).toBe(45_000_000);
+    expect(plan.prefixOutUs[1]).toBe(1_000_000);
+    expect(plan.totalUs).toBe(46_000_000);
+    expect(plan.clips[1].removeAudio).toBe(true);
+  });
+
+  it('has no sound to mix in a post of pictures alone', () => {
+    const plan = buildPlan(spec({ clips: [clip({ uri: 'blob:photo', muted: true, image: true })] }), new Map([['blob:photo', still]]));
+    expect(plan.hasAudio).toBe(false);
+  });
+});
+
 describe('extra video layers', () => {
   it('sorts bottom to top and keeps the spec order for a tie', () => {
     const plan = buildPlan(

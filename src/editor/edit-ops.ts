@@ -8,8 +8,10 @@ import {
   MIN_LAYER_MS,
   MIN_SCALE,
   MIN_SPEED,
+  PICTURE_CLIP_MS,
   clamp,
   contentDurationMs,
+  defaultPictureEdit,
   isFullFrameRect,
   normalisePlacement,
   normaliseRect,
@@ -170,7 +172,8 @@ export function trackIdOfClip(manifest: EditManifest, clipId: string): string | 
 export function patchClip(
   manifest: EditManifest,
   clipId: string,
-  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn'>> & ClipFramingPatch & { transitionIn?: EditTransition | null },
+  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image'>> &
+    ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null },
 ): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
@@ -179,6 +182,8 @@ export function patchClip(
     if (patch.transitionIn) next.transitionIn = { kind: patch.transitionIn.kind, durationMs: patch.transitionIn.durationMs };
     else delete next.transitionIn;
   }
+  // The key goes rather than being left as `null`: a video segment carries no `image` at all.
+  if ('image' in patch && !patch.image) delete next.image;
   if (sameClip(current, next)) return manifest;
   if (manifest.clips.some(clip => clip.id === clipId)) {
     return { ...manifest, clips: manifest.clips.map(clip => (clip.id === clipId ? next : clip)) };
@@ -191,7 +196,9 @@ export function patchClip(
   };
 }
 
+/** A picture keeps 1x: a still sped up is only a shorter still, which is what trimming it is for. */
 export function setClipSpeed(manifest: EditManifest, clipId: string, speed: number): EditManifest {
+  if (findClip(manifest, clipId)?.image) return manifest;
   return patchClip(manifest, clipId, { speed: Math.round(clamp(speed, MIN_SPEED, MAX_SPEED) * 100) / 100 });
 }
 
@@ -420,8 +427,28 @@ function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip
  * Either way the trim starts at 0: there is no offset into a file nobody has seen worth guessing. A
  * new source SHORTER than the hole gives up what is not there rather than the segment claiming
  * frames the file does not have.
+ *
+ * `picture` says the new source is a still. It lands as a picture segment (see
+ * [EditClip.image]): the length it plays for on the OUTPUT timeline is kept when `keepLength` is,
+ * because a picture has no speed to hold that length in source time, and is [PICTURE_CLIP_MS]
+ * otherwise, because a still has no whole length to take. A video replacing a picture takes the
+ * picture's length the same way it takes any segment's, and stops being one.
  */
-export function replaceClipSource(manifest: EditManifest, clipId: string, clipKey: string, sourceDurationMs: number, keepLength = true): EditManifest {
+export function replaceClipSource(
+  manifest: EditManifest,
+  clipId: string,
+  clipKey: string,
+  sourceDurationMs: number,
+  keepLength = true,
+  picture = false,
+): EditManifest {
+  if (picture) {
+    const found = findClip(manifest, clipId);
+    if (!found) return manifest;
+    const window = defaultPictureEdit(clipKey, clipId, keepLength ? clipDurationMs(found) : PICTURE_CLIP_MS);
+    return patchClip(manifest, clipId, { clipKey, inMs: window.inMs, outMs: window.outMs, speed: 1, image: true });
+  }
+
   const current = keepLength ? findClip(manifest, clipId) : null;
   const wanted = current ? current.outMs - current.inMs : sourceDurationMs;
 
@@ -429,6 +456,7 @@ export function replaceClipSource(manifest: EditManifest, clipId: string, clipKe
     clipKey,
     inMs: 0,
     outMs: Math.max(MIN_CLIP_MS, Math.round(Math.min(wanted, sourceDurationMs))),
+    image: null,
   });
 }
 
@@ -1123,7 +1151,8 @@ function sameClip(a: EditClip, b: EditClip): boolean {
     a.fit === b.fit &&
     sameRect(a.crop, b.crop) &&
     sameRect(a.rect, b.rect) &&
-    sameTransition(a.transitionIn, b.transitionIn)
+    sameTransition(a.transitionIn, b.transitionIn) &&
+    !!a.image === !!b.image
   );
 }
 

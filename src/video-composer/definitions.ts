@@ -121,6 +121,21 @@ export interface ComposeClip {
    * every clip of a [ComposeTrack].
    */
   transitionIn?: ComposeTransition;
+  /**
+   * `uri` is a PICTURE (JPEG, PNG, WebP, HEIC where the platform decodes it), not a video. Absent
+   * is a video, which is every spec written before this field.
+   *
+   * A picture is one frame held for `outMs - inMs` of output time, oriented by its EXIF data like
+   * any photo. It has no sound and no speed: an engine renders it silent at 1x whatever `muted`,
+   * `volume` and `speed` say, and never clamps its trim against a probed duration, because a still
+   * has none. `toComposeSpec` sends one with `inMs` of 0, speed 1 and `muted` set, so an engine that
+   * reads those fields as it would for a video gets the same answer. Crop, fit, `rect` and
+   * transitions apply to it exactly as they do to a video frame.
+   *
+   * Supported by the web and Android engines. iOS does not render pictures yet and fails such a
+   * spec with `unreadable_input`, naming the clip.
+   */
+  image?: boolean;
 }
 
 /**
@@ -597,14 +612,31 @@ export interface GalleryAccessResult {
   access: GalleryAccess;
 }
 
+export interface GalleryAccessOptions {
+  /**
+   * Ask to read the device's PICTURES as well as its videos, for a host that lists both (see
+   * [ListGalleryVideosOptions.images]). On Android 13 and later that is a second permission,
+   * `READ_MEDIA_IMAGES`, which the host declares beside `READ_MEDIA_VIDEO`; the two are asked for
+   * together, in one prompt. Defaults to false. iOS's photo library grant already covers both.
+   */
+  images?: boolean;
+}
+
 export interface ListGalleryVideosOptions {
   /** How many of the newest to skip. Defaults to 0. */
   offset?: number;
   /** How many to answer with. Defaults to 60, and never more than 500. */
   limit?: number;
+  /**
+   * List the device's pictures among its videos, newest first together, each one marked with
+   * [GalleryVideo.kind]. Defaults to false, which is the video library alone.
+   *
+   * Android only for now; iOS answers with its videos whatever this says.
+   */
+  images?: boolean;
 }
 
-/** One video in the device's own library. */
+/** One video - or picture, when they were asked for - in the device's own library. */
 export interface GalleryVideo {
   /**
    * The library's handle on it, for [galleryThumbnail] and [resolveGalleryVideo] and nothing else:
@@ -614,8 +646,10 @@ export interface GalleryVideo {
   id: string;
   /** What the gallery calls it, extension included. Empty when the platform keeps no name. */
   fileName: string;
-  /** 0 when the library has not measured it yet; `probe` always can. */
+  /** 0 when the library has not measured it yet; `probe` always can. Always 0 for a picture. */
   durationMs: number;
+  /** A picture rather than a video. Absent is a video, which is every item of a video-only list. */
+  kind?: 'video' | 'image';
 }
 
 export interface ListGalleryVideosResult {

@@ -45,6 +45,25 @@ export interface EditorEditingOptions {
    * and holding onto it only throws footage away.
    */
   replaceKeepsLength?: boolean;
+
+  /**
+   * Whether a PICTURE can go on the timeline beside the videos. Defaults to FALSE.
+   *
+   * On, every way a clip gets onto the timeline - Add clip, a second video layer, Replace - offers
+   * pictures as well as videos, through [EditorMediaHost.pickMedia]. A picture lands three seconds
+   * long and is then a segment like any other: trimmed from either end, cut, joined, duplicated,
+   * reordered, framed, dressed with a transition. It has no speed and no sound, so it has no Speed
+   * or Volume tool.
+   *
+   * Off is what every host got before pictures existed, and it is still the right answer for an
+   * app whose posts are footage and nothing else. It governs what the pickers OFFER: a manifest
+   * that already holds a picture, or a `sources` list with one in it, is still edited and rendered
+   * as one.
+   *
+   * The render has to be able to draw one too. The package's web and Android engines can; its iOS
+   * engine cannot yet, so an iOS host should leave this off.
+   */
+  pictures?: boolean;
 }
 
 /**
@@ -96,6 +115,12 @@ export interface EditorSource {
   sourcePath?: string;
   /** Poster frame, in whatever form `platform.fileUrl` can turn into a loadable URL. */
   thumbnailUrl?: string;
+  /**
+   * What the file is. Absent is a video, which is every source a host handed over before pictures
+   * could go on the timeline; `image` is a still, which the editor holds for as long as its segment
+   * runs rather than playing. See [EditorEditingOptions.pictures].
+   */
+  kind?: 'video' | 'image';
 }
 
 /**
@@ -106,6 +131,17 @@ export interface EditorSource {
  */
 export interface EditorMediaHost {
   pickVideo(): Promise<EditorSource | null>;
+  /**
+   * A video OR a picture, for a clip on the timeline, when the host lets pictures on there (see
+   * [EditorEditingOptions.pictures]). A picture comes back with `kind: 'image'`, and a source with
+   * no `kind` is taken to be a video.
+   *
+   * Optional: a host that allows pictures and leaves this out has its clip pickers fall back to
+   * `pickVideo`, which offers videos only. The browser default offers both.
+   *
+   * Not the Overlay tool's picker: a photo laid OVER the video as a layer is still `pickImage`.
+   */
+  pickMedia?(): Promise<EditorSource | null>;
   pickImage(): Promise<PickedImage | null>;
   pickAudio(): Promise<PickedAudio | null>;
 
@@ -441,6 +477,7 @@ export interface ResolvedEditorHost {
 
 export interface ResolvedEditingOptions {
   replaceKeepsLength: boolean;
+  pictures: boolean;
 }
 
 export interface ResolvedOutputOptions {

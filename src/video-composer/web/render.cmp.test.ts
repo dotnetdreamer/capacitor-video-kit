@@ -302,6 +302,89 @@ async function pixelOfVideo(url: string, seconds: number, x: number, y: number):
   }
 }
 
+/** A solid-colour PNG, as a picture a customer might put on the timeline. */
+async function makePicture(colour: string, width = 90, height = 120): Promise<Blob> {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('no canvas');
+  ctx.fillStyle = colour;
+  ctx.fillRect(0, 0, width, height);
+  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) throw new Error('no picture');
+  return blob;
+}
+
+describe('a picture on the timeline, end to end', () => {
+  it(
+    'holds the picture for its segment between two moments of video, and runs the whole post',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const green = URL.createObjectURL(await makeSourceVideo('#0f0'));
+      const blue = URL.createObjectURL(await makePicture('#00f'));
+      try {
+        // Half a second of green video, then a second of the blue picture - sent as `toComposeSpec`
+        // sends one: from 0, silent, at 1x. Filled, so the frame is the picture's edge to edge.
+        const video: ComposeClip = { key: 'v', uri: green, inMs: 0, outMs: 500, speed: 1, volume: 1, muted: false, fit: 'cover' };
+        const picture: ComposeClip = { key: 'p', uri: blue, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: true, fit: 'cover', image: true };
+        const outcome = await renderSpec(spec(green, { jobId: 'job-picture', clips: [video, picture] }), {
+          signal: new AbortController().signal,
+          onProgress: () => undefined,
+        });
+
+        // The picture's length is its own, never clamped against a probed one it does not have.
+        expect(outcome.durationMs).toBe(1500);
+
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const onVideo = await pixelOfVideo(url, 0.25, 80, 142);
+          const onPicture = await pixelOfVideo(url, 1.0, 80, 142);
+          expect(onVideo).not.toBeNull();
+          expect(onPicture).not.toBeNull();
+          // Green, then blue: the picture is drawn where its segment is and nowhere else.
+          expect(onVideo![1]).toBeGreaterThan(150);
+          expect(onVideo![2]).toBeLessThan(90);
+          expect(onPicture![2]).toBeGreaterThan(150);
+          expect(onPicture![1]).toBeLessThan(90);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } finally {
+        URL.revokeObjectURL(green);
+        URL.revokeObjectURL(blue);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'fails naming the clip when a picture will not decode, as a video that will not open does',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+
+      const broken = URL.createObjectURL(new Blob(['not a picture'], { type: 'image/png' }));
+      try {
+        const picture: ComposeClip = { key: 'p', uri: broken, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: true, fit: 'cover', image: true };
+        await expect(
+          renderSpec(spec(broken, { jobId: 'job-broken-picture', clips: [picture] }), {
+            signal: new AbortController().signal,
+            onProgress: () => undefined,
+          }),
+        ).rejects.toMatchObject({ code: 'unreadable_input', clipKey: 'p' });
+      } finally {
+        URL.revokeObjectURL(broken);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});
+
 describe('a transition, end to end', () => {
   it(
     'dissolves one clip into the next in the finished file, and runs the lowered length',

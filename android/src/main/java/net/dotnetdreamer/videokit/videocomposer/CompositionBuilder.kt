@@ -34,6 +34,7 @@ import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import com.google.common.collect.ImmutableList
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
 
 /**
  * Turns a [RenderPlan] into the Media3 objects that actually do the work.
@@ -433,7 +434,7 @@ object CompositionBuilder {
         silentUs: Long = 0L,
     ): EditedMediaItem {
         val clip = planned.clip
-        val mediaItem = MediaItem.Builder()
+        val mediaItem = if (clip.image) pictureItem(planned) else MediaItem.Builder()
             .setUri(Uri.parse(clip.uri))
             .setClippingConfiguration(
                 MediaItem.ClippingConfiguration.Builder()
@@ -525,7 +526,12 @@ object CompositionBuilder {
             .setFrameRate(output.fps)
             .setEffects(Effects(audioProcessors, videoEffects))
 
-        if (clip.speed != 1f) {
+        if (clip.image) {
+            // A picture's length to the microsecond, which is the resolution the plan and the gates
+            // count in - see [pictureItem] for why the item's own millisecond one is not enough. For
+            // an image the frame rate above is not a ceiling but the rate the still is emitted at.
+            builder.setDurationUs(pictureDurationUs(planned))
+        } else if (clip.speed != 1f) {
             // Transformer inserts the speed change as the first video effect and first audio
             // processor of the item, so our gain runs on post-speed audio and the geometry on
             // post-speed frames. Passing a SpeedChangeEffect alongside this throws, so none is.
@@ -533,6 +539,34 @@ object CompositionBuilder {
         }
         return builder.build()
     }
+
+    /**
+     * A picture as a Media3 image item: no clipping, no speed, one frame held for its length.
+     *
+     * Media3 takes an item for an image when its MIME type is one - read off the item, or guessed
+     * from the content resolver or the file's extension - AND it has an image duration. The type is
+     * set from the probe, which read it off the picture's own bytes, so a render input copied with no
+     * extension is still a picture. The duration here is whole milliseconds because that is all
+     * `setImageDurationMs` takes; it only has to be set for Media3 to treat the item as an image,
+     * and [editedClip] then overrides it with the exact length in microseconds. The plan's cuts - a
+     * layer cut to the room left, a transition tail's lead - land on any microsecond, and an item a
+     * fraction of a millisecond short of its placement lets the gap behind it through, which is an
+     * opaque black frame the alpha gate still calls visible.
+     *
+     * The frame comes out upright: Media3's bitmap loader applies the EXIF rotation, and caps the
+     * decode at the largest texture it can upload.
+     */
+    private fun pictureItem(planned: RenderPlan.PlannedClip): MediaItem {
+        val builder = MediaItem.Builder()
+            .setUri(Uri.parse(planned.clip.uri))
+            .setImageDurationMs(max(1L, (pictureDurationUs(planned) + 999L) / 1000L))
+        planned.imageMimeType?.let { builder.setMimeType(it) }
+        return builder.build()
+    }
+
+    /** How long a picture item runs: its whole trim, which the parser has already put at 1x. */
+    private fun pictureDurationUs(planned: RenderPlan.PlannedClip): Long =
+        max(1L, planned.outUs - planned.inUs)
 
     /**
      * Music as explicit repetitions rather than a looping sequence: looping repeats the whole

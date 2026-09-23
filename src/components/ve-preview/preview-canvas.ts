@@ -2,9 +2,10 @@ import { compileTransition, lookAt, transitionPreset, type CompiledTransition } 
 import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
 import { pictureDest } from '../../video-composer/web/geometry';
-import { Painter, WHOLE_FRAME, type LayerDraw, type TransitionDraw } from '../../video-composer/web/painter';
+import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from '../../video-composer/web/painter';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorStore } from '../../state/editor-store';
+import { ClipMedia } from './clip-media';
 
 /**
  * The preview's picture: every video layer composited into ONE canvas by the browser renderer's own
@@ -66,9 +67,15 @@ const WARM_AFTER_PLAY_MS = 250;
 /** The most transitions warmed in one frame, so a post dressed with a dozen kinds does not stall one frame by all of them. */
 const WARM_PER_FRAME = 3;
 
+/**
+ * What a layer is drawn from: the slot a track plays on (see [ClipMedia]), which is its `<video>`
+ * element or a picture. A bare element is taken too, which is what the unit tests hand over.
+ */
+export type PreviewSource = ClipMedia | HTMLVideoElement;
+
 /** What one video track contributes: the element the compositor draws it from. */
 interface Source {
-  video: HTMLVideoElement;
+  video: PreviewSource;
 }
 
 /**
@@ -86,7 +93,7 @@ export interface BaseShot {
   /** The base clip under the playhead - inside a transition, the INCOMING one - as a layer. */
   layer: PreviewVideoLayer;
   /** The element showing it, or null while that element has no frame to give. */
-  video: HTMLVideoElement | null;
+  video: PreviewSource | null;
   /** Its element could not load the clip, so there is nothing worth waiting for. */
   lost: boolean;
   transition: BaseTransitionShot | null;
@@ -97,7 +104,7 @@ export interface BaseTransitionShot {
   /** The outgoing clip's tail, framed exactly as a base layer is: its own fit, crop, rectangle and angle. */
   layer: PreviewVideoLayer;
   /** The element playing the tail, or null while it has no frame to give. */
-  video: HTMLVideoElement | null;
+  video: PreviewSource | null;
   /** Its element could not load the clip, so there is nothing worth waiting for. */
   lost: boolean;
   /** 0..1 through the transition, read off the clock element at this instant. */
@@ -123,14 +130,14 @@ export class PreviewCanvas {
    * was handed a single element instead, which is what the unit tests build.
    */
   private readonly sources = new Map<string | null, Source>();
-  private readonly listeners = new Map<HTMLVideoElement, () => void>();
+  private readonly listeners = new Map<PreviewSource, () => void>();
   /**
    * Where the base track is read from: the player's [BaseShot], a whole reading at a time. Its two
    * elements are listened to like any other source, because a seek landing on either one is a frame
    * that has changed with nothing in the store moving.
    */
   private baseFeed: (() => BaseShot | null) | null = null;
-  private baseElements: HTMLVideoElement[] = [];
+  private baseElements: PreviewSource[] = [];
 
   private rafId = 0;
   private pending = false;
@@ -161,7 +168,7 @@ export class PreviewCanvas {
    * attached. Nothing happens for an element that is already the one attached, which is what makes
    * it safe to call from every render.
    */
-  attach(trackId: string | null, video: HTMLVideoElement | null): void {
+  attach(trackId: string | null, video: PreviewSource | null): void {
     const current = this.sources.get(trackId);
     if (current?.video === video) return;
     if (current) this.release(current.video);
@@ -180,7 +187,7 @@ export class PreviewCanvas {
    * name, which are listened to exactly as a track's element is. Once, from the component's set-up;
    * the elements live as long as the component does.
    */
-  attachBase(feed: () => BaseShot | null, elements: readonly HTMLVideoElement[]): void {
+  attachBase(feed: () => BaseShot | null, elements: readonly PreviewSource[]): void {
     for (const video of this.baseElements) this.release(video);
     this.baseFeed = feed;
     this.baseElements = [...elements];
@@ -193,7 +200,7 @@ export class PreviewCanvas {
    * moving: a source landing, a seek settling, a decoder waking up. While playing the frame loop is
    * already drawing, and a redraw asked for twice in a frame only happens once.
    */
-  private listenTo(video: HTMLVideoElement): void {
+  private listenTo(video: PreviewSource): void {
     const onFrame = () => this.request();
     for (const type of FRAME_EVENTS) video.addEventListener(type, onFrame);
     this.listeners.set(video, () => {
@@ -425,7 +432,7 @@ export class PreviewCanvas {
     this.rafId = 0;
   }
 
-  private release(video: HTMLVideoElement): void {
+  private release(video: PreviewSource): void {
     this.listeners.get(video)?.();
     this.listeners.delete(video);
   }
@@ -477,10 +484,10 @@ export function orderedLayers(layers: readonly PreviewVideoLayer[]): PreviewVide
  * appears to do something else entirely. It is false for every other layer and whenever the sheet
  * is shut, and then the preview is exactly what the render draws.
  */
-export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, frameAspect: number = DEFAULT_FRAME_ASPECT, cropping = false): LayerDraw {
+export function layerDraw(layer: PreviewVideoLayer, video: PreviewSource, frameAspect: number = DEFAULT_FRAME_ASPECT, cropping = false): LayerDraw {
   const rotationDeg = layer.rect?.rotationDeg ?? 0;
   const common = {
-    source: video,
+    source: drawableOf(video),
     sourceWidth: video.videoWidth,
     sourceHeight: video.videoHeight,
     opacity: layer.opacity,
@@ -505,6 +512,15 @@ export function layerDraw(layer: PreviewVideoLayer, video: HTMLVideoElement, fra
     framing,
     dest: pictureDest(layer.rect ?? WHOLE_FRAME, framing, frameAspect, video.videoWidth, video.videoHeight),
   };
+}
+
+/**
+ * What the painter draws for a source: the slot's live picture - its `<video>`, or the decoded still -
+ * or the element itself for a bare one. A still asked before it has decoded answers with its element,
+ * which the caller has already refused for having no frame, so it is never actually drawn.
+ */
+function drawableOf(video: PreviewSource): LayerSource {
+  return video instanceof ClipMedia ? (video.drawable ?? video.element) : video;
 }
 
 /** A real picture to warm a transition up with: the base layer, or either side of a transition. */

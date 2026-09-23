@@ -64,7 +64,7 @@ export function clipsSilenced(store: EditorStore): boolean {
 }
 
 /** A clip's own sound on the element playing it. A second layer's clips get theirs the same way. */
-export function applyClipAudio(video: HTMLVideoElement, clip: EditClip, silenced: boolean): void {
+export function applyClipAudio(video: { muted: boolean; volume: number }, clip: EditClip, silenced: boolean): void {
   const muted = silenced || clip.muted;
   if (video.muted !== muted) video.muted = muted;
   const volume = clamp(clip.volume, 0, 1);
@@ -99,7 +99,7 @@ export function volumeIsWritable(): boolean {
  * swapping clips on one element, not a failure, so it is swallowed - the transport follows the
  * element's own events either way.
  */
-export function startPlayback(el: HTMLMediaElement): void {
+export function startPlayback(el: { play(): Promise<void> }): void {
   el.play().catch((error: unknown) => {
     if ((error as DOMException)?.name !== 'AbortError') debugWarn('[ve-preview] play failed', error);
   });

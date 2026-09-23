@@ -1,10 +1,10 @@
-import { MAX_LAYERS, MAX_VIDEO_TRACKS, emptyManifest, type EditClip, type EditManifest } from '../editor';
+import { MAX_LAYERS, MAX_VIDEO_TRACKS, PICTURE_CLIP_MS, PICTURE_SOURCE_MS, emptyManifest, type EditClip, type EditManifest } from '../editor';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
 import type { EditorMediaHost, EditorSoundLibrary, EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
 import type { Peaks, extractPeaks } from '../web-runtime/waveform';
-import { EditorMedia } from './editor-media';
+import { EditorMedia, type PictureReader } from './editor-media';
 import { EditorStore } from './editor-store';
 
 function clip(id: string, inMs: number, outMs: number): EditClip {
@@ -40,11 +40,25 @@ describe('EditorMedia', () => {
    */
   let measure: ReturnType<typeof vi.fn>;
 
-  function open(mediaHost: EditorMediaHost = fakeMedia(), peaks: Peaks | null = null): void {
-    host = resolveEditorHost({ media: mediaHost });
+  /**
+   * How pictures are read, injected for the reason audio is: the mock DOM decodes no image. Each
+   * test gets one that answers at once with a picture of 4000x3000, unless it says otherwise.
+   */
+  let pictures: { measure: ReturnType<typeof vi.fn>; thumbnail: ReturnType<typeof vi.fn> };
+
+  function open(
+    mediaHost: EditorMediaHost = fakeMedia(),
+    peaks: Peaks | null = null,
+    options: { pictures?: boolean; decodes?: boolean } = {},
+  ): void {
+    host = resolveEditorHost({ media: mediaHost, editing: { pictures: options.pictures } });
     store = new EditorStore(host);
     measure = vi.fn(async () => peaks);
-    media = new EditorMedia(store, host, measure as unknown as typeof extractPeaks);
+    pictures = {
+      measure: vi.fn(async () => (options.decodes === false ? null : { width: 4000, height: 3000 })),
+      thumbnail: vi.fn(async () => 'data:image/jpeg;base64,thumb'),
+    };
+    media = new EditorMedia(store, host, measure as unknown as typeof extractPeaks, pictures as unknown as PictureReader);
     base = { ...emptyManifest(), clips: [clip('a', 0, 4000), clip('b', 0, 2000)] };
     store.load(sources, new Map([['a', 4000]]), base);
   }
@@ -546,6 +560,107 @@ describe('EditorMedia', () => {
 
       expect(media.sounds.value).toEqual([saved]);
       expect(store.toast.value?.text).toBe('That sound could not be deleted');
+    });
+  });
+
+  describe('pictures on the timeline', () => {
+    const photo: EditorSource = { key: 'photo', fileName: 'photo.jpg', playbackUrl: 'blob:photo', kind: 'image' };
+
+    function mixedMedia(): EditorMediaHost {
+      return fakeMedia({ pickMedia: vi.fn(async () => photo) });
+    }
+
+    it('keeps to videos while the host has not allowed pictures, whatever pickers it has', async () => {
+      const mediaHost = mixedMedia();
+      open(mediaHost);
+      await media.addClip();
+
+      expect(mediaHost.pickMedia).not.toHaveBeenCalled();
+      expect(mediaHost.pickVideo).toHaveBeenCalledTimes(1);
+      expect(store.manifest.value.clips.map(c => c.clipKey)).toEqual(['a', 'b', 'picked']);
+    });
+
+    it('lands a picked picture as a three second picture segment, and selects it', async () => {
+      const mediaHost = mixedMedia();
+      open(mediaHost, null, { pictures: true });
+      await media.addClip();
+
+      const added = store.manifest.value.clips[2];
+      expect(added).toMatchObject({ clipKey: 'photo', image: true, speed: 1 });
+      expect(added.outMs - added.inMs).toBe(PICTURE_CLIP_MS);
+      expect(store.selectedClip.value?.id).toBe(added.id);
+      expect(mediaHost.pickVideo).not.toHaveBeenCalled();
+      // A picture is never handed to the host's duration probe: it opens a <video>.
+      expect(mediaHost.probeDuration).not.toHaveBeenCalled();
+      expect(store.durations.value.get('photo')).toBe(PICTURE_SOURCE_MS);
+    });
+
+    it('falls back to the video picker for a host that allows pictures but has no picker for them', async () => {
+      const mediaHost = fakeMedia();
+      open(mediaHost, null, { pictures: true });
+      await media.addClip();
+
+      expect(mediaHost.pickVideo).toHaveBeenCalledTimes(1);
+      expect(store.manifest.value.clips[2].image).toBeUndefined();
+    });
+
+    it('opens a picture as a second video layer, a picture segment on it', async () => {
+      open(mixedMedia(), null, { pictures: true });
+      const trackId = await media.addVideoTrack();
+
+      const track = store.manifest.value.videoTracks.find(t => t.id === trackId);
+      expect(track?.clips[0]).toMatchObject({ clipKey: 'photo', image: true });
+    });
+
+    it('replaces a video segment with a picture that plays as long as the segment did', async () => {
+      open(mixedMedia(), null, { pictures: true });
+      store.select({ kind: 'clip', id: 'b' });
+      await media.replaceSelectedClip();
+
+      const replaced = store.manifest.value.clips[1];
+      expect(replaced).toMatchObject({ id: 'b', clipKey: 'photo', image: true });
+      expect(replaced.outMs - replaced.inMs).toBe(2000);
+    });
+
+    it('cuts a filmstrip of one small frame, standing for every tile', async () => {
+      open(mixedMedia(), null, { pictures: true });
+      await media.loadFilmstrip(photo);
+
+      expect(pictures.thumbnail).toHaveBeenCalledWith('blob:photo', expect.any(Number));
+      expect(store.filmstrips.value.get('photo')).toEqual({ stepMs: PICTURE_SOURCE_MS, urls: ['data:image/jpeg;base64,thumb'] });
+      expect(host.media.thumbnails).not.toHaveBeenCalled();
+    });
+
+    it('reports a picture that no longer decodes, as it does a video that no longer opens', async () => {
+      open(mixedMedia(), null, { pictures: true, decodes: false });
+      await media.probe(photo);
+
+      expect(store.unreadable.value.has('photo')).toBe(true);
+    });
+
+    it('never hands a picture to the audio decoder', async () => {
+      open(mixedMedia(), null, { pictures: true });
+      await media.addClip();
+      await Promise.resolve();
+
+      const measured = measure.mock.calls.map(call => call[0]);
+      expect(measured).not.toContain('blob:photo');
+    });
+
+    it('says so when the picker itself failed', async () => {
+      open(
+        fakeMedia({
+          pickMedia: vi.fn(async () => {
+            throw new Error('denied');
+          }),
+        }),
+        null,
+        { pictures: true },
+      );
+      await media.addClip();
+
+      expect(store.manifest.value.clips).toHaveLength(2);
+      expect(store.toast.value?.text).toBe("That file can't be used. Try another one");
     });
   });
 });

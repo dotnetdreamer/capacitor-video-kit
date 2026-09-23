@@ -103,6 +103,13 @@ data class Clip(
      * and a clip that answers null takes exactly the item it took before transitions existed.
      */
     val transitionIn: Transition? = null,
+    /**
+     * [uri] is a PICTURE: one frame held for `outMs - inMs`, silent and at 1x, oriented by its EXIF
+     * data. The parser holds [speed] at 1 and [muted] on for one, so every rule that reads those two
+     * reads the right answer without asking. False is a video, which is every spec written before
+     * the field. See `ComposeClip.image` in definitions.ts.
+     */
+    val image: Boolean = false,
 )
 
 /**
@@ -351,6 +358,12 @@ data class ProbedInput(
     val durationMs: Long,
     val hasAudio: Boolean,
     val hasVideo: Boolean,
+    /**
+     * For a picture, the type its bytes decode as - read off the picture itself by [Pictures], not
+     * off its name. Media3 decides whether an item is an image by its MIME type, and a picture copied
+     * to a render input has no extension to guess one from. Null for a video.
+     */
+    val imageMimeType: String? = null,
 )
 
 /** Thrown by the parser; the plugin turns it into `invalid_spec:<path>`. */

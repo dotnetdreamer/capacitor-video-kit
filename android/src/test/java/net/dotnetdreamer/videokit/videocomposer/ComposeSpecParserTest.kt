@@ -2,6 +2,7 @@ package net.dotnetdreamer.videokit.videocomposer
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -56,6 +57,28 @@ class ComposeSpecParserTest {
         assertEquals(720, spec.output.width)
         assertNull(spec.audio.music)
         assertTrue(spec.audio.voiceover.isEmpty())
+    }
+
+    @Test
+    fun `a picture is read as one, silent and at 1x whatever the clip says`() {
+        val json = minimalJson()
+        json.getJSONArray("clips").getJSONObject(0)
+            .put("uri", "content://media/external/images/media/7")
+            .put("image", true)
+            .put("speed", 2)
+            .put("muted", false)
+        val clip = ComposeSpecParser.parse(json).clips[0]
+        assertTrue(clip.image)
+        assertEquals(1f, clip.speed)
+        assertTrue(clip.muted)
+        assertEquals(2000L, clip.outMs)
+    }
+
+    @Test
+    fun `a clip that says nothing about pictures is a video, exactly as before`() {
+        val clip = ComposeSpecParser.parse(minimalJson()).clips[0]
+        assertFalse(clip.image)
+        assertFalse(clip.muted)
     }
 
     @Test

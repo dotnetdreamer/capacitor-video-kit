@@ -21,6 +21,7 @@ import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
 import type { EditorPanel } from '../../state/editor.types';
 import { OverlayBitmaps } from '../../state/overlay-bitmap';
+import { isPictureSource } from '../../web-runtime/picture';
 import { DISCARD_EDITS, EditorConfirm, RENDER_UNAVAILABLE, renderFailed } from '../ve-alert/editor-confirm';
 import { formatClock, shellLayout } from './shell-layout';
 
@@ -366,7 +367,7 @@ export class VeEditor {
     const store = this.store;
     // A custom element can be written into a page with no properties set at all, and an editor with
     // nothing in it is a better answer to that than a throw inside the first render.
-    const sources = this.sources ? [...this.sources] : [];
+    const sources = withPictureKinds(this.sources ? [...this.sources] : [], this.manifest);
 
     store.clips.value = sources;
     store.maxClips.value = this.maxSources;
@@ -381,6 +382,7 @@ export class VeEditor {
       this.manifest,
       sources.map(source => source.key),
       store.durations.value,
+      new Set(sources.filter(isPictureSource).map(source => source.key)),
     );
     /*
      * A post that has never been given a frame starts on the host's, not on this package's.
@@ -1152,6 +1154,25 @@ function isTextEntry(el: HTMLElement | null): boolean {
  */
 function isPressable(el: HTMLElement | null): boolean {
   return !!el && (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button');
+}
+
+/**
+ * The host's sources, with every one the manifest keeps a PICTURE segment for marked as a picture.
+ *
+ * A source says what it is through `kind`, and a host that stores its sources without it - a draft
+ * written before pictures existed, or by an app that keeps only a key and a path - hands a picture
+ * back looking like a video. The manifest still knows, on the segments it saved; asked too late, the
+ * picture has already been opened as a video, failed, and been reported as missing. So the answer is
+ * read off the manifest here, before anything is probed.
+ *
+ * Only a source that says nothing is touched, and it is copied rather than written to: the objects
+ * are the host's own. Everything else is the same object it was handed.
+ */
+function withPictureKinds(sources: EditorSource[], manifest: EditManifest | undefined): EditorSource[] {
+  const rows = [manifest?.clips ?? [], ...(manifest?.videoTracks ?? []).map(track => track.clips ?? [])];
+  const pictures = new Set(rows.flatMap(row => row.filter(clip => clip?.image === true).map(clip => clip.clipKey)));
+  if (pictures.size === 0) return sources;
+  return sources.map(source => (!source.kind && pictures.has(source.key) ? { ...source, kind: 'image' } : source));
 }
 
 /** The three the editor has a sentence for; anything else is the blank apology. */

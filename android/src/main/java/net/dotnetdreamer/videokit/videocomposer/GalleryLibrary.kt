@@ -37,7 +37,8 @@ import java.io.IOException
  */
 object GalleryLibrary {
 
-    data class Video(val id: String, val fileName: String, val durationMs: Long)
+    /** One item of the library: a video, or - when pictures were asked for - a picture. */
+    data class Video(val id: String, val fileName: String, val durationMs: Long, val image: Boolean = false)
 
     data class Page(val videos: List<Video>, val total: Int)
 
@@ -74,7 +75,8 @@ object GalleryLibrary {
      * LIMIT changed twice between API 24 and API 30 and a cursor move works on all of them. Three
      * columns, so opening the whole library costs milliseconds.
      */
-    fun list(ctx: Context, offset: Int, limit: Int): Page {
+    fun list(ctx: Context, offset: Int, limit: Int, images: Boolean = false): Page {
+        if (images) return listWithPictures(ctx, offset, limit)
         val collection = collection()
         val projection = arrayOf(
             MediaStore.Video.Media._ID,
@@ -106,6 +108,65 @@ object GalleryLibrary {
                 } while (videos.size < limit && cursor.moveToNext())
             }
             return Page(videos, total)
+        }
+        return Page(emptyList(), 0)
+    }
+
+    /**
+     * The same, with the device's PICTURES listed among the videos, newest first together.
+     *
+     * One query over MediaStore's files table rather than one per kind merged here: two queries
+     * paged by position cannot be merged into one position without reading both from the start
+     * every page, and the files table already holds both with the one order the grid wants. Each row
+     * comes back as the Images or the Video URI for its own kind, which is what every other reader in
+     * the plugin opens and what [thumbnail] and [resolve] tell the two apart by.
+     *
+     * Duration is asked for from API 29 only, where it is a column of every media row; below that a
+     * video listed here carries 0, which the host reads as "not measured yet".
+     *
+     * What the host may read decides what comes back: on Android 13 a host holding only the video
+     * grant gets its videos and none of the pictures, with no error, because MediaProvider filters
+     * the rows rather than refusing the query.
+     */
+    private fun listWithPictures(ctx: Context, offset: Int, limit: Int): Page {
+        val modern = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val files = if (modern) {
+            MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Files.getContentUri("external")
+        }
+        val projection = listOfNotNull(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.MEDIA_TYPE,
+            if (modern) MediaStore.MediaColumns.DURATION else null,
+        ).toTypedArray()
+        val kinds = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN " +
+            "(${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}, ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO})"
+        val selection = if (modern) "$kinds AND ${MediaStore.MediaColumns.IS_PENDING} = 0" else kinds
+        val order = "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${MediaStore.Files.FileColumns._ID} DESC"
+
+        ctx.contentResolver.query(files, projection, selection, null, order)?.use { cursor ->
+            val total = cursor.count
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val typeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
+            val durationColumn = if (modern) cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DURATION) else -1
+
+            val items = ArrayList<Video>(limit)
+            if (cursor.moveToPosition(offset)) {
+                do {
+                    val image = cursor.getInt(typeColumn) == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
+                    val row = cursor.getLong(idColumn)
+                    items += Video(
+                        id = ContentUris.withAppendedId(if (image) pictureCollection() else collection(), row).toString(),
+                        fileName = cursor.getString(nameColumn) ?: "",
+                        durationMs = if (image || durationColumn < 0) 0L else cursor.getLong(durationColumn),
+                        image = image,
+                    )
+                } while (items.size < limit && cursor.moveToNext())
+            }
+            return Page(items, total)
         }
         return Page(emptyList(), 0)
     }
@@ -145,13 +206,30 @@ object GalleryLibrary {
      * The MediaStore URI itself: every reader in the plugin opens one, so there is nothing to copy.
      */
     fun resolve(ctx: Context, id: String): Video? {
+        val uri = Uri.parse(id)
+        // A picture's row is asked for its name alone: below API 29 the images table has no
+        // duration column, and asking for one fails the query rather than answering null.
+        if (isPicture(uri)) {
+            ctx.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                return Video(id = id, fileName = cursor.getString(0) ?: "", durationMs = 0L, image = true)
+            }
+            return null
+        }
         val projection = arrayOf(MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.DURATION)
-        ctx.contentResolver.query(Uri.parse(id), projection, null, null, null)?.use { cursor ->
+        ctx.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
             if (!cursor.moveToFirst()) return null
             return Video(id = id, fileName = cursor.getString(0) ?: "", durationMs = cursor.getLong(1))
         }
         return null
     }
+
+    /**
+     * Whether a listed id is a picture's rather than a video's. Every id this lists is a MediaStore
+     * URI of its kind's own collection, and that collection's path is the whole of the answer:
+     * `.../images/media/42` against `.../video/media/42`.
+     */
+    internal fun isPicture(uri: Uri): Boolean = uri.pathSegments.contains("images")
 
     /** One file per video and size, named after the URI itself so no index has to be kept. */
     internal fun thumbnailName(id: String, maxSize: Int): String =
@@ -165,10 +243,29 @@ object GalleryLibrary {
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         }
 
+    /** The same for the device's pictures. */
+    private fun pictureCollection(): Uri =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
+    /**
+     * From API 29 one call serves both kinds - `loadThumbnail` reads the row's own type. Before it,
+     * each kind had a thumbnail table of its own.
+     */
     @Suppress("DEPRECATION")
     private fun frame(ctx: Context, uri: Uri, maxSize: Int): Bitmap? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ctx.contentResolver.loadThumbnail(uri, Size(maxSize, maxSize), null)
+        } else if (isPicture(uri)) {
+            MediaStore.Images.Thumbnails.getThumbnail(
+                ctx.contentResolver,
+                ContentUris.parseId(uri),
+                MediaStore.Images.Thumbnails.MINI_KIND,
+                null,
+            )
         } else {
             MediaStore.Video.Thumbnails.getThumbnail(
                 ctx.contentResolver,

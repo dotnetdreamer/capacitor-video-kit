@@ -108,6 +108,19 @@ describe('refusals', () => {
   });
 });
 
+describe('pictures', () => {
+  it('keeps a picture a picture, silent and at 1x whatever the clip says', () => {
+    const read = validateSpec(spec({ clips: [clip({ uri: 'blob:photo', image: true, speed: 3, muted: false })] }));
+    expect(read.clips[0]).toMatchObject({ image: true, speed: 1, muted: true });
+  });
+
+  it('reads a clip that says nothing about pictures exactly as before', () => {
+    const read = validateSpec(spec());
+    expect('image' in read.clips[0]).toBe(false);
+    expect(read.clips[0].muted).toBe(false);
+  });
+});
+
 describe('clamps', () => {
   it('brings a speed, a volume and an opacity back into range', () => {
     const checked = validateSpec(

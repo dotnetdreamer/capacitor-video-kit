@@ -67,6 +67,56 @@ class RenderPlanTest {
         ProbedInput(durationMs, hasAudio, hasVideo = true)
 
     /* ------------------------------------------------------------------------------------- */
+    /* Pictures                                                                                */
+    /* ------------------------------------------------------------------------------------- */
+
+    /** A picture as the parser hands one over: 1x and muted, whatever the wire said. */
+    private fun picture(key: String, outMs: Long) =
+        Clip(key, "content://media/external/images/media/$key", 0, outMs, 1f, 1f, true, Fit.COVER, image = true)
+
+    private val pictureProbe = ProbedInput(0L, hasAudio = false, hasVideo = true, imageMimeType = "image/jpeg")
+
+    @Test
+    fun `a picture is planned at its whole trim, silent, and carries the type its probe read`() {
+        val still = picture("p", outMs = 3_000)
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a"), still)),
+            mapOf("file:///a.mp4" to probe(2_000), still.uri to pictureProbe),
+        )
+
+        assertEquals(3_000_000L, plan.clips[1].outDurUs)
+        assertEquals(2_000_000L, plan.prefixOutUs[1])
+        assertEquals(5_000_000L, plan.totalUs)
+        assertTrue(plan.clips[1].removeAudio)
+        assertEquals("image/jpeg", plan.clips[1].imageMimeType)
+        // The video beside it is exactly what it was before pictures existed.
+        assertNull(plan.clips[0].imageMimeType)
+        assertFalse(plan.clips[0].removeAudio)
+    }
+
+    @Test
+    fun `a picture's length is never clamped to a probed duration, because it has none`() {
+        val still = picture("p", outMs = 45_000)
+        val plan = RenderPlan.build(spec(listOf(still)), mapOf(still.uri to pictureProbe))
+
+        assertEquals(45_000_000L, plan.clips[0].outDurUs)
+        assertEquals(45_000_000L, plan.totalUs)
+    }
+
+    @Test
+    fun `a post of pictures alone carries no sound of its own`() {
+        val first = picture("p", outMs = 1_000)
+        val second = picture("q", outMs = 1_000)
+        val plan = RenderPlan.build(
+            spec(listOf(first, second)),
+            mapOf(first.uri to pictureProbe, second.uri to pictureProbe),
+        )
+
+        assertFalse(plan.videoSeqHasAudio)
+        assertEquals(2_000_000L, plan.totalUs)
+    }
+
+    /* ------------------------------------------------------------------------------------- */
 
     @Test
     fun `clips are laid end to end on the output timeline`() {

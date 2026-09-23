@@ -15,6 +15,7 @@ import type {
   EncodeSupport,
   ExtractAudioOptions,
   ExtractAudioResult,
+  GalleryAccessOptions,
   GalleryAccessResult,
   GalleryThumbnailOptions,
   GalleryThumbnailResult,
@@ -115,12 +116,14 @@ export interface VideoComposerPlugin {
    * `Info.plist`. Google Play reviews a media read permission app by app, so the kit does not put
    * one on every host that only renders.
    */
-  requestGalleryAccess(): Promise<GalleryAccessResult>;
+  requestGalleryAccess(options?: GalleryAccessOptions): Promise<GalleryAccessResult>;
 
   /**
-   * One page of the device's videos, newest first. Rejects `permission_denied` without access and
-   * `unsupported` in a browser. Paged by position, so a video recorded between two pages moves the
-   * rest down one: a host should skip an id it has already listed.
+   * One page of the device's videos, newest first - and its pictures among them, with `images`.
+   * Rejects `permission_denied` without access and `unsupported` in a browser. Paged by position,
+   * so a video recorded between two pages moves the rest down one: a host should skip an id it has
+   * already listed. [galleryThumbnail] and [resolveGalleryVideo] take a picture's id as they take a
+   * video's.
    */
   listGalleryVideos(options?: ListGalleryVideosOptions): Promise<ListGalleryVideosResult>;
 

@@ -1,4 +1,6 @@
 import { loadableUrl } from '../../web-runtime/files';
+import { decodePicture, measurePicture, type DecodedPicture } from '../../web-runtime/picture';
+import type { LayerSource } from './painter';
 import type { ProbedInput } from './plan';
 
 /**
@@ -115,6 +117,64 @@ export function hasAudioTrack(video: HTMLVideoElement): boolean {
 }
 
 /**
+ * What one layer is drawn from, whichever kind of source it is: something to hand the painter, its
+ * size, a way to put it on the frame for an instant, and a way to give it back.
+ */
+export interface SourceReader {
+  readonly source: LayerSource;
+  readonly width: number;
+  readonly height: number;
+  /** Resolves true when there is a frame to draw at `seconds` into the source. */
+  seek(seconds: number, frameIntervalSeconds: number): Promise<boolean>;
+  close(): void;
+}
+
+/**
+ * A picture on the timeline, which is the same frame at every instant: decoded once, upright and
+ * at the size the render needs (see `web-runtime/picture`), and never seeked. See
+ * `ComposeClip.image`.
+ */
+export class StillReader implements SourceReader {
+  private constructor(private readonly picture: DecodedPicture) {}
+
+  static async open(uri: string, maxEdge: number): Promise<StillReader> {
+    return new StillReader(await decodePicture(await loadableUrl(uri), maxEdge));
+  }
+
+  get source(): LayerSource {
+    return this.picture.bitmap;
+  }
+
+  get width(): number {
+    return this.picture.width;
+  }
+
+  get height(): number {
+    return this.picture.height;
+  }
+
+  /** Always there, whatever the time: a picture has one frame and it is already decoded. */
+  seek(): Promise<boolean> {
+    return Promise.resolve(true);
+  }
+
+  close(): void {
+    const bitmap = this.picture.bitmap;
+    if ('close' in bitmap) bitmap.close();
+  }
+}
+
+/**
+ * What a picture is, for `probe()` and for the plan: its size, and no length or sound of its own.
+ * Rejects when it will not decode, which is the unreadable input the render reports.
+ */
+export async function probePicture(uri: string): Promise<ProbedInput> {
+  const size = await measurePicture(await loadableUrl(uri));
+  if (!size) throw new Error(`the browser could not open the picture ${uri}`);
+  return { durationMs: 0, width: size.width, height: size.height, hasAudio: false, hasVideo: true };
+}
+
+/**
  * One source, seeked frame by frame - the renderer's whole relationship with a decoder.
  *
  * The last time it was asked for is remembered, and a request inside half a frame of it draws
@@ -122,13 +182,17 @@ export function hasAudioTrack(video: HTMLVideoElement): boolean {
  * frame twice in a row for every output frame, and without this the render would seek, wait and
  * decode twice for one picture. The same holds for a frame held at the join between two clips.
  */
-export class FrameReader {
+export class FrameReader implements SourceReader {
   private lastSeconds = Number.NaN;
 
   private constructor(readonly video: HTMLVideoElement) {}
 
   static async open(uri: string): Promise<FrameReader> {
     return new FrameReader(await openVideo(uri));
+  }
+
+  get source(): LayerSource {
+    return this.video;
   }
 
   get width(): number {

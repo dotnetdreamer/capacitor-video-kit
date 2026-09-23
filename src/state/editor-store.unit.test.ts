@@ -364,13 +364,65 @@ describe('EditorStore', () => {
       expect(store.selection.value).toEqual({ kind: 'clip', id: clips[2].id });
     });
 
-    it('explains a split too close to an edge and changes nothing', () => {
+    it('explains a cut too close to an edge and changes nothing', () => {
       store.playheadMs.value = 100;
       store.splitAtPlayhead();
       expect(store.manifest.value).toBe(base);
       expect(store.canUndo.value).toBe(false);
       expect(store.selection.value).toBeNull();
-      expect(store.toast.value?.text).toBe('Move the playhead further into the clip to split it');
+      expect(store.toast.value?.text).toBe('Move the playhead further into the clip to cut it');
+    });
+
+    it('names the step Cut, which is what undoing it says', () => {
+      store.playheadMs.value = 1000;
+      store.splitAtPlayhead();
+      store.undo();
+      expect(store.toast.value?.text).toBe('Undo: Cut');
+    });
+  });
+
+  describe('pictures', () => {
+    const picture = (id: string) => clip(id, 1_800_000, 1_803_000, { image: true });
+
+    it('knows a picture by its source, and by its segment when the source does not say', () => {
+      store.load(
+        [
+          { key: 'a', fileName: 'a.mp4' },
+          { key: 'photo', fileName: 'photo.jpg', kind: 'image' },
+          { key: 'p', fileName: 'p.jpg' },
+        ],
+        new Map([['a', 4000]]),
+        { ...emptyManifest(), clips: [clip('a', 0, 4000), picture('p')] },
+      );
+      expect(store.isPictureKey('photo')).toBe(true);
+      expect(store.isPictureKey('p')).toBe(true);
+      expect(store.isPictureKey('a')).toBe(false);
+    });
+
+    it('says when the selected segment is a picture', () => {
+      load({ clips: [clip('a', 0, 4000), picture('p')] });
+      store.select({ kind: 'clip', id: 'a' });
+      expect(store.selectedIsPicture.value).toBe(false);
+      store.select({ kind: 'clip', id: 'p' });
+      expect(store.selectedIsPicture.value).toBe(true);
+    });
+
+    it('cuts a picture into two pictures that can be joined back into one', () => {
+      load({ clips: [picture('p')] });
+      store.playheadMs.value = 1000;
+      store.splitAtPlayhead();
+      const [left, right] = store.manifest.value.clips;
+      expect([left.image, left.outMs - left.inMs]).toEqual([true, 1000]);
+      expect([right.image, right.outMs - right.inMs]).toEqual([true, 2000]);
+      store.select({ kind: 'clip', id: 'p' });
+      expect(store.canJoinSelected.value).toBe(true);
+    });
+
+    it('leaves a picture at 1x when the speed is set', () => {
+      load({ clips: [clip('a', 0, 4000), picture('p')] });
+      store.setClipSpeed('p', 2);
+      expect(store.manifest.value.clips[1].speed).toBe(1);
+      expect(store.canUndo.value).toBe(false);
     });
   });
 

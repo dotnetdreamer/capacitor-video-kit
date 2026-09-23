@@ -123,17 +123,22 @@ object ComposeSpecParser {
         if (inMs < 0L) throw SpecException("$path.inMs")
         val outMs = o.optLong("outMs", -1L)
         if (outMs <= inMs) throw SpecException("$path.outMs")
+        // A picture is silent at 1x whatever the rest of the clip says - `ComposeClip.image` - and
+        // is made so here, once, so the plan and the builder read the answer off the fields they
+        // already read rather than each asking what kind of clip this is.
+        val image = o.optBoolean("image", false)
         return Clip(
             key = key,
             uri = uri,
             inMs = inMs,
             outMs = outMs,
-            speed = o.optDouble("speed", 1.0).toFloat().coerceIn(MIN_SPEED, MAX_SPEED),
+            speed = if (image) 1f else o.optDouble("speed", 1.0).toFloat().coerceIn(MIN_SPEED, MAX_SPEED),
             volume = o.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
-            muted = o.optBoolean("muted", false),
+            muted = image || o.optBoolean("muted", false),
             fit = if (o.optString("fit", "contain") == "cover") Fit.COVER else Fit.CONTAIN,
             crop = o.rectOrNull("crop", "$path.crop"),
             rect = o.placementOrNull("rect", "$path.rect"),
+            image = image,
         )
     }
 

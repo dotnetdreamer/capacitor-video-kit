@@ -69,7 +69,12 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       debug: platform?.debug ?? false,
     },
     output: resolveOutputOptions(host?.output),
-    editing: { replaceKeepsLength: host?.editing?.replaceKeepsLength ?? true },
+    editing: {
+      replaceKeepsLength: host?.editing?.replaceKeepsLength ?? true,
+      // Off unless the host says so: an app that has never heard of pictures on the timeline keeps
+      // pickers that offer what they always offered.
+      pictures: host?.editing?.pictures === true,
+    },
   };
 }
 
@@ -214,6 +219,20 @@ export function browserMediaHost(): EditorMediaHost {
         key: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         fileName: file.name,
         playbackUrl,
+      };
+    },
+
+    /** One file input offering both, and the file's own type says which it turned out to be. */
+    async pickMedia(): Promise<EditorSource | null> {
+      const file = await pickFile('video/*,image/*');
+      if (!file) return null;
+      const playbackUrl = URL.createObjectURL(file);
+      minted.add(playbackUrl);
+      return {
+        key: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        fileName: file.name,
+        playbackUrl,
+        kind: file.type.startsWith('image/') ? 'image' : 'video',
       };
     },
 

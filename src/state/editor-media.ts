@@ -1,8 +1,9 @@
 import { effect, signal } from '@preact/signals-core';
-import { MAX_LAYERS, MAX_VIDEO_TRACKS, defaultClipEdit, insertClip, replaceClipSource } from '../editor';
+import { MAX_LAYERS, MAX_VIDEO_TRACKS, PICTURE_SOURCE_MS, defaultClipEdit, defaultPictureEdit, insertClip, replaceClipSource } from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
+import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
 import { clipWaveKey, type Filmstrip } from './editor.types';
@@ -29,6 +30,18 @@ const PRECISE_FILMSTRIP_MAX_FRAMES = 6;
 
 /** How long one file may hold the waveform queue before it is given up on. */
 const WAVEFORM_TIMEOUT_MS = 60_000;
+
+/**
+ * How a picture on the timeline is read: whether it decodes at all, and a small frame of it for the
+ * filmstrip. A seam for the same reason [EditorMedia]'s audio measurer is one - the mock DOM the
+ * unit tests run in decodes no image.
+ */
+export interface PictureReader {
+  measure(url: string): Promise<{ width: number; height: number } | null>;
+  thumbnail(url: string, maxHeight: number): Promise<string>;
+}
+
+const PICTURES: PictureReader = { measure: measurePicture, thumbnail: pictureThumbnail };
 
 /**
  * Everything in the editor that asks the host for media: the pickers, the duration probe and the
@@ -91,6 +104,8 @@ export class EditorMedia {
      * one needs Web Audio, which the mock DOM they run in does not have.
      */
     private readonly measure: typeof extractPeaks = extractPeaks,
+    /** How a picture is read; a parameter for the same reason `measure` is. */
+    private readonly pictures: PictureReader = PICTURES,
   ) {
     /*
      * Waveforms follow the MANIFEST rather than being asked for at each place a sound can arrive.
@@ -118,6 +133,9 @@ export class EditorMedia {
        * Filed under a name of its own, so a source key can never be mistaken for an audio URI.
        */
       for (const source of this.store.clips.value) {
+        // A picture has no sound to draw, and handing one to the audio decoder is a decode that
+        // can only fail.
+        if (isPictureSource(source)) continue;
         const url = source.playbackUrl || (source.sourcePath ? this.host.platform.fileUrl(source.sourcePath) : '');
         if (url) audio.push({ uri: url, key: clipWaveKey(source.key), durationMs: this.store.sourceDurationMs(source.key) });
       }
@@ -148,6 +166,7 @@ export class EditorMedia {
   async probe(source: EditorSource): Promise<number> {
     const known = this.store.durations.value.get(source.key);
     if (known !== undefined && known > 0) return known;
+    if (isPictureSource(source)) return this.probePicture(source);
 
     let durationMs = 0;
     let readable = true;
@@ -167,6 +186,26 @@ export class EditorMedia {
     this.store.durations.value = new Map(this.store.durations.value).set(source.key, durationMs);
     this.markReadable(source.key, readable);
     return durationMs;
+  }
+
+  /**
+   * A picture has no length to measure, so the host's duration probe is not asked - it opens a
+   * `<video>`, which a JPEG is not. What is worth knowing is whether the file is still there and
+   * still decodes, which is exactly the question [unreadable] exists to answer for a draft reopened
+   * after a photo was deleted. Its "source" is [PICTURE_SOURCE_MS] long either way, so its segment
+   * can be trimmed while the answer is on its way.
+   */
+  private async probePicture(source: EditorSource): Promise<number> {
+    const size = await this.pictures.measure(this.urlOf(source)).catch(() => null);
+    if (!size) debugWarn('[EditorMedia] picture did not decode', source.key);
+    this.store.durations.value = new Map(this.store.durations.value).set(source.key, PICTURE_SOURCE_MS);
+    this.markReadable(source.key, !!size);
+    return PICTURE_SOURCE_MS;
+  }
+
+  /** Something this WebView can load for a source: its own URL, or the host's reading of its path. */
+  private urlOf(source: EditorSource): string {
+    return source.playbackUrl || (source.sourcePath ? this.host.platform.fileUrl(source.sourcePath) : '');
   }
 
   /** Adds a clip to `store.unreadable`, or takes it back out once its file opens again. */
@@ -225,7 +264,10 @@ export class EditorMedia {
     return job;
   }
 
-  /** Adds one more video straight after the selected segment, or at the end. */
+  /**
+   * Adds one more video - or picture, on a host that allows them - straight after the selected
+   * segment, or at the end.
+   */
   async addClip(): Promise<void> {
     // A second picker while the first result is still being read would commit into a manifest
     // that is about to change under it.
@@ -237,7 +279,7 @@ export class EditorMedia {
     }
     this.busy.value = true;
     try {
-      const source = await this.pickVideo();
+      const source = await this.pickClip();
       if (!source) return;
       const durationMs = await this.probe(source);
 
@@ -245,7 +287,7 @@ export class EditorMedia {
       this.store.clips.value = [...this.store.clips.value, source];
       const segmentId = this.store.newId('seg');
       const afterId = this.store.selectedClip.value?.id ?? null;
-      const added = this.store.commit('Add clip', m => insertClip(m, defaultClipEdit(source.key, durationMs, segmentId), afterId));
+      const added = this.store.commit('Add clip', m => insertClip(m, this.segmentFor(source, durationMs, segmentId), afterId));
       if (added) {
         this.store.select({ kind: 'clip', id: segmentId });
         this.store.haptic('light');
@@ -280,14 +322,14 @@ export class EditorMedia {
     }
     this.busy.value = true;
     try {
-      const source = await this.pickVideo();
+      const source = await this.pickClip();
       if (!source) return null;
       const durationMs = await this.probe(source);
 
       this.landOpenTextEdit();
       this.store.clips.value = [...this.store.clips.value, source];
       const segmentId = this.store.newId('seg');
-      const trackId = this.store.addVideoTrack(defaultClipEdit(source.key, durationMs, segmentId));
+      const trackId = this.store.addVideoTrack(this.segmentFor(source, durationMs, segmentId));
       if (!trackId) {
         this.dropUnusedSource(source);
         return null;
@@ -312,14 +354,16 @@ export class EditorMedia {
     if (!target) return;
     this.busy.value = true;
     try {
-      const source = await this.pickVideo();
+      const source = await this.pickClip();
       if (!source) return;
       const durationMs = await this.probe(source);
 
       this.landOpenTextEdit();
       this.store.clips.value = [...this.store.clips.value, source];
       // The segment is looked up again by id: it may have been deleted while the picker was open.
-      const replaced = this.store.commit('Replace', m => replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength));
+      const replaced = this.store.commit('Replace', m =>
+        replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength, isPictureSource(source)),
+      );
       if (!replaced) {
         this.dropUnusedSource(source);
         return;
@@ -584,6 +628,36 @@ export class EditorMedia {
   }
 
   /**
+   * A clip for the timeline: a video, or a video or a picture on a host that allows pictures there
+   * and supplies a picker that offers both. Null on a cancel, and on a failure after saying so.
+   *
+   * A host that allows pictures but has no `pickMedia` gets `pickVideo`, which is the promise the
+   * option makes - it governs what the pickers offer, and a host with only a video picker can only
+   * offer videos.
+   */
+  private async pickClip(): Promise<EditorSource | null> {
+    const pickMedia = this.host.media.pickMedia;
+    if (!this.host.editing.pictures || !pickMedia) return this.pickVideo();
+    this.store.pause();
+    try {
+      return await pickMedia.call(this.host.media);
+    } catch (error) {
+      debugWarn('[EditorMedia] media picker failed', error);
+      this.store.showToast("That file can't be used. Try another one", 2400);
+      this.store.haptic('warning');
+      return null;
+    }
+  }
+
+  /**
+   * The segment a picked source goes onto the timeline as: a picture held for [PICTURE_CLIP_MS], or
+   * a video trimmed to the whole of its length.
+   */
+  private segmentFor(source: EditorSource, durationMs: number, segmentId: string) {
+    return isPictureSource(source) ? defaultPictureEdit(source.key, segmentId) : defaultClipEdit(source.key, durationMs, segmentId);
+  }
+
+  /**
    * Takes a source back out after the edit refused it. Nothing - not even an undo step - refers to
    * it by this point.
    *
@@ -597,6 +671,10 @@ export class EditorMedia {
 
   private async cutFilmstrip(source: EditorSource): Promise<void> {
     if (this.destroyed) return;
+    if (isPictureSource(source)) {
+      await this.cutPictureStrip(source);
+      return;
+    }
     const durationMs = this.store.sourceDurationMs(source.key) || (await this.probe(source));
 
     // Frames sit at whole multiples of the step so a host that caches them by time hands the same
@@ -632,6 +710,29 @@ export class EditorMedia {
     if (!strip || this.destroyed) return;
 
     this.store.filmstrips.value = new Map(this.store.filmstrips.value).set(source.key, strip);
+  }
+
+  /**
+   * A picture's filmstrip: ONE small frame of it, standing for every tile.
+   *
+   * The step is the whole of the picture's source, which is what puts every tile on frame 0 however
+   * the segment is trimmed - the same trick a video with only a poster uses. Cut in the page rather
+   * than asked of the host, whose thumbnailer seeks a video, and small rather than the file itself: a
+   * tile is 160 px tall, and a timeline that tiled a twelve megapixel photo would decode it that big.
+   * A picture that will not shrink is tiled as it is, which is slow and still right.
+   */
+  private async cutPictureStrip(source: EditorSource): Promise<void> {
+    const url = this.urlOf(source);
+    if (!url) return;
+    let frame: string;
+    try {
+      frame = await this.pictures.thumbnail(url, FILMSTRIP_MAX_HEIGHT);
+    } catch (error) {
+      debugWarn('[EditorMedia] picture thumbnail failed', source.key, error);
+      frame = url;
+    }
+    if (this.destroyed) return;
+    this.store.filmstrips.value = new Map(this.store.filmstrips.value).set(source.key, { stepMs: PICTURE_SOURCE_MS, urls: [frame] });
   }
 
   /**
