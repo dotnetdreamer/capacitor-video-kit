@@ -346,6 +346,29 @@ export interface ComposeOutput {
    * 48 kHz - rather than failing the render over it.
    */
   audioBitrate: number;
+  /**
+   * The most bytes the finished file may have. Absent, or anything but a positive finite number,
+   * is no ceiling at all, which is what every spec written before this key meant.
+   *
+   * It is the HOST's upload limit and not a property of the video, which is why the package sets
+   * none of its own: one app posts to a server that refuses a file over 100 MB, and another builds
+   * 4K for a different purpose entirely. The editor writes it from `EditorOutputOptions.maxBytes`.
+   *
+   * Every engine holds the file to it the same way. While encoding it watches the output grow - iOS
+   * and Android poll the file's size a few times a second, and the web counts the bytes its encoder
+   * hands the muxer - and stops the moment it passes the ceiling, deleting what it wrote, rather than
+   * spend the rest of the encode on a file the host cannot send. The finished file is measured once
+   * more before `completed`, because a container's index is written last. Either way the render
+   * fails `too_large`.
+   *
+   * Nothing is refused by estimate before the encode starts. The rate above is an average the
+   * encoder may spend less than, and a still or dark post often comes in well under a budget the
+   * arithmetic says it would break, so the only honest test is the file itself. That includes the
+   * one retry an encoder that refused the request is given (see `videoBitrate`): its file is the
+   * encoder's idea of the size, and iOS's export session is told the ceiling as its
+   * `fileLengthLimit` besides.
+   */
+  maxBytes?: number;
 }
 
 /**
@@ -540,6 +563,14 @@ export type ComposeFailureCode =
   | 'cancelled'
   /** The disk would not take the output. `needBytes` says how much it wanted. */
   | 'no_space'
+  /**
+   * The file would have been larger than [ComposeOutput.maxBytes], found while it was being written
+   * or once it was finished, and it has been deleted. The message is `too_large max=<maxBytes>
+   * bytes=<bytes>` on every engine, `bytes` being the size it had reached when it was stopped, which
+   * is not the size a finished file would have had. The same spec will fail the same way: a lower
+   * rate, a smaller frame or a shorter post is what fits.
+   */
+  | 'too_large'
   /** Something this platform cannot do at all: a browser with no encoder, a format it has no decoder for. */
   | 'unsupported'
   /**

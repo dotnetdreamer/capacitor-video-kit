@@ -58,16 +58,18 @@ enum JobFolders {
 
     /// This app's container, spelled the way `FileManager.urls(for:in:)` spells every folder in it.
     ///
-    /// WHY NOT `NSHomeDirectory()`. On a device the two spell one folder two ways: `urls(for:in:)`
-    /// answers `/var/mobile/Containers/...` and `NSHomeDirectory()` answers `/private/var/...`, where
-    /// `/var` is a link to `/private/var`. Both open the same files, but a host compares names as
-    /// strings - a `keep` list, a draft asking whether a clip is already in it - so a name built on
-    /// one is a different clip from the same name built on the other. Every name the kit hands out
-    /// is built on `urls(for:in:)` (`pickedFolder`, `copiesFolder`, `root`, the caches), so this is
-    /// too, and so is everything built on this: the name `rebased` moves a stored path to, and the
-    /// `tmp` folders of `StagedRenderInputs` and `AudioFilePicker`, which is why neither starts from
-    /// `FileManager.temporaryDirectory`, spelled as `NSHomeDirectory()` is. The simulator spells the
-    /// two alike, so there the difference cannot be seen at all.
+    /// WHY ONE SPELLING. On a device `/var` is a link to `/private/var`, so every folder in the
+    /// container has two names, and the system's APIs do not agree on one: `urls(for:in:)` answers
+    /// `/var/mobile/Containers/...`, the URLs a picker hands over and `FileManager.temporaryDirectory`
+    /// are seen spelled `/private/var/...`, and `NSHomeDirectory()` is promised to match neither. Both
+    /// names open the same files, but a host compares names as strings - a `keep` list, a draft
+    /// asking whether a clip is already in it - so a name built on one is a different clip from the
+    /// same name built on the other. Every name the kit hands out is built on `urls(for:in:)`
+    /// (`pickedFolder`, `copiesFolder`, `root`, the caches), so this is too, and so is everything
+    /// built on this: the name `rebased` moves a stored path to, and the `tmp` folders of
+    /// `StagedRenderInputs` and `AudioFilePicker`, which is why neither starts from
+    /// `temporaryDirectory`. The simulator spells every one of them alike, so there the difference
+    /// cannot be seen at all.
     static var home: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].deletingLastPathComponent()
     }
@@ -209,7 +211,9 @@ enum JobFolders {
     /// The moved path is spelled as `home` is, whichever way the stored one was, so it is the very
     /// name the kit would hand out for that file today: `RetainedMedia.check` answers it, and a host
     /// that finds it equal to a name it was given since takes the two for the one file they are.
-    static func rebased(_ url: URL) -> URL {
+    /// `home` is a parameter only so a test can hand it a container spelled otherwise, as a device
+    /// spells one and the simulator never does; every caller takes the default.
+    static func rebased(_ url: URL, home: URL = JobFolders.home) -> URL {
         let fm = FileManager.default
         if fm.fileExists(atPath: url.path) { return url }
         let parts = url.pathComponents
@@ -380,8 +384,9 @@ enum JobFolders {
     /// After a copy, the source is deleted only when it is a scratch copy in our own container -
     /// under `tmp/` or `Library/Caches/`, where the file picker leaves a pick - so the net effect
     /// for a picked file is still a move. Deleting what is not ours is not our call, and what is
-    /// ours anywhere else is being kept on purpose (see `isAppOwned`).
-    private static func removeIfScratch(_ url: URL) {
+    /// ours anywhere else is being kept on purpose (see `isAppOwned`). `AudioFilePicker` deletes the
+    /// document picker's copies of a song nobody will take by the same rule.
+    static func removeIfScratch(_ url: URL) {
         guard let relative = containerRelativePath(url),
               relative.hasPrefix("tmp/") || relative.hasPrefix("Library/Caches/") else { return }
         try? FileManager.default.removeItem(at: url)
@@ -390,10 +395,10 @@ enum JobFolders {
     /// The path below `home`, or nil for a file outside this app's container.
     ///
     /// The `.standardizedFileURL` on both sides is load bearing. On device a name the kit built is
-    /// spelled `/var/...` (see `home`), while one from anywhere else - `NSHomeDirectory()`,
-    /// `FileManager.temporaryDirectory`, a picker - may be spelled `/private/var/...`; comparing
-    /// them raw makes every file look foreign, which turns every move into a copy. Standardizing
-    /// drops the `/private`. `RetainedMedia` compares its copies by this path for the same reason.
+    /// spelled `/var/...` (see `home`), while one from anywhere else - a picker, `temporaryDirectory`,
+    /// `NSHomeDirectory()` - may be spelled `/private/var/...`; comparing them raw makes every file
+    /// look foreign, which turns every move into a copy. Standardizing drops the `/private`.
+    /// `RetainedMedia` compares its copies by this path for the same reason.
     static func containerRelativePath(_ url: URL) -> String? {
         let path = url.standardizedFileURL.path
         let home = self.home.standardizedFileURL.path
@@ -426,16 +431,19 @@ enum JobFolders {
     /// Deliberately conservative about job folders, because the alternative is deleting the files
     /// behind a post the customer can still retry. Three rules, in order:
     ///
-    /// 1. cache entries, staged render inputs and picked songs older than 24 h
+    /// 1. cache entries and staged render inputs older than 24 h
     /// 2. a job folder carrying the done marker, 24 h after the marker was written
     /// 3. an unmarked job folder after 7 days, and only when nothing still claims it
     ///
-    /// The staged inputs (`StagedRenderInputs`) and the songs (`AudioFilePicker`) are in `tmp`, which
-    /// iOS empties by itself only while the app is not running, and something in this process may
-    /// still be reading one: `load()` runs again when the web view reloads, which can happen in the
-    /// middle of a render, and a host may keep a picked song's name for the rest of its session. A
-    /// day is long past either, so nothing here needs to know who still holds a name. Android's
+    /// The staged inputs (`StagedRenderInputs`) are in `tmp`, which iOS may purge while the app is
+    /// not running and never while it runs, and a render in this process may still be reading one:
+    /// `load()` runs again when the web view reloads, which can happen in the middle of a render. A
+    /// day is long past that, so nothing here needs to know who still holds a name. Android's
     /// `JobFolders.sweep` clears its staged inputs by the same rule.
+    ///
+    /// The picked songs beside them go whatever their age (`AudioFilePicker.clear`): each was read by
+    /// the page it was answered to as it was answered, and that page is gone by the time the plugin
+    /// loads again.
     static func sweep(now: Date) {
         let fm = FileManager.default
         // A missing root is the normal state on a fresh install, and `contentsOfDirectory` throws
@@ -456,7 +464,7 @@ enum JobFolders {
         sweepCache(thumbsDir(), now: now)
         sweepCache(voiceDir(), now: now)
         sweepCache(StagedRenderInputs.folder, now: now)
-        sweepCache(AudioFilePicker.folder, now: now)
+        AudioFilePicker.clear()
     }
 
     /// The folder name IS the sanitised batchId, which is what both of the guards below are

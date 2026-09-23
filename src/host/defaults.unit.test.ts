@@ -299,9 +299,8 @@ describe('the audio picker in a Capacitor app on iOS', () => {
    * the method is looked up in is the plugin's own: another plugin's method of the same name is not it.
    */
   it('gives an iOS build without the kit\'s picker the file input, rather than a call nothing answers', async () => {
-    installBridge('ios', nativePromise, ['retainMedia', 'stageRenderInput']);
-    const bridge = (globalThis as { Capacitor: { PluginHeaders: object[] } }).Capacitor;
-    bridge.PluginHeaders.push({ name: 'SomeOtherPlugin', methods: [{ name: 'pickAudioFile', rtype: 'promise' }] });
+    const headers = installBridge('ios', nativePromise, ['retainMedia', 'stageRenderInput']);
+    headers.push({ name: 'SomeOtherPlugin', methods: [{ name: 'pickAudioFile', rtype: 'promise' }] });
     const picked = browserMediaHost().pickAudio();
     const input = lastInput();
 
@@ -463,22 +462,31 @@ function answerDurations(seconds: Record<string, number>): string[] {
   return asked;
 }
 
+/** One entry of `Capacitor.PluginHeaders`: a native plugin the app was built with, and its methods. */
+interface PluginHeader {
+  name: string;
+  methods: { name: string; rtype: string }[];
+}
+
 /**
  * The global a Capacitor app's native side puts in the page, as the default host reads it, with the
  * `VideoComposer` header a build of the kit declares - `pickAudioFile` among its methods unless
- * `methods` says otherwise, as a build older than the call would.
+ * `methods` says otherwise, as a build older than the call would. Answers the headers, for a test
+ * that adds a plugin of its own.
  */
 function installBridge(
   platform: string,
   nativePromise: ReturnType<typeof vi.fn>,
   methods: readonly string[] = ['retainMedia', 'pickAudioFile', 'stageRenderInput'],
-): void {
+): PluginHeader[] {
+  const headers: PluginHeader[] = [{ name: 'VideoComposer', methods: methods.map((name) => ({ name, rtype: 'promise' })) }];
   (globalThis as { Capacitor?: unknown }).Capacitor = {
     getPlatform: () => platform,
     convertFileSrc: (path: string) => path.replace('file://', 'capacitor://localhost/_capacitor_file_'),
     nativePromise,
-    PluginHeaders: [{ name: 'VideoComposer', methods: methods.map((name) => ({ name, rtype: 'promise' })) }],
+    PluginHeaders: headers,
   };
+  return headers;
 }
 
 /**

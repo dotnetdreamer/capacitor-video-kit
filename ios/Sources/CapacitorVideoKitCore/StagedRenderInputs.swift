@@ -141,7 +141,7 @@ enum StagedRenderInputs {
     /// Taken with or without a leading dot, because both are how an extension is written and the two
     /// mean the same file. Anything but letters and digits is refused rather than cleaned: it becomes
     /// part of a path, and a caller that sends `../x` has a bug worth hearing about. The same rule as
-    /// Android's `StagedRenderInputs.extension`, so one page is refused on both or neither.
+    /// Android's `StagedRenderInputs.extension`.
     static func extensionName(_ raw: String?) throws -> String? {
         guard let raw else { return nil }
         let bare = raw.hasPrefix(".") ? String(raw.dropFirst()) : raw

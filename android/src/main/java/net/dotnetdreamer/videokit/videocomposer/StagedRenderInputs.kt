@@ -67,10 +67,15 @@ object StagedRenderInputs {
     /**
      * Without [uri] the chunk starts a new file, `<uuid>` plus [extension] after a dot when there is
      * one; with it, the chunk is appended to the file [uri] names, which must be one this made and
-     * still there, and [extension] is ignored, as the contract's `StageRenderInputOptions.extension`
-     * says, because the name was settled when the file was made. An append to nothing is refused
-     * rather than begun again, because a file that lost its head opens as a broken sound, and the
-     * page would rather be told than render one.
+     * still there. An append to nothing is refused rather than begun again, because a file that
+     * lost its head opens as a broken sound, and the page would rather be told than render one.
+     *
+     * [extension] is checked on every chunk and used only on the first, as the contract's
+     * `StageRenderInputOptions.extension` says and as iOS's `stage` does it: the name is settled
+     * once the file exists, but a caller that sends `../x` with its fifth chunk has the same bug as
+     * one that sends it with its first, and is told so on either engine. It is checked before
+     * anything else, the file [uri] names included, so a call wrong in two ways is refused for the
+     * same one on both.
      *
      * Every chunk is decoded on its own. The page encodes each one on its own - `btoa` in
      * `withNativeRenderInputs` - so every chunk carries its own padding, and the chunks cannot be
@@ -95,8 +100,9 @@ object StagedRenderInputs {
         extension: String?,
         decode: (String) -> ByteArray,
     ): File {
+        val suffix = extension(extension)?.let { ".$it" }.orEmpty()
         val target = if (uri == null) {
-            File(folder, "${UUID.randomUUID()}${extension(extension)?.let { ".$it" }.orEmpty()}")
+            File(folder, "${UUID.randomUUID()}$suffix")
         } else {
             staged(folder, uri)?.takeIf { it.isFile }
                 ?: throw Refused("$uri is not a render input staged here")
@@ -171,8 +177,8 @@ object StagedRenderInputs {
      * `.wav` is how an extension is often written and plainly means the same file. What is left must
      * be letters and digits, and anything else is refused rather than cleaned: it becomes part of a
      * path, and a caller that sends `../x` has a bug worth hearing about. Empty, as absent, is none.
-     * The same rule as iOS's `StagedRenderInputs.extensionName`, so a new file's extension is refused
-     * on both or neither.
+     * The same rule as iOS's `StagedRenderInputs.extensionName`, so an extension is refused on both
+     * or neither.
      */
     internal fun extension(raw: String?): String? {
         val bare = raw?.removePrefix(".")?.takeIf { it.isNotEmpty() } ?: return null

@@ -190,6 +190,12 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
 
   const durationMs = Math.max(0, Math.round(finite(spec.durationMs, 0)));
 
+  // Whole bytes, since a file has no fraction of one and the failure's message prints the number.
+  // Anything that is not a positive number is no ceiling, and the key is left off rather than read
+  // back as a zero that would fail every render.
+  const askedMaxBytes = finite(output.maxBytes, 0);
+  const maxBytes = askedMaxBytes > 0 ? Math.max(1, Math.floor(askedMaxBytes)) : 0;
+
   const audio = spec.audio ?? {
     originalMuted: false,
     originalVolume: 1,
@@ -214,6 +220,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
       fps: Math.max(1, Math.round(finite(output.fps, 30))),
       videoBitrate: Math.max(100_000, Math.round(finite(output.videoBitrate, 6_000_000))),
       audioBitrate: Math.max(32_000, Math.round(finite(output.audioBitrate, 128_000))),
+      ...(maxBytes > 0 ? { maxBytes } : {}),
     },
     filter,
     overlays,

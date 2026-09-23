@@ -17,11 +17,13 @@ import UniformTypeIdentifiers
 /// `unimplemented` (`VideoComposerPlugin.kt`), and the web has no native side to ask.
 ///
 /// The copy is the page's to read, once, as soon as it is answered: the host's picker reads its
-/// bytes into a `Blob`, and nothing after that learns the song came in another way. So it lives in
-/// `tmp/videokit-audio/`, and nothing deletes it but iOS, which empties `tmp` while the app is not
-/// running, and `JobFolders.sweep`, which clears anything there a day old on the next launch. A page
-/// that has read the bytes has no call to make, and a host that keeps the name for the rest of its
-/// session still finds the file.
+/// bytes into a `Blob`, and nothing after that learns the song came in another way, which is why the
+/// contract has a host never keep the name. So it lives in `tmp/videokit-audio/`, and goes without
+/// being asked for: the next pick clears the folder before it puts its own song there (`keep`), and
+/// `JobFolders.sweep` clears whatever is left when the plugin next loads. By either time the page
+/// it was answered to has read it - a person has been through the picker again since, or that page
+/// has been replaced - so a page that has read the bytes has no call to make, and one song at most
+/// is on disk here beside the page's `Blob`. iOS may also purge `tmp` while the app is not running.
 ///
 /// Main-actor bound, because the picker is UIKit's, and every callback of it comes on main. The file
 /// work is not, and the plugin runs it off main (`VideoComposerPlugin.pickAudioFile`).
@@ -42,21 +44,35 @@ final class AudioFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePrese
     /// failure, as a cancel is for every other picker a host uses.
     nonisolated static var cancelled: [String: Any] { ["cancelled": true] }
 
+    /// Deletes every song in `folder`, whatever its age, and leaves the folder. For `keep`, before it
+    /// puts the next one there, and for `JobFolders.sweep`: see the type's doc for why no song is
+    /// wanted by then. Best effort, as every sweep is: a song that would not delete is tried again by
+    /// the next pick or the next load.
+    nonisolated static func clear() {
+        let fm = FileManager.default
+        for song in (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: song)
+        }
+    }
+
     /// Puts what the picker picked in `folder` under a name of its own, and answers it.
+    ///
+    /// Clears the folder first (`clear`): the song there is the last pick's, which its page read as
+    /// it was answered, long before a person could get through the picker again. The plugin makes one
+    /// of these at a time (`VideoComposerPlugin.audioCopies`), so a clear never takes a song another
+    /// `keep` is still writing.
     ///
     /// Moved when it is in this app's container, as the picker's copy is: `asCopy` has iOS copy the
     /// file into the app's `tmp` before it answers and leave that copy for the app to deal with, so
     /// moving it keeps one song on disk rather than two, and the move is a rename. Copied from
-    /// anywhere else, because a file outside the container is not the app's to take away.
+    /// anywhere else, because a file outside the container is not the app's to take away. A move or
+    /// a copy that fails takes the half-written copy with it, and the picker's own copy too, by
+    /// `JobFolders.removeIfScratch`'s rule, because its folder is one no sweep looks in.
     ///
     /// Named `<uuid>.<ext>`: a UUID because two songs called `Track 1.mp3` from two albums are two
     /// picks, and the picked extension because the local server that plays the file to the page, and
     /// AVFoundation when a host renders it, both take a file's type from its name (see
     /// `RenderInputs`). A song with no extension is named by the UUID alone.
-    ///
-    /// Dated now, because the launch sweep takes what is a day old, and the picker's copy can carry
-    /// the date of the file it copied: a song made last year would otherwise go on the next launch,
-    /// which can be a web view reload a minute later.
     ///
     /// `mimeType` is the type iOS gives the extension, for the page: its `Blob` needs one, and the
     /// local server's response for a whole file carries none.
@@ -64,20 +80,24 @@ final class AudioFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePrese
         let fm = FileManager.default
         var target = folder.appendingPathComponent(UUID().uuidString, isDirectory: false)
         if !picked.pathExtension.isEmpty { target.appendPathExtension(picked.pathExtension) }
+        clear()
         try JobFolders.ensure(folder)
-        if JobFolders.containerRelativePath(picked) != nil {
-            try fm.moveItem(at: picked, to: target)
-        } else {
-            // `asCopy` promises a file in the container, so this is for a picker that ever breaks the
-            // promise: a document picker URL from outside the sandbox reads only between these two
-            // calls. For any other URL the first answers false, and the second is not made.
-            let scoped = picked.startAccessingSecurityScopedResource()
-            defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
-            try fm.copyItem(at: picked, to: target)
+        do {
+            if JobFolders.containerRelativePath(picked) != nil {
+                try fm.moveItem(at: picked, to: target)
+            } else {
+                // `asCopy` promises a file in the container, so this is for a picker that ever breaks
+                // the promise: a document picker URL from outside the sandbox reads only between these
+                // two calls. For any other URL the first answers false, and the second is not made.
+                let scoped = picked.startAccessingSecurityScopedResource()
+                defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
+                try fm.copyItem(at: picked, to: target)
+            }
+        } catch {
+            try? fm.removeItem(at: target)
+            JobFolders.removeIfScratch(picked)
+            throw error
         }
-        // Best effort, as `RetainedMedia.moveIntoPicked` dates a pick: a date that would not set is
-        // not a reason to lose the song.
-        try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: target.path)
 
         let mimeType = picked.pathExtension.isEmpty
             ? nil
@@ -114,12 +134,24 @@ final class AudioFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePrese
         controller.presentingViewController != nil
     }
 
-    /// Presents the picker over whatever `presenter` already shows, because UIKit presents nothing
-    /// from a view controller that is presenting something else, and says so only in the log.
-    func present(from presenter: UIViewController) {
+    /// Presents the picker over whatever `presenter` already shows, and answers whether it went up.
+    ///
+    /// Over the top of what is shown because UIKit presents nothing from a view controller that is
+    /// presenting something else, passing over one on its way out because a picker put over it would
+    /// go with it. UIKit still refuses some presentations - from a view whose window is gone, in the
+    /// middle of another transition - and says so only in the log, and a picker that never went up
+    /// never calls back. So a refusal answers false for the plugin to reject at once, rather than
+    /// leave the page waiting on an answer nobody will give, and spends the picker: `finish` is dropped
+    /// uncalled, so a presentation UIKit made after all cannot answer a call already refused.
+    func present(from presenter: UIViewController) -> Bool {
         var top = presenter
-        while let shown = top.presentedViewController { top = shown }
+        while let shown = top.presentedViewController, !shown.isBeingDismissed { top = shown }
         top.present(controller, animated: true)
+        guard isOnScreen else {
+            finish = nil
+            return false
+        }
+        return true
     }
 
     /// Calls `finish` with `picked`, the first time only. A pick and a dismissal can both be told for
@@ -133,7 +165,12 @@ final class AudioFilePicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePrese
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         // No URL is nothing picked: a cancel by another name.
+        let taken = finish == nil ? nil : urls.first
         settle(urls.first)
+        // A pick told after the picker was answered - settled as gone, or refused - is a copy nobody
+        // will ask for, and so is any past the first, which a picker of one file should never send.
+        // `asCopy` left each in `tmp/<bundle id>-Inbox/`, which no sweep looks in, so they go now.
+        for url in urls where url != taken { JobFolders.removeIfScratch(url) }
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {

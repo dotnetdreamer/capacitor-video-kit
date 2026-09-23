@@ -325,6 +325,12 @@ class VideoComposerPlugin : Plugin() {
     ): Transformer.Listener = object : Transformer.Listener {
 
         override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+            // The export is over, so it is let go of here rather than when the job is finished,
+            // which stops the progress poll on its next tick. Without that, the poll's size check
+            // could measure the finished file while [finalizeJob] measures and moves it, and
+            // report one render too large twice. Nothing is lost: a cancel of a finished export
+            // is a no-op.
+            job.transformer = null
             pluginScope.launch { finalizeJob(job, exportResult) }
         }
 
@@ -376,13 +382,28 @@ class VideoComposerPlugin : Plugin() {
      * seconds ago keeps reporting 99 % - so the average says 55 % while the video is at 10 %.
      * The frame timestamps are the real thing. `getProgress` is still useful for the moment before
      * the first frame arrives, and only when a single sequence makes it invertible.
+     *
+     * The same tick holds the export to the host's ceiling, [Output.maxBytes], by measuring the
+     * file being written - see [SizeCeiling] for why the file and not an estimate. Here because
+     * this is the looper the Transformer has to be cancelled on, and twice a second is often enough
+     * that a file stopped past the ceiling is a poll's worth of video past it and no more.
+     * Measuring is one read of the file's metadata, and this looper already creates and deletes the
+     * same file around every attempt.
      */
     private fun pollProgress(job: JobRegistry.Job) {
         val holder = ProgressHolder()
+        val maxBytes = job.plan.spec.output.maxBytes
         main.post(object : Runnable {
             override fun run() {
                 if (job.state != JobRegistry.State.RENDERING) return
                 val transformer = job.transformer ?: return
+
+                if (maxBytes != null) {
+                    SizeCeiling.tooLarge(job.partFile.length(), maxBytes)?.let { message ->
+                        stopTooLarge(job, transformer, message)
+                        return
+                    }
+                }
 
                 val frameUs = job.lastFrameUs.get()
                 val progress = if (frameUs > 0L && job.plan.totalUs > 0L) {
@@ -413,9 +434,42 @@ class VideoComposerPlugin : Plugin() {
         })
     }
 
+    /**
+     * Stops an export whose file has grown past the host's ceiling, and fails the render
+     * `too_large` with [message]. Main looper only, like every other call on a Transformer.
+     *
+     * The steps a caller's [cancel] takes, and for the same reason: Transformer fires no callback
+     * after `cancel()`, so the terminal state is written here. Unlike [cancel] it is all done on
+     * this looper and at once, as [listenerFor]'s `onError` does it, so the job is already finished
+     * by the time anything else posted here runs: a caller's cancel landing a moment later finds a
+     * terminal job and adds nothing, and a second poll loop - a relaxed retry starts one of its
+     * own - finds no render to measure.
+     */
+    private fun stopTooLarge(job: JobRegistry.Job, transformer: Transformer, message: String) {
+        Log.w(TAG, "render ${job.jobId} stopped: $message")
+        try {
+            transformer.cancel()
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "cancel past the size ceiling failed for ${job.jobId}: ${e.message}")
+        }
+        job.partFile.delete()
+        failJob(job, FailureCodes.TOO_LARGE, message)
+    }
+
     private fun finalizeJob(job: JobRegistry.Job, exportResult: ExportResult) {
         val appContext = context.applicationContext
         try {
+            // Measured once more now that the muxer has written the file's index, which comes last
+            // and which no poll saw. Before the file is moved, so a render that fails here touches
+            // nothing but its own part file, as every other failed render does.
+            val maxBytes = job.plan.spec.output.maxBytes
+            SizeCeiling.tooLarge(job.partFile.length(), maxBytes)?.let { message ->
+                Log.w(TAG, "render ${job.jobId} finished too large: $message")
+                job.partFile.delete()
+                failJob(job, FailureCodes.TOO_LARGE, message)
+                return
+            }
+
             val stitched = JobFolders.stitched(appContext, job.batchId)
             stitched.delete()
             if (!job.partFile.renameTo(stitched)) {
@@ -1146,8 +1200,8 @@ class VideoComposerPlugin : Plugin() {
      * may only be one of the kit's own.
      *
      * Rejects `invalid_spec` for a call the page got wrong: no `data`, data that is not base64, a
-     * `uri` that names anything but a staged file that is still there, or for a new file an
-     * extension that is not one.
+     * `uri` that names anything but a staged file that is still there, or an extension that is not
+     * one, on any chunk.
      * A disk that would not take the chunk is `no_space`, and any other failed write is `unknown`,
      * in the system's words.
      */

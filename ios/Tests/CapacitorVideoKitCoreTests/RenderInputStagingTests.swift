@@ -145,7 +145,7 @@ final class RenderInputStagingTests: XCTestCase {
 
     // MARK: - The launch sweep
 
-    func testTheLaunchSweepClearsStagedInputsAndPickedSongsADayOld() throws {
+    func testTheLaunchSweepClearsStagedInputsADayOldAndEveryPickedSong() throws {
         let oldInput = try StagedRenderInputs.stage(base64([1]), onto: nil, extension: "wav")
         try date(oldInput, longAgo)
         let freshInput = try StagedRenderInputs.stage(base64([1]), onto: nil, extension: "wav")
@@ -159,9 +159,9 @@ final class RenderInputStagingTests: XCTestCase {
         JobFolders.sweep(now: Date())
 
         XCTAssertFalse(exists(oldInput))
-        XCTAssertFalse(exists(oldSong))
         XCTAssertTrue(exists(freshInput), "a render may still be reading it")
-        XCTAssertTrue(exists(freshSong), "a host may still hold its name")
+        XCTAssertFalse(exists(oldSong))
+        XCTAssertFalse(exists(freshSong), "read by a page that is gone, however recently")
     }
 
     // MARK: - Through the plugin

@@ -435,17 +435,27 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     ///
     /// An absent `uris` is the caller's mistake and says so, as an absent `timesMs` does; an EMPTY
     /// one is legal and deletes nothing. An absent `keep` is legal too, and spares nothing: unlike
-    /// `sweepMedia`'s, it cannot widen what goes, which is never more than `uris` names. An entry
-    /// of either that is not a string names nothing.
+    /// `sweepMedia`'s, it cannot widen what goes, which is never more than `uris` names. A JSON null
+    /// is absent - the bridge hands it over as `NSNull` - as Android's and the web's `releaseMedia`
+    /// read it. A `keep` that is anything else and not a list is refused before anything is deleted,
+    /// because `getArray` answers nil for it just as for an absent one: a host that put one name
+    /// where the list belongs meant to spare that copy, and read as absent it would delete exactly
+    /// what it was there to keep. An entry of either list that is not a string names nothing.
     @objc func releaseMedia(_ call: CAPPluginCall) {
         guard let uris = call.getArray("uris") else {
             call.reject("uris is required", Reject.invalidSpec)
             return
         }
+        let given = call.options["keep"]
+        let keep = call.getArray("keep")
+        guard keep != nil || given == nil || given is NSNull else {
+            call.reject("keep must be a list of uris", Reject.invalidSpec)
+            return
+        }
         let names = uris.compactMap { $0 as? String }
-        let keep = (call.getArray("keep") ?? []).compactMap { $0 as? String }
+        let kept = (keep ?? []).compactMap { $0 as? String }
         Task {
-            RetainedMedia.release(names, keep: keep)
+            RetainedMedia.release(names, keep: kept)
             call.resolve()
         }
     }
@@ -486,7 +496,9 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     /// second over it and leaving the first to answer nobody. A picker that has gone without saying so
     /// is answered as a cancel first, so one lost callback cannot refuse every pick after it. With no
     /// view controller to present from - a bridge with no screen - it rejects as unavailable, which
-    /// is Capacitor's own `UNAVAILABLE`. A song that picked but would not copy rejects `no_space` or
+    /// is Capacitor's own `UNAVAILABLE`, and so it does when UIKit would not put the picker up, which
+    /// would otherwise leave the call waiting for an answer that cannot come (see
+    /// `AudioFilePicker.present`). A song that picked but would not copy rejects `no_space` or
     /// `unknown`, as `stageRenderInput` does.
     @objc func pickAudioFile(_ call: CAPPluginCall) {
         Task { @MainActor in
@@ -515,14 +527,23 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             Self.keep(picked, answering: call)
         }
+        guard picker.present(from: presenter) else {
+            call.unavailable("the audio picker could not be shown")
+            return
+        }
         audioPicker = picker
-        picker.present(from: presenter)
     }
+
+    /// Where `AudioFilePicker.keep` runs, one song at a time: each clears the folder before it puts
+    /// its own song there, and two at once could clear a song the other is still writing. Without
+    /// this two would overlap only for a host that asks again before its last pick has answered and
+    /// a person quick enough to pick in between, which is rare, and costs a song when it happens.
+    private static let audioCopies = DispatchQueue(label: "net.dotnetdreamer.videokit.audio", qos: .userInitiated)
 
     /// Answers `call` with the copy `AudioFilePicker.keep` makes of `picked`, made off main: a song
     /// copied from outside the app is a copy of every byte, and main is drawing the picker away.
     private static func keep(_ picked: URL, answering call: CAPPluginCall) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        audioCopies.async {
             do {
                 call.resolve(try AudioFilePicker.keep(picked).json)
             } catch {
@@ -550,7 +571,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     /// Rejects `invalid_spec` for a call the page got wrong: no `data`, data that is not base64, an
     /// extension that is not one, a `uri` that names anything but a staged file that is still there.
     /// A disk that would not take the chunk is `no_space`, and any other failed write is `unknown`,
-    /// in the system's words. Android's `stageRenderInput` answers each the same way.
+    /// in the system's words. Android's `stageRenderInput` gives each the same code.
     @objc func stageRenderInput(_ call: CAPPluginCall) {
         guard let data = call.getString("data") else {
             call.reject("data is required", Reject.invalidSpec)

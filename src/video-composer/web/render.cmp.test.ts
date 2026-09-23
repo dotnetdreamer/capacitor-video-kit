@@ -222,6 +222,75 @@ describe('the web renderer, end to end', () => {
     RENDER_TIMEOUT_MS,
   );
 
+  /*
+   * The host's upload ceiling. Two seconds of green at 800 kbps is tens of kilobytes whatever the
+   * encoder makes of it, so a ceiling of two kilobytes is passed by the first key frame, and one of
+   * fifty megabytes is never approached.
+   */
+  it(
+    'stops a render that grows past the host\'s ceiling, and says by how much in every engine\'s words',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const source = URL.createObjectURL(await makeSourceVideo('#0a0'));
+      try {
+        const seen: number[] = [];
+        const tooBig = spec(source, {
+          jobId: 'job-3',
+          // A black tail past the one second of footage, so there are frames left to not encode.
+          durationMs: 2000,
+          output: { ...spec(source).output, maxBytes: 2000 },
+        });
+        const failure = await renderSpec(tooBig, {
+          signal: new AbortController().signal,
+          onProgress: progress => seen.push(progress),
+        }).then(
+          () => null,
+          (error: unknown) => error as { code: string; message: string },
+        );
+
+        expect(failure?.code).toBe('too_large');
+        const [, max, bytes] = /^too_large max=(\d+) bytes=(\d+)$/.exec(failure?.message ?? '') ?? [];
+        expect(Number(max)).toBe(2000);
+        expect(Number(bytes)).toBeGreaterThan(2000);
+        // No video was handed back, and the bar never reached the end it only reaches with one.
+        expect(seen).not.toContain(1);
+      } finally {
+        URL.revokeObjectURL(source);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'finishes a render that stays under the host\'s ceiling, exactly as one with none',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const source = URL.createObjectURL(await makeSourceVideo('#0a0'));
+      try {
+        const maxBytes = 50 * 1024 * 1024;
+        const outcome = await renderSpec(spec(source, { jobId: 'job-4', output: { ...spec(source).output, maxBytes } }), {
+          signal: new AbortController().signal,
+          onProgress: () => undefined,
+        });
+
+        expect(outcome.durationMs).toBe(500);
+        expect(outcome.blob.size).toBeGreaterThan(0);
+        expect(outcome.blob.size).toBeLessThanOrEqual(maxBytes);
+      } finally {
+        URL.revokeObjectURL(source);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
   it(
     'stops when the caller cancels',
     async ctx => {

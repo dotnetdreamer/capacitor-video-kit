@@ -255,6 +255,14 @@ data class Output(
     val fps: Int,
     val videoBitrate: Int,
     val audioBitrate: Int,
+    /**
+     * The most bytes the finished file may have - `ComposeOutput.maxBytes`, the host's upload
+     * ceiling - in whole bytes, or null for no ceiling at all. Null is what every spec written
+     * before the field says, and what a host that keeps its videos on the phone goes on saying: a
+     * 4K render there may be as large as it comes out. See [SizeCeiling] for how a render is held
+     * to one.
+     */
+    val maxBytes: Long? = null,
 )
 
 /**

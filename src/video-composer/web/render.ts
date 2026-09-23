@@ -122,6 +122,10 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   try {
     const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, options);
     const { blob, hasAudio, mimeType } = await guard(() => sink.finish(), 'muxer');
+    // The finished file, measured once more: the running count leaves out the container's boxes and
+    // the sound, which is only encoded now. A file over the ceiling is dropped here, before anything
+    // stores it, which is the web's way of deleting it.
+    holdToCeiling(plan.output.maxBytes, blob.size);
     options.onProgress(1);
     return {
       blob,
@@ -261,6 +265,9 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     // The last frame is only as long as there is timeline left for it.
     const holdUs = Math.max(1, Math.min(frameUs, plan.totalUs - atUs));
     await guard(() => sink.addFrame(atUs, holdUs), 'encoder');
+    // Every frame rather than a few times a second, as the native engines poll a file's size: this
+    // is a number the sink already holds, not a trip to the disk.
+    holdToCeiling(plan.output.maxBytes, sink.bytes);
 
     const progress = FRAMES_FROM + ((index + 1) / frames) * (FRAMES_TO - FRAMES_FROM);
     if (progress - reported >= PROGRESS_STEP) {
@@ -474,6 +481,20 @@ async function guard<T>(run: () => Promise<T>, code: ComposeFailureCode): Promis
     }
     throw new RenderFailure(code, describe(error));
   }
+}
+
+/**
+ * Fails the render `too_large` once the file has passed [ComposeOutput.maxBytes], in the words every
+ * engine uses, so a host's log reads the same whichever platform it came from.
+ *
+ * Checked as the file grows, where it stops the encode instead of spending the rest of it on a file
+ * the host cannot send, and on the finished file. A ceiling that is absent or not a positive number
+ * is none: `validateSpec` leaves such a key off, and this holds to the same rule for a spec handed
+ * to [renderSpec] directly.
+ */
+function holdToCeiling(maxBytes: number | undefined, bytes: number): void {
+  if (maxBytes === undefined || !Number.isFinite(maxBytes) || maxBytes <= 0) return;
+  if (bytes > maxBytes) throw new RenderFailure('too_large', `too_large max=${maxBytes} bytes=${bytes}`);
 }
 
 /** The poster, as a JPEG. Null where the canvas would not give one - a tainted canvas, mostly. */

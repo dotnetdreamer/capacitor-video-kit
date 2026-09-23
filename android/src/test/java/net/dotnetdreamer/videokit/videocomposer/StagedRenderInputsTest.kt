@@ -104,12 +104,39 @@ class StagedRenderInputsTest {
     }
 
     @Test
-    fun `an extension on an append is ignored, since the name was settled with the file`() {
-        // As the contract's StageRenderInputOptions.extension has it: "Ignored when appending".
+    fun `an extension on an append changes nothing, since the name was settled with the file`() {
+        // As the contract's StageRenderInputOptions.extension has it: "Checked on every call, used
+        // only on the first".
         val first = stage(encode(byteArrayOf(1)), extension = "wav")
         assertEquals(first, stage(encode(byteArrayOf(2)), uri = uriOf(first), extension = "mp3"))
-        assertEquals(first, stage(encode(byteArrayOf(3)), uri = uriOf(first), extension = "../x"))
+        assertEquals(first, stage(encode(byteArrayOf(3)), uri = uriOf(first), extension = ".m4a"))
         assertArrayEquals(byteArrayOf(1, 2, 3), first.readBytes())
+        assertEquals(listOf(first.name), folder.list()!!.toList())
+    }
+
+    @Test
+    fun `an extension that is not one is refused on an append too, and the file is left alone`() {
+        // The iOS stage checks it on every chunk, so a page that sends one with its fifth chunk is
+        // told on both engines, and in the same words.
+        val first = stage(encode(byteArrayOf(1)), extension = "wav")
+        for (extension in listOf("../x", "a/b", "tar.gz")) {
+            val refusal = assertThrows(extension, StagedRenderInputs.Refused::class.java) {
+                stage(encode(byteArrayOf(2)), uri = uriOf(first), extension = extension)
+            }
+            assertEquals("$extension is not an extension", refusal.message)
+        }
+        assertArrayEquals(byteArrayOf(1), first.readBytes())
+    }
+
+    @Test
+    fun `an extension is checked before the file an append names`() {
+        // A call wrong in two ways is refused for the same one on both engines: iOS reads the
+        // extension first.
+        val elsewhere = "content://media/external/audio/media/12"
+        val refusal = assertThrows(StagedRenderInputs.Refused::class.java) {
+            stage(encode(byteArrayOf(2)), uri = elsewhere, extension = "../x")
+        }
+        assertEquals("../x is not an extension", refusal.message)
     }
 
     @Test

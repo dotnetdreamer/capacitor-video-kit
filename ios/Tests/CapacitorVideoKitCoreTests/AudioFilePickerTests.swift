@@ -4,9 +4,10 @@ import XCTest
 @testable import CapacitorVideoKitCore
 
 /// `pickAudioFile`, as far as it goes without a screen: where a picked song is put and what it is
-/// called, the answer for a pick and for a cancel, every way the picker can end coming to exactly one
-/// answer, and the refusal when there is nothing to present the picker from. Presenting the picker
-/// itself needs a person to pick, and is not tested here.
+/// called, that no song outlives the next pick or the next load and no copy the picker made is left
+/// where no sweep looks, the answer for a pick and for a cancel, every way the picker can end coming
+/// to exactly one answer, and the refusals when there is nothing to present the picker from or UIKit
+/// will not present it. Presenting the picker itself needs a person to pick, and is not tested here.
 final class AudioFilePickerTests: XCTestCase {
 
     /// Files and folders this test placed outside the audio folder, removed in `tearDown`.
@@ -29,8 +30,6 @@ final class AudioFilePickerTests: XCTestCase {
         let inbox = try inboxFolder()
         let pick = inbox.appendingPathComponent("Song One.mp3")
         try Data([1, 2, 3]).write(to: pick)
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000_000)],
-                                              ofItemAtPath: pick.path)
 
         let kept = try AudioFilePicker.keep(pick)
 
@@ -41,10 +40,6 @@ final class AudioFilePickerTests: XCTestCase {
         XCTAssertEqual(kept.mimeType, "audio/mpeg")
         XCTAssertEqual(try Data(contentsOf: kept.url), Data([1, 2, 3]))
         XCTAssertFalse(FileManager.default.fileExists(atPath: pick.path), "a move, so the song is on disk once")
-
-        let modified = try XCTUnwrap(URL(fileURLWithPath: kept.url.path)
-            .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-        XCTAssertLessThan(abs(modified.timeIntervalSinceNow), 60, "dated when it was picked, for the launch sweep")
     }
 
     func testCopiesAFileFromOutsideTheAppAndLeavesItWhereItIs() throws {
@@ -61,11 +56,33 @@ final class AudioFilePickerTests: XCTestCase {
         XCTAssertNil(kept.mimeType)
     }
 
-    func testTwoSongsOfOneNameAreTwoFiles() throws {
+    func testEachPickClearsTheSongBeforeItAndIsNamedAfreshEvenForOneName() throws {
         let first = try AudioFilePicker.keep(try write("Track 1.m4a", in: try inboxFolder()))
         let second = try AudioFilePicker.keep(try write("Track 1.m4a", in: try inboxFolder()))
-        XCTAssertNotEqual(first.url, second.url)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: first.url.path))
+
+        XCTAssertNotEqual(first.url, second.url, "a name is never handed out twice")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.url.path), "its page read it when it was answered")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: AudioFilePicker.folder.path),
+                       [second.url.lastPathComponent])
+    }
+
+    func testAPickThatWouldNotMoveLeavesNoCopyBehind() throws {
+        let pick = try write("song.mp3", in: try inboxFolder())
+        // A file where the folder belongs, so the move has nowhere to go.
+        try FileManager.default.createDirectory(at: AudioFilePicker.folder.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try Data([9]).write(to: AudioFilePicker.folder)
+
+        XCTAssertThrowsError(try AudioFilePicker.keep(pick))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pick.path), "the picker's copy is in a folder no sweep looks in")
+    }
+
+    func testTheLaunchSweepTakesEverySongWhateverItsAge() throws {
+        let song = try AudioFilePicker.keep(try write("song.mp3", in: try inboxFolder()))
+
+        JobFolders.sweep(now: Date())
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: song.url.path), "the page it was answered to is gone")
     }
 
     func testNamesATypeTheRenderNamesAnExtensionFor() throws {
@@ -134,8 +151,42 @@ final class AudioFilePickerTests: XCTestCase {
     }
 
     @MainActor
+    func testAPickTheAnswerCannotTakeIsDeleted() throws {
+        let document = UIDocumentPickerViewController(forOpeningContentTypes: [.audio], asCopy: true)
+        let inbox = try inboxFolder()
+        let taken = try write("taken.mp3", in: inbox)
+        let extra = try write("extra.mp3", in: inbox)
+        let late = try write("late.mp3", in: inbox)
+        var answers: [URL?] = []
+        let picker = AudioFilePicker { answers.append($0) }
+
+        picker.documentPicker(document, didPickDocumentsAt: [taken, extra])
+        picker.documentPicker(document, didPickDocumentsAt: [late])
+
+        XCTAssertEqual(answers, [taken])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: taken.path), "the answer's to keep")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: extra.path), "past the first")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: late.path), "told after the answer")
+    }
+
+    @MainActor
     func testAPickerNotPresentedIsNotOnScreen() {
         XCTAssertFalse(AudioFilePicker { _ in }.isOnScreen)
+    }
+
+    @MainActor
+    func testAPickerUIKitWouldNotPresentSaysSoAndNeverAnswers() throws {
+        let document = UIDocumentPickerViewController(forOpeningContentTypes: [.audio], asCopy: true)
+        var answers: [URL?] = []
+        let picker = AudioFilePicker { answers.append($0) }
+
+        // A view controller in no window, which UIKit presents nothing from.
+        XCTAssertFalse(picker.present(from: UIViewController()))
+        XCTAssertFalse(picker.isOnScreen)
+
+        picker.documentPickerWasCancelled(document)
+        picker.documentPicker(document, didPickDocumentsAt: [URL(fileURLWithPath: "/tmp/a.mp3")])
+        XCTAssertEqual(answers, [], "the plugin has rejected the call already")
     }
 
     // MARK: - Through the plugin

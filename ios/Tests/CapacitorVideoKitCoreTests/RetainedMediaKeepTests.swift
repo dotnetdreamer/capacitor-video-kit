@@ -107,6 +107,32 @@ final class RetainedMediaKeepTests: XCTestCase {
         XCTAssertFalse(exists(second))
     }
 
+    func testReleaseMediaRefusesAKeepThatIsNotAListAndDeletesNothing() throws {
+        let shared = try copy("videokit-picked/\(UUID().uuidString).mov")
+        let own = try copy("videokit-picked/\(UUID().uuidString).mov")
+
+        // One name where the list belongs is the likeliest mistake, and read as absent it would
+        // delete the very copy it names.
+        for keep: Any in [shared.absoluteString, 42, ["uri": shared.absoluteString]] {
+            let rejection = try PluginCalls.reject(VideoComposerPlugin.releaseMedia, [
+                "uris": [shared.absoluteString, own.absoluteString], "keep": keep,
+            ])
+            XCTAssertEqual(rejection.code, "invalid_spec", "\(keep)")
+            XCTAssertEqual(rejection.message, "keep must be a list of uris")
+        }
+
+        XCTAssertTrue(exists(shared))
+        XCTAssertTrue(exists(own))
+    }
+
+    func testReleaseMediaReadsANullKeepAsAbsent() throws {
+        let released = try copy("videokit-picked/\(UUID().uuidString).mov")
+
+        _ = try PluginCalls.resolve(VideoComposerPlugin.releaseMedia, ["uris": [released.absoluteString], "keep": NSNull()])
+
+        XCTAssertFalse(exists(released), "a null names nothing to spare, as on Android and the web")
+    }
+
     // MARK: - One spelling
 
     func testAMovedNameIsTheNameTheKitHandsOutForTheFile() throws {
@@ -125,6 +151,24 @@ final class RetainedMediaKeepTests: XCTestCase {
         let bare = RetainedMedia.check(stale(file))
         XCTAssertEqual(bare.uri, file.path)
         XCTAssertEqual(JobFolders.rebased(URL(fileURLWithPath: stale(file))), file)
+    }
+
+    func testAMovedNameIsSpelledAsHomeIsAndNotAsTheFileResolves() throws {
+        // A device's two spellings of one container, which the simulator never has: a link standing
+        // in for `/var`, and the folder it points at for `/private/var`.
+        let temporary = FileManager.default.temporaryDirectory
+        let container = temporary.appendingPathComponent("vk-container-\(UUID().uuidString)", isDirectory: true)
+        let link = temporary.appendingPathComponent("vk-link-\(UUID().uuidString)", isDirectory: true)
+        let relative = "Library/Application Support/videokit-picked/clip one.mov"
+        _ = try place(container.appendingPathComponent(relative))
+        placed.append(container)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: container)
+        placed.append(link)
+        let stored = "/private/var/mobile/Containers/Data/Application/\(UUID().uuidString)/" + relative
+
+        let moved = JobFolders.rebased(URL(fileURLWithPath: stored), home: link)
+
+        XCTAssertEqual(moved.path, link.path + "/" + relative, "built on home as it is spelled, not resolved")
     }
 
     func testEveryFolderTheKitNamesFilesInIsSpelledAsHomeIs() throws {

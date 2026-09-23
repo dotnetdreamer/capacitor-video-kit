@@ -209,6 +209,21 @@ describe('clamps', () => {
     if (first) first.speed = 0.5;
     expect(checked.clips[0]?.speed).toBe(1);
   });
+
+  /*
+   * A size ceiling is the host's upload limit, and anything that is not a positive number of bytes
+   * is no ceiling: read as a zero instead, it would fail every render the host ever asked for.
+   */
+  it('keeps a size ceiling in whole bytes, and leaves off one that is not a positive number', () => {
+    const output = spec().output;
+    expect(validateSpec(spec({ output: { ...output, maxBytes: 104_857_600 } })).output.maxBytes).toBe(104_857_600);
+    expect(validateSpec(spec({ output: { ...output, maxBytes: 1000.9 } })).output.maxBytes).toBe(1000);
+
+    expect(validateSpec(spec()).output).not.toHaveProperty('maxBytes');
+    for (const none of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, '100', null]) {
+      expect(validateSpec(spec({ output: { ...output, maxBytes: none as number } })).output).not.toHaveProperty('maxBytes');
+    }
+  });
 });
 
 /*
