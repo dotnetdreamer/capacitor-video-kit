@@ -218,7 +218,8 @@ export class TransitionGl {
 
   private constructor(
     private readonly gl: WebGL2RenderingContext,
-    private readonly frame: Frame,
+    /** Not readonly only for [resize]. */
+    private frame: Frame,
     private readonly blur: Program,
     private readonly mix: Program,
   ) {}
@@ -333,6 +334,21 @@ export class TransitionGl {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.activeTexture(gl.TEXTURE0);
+  }
+
+  /**
+   * A new frame size, for a painter resized in place. Every target is sized from the frame, so every
+   * one goes and is made again at the new size the first time it is asked for; both programs stay,
+   * because nothing in them depends on the size - it is handed to them as a uniform on every draw.
+   */
+  resize(frame: Frame): void {
+    const gl = this.gl;
+    for (const target of this.targets.values()) {
+      gl.deleteFramebuffer(target.framebuffer);
+      gl.deleteTexture(target.texture);
+    }
+    this.targets.clear();
+    this.frame = frame;
   }
 
   /** Every target and both programs. The context itself is the painter's to give back. */

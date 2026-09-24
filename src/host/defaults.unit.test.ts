@@ -145,6 +145,83 @@ describe('the browser media host', () => {
   });
 });
 
+/*
+ * A native host's source can carry a path and no URL, and `composerMediaHost` falls back on these
+ * members for one. A raw path is nothing a WebView's `<video>` opens, so it is read the way the
+ * editor's own preview reads it: through Capacitor's local server.
+ */
+describe('the browser media host reading a source that has only a path', () => {
+  const PATH = 'file:///app/Library/Application%20Support/videokit-picked/9F2C.mp4';
+  const SERVED = 'capacitor://localhost/_capacitor_file_/app/Library/Application%20Support/videokit-picked/9F2C.mp4';
+
+  beforeEach(() => {
+    (globalThis as { Capacitor?: unknown }).Capacitor = {
+      convertFileSrc: (path: string) => path.replace('file://', 'capacitor://localhost/_capacitor_file_'),
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as { Capacitor?: unknown }).Capacitor;
+    vi.restoreAllMocks();
+  });
+
+  /** Every `<video>` made from here on, as the URL it was pointed at, opening as `seconds` long or failing. */
+  function videosOpen(seconds: number | null): string[] {
+    const opened: string[] = [];
+    const create = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      if (tag !== 'video') return create(tag);
+      const video = {
+        preload: '',
+        muted: false,
+        playsInline: false,
+        duration: seconds ?? Number.NaN,
+        onloadedmetadata: null as (() => void) | null,
+        onerror: null as (() => void) | null,
+        listeners: new Map<string, () => void>(),
+        addEventListener: (event: string, listener: () => void) => video.listeners.set(event, listener),
+        removeEventListener: (event: string) => video.listeners.delete(event),
+        removeAttribute: () => undefined,
+        load: () => undefined,
+        set src(url: string) {
+          opened.push(url);
+          queueMicrotask(() => {
+            if (seconds === null) {
+              video.onerror?.();
+              video.listeners.get('error')?.();
+            } else {
+              video.onloadedmetadata?.();
+            }
+          });
+        },
+      };
+      return video as unknown as HTMLVideoElement;
+    }) as typeof document.createElement);
+    return opened;
+  }
+
+  it('measures it through Capacitor\'s local server', async () => {
+    const opened = videosOpen(2.5);
+
+    await expect(browserMediaHost().probeDuration({ key: 'a', fileName: 'a.mp4', sourcePath: PATH })).resolves.toBe(2500);
+    expect(opened).toEqual([SERVED]);
+  });
+
+  it('cuts its frames through Capacitor\'s local server', async () => {
+    const opened = videosOpen(null);
+
+    await browserMediaHost().thumbnails({ source: { key: 'a', fileName: 'a.mp4', sourcePath: PATH }, timesMs: [0], maxHeight: 160, precise: false });
+    expect(opened).toEqual([SERVED]);
+  });
+
+  it('still prefers the URL a source plays by', async () => {
+    const opened = videosOpen(1);
+
+    await browserMediaHost().probeDuration({ key: 'a', fileName: 'a.mp4', sourcePath: PATH, playbackUrl: 'blob:https://example.test/a' });
+    expect(opened).toEqual(['blob:https://example.test/a']);
+  });
+});
+
 describe('the browser media host giving back what the edit dropped', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -277,7 +354,7 @@ describe('the audio picker in a Capacitor app on iOS', () => {
     const minted = soundPlaysFor(12.5);
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => new Blob([]) }));
-    await expect(browserMediaHost().pickAudio()).rejects.toThrow('qa-sample.m4a is empty');
+    await expect(browserMediaHost().pickAudio()).rejects.toThrow('it is empty');
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 0, blob: async () => new Blob([]) }));
     await expect(browserMediaHost().pickAudio()).rejects.toThrow();

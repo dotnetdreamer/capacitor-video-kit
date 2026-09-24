@@ -113,7 +113,10 @@ export async function toComposeSpec(
     if (overlay.kind === 'text' && overlay.text.trim().length === 0) continue;
     if (overlay.startMs >= totalMs - 1) continue;
 
-    const bitmap = await rasteriseOverlay(overlay, raster);
+    // The preview's own bitmap when the editor vouches for it (see RasterContext.drawn): the same
+    // function, context and key drew it, so drawing it again here would only repeat the decode and
+    // the PNG encode. Anything it does not vouch for is drawn exactly as before, errors included.
+    const bitmap = raster.drawn?.(overlay) ?? (await rasteriseOverlay(overlay, raster));
     const startMs = Math.max(0, Math.round(overlay.startMs));
     const endMs = Math.max(startMs + MIN_LAYER_MS, Math.round(overlayEndMs(overlay, totalMs)));
     // An effect covers the frame: its bitmap is the whole picture, so it is never moved or turned.

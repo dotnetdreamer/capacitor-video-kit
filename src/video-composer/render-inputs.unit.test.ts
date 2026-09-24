@@ -113,6 +113,46 @@ describe('withNativeRenderInputs', () => {
     expect(calls[2]).toEqual({ data: base64Of(bytes.subarray(2 * MIB)), uri: prepared.audio.music?.uri });
   });
 
+  /*
+   * The engine's own encoder where it has one and the kit's loop where it has not, and the same
+   * calls either way: every length mod 3, so each padding case is covered, across several chunks.
+   * The runner has no `toBase64` of its own, so the native path is stood in for with Node's.
+   */
+  it.each([
+    ['the loop', false],
+    ["the engine's toBase64", true],
+  ])('sends the same calls, byte for byte, through %s', async (_, native) => {
+    const proto = Uint8Array.prototype as Uint8Array & { toBase64?: () => string };
+    const had = Object.getOwnPropertyDescriptor(proto, 'toBase64');
+    const encoded = vi.fn(function (this: Uint8Array) {
+      return Buffer.from(this.buffer, this.byteOffset, this.byteLength).toString('base64');
+    });
+    if (native) Object.defineProperty(proto, 'toBase64', { value: encoded, configurable: true, writable: true });
+    else delete proto.toBase64;
+    try {
+      for (let extra = 0; extra < 6; extra++) {
+        bridge.stageRenderInput.mockClear();
+        const bytes = new Uint8Array(2 * MIB + extra);
+        for (let at = 0; at < bytes.length; at++) bytes[at] = (at * 7 + extra) % 256;
+        blobs.set('blob:app/music', new Blob([bytes], { type: 'audio/wav' }));
+
+        const prepared = await withNativeRenderInputs(musicOnly('blob:app/music'), async (copy) => copy);
+
+        const uri = prepared.audio.music?.uri;
+        const expected = [
+          { data: base64Of(bytes.subarray(0, MIB)), extension: 'wav' },
+          { data: base64Of(bytes.subarray(MIB, 2 * MIB)), uri },
+          ...(extra ? [{ data: base64Of(bytes.subarray(2 * MIB)), uri }] : []),
+        ];
+        expect(bridge.stageRenderInput.mock.calls.map(([options]) => options)).toEqual(expected);
+      }
+      expect(encoded.mock.calls.length > 0).toBe(native);
+    } finally {
+      if (had) Object.defineProperty(proto, 'toBase64', had);
+      else delete proto.toBase64;
+    }
+  });
+
   it('names a new file after its blob type, and gives a type it does not know no extension', async () => {
     blobs.set('blob:app/music', new Blob(['music'], { type: 'application/octet-stream' }));
     await withNativeRenderInputs(spec(), async () => undefined);

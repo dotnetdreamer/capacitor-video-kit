@@ -615,43 +615,50 @@ export class VeTimeline {
    * Each handle is held inside the viewport on ITS OWN side only - the left one never crosses to the
    * right, nor the right one to the left - so the two can neither swap nor stack, and a handle that
    * is pinned says so rather than pretending to be the real edge.
+   *
+   * Compared field by field, like the tile arrays: the body reads the whole manifest, so a volume
+   * or opacity drag on the selected segment - or a sticker pinched on the stage - rebuilds this on
+   * every frame, and a new object with the same two numbers in it would still repaint every tile.
    */
-  private readonly trimHandles = computed<ClipHandlesView | null>(() => {
-    const store = this.ctx.store;
-    const selection = store.selection.value;
-    if (selection?.kind !== 'clip') return null;
-    const manifest = store.manifest.value;
-    const trackId = trackIdOfClip(manifest, selection.id);
-    if (trackId === undefined) return null;
-    const pps = store.pps.value;
-    const shift = this.trimShift.value;
-    const nudged = (index: number): number => (shift && shift.trackId === trackId && index >= shift.index ? shift.px : 0);
+  private readonly trimHandles = computedWith<ClipHandlesView | null>(
+    () => {
+      const store = this.ctx.store;
+      const selection = store.selection.value;
+      if (selection?.kind !== 'clip') return null;
+      const manifest = store.manifest.value;
+      const trackId = trackIdOfClip(manifest, selection.id);
+      if (trackId === undefined) return null;
+      const pps = store.pps.value;
+      const shift = this.trimShift.value;
+      const nudged = (index: number): number => (shift && shift.trackId === trackId && index >= shift.index ? shift.px : 0);
 
-    if (trackId === null) {
-      const slots = store.slots.value;
-      const slot = slots.find(s => s.clip.id === selection.id);
-      if (!slot) return null;
-      const x = this.pad.value + (slot.startMs / 1000) * pps + nudged(slot.index);
-      // The width the segment is DRAWN with, gap included, not the width its duration is worth.
-      // Every segment but the last gives [SEGMENT_GAP_PX] back to the cut after it, and an end
-      // handle placed on the duration instead would stand that far past the border it holds.
-      const full = (slot.durationMs / 1000) * pps;
-      const last = slot.index === slots.length - 1;
-      return { trackId, id: slot.clip.id, ...edgeHandles(x, Math.max(2, last ? full : full - SEGMENT_GAP_PX)) };
-    }
+      if (trackId === null) {
+        const slots = store.slots.value;
+        const slot = slots.find(s => s.clip.id === selection.id);
+        if (!slot) return null;
+        const x = this.pad.value + (slot.startMs / 1000) * pps + nudged(slot.index);
+        // The width the segment is DRAWN with, gap included, not the width its duration is worth.
+        // Every segment but the last gives [SEGMENT_GAP_PX] back to the cut after it, and an end
+        // handle placed on the duration instead would stand that far past the border it holds.
+        const full = (slot.durationMs / 1000) * pps;
+        const last = slot.index === slots.length - 1;
+        return { trackId, id: slot.clip.id, ...edgeHandles(x, Math.max(2, last ? full : full - SEGMENT_GAP_PX)) };
+      }
 
-    // A layer's segments are drawn with no gap between them and cut where the base track ends, so
-    // their handles are placed on the width the row really drew - the same arithmetic `trackRows`
-    // uses, for the same reason the base track's handles use the base track's.
-    const track = findVideoTrack(manifest, trackId);
-    const slot = track && timelineSlots({ clips: track.clips }).find(s => s.clip.id === selection.id);
-    if (!track || !slot) return null;
-    const startMs = track.startMs + slot.startMs;
-    const durationMs = Math.min(slot.durationMs, store.totalMs.value - startMs);
-    if (durationMs <= 0) return null;
-    const x = this.pad.value + (startMs / 1000) * pps + nudged(slot.index);
-    return { trackId, id: slot.clip.id, ...edgeHandles(x, Math.max(2, (durationMs / 1000) * pps)) };
-  });
+      // A layer's segments are drawn with no gap between them and cut where the base track ends, so
+      // their handles are placed on the width the row really drew - the same arithmetic `trackRows`
+      // uses, for the same reason the base track's handles use the base track's.
+      const track = findVideoTrack(manifest, trackId);
+      const slot = track && timelineSlots({ clips: track.clips }).find(s => s.clip.id === selection.id);
+      if (!track || !slot) return null;
+      const startMs = track.startMs + slot.startMs;
+      const durationMs = Math.min(slot.durationMs, store.totalMs.value - startMs);
+      if (durationMs <= 0) return null;
+      const x = this.pad.value + (startMs / 1000) * pps + nudged(slot.index);
+      return { trackId, id: slot.clip.id, ...edgeHandles(x, Math.max(2, (durationMs / 1000) * pps)) };
+    },
+    (a, b) => a === b || (!!a && !!b && a.trackId === b.trackId && a.id === b.id && a.inX === b.inX && a.outX === b.outX),
+  );
 
   /** The selected layer's two edge handles, on its own two edges. */
   private readonly layerHandles = computed<TrimHandlesView | null>(() => {
@@ -660,10 +667,13 @@ export class VeTimeline {
   });
 
   /** The sound bar's, when it is selected. A looping track has no end to catch. */
-  private readonly musicHandles = computed<MusicHandlesView | null>(() => {
-    const music = this.musicLane.value;
-    return music?.selected ? { canTrimEnd: music.canTrimEnd, ...edgeHandles(music.x, music.w) } : null;
-  });
+  private readonly musicHandles = computedWith<MusicHandlesView | null>(
+    () => {
+      const music = this.musicLane.value;
+      return music?.selected ? { canTrimEnd: music.canTrimEnd, ...edgeHandles(music.x, music.w) } : null;
+    },
+    (a, b) => a === b || (!!a && !!b && a.inX === b.inX && a.outX === b.outX && a.canTrimEnd === b.canTrimEnd),
+  );
 
   /** One lane per layer, FRONT-MOST FIRST: the top lane is the layer drawn on top. */
   private readonly layerLanes = computedWith<LayerLaneView[]>(
@@ -694,20 +704,28 @@ export class VeTimeline {
       sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.selected === y.selected && x.label === y.label && x.emoji === y.emoji && x.image === y.image),
   );
 
-  private readonly musicLane = computed<MusicLaneView | null>(() => {
-    const store = this.ctx.store;
-    const music = store.manifest.value.music;
-    if (!music) return null;
-    const pps = store.pps.value;
-    const { startMs, endMs } = musicWindow(music, store.totalMs.value);
-    return {
-      x: this.pad.value + (startMs / 1000) * pps,
-      w: Math.max(MIN_ITEM_PX, ((endMs - startMs) / 1000) * pps),
-      label: music.fileName || 'Sound',
-      selected: store.selection.value?.kind === 'music',
-      canTrimEnd: !music.loop,
-    };
-  });
+  /*
+   * Compared field by field for the same reason as `trimHandles`: `music` is a field of the manifest,
+   * so any live write anywhere - a sticker pinched on the stage - rebuilds this, and the sound bar is
+   * on screen whenever the timeline is at full height.
+   */
+  private readonly musicLane = computedWith<MusicLaneView | null>(
+    () => {
+      const store = this.ctx.store;
+      const music = store.manifest.value.music;
+      if (!music) return null;
+      const pps = store.pps.value;
+      const { startMs, endMs } = musicWindow(music, store.totalMs.value);
+      return {
+        x: this.pad.value + (startMs / 1000) * pps,
+        w: Math.max(MIN_ITEM_PX, ((endMs - startMs) / 1000) * pps),
+        label: music.fileName || 'Sound',
+        selected: store.selection.value?.kind === 'music',
+        canTrimEnd: !music.loop,
+      };
+    },
+    (a, b) => a === b || (!!a && !!b && a.x === b.x && a.w === b.w && a.label === b.label && a.selected === b.selected && a.canTrimEnd === b.canTrimEnd),
+  );
 
   /** TikTok's "Add sound" bar runs the length of the video, but never shorter than its label. */
   private readonly addSoundWidth = computed(() => Math.max(160, this.totalPx.value));
@@ -835,10 +853,15 @@ export class VeTimeline {
       const clip = slot.clip;
       const wave = waves.get(clipWaveKey(clip.clipKey));
       /*
-       * `muted` and `volume` are in the key because they decide whether there is a picture at all.
-       * A clip whose sound is turned off is a clip with nothing to draw, and the moment the
+       * Whether the clip is heard is in the key because it decides whether there is a picture at
+       * all. A clip whose sound is turned off is a clip with nothing to draw, and the moment the
        * customer turns it back up the bars have to come back - which they only can if the key
        * they are memoised against noticed the difference.
+       *
+       * Heard or silent, and not the level itself: the bars are drawn against the measurement's own
+       * loudest peak, so their shape never depends on the volume, and a key carrying the raw level
+       * rebuilt every clip's picture - and repainted every tile - on each step of a Volume drag.
+       * This is exactly the test `clipWaves` makes below.
        */
       parts.push(
         clip.id,
@@ -846,8 +869,7 @@ export class VeTimeline {
         clip.inMs,
         clip.outMs,
         clip.speed,
-        clip.muted ? 1 : 0,
-        clip.volume,
+        clip.muted || clip.volume <= 0 ? 0 : 1,
         slot.startMs,
         slot.durationMs,
         wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '',
@@ -909,7 +931,9 @@ export class VeTimeline {
         });
         if (view) built.set(clip.id, view);
       });
-      return built;
+      // The shared empty map when nothing was drawn, so a post with no measured sound hands back
+      // the same reference whenever the key moves and does not repaint the tiles for nothing.
+      return built.size ? built : EMPTY_WAVES;
     });
   });
 
@@ -963,7 +987,15 @@ export class VeTimeline {
     });
   });
 
-  /** The take being recorded, growing from where it started to the playhead. */
+  /**
+   * The take being recorded, growing from where it started to the playhead.
+   *
+   * Only an effect reads this, never the render: it follows the playhead, which is written thirty
+   * times a second for the whole of a take, and a render that read it repainted every tile and lane
+   * on each of those writes while the recorder and the preview were both fighting for the thread.
+   * The render draws the bar from `recordingX`, and its width is written onto the element directly
+   * by `keepRecording` and the effect in `startEffects`.
+   */
   private readonly recording = computed(() => {
     const store = this.ctx.store;
     const from = store.recordingFromMs.value;
@@ -971,6 +1003,12 @@ export class VeTimeline {
     const pps = store.pps.value;
     const to = Math.max(from, store.playheadMs.value);
     return { x: this.pad.value + (from / 1000) * pps, w: Math.max(MIN_ITEM_PX, ((to - from) / 1000) * pps) };
+  });
+
+  /** Where the take being recorded starts, content px - the same `x` as above, without the playhead. */
+  private readonly recordingX = computed<number | null>(() => {
+    const from = this.ctx.store.recordingFromMs.value;
+    return from === null ? null : this.pad.value + (from / 1000) * this.ctx.store.pps.value;
   });
 
   private readonly showVoiceLane = computed(() => {
@@ -1054,6 +1092,7 @@ export class VeTimeline {
   private unbind: (() => void) | null = null;
   private stopFollowEffect: (() => void) | null = null;
   private stopPlayingEffect: (() => void) | null = null;
+  private stopRecordingEffect: (() => void) | null = null;
 
   /* -- the elements -------------------------------------------------------------------------- */
 
@@ -1089,6 +1128,21 @@ export class VeTimeline {
     this.reorderEl = el ?? undefined;
   };
 
+  /*
+   * The bar of the take being recorded. Its width is not in the render - see `recording` - so a new
+   * element gets it here, the moment it is made: the effect that keeps it growing only runs when the
+   * playhead moves, and a bar made between two writes would otherwise start out with no width.
+   */
+  private recordingEl?: HTMLDivElement;
+  private readonly keepRecording = (el?: HTMLDivElement | null) => {
+    this.recordingEl = el ?? undefined;
+    if (el) this.sizeRecording(untracked(() => this.recording.value));
+  };
+
+  private sizeRecording(recording: { w: number } | null): void {
+    if (recording && this.recordingEl) this.recordingEl.style.width = `${recording.w}px`;
+  }
+
   /* ========================================================================================= */
   /* Lifecycle                                                                                 */
   /* ========================================================================================= */
@@ -1118,11 +1172,11 @@ export class VeTimeline {
   }
 
   /**
-   * The two effects that cannot be a render hook, created here and dropped on the way out.
+   * The effects that cannot be a render hook, created here and dropped on the way out.
    *
-   * Neither body writes to the store while the store is part way through a change of its own, which
-   * is what would make them `deferredEffect` instead: the first only scrolls, and the second only
-   * runs when the player starts or stops.
+   * No body writes to the store while the store is part way through a change of its own, which is
+   * what would make them `deferredEffect` instead: the first only scrolls, the second only runs
+   * when the player starts or stops, and the third only sizes the bar of a take being recorded.
    */
   private startEffects(): void {
     const store = this.ctx.store;
@@ -1135,20 +1189,7 @@ export class VeTimeline {
       const playhead = store.playheadMs.value;
       const playing = store.playing.value;
       const width = this.contentWidth.value;
-      untracked(() => {
-        if (!this.scrollerEl) return;
-        // The width the content is about to be laid out with, written now rather than waited for:
-        // a scroller near its end clamps `scrollLeft` against the width it has THIS frame, and the
-        // clamped value reads back as a seek to the wrong time.
-        if (this.contentEl) this.contentEl.style.width = `${width}px`;
-        if (this.pinch) {
-          this.scrollLaneTo((this.pinch.ms / 1000) * pps, true);
-          return;
-        }
-        // While playing, the frame loop below owns the scroll position.
-        if (playing || this.drag || this.userScrollActive) return;
-        this.scrollLaneTo((playhead / 1000) * pps, true);
-      });
+      untracked(() => this.followPlayhead(pps, playhead, playing, width));
     });
 
     this.stopPlayingEffect = effect(() => {
@@ -1167,6 +1208,35 @@ export class VeTimeline {
         this.startFollowLoop();
       });
     });
+
+    // The take being recorded grows with the playhead. Written onto its bar here rather than
+    // through the render, which would repaint the whole timeline on every frame of the take; the
+    // zoom and the pad are read by `recording` too, so a pinch mid-take keeps the width in step
+    // with the `left` the render gives the bar.
+    this.stopRecordingEffect = effect(() => {
+      const recording = this.recording.value;
+      untracked(() => this.sizeRecording(recording));
+    });
+  }
+
+  /**
+   * Puts the playhead's moment under the centre line, unless something else owns the scroll. The
+   * follow effect runs it whenever the playhead, the zoom or the width changes, and `bind` runs it
+   * once there is a scroller to scroll.
+   */
+  private followPlayhead(pps: number, playhead: number, playing: boolean, width: number): void {
+    if (!this.scrollerEl) return;
+    // The width the content is about to be laid out with, written now rather than waited for: a
+    // scroller near its end clamps `scrollLeft` against the width it has THIS frame, and the
+    // clamped value reads back as a seek to the wrong time.
+    if (this.contentEl) this.contentEl.style.width = `${width}px`;
+    if (this.pinch) {
+      this.scrollLaneTo((this.pinch.ms / 1000) * pps, true);
+      return;
+    }
+    // While playing, the frame loop owns the scroll position.
+    if (playing || this.drag || this.userScrollActive) return;
+    this.scrollLaneTo((playhead / 1000) * pps, true);
   }
 
   /* ========================================================================================= */
@@ -1292,6 +1362,15 @@ export class VeTimeline {
     this.viewportWidth.value = el.clientWidth;
     this.scrollX = el.scrollLeft;
     this.updateChunk(this.scrollX);
+
+    // A new scroller starts at 00:00 wherever the playhead is, and `ve-editor` makes a new timeline
+    // every time a tall sheet or full screen closes. The follow effect cannot catch that: its first
+    // run came on connect, before there was a scroller, and it runs again only on a change - and on
+    // a phone the width measured just above is the `window.innerWidth` it started from, so not even
+    // that changes. Left alone, the clock read 00:06 over lanes showing 00:00, and the next Cut or
+    // take acted on a moment the screen was not showing.
+    const store = this.ctx.store;
+    untracked(() => this.followPlayhead(store.pps.value, store.playheadMs.value, store.playing.value, this.contentWidth.value));
     return () => offs.forEach(off => off());
   }
 
@@ -1302,6 +1381,8 @@ export class VeTimeline {
     this.stopFollowEffect = null;
     this.stopPlayingEffect?.();
     this.stopPlayingEffect = null;
+    this.stopRecordingEffect?.();
+    this.stopRecordingEffect = null;
     this.unbindTouchTargets();
     this.ourTouches.clear();
     this.cancelPress();
@@ -2744,7 +2825,10 @@ export class VeTimeline {
       this.laneY = 0;
       return;
     }
-    this.setLaneY(this.laneY);
+    // Rows that are not panned have nothing to clamp: 0 is already the floor, and finding the
+    // ceiling reads `offsetHeight` straight after the patch, which forces a layout on every render -
+    // every frame of a pinch zoom among them. The resize observer skips it the same way.
+    if (this.laneY > 0) this.setLaneY(this.laneY);
     const selection = this.ctx.store.selection.value;
     const row = this.selectionRow(selection);
     // The ROW a selection is on and not merely which selection it is. A layer sent to the back, a
@@ -3292,7 +3376,8 @@ export class VeTimeline {
   }
 
   private voiceRow() {
-    const recording = this.recording.value;
+    // Where the bar starts only. Its width follows the playhead and is not the render's to draw.
+    const recordingX = this.recordingX.value;
     const waves = this.voiceWaves.value;
     return (
       <div class="lane" key="voice-lane" data-row="voice">
@@ -3311,8 +3396,8 @@ export class VeTimeline {
             </span>
           </div>
         ))}
-        {recording ? (
-          <div class="item item--recording" key="recording" style={{ left: `${recording.x}px`, width: `${recording.w}px` }}>
+        {recordingX !== null ? (
+          <div class="item item--recording" key="recording" ref={this.keepRecording} style={{ left: `${recordingX}px` }}>
             <span class="item__label">
               <ve-icon name="mic"></ve-icon>
             </span>

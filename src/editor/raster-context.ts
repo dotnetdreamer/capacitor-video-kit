@@ -6,6 +6,8 @@
  * those through a [RasterContext], once, and both its preview and its render pass the same one.
  */
 
+import type { EditOverlay } from './edit-manifest';
+
 /** A text look: a font plus the few extras a canvas can draw identically everywhere. */
 export interface TextStyleSpec {
   id: string;
@@ -35,6 +37,16 @@ export interface RasterContext {
   stickerUrl(assetId: string): string;
   /** A URL the WebView can load for a `file://` / `content://` path (Capacitor's `convertFileSrc`). */
   fileUrl(uri: string): string;
+  /**
+   * A bitmap already drawn for this layer against exactly this context, or null to have it drawn.
+   *
+   * Optional, and a host never writes it: the editor fills it in on the context it hands a render,
+   * so `toComposeSpec` places the bitmaps the preview is already showing instead of drawing every
+   * layer a second time - one after another, on the main thread, while the export screen sits at
+   * 0%. It may only answer with a bitmap that drawing the layer again would reproduce byte for byte;
+   * anything it is unsure of it answers null for, and that layer is drawn here as it always was.
+   */
+  drawn?(overlay: EditOverlay): RasterisedOverlay | null;
 }
 
 /**

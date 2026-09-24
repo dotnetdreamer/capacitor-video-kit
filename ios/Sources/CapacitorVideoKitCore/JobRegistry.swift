@@ -432,9 +432,10 @@ final class JobRegistry: @unchecked Sendable {
         let watchdog = watchForStall(job)
 
         do {
-            // The exporter describes the part file it has just written; that result is thrown away
-            // and the finished file is described again below at its final path, because `uri` has
-            // to be stitched.mp4 and the poster belongs beside it.
+            // The exporter describes the part file it has just written, without a poster; that
+            // result is thrown away and the finished file is described again below at its final
+            // path, poster and all, because `uri` has to be stitched.mp4 and the poster belongs
+            // beside it.
             _ = try await Exporter.export(built,
                                           to: job.partURL,
                                           tmpDir: JobFolders.exportTmp(job.batchId),

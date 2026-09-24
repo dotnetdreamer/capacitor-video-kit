@@ -767,6 +767,82 @@ describe('ve-preview with several layers', () => {
   });
 });
 
+/**
+ * Counts the preview's renders, from the hook every one of them ends in.
+ *
+ * Through Stencil's own host ref, because in the lazy build the element and the component are two
+ * objects and nothing else hands the component out. Stencil looks `componentDidRender` up by name
+ * on the instance at the end of every render, so a wrapper put on the instance is the one it calls.
+ * A render that changes nothing on the page is exactly what is being counted, and no DOM observer
+ * can see one of those.
+ *
+ * Not by the host ref's `$lazyInstance$`: `npm test` builds with `--prod`, which renames every
+ * `$...$` field of Stencil's to a letter, so that name is only there in a dev build. What survives
+ * the minifier is the method both ends are given: the instance is the one object on the host ref,
+ * other than the element itself, whose own `__stencil__getHostRef` hands back that same host ref.
+ */
+function countRenders(preview: HTMLElement): () => number {
+  type WithHostRef = { __stencil__getHostRef?: () => object };
+  type Instance = WithHostRef & { componentDidRender?: () => void };
+  const hostRef = (preview as HTMLElement & WithHostRef).__stencil__getHostRef?.();
+  const instance =
+    hostRef &&
+    Object.values(hostRef).find(
+      (v): v is Instance => typeof v === 'object' && v !== null && v !== preview && (v as WithHostRef).__stencil__getHostRef?.() === hostRef,
+    );
+  const original = instance?.componentDidRender;
+  if (!instance || !original) throw new Error('no component instance to count the renders of');
+  let count = 0;
+  instance.componentDidRender = function (this: Instance) {
+    count += 1;
+    original.call(this);
+  };
+  return () => count;
+}
+
+describe('ve-preview while only the playhead moves', () => {
+  /*
+   * The store rebuilds its list of the layers on screen on every playhead write - thirty a second
+   * while playing, one per step of a scrub - because where each layer has got to in its file moves
+   * with it. The selection box asks that list whether the selected video is on screen, and it used
+   * to be handed a new copy of it on every one of those writes: with a video on a layer selected,
+   * the whole preview was rebuilt and diffed thirty times a second with nothing on it having moved.
+   */
+  it('does not re-render the preview around a selected layer', async () => {
+    const { store, preview } = await mount(true);
+    const layer = store.videoTrackRows.value[0].clips[0].id;
+    store.select({ kind: 'clip', id: layer });
+    await frames(5);
+    expect(preview.querySelector('.pv__select')).not.toBeNull();
+
+    const renders = countRenders(preview);
+    // Inside the layer's four seconds, where the box is drawn with its handles.
+    for (let i = 1; i <= 10; i += 1) {
+      store.playheadMs.value = i * 300;
+      await frames(1);
+    }
+    await frames(2);
+    expect(renders()).toBe(0);
+
+    // Past the layer's end and over the base alone, where the box is ghosted: the list of layers
+    // on screen is an EMPTY one there, and was a new empty one on every write.
+    store.playheadMs.value = 4100;
+    await until('the box to be ghosted', () => preview.querySelector('.pv__select--ghost') !== null);
+    await frames(2);
+    const settled = renders();
+    for (let i = 1; i <= 8; i += 1) {
+      store.playheadMs.value = 4100 + i * 100;
+      await frames(1);
+    }
+    await frames(2);
+    expect(renders()).toBe(settled);
+
+    // And it still repaints when something the box is drawn from does change.
+    store.commitClipFraming(layer, { rect: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 } }, 'Move');
+    await until('the moved box to be drawn', () => renders() > settled);
+  });
+});
+
 describe('ve-preview cropping one side at a time', () => {
   /*
    * A crop used to be a pan and a pinch and nothing else: the window kept whatever shape the ratio

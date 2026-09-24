@@ -3,10 +3,15 @@ package net.dotnetdreamer.videokit.videocomposer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.VideoCompositorSettings
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.RgbMatrix
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.floor
 
 /**
@@ -414,5 +419,84 @@ class CompositionBuilderTest {
         val clipping = clippingOf(baseSeq.editedMediaItems[0])
         assertEquals(250_000L, clipping.startPositionUs)
         assertEquals(2_000_000L, clipping.endPositionUs)
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+    /* Shared effects and the progress tap                                                     */
+    /* ------------------------------------------------------------------------------------- */
+
+    private fun graded(clips: List<Clip>, tracks: List<Track> = emptyList()) = spec(clips, tracks).copy(
+        filter = listOf(FilterOp.Sepia(0.5f)),
+    )
+
+    @Test
+    fun `plain clips on one sequence hand media3 the same effects, so it keeps its chain`() {
+        // Media3 rebuilds a sequence's whole chain - overlays included - at any item whose effect
+        // list does not EQUAL the running one, and effects compare by identity.
+        val plan = RenderPlan.build(graded(listOf(clip("a"), clip("b"), clip("c"))), probes("a", "b", "c"))
+        val items = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems
+        assertEquals(2, items[0].effects.videoEffects.size)
+        assertTrue(items[0].effects.videoEffects[0] is ColorMatrixEffect)
+        assertTrue(items[0].effects.videoEffects[1] is Presentation)
+        for (item in items.drop(1)) {
+            assertEquals(items[0].effects.videoEffects, item.effects.videoEffects)
+        }
+    }
+
+    @Test
+    fun `a clip with another fit gets a presentation of its own`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a"), clip("b").copy(fit = Fit.COVER), clip("c"))),
+            probes("a", "b", "c"),
+        )
+        val items = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems
+        assertNotSame(items[0].effects.videoEffects[0], items[1].effects.videoEffects[0])
+        assertSame(items[0].effects.videoEffects[0], items[2].effects.videoEffects[0])
+    }
+
+    @Test
+    fun `a presentation is never shared between sequences, nor with the composition`() {
+        // Every sequence under a compositor has its own frame processor, configuring its own
+        // Presentation for its own inputs. The grade holds nothing but its matrix and is shared.
+        val plan = RenderPlan.build(
+            graded(
+                listOf(clip("a"), clip("b")),
+                tracks = listOf(Track("pip", listOf(clip("c"), clip("d")), 0, 1, 1f)),
+            ),
+            probes("a", "b", "c", "d"),
+        )
+        val composition = CompositionBuilder.toComposition(plan, emptyList(), AtomicLong())
+        val layer = composition.sequences[0].editedMediaItems.filter { it.effects.videoEffects.isNotEmpty() }
+        val base = composition.sequences[1].editedMediaItems
+        val layerGeometry = layer.map { it.effects.videoEffects[1] }.toSet()
+        val baseGeometry = base.map { it.effects.videoEffects[1] }.toSet()
+        assertTrue(layerGeometry.none { it in baseGeometry })
+        val compositionPresentation = composition.effects.videoEffects[0]
+        assertTrue(compositionPresentation is Presentation)
+        assertFalse(compositionPresentation in layerGeometry || compositionPresentation in baseGeometry)
+        assertSame(layer[0].effects.videoEffects[0], base[0].effects.videoEffects[0])
+    }
+
+    @Test
+    fun `the progress tap is an rgb matrix after the composition's presentation`() {
+        val plan = RenderPlan.build(spec(listOf(clip("a"))), probes("a"))
+        val effects = CompositionBuilder.toComposition(plan, emptyList(), AtomicLong()).effects.videoEffects
+        assertEquals(2, effects.size)
+        assertTrue(effects[0] is Presentation)
+        assertTrue(effects[1] is ProgressTap)
+        assertTrue(effects[1] is RgbMatrix)
+        assertFalse((effects[1] as ProgressTap).isNoOp(720, 1280))
+    }
+
+    @Test
+    fun `the progress tap publishes the frame's time and leaves the colour alone`() {
+        val tap = AtomicLong(-1L)
+        val matrix = ProgressTap(tap).getMatrix(1_234_567L, /* useHdr= */ false)
+        assertEquals(1_234_567L, tap.get())
+        assertArrayEquals(
+            floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f),
+            matrix,
+            0f,
+        )
     }
 }

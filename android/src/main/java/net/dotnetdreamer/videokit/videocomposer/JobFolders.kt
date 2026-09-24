@@ -24,6 +24,15 @@ object JobFolders {
 
     private const val TAG = "VideoComposer"
 
+    /**
+     * The buffer a picked `content://` input is copied in with. Picks are whole videos, often
+     * hundreds of megabytes, read through a provider's stream - FUSE-backed from API 30 - where
+     * Kotlin's default 8 KiB costs a round trip per 8 KiB. It stays a stream copy rather than the
+     * channel transfer [copy] does for plain files, because a provider's descriptor is not
+     * guaranteed to be a whole plain file. The bytes written are the same whatever the buffer.
+     */
+    private const val COPY_BUFFER_BYTES = 1 shl 20
+
     /** Headroom demanded on top of the estimated write, so a render cannot fill the disk. */
     const val FREE_SPACE_HEADROOM_BYTES = 32L * 1024 * 1024
 
@@ -276,7 +285,7 @@ object JobFolders {
                         PrepareOutcome.Failed("file_missing", "file_missing:$key")
                     }
                 }
-                FileOutputStream(dest).use { output -> input.copyTo(output, DEFAULT_BUFFER_SIZE) }
+                FileOutputStream(dest).use { output -> input.copyTo(output, COPY_BUFFER_BYTES) }
             }
             PrepareOutcome.Ok(listOf(key to dest), inDir.parentFile ?: inDir)
         } catch (e: SecurityException) {

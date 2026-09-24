@@ -20,6 +20,10 @@ import java.util.UUID
  */
 class VoiceRecorder(private val appContext: Context) {
 
+    // [start], [stop] and [abandon] hold the recorder's lock. The plugin runs the first two one at a
+    // time on a worker of its own, but [abandon] comes from the main thread when the plugin goes
+    // away, and it has to wait for a take still being opened rather than stop it half made.
+
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
     private var startedAtMs: Long = 0L
@@ -54,6 +58,7 @@ class VoiceRecorder(private val appContext: Context) {
     /**
      * @param batchId where the take is written: see [folderFor].
      */
+    @Synchronized
     @Throws(RecordingException::class)
     fun start(batchId: String?) {
         if (recorder != null) throw RecordingException("already_recording")
@@ -104,6 +109,7 @@ class VoiceRecorder(private val appContext: Context) {
         startedAtMs = SystemClock.elapsedRealtime()
     }
 
+    @Synchronized
     @Throws(RecordingException::class)
     fun stop(): Result {
         val current = recorder ?: throw RecordingException("not_recording")
@@ -140,6 +146,7 @@ class VoiceRecorder(private val appContext: Context) {
     }
 
     /** Used when the plugin instance goes away mid-take; the partial file is not worth keeping. */
+    @Synchronized
     fun abandon() {
         val current = recorder ?: return
         recorder = null

@@ -8,6 +8,28 @@ import XCTest
 /// which fails a render `too_large` when it is set and holds nothing back when it is not.
 final class ExportFailureTests: RenderTestCase {
 
+    // MARK: - The poster
+
+    /// The exporter's own description of the file is thrown away by the registry, which describes
+    /// the finished file again and cuts the poster there. So the exporter cuts none - it used to cut
+    /// the same frame into the same poster.jpg a second time - while still measuring the file.
+    func testTheExportPassCutsNoPosterAndTheFinalDescribeCutsOne() async throws {
+        let source = try await TestMedia.video(file("red.mp4"), durationMs: 1000, color: .red)
+        let job = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 1000)]))
+        defer { job.cleanup() }
+
+        let result = try await Exporter.export(job.built, to: file("out.mp4"), tmpDir: job.tmpDir, spec: job.spec) { _ in }
+        XCTAssertEqual(result.posterUri, "")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file("poster.jpg").path))
+        XCTAssertEqual(Double(result.durationMs), 1000, accuracy: 70, "the probe still runs")
+        XCTAssertGreaterThan(result.bytes, 0)
+
+        let final = try await ResultBuilder.describe(file("out.mp4"), spec: job.spec, jobId: job.spec.jobId,
+                                                     totalMs: job.built.totalMs)
+        XCTAssertEqual(final.posterUri, file("poster.jpg").absoluteString)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file("poster.jpg").path))
+    }
+
     // MARK: - The fallback
 
     func testARefusedWriterFallsBackToThePresetOnce() async throws {

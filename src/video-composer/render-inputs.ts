@@ -67,11 +67,27 @@ export async function withNativeRenderInputs<T>(
     const blob = await readInput(uri, clipKey, signal);
     const extension = extensionFor(blob.type);
 
+    /*
+     * One chunk encoded ahead. The page would otherwise sit idle through every bridge call while the
+     * phone decodes and appends, and only then start encoding the next mebibyte; encoding chunk i+1
+     * while chunk i is being written overlaps the two. The calls themselves still go out one at a
+     * time and in order - the first still answers the file's name before any append names it - so
+     * the staged file is the same bytes. At most two chunks of base64, about 2.8 MB, are alive at
+     * once. An encode started ahead and never awaited, because the signal stopped the staging or a
+     * write failed, is caught here so its rejection is not reported as unhandled.
+     */
+    const encode = (at: number): Promise<string> => {
+      const encoding = base64(blob.slice(at, at + CHUNK_BYTES));
+      encoding.catch(() => undefined);
+      return encoding;
+    };
     let file = '';
+    let pending = encode(0);
     for (let offset = 0; offset < blob.size; offset += CHUNK_BYTES) {
       signal?.throwIfAborted();
-      const data = await base64(blob.slice(offset, offset + CHUNK_BYTES));
+      const data = await pending;
       signal?.throwIfAborted();
+      if (offset + CHUNK_BYTES < blob.size) pending = encode(offset + CHUNK_BYTES);
       try {
         if (!file) {
           file = (await VideoComposer.stageRenderInput({ data, ...(extension ? { extension } : {}) })).uri;
@@ -228,15 +244,23 @@ const EXTENSIONS: ReadonlyMap<string, string> = new Map([
  * A chunk of bytes as base64, the form a bridge message carries them in.
  *
  * Through `arrayBuffer` and `btoa` rather than a `FileReader` data URL, which is the same work with
- * a prefix to cut off and an API a test runner's DOM does not always have. The bytes are turned into
- * a string a slice at a time because `String.fromCharCode` takes its characters as arguments, and a
- * whole mebibyte of arguments is past what an engine will put on the stack.
+ * a prefix to cut off and an API a test runner's DOM does not always have.
+ *
+ * The engine's own `Uint8Array.prototype.toBase64` where there is one (Safari 18.2, Chrome 140 and
+ * up): with no options it is the standard alphabet with padding, the very string `btoa` gives, at a
+ * fraction of the main-thread time. Older WebViews have none, and neither does the test runner, so
+ * it is asked for rather than assumed, and the loop below is kept for them. The loop turns the bytes
+ * into a string a slice at a time because `String.fromCharCode` takes its characters as arguments,
+ * and a whole mebibyte of arguments is past what an engine will put on the stack; through `apply`
+ * rather than a spread, which JavaScriptCore walks through the iterator protocol a byte at a time.
  */
 async function base64(chunk: Blob): Promise<string> {
   const bytes = new Uint8Array(await chunk.arrayBuffer());
+  const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64;
+  if (typeof native === 'function') return native.call(bytes);
   let binary = '';
   for (let at = 0; at < bytes.length; at += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+    binary += String.fromCharCode.apply(null, bytes.subarray(at, at + 0x8000) as unknown as number[]);
   }
   return btoa(binary);
 }

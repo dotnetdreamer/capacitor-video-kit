@@ -39,6 +39,14 @@ object Gallery {
     private const val DEFAULT_NAME = "video.mp4"
 
     /**
+     * The copy's buffer. Every save is a whole video, and from API 30 the gallery's side of the
+     * copy is served through the FUSE daemon, where each write is a round trip to user space:
+     * Kotlin's default 8 KiB turns a 100 MB render into some twelve thousand of them. The bytes
+     * written are the same whatever the buffer; only how many trips they take changes.
+     */
+    private const val COPY_BUFFER_BYTES = 1 shl 20
+
+    /**
      * Copies `uri` into the gallery and answers with the row it now occupies.
      *
      * Throws [IllegalArgumentException] for an option that cannot be honoured and [IOException] for
@@ -93,7 +101,7 @@ object Gallery {
                 input ?: throw IOException("there is nothing to read at $source")
                 resolver.openOutputStream(item).use { output ->
                     output ?: throw IOException("the gallery gave nothing to write to")
-                    input.copyTo(output, DEFAULT_BUFFER_SIZE)
+                    input.copyTo(output, COPY_BUFFER_BYTES)
                 }
             }
         } catch (e: Throwable) {
@@ -120,7 +128,7 @@ object Gallery {
         val file = File(target, name)
         context.contentResolver.openInputStream(source).use { input ->
             input ?: throw IOException("there is nothing to read at $source")
-            FileOutputStream(file).use { output -> input.copyTo(output, DEFAULT_BUFFER_SIZE) }
+            FileOutputStream(file).use { output -> input.copyTo(output, COPY_BUFFER_BYTES) }
         }
 
         MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf(mimeTypeOf(name)), null)

@@ -90,13 +90,22 @@ object Thumbnailer {
         val sourceKey = cacheKey(ctx, uri)
 
         return synchronized(lockFor(uri)) {
+            val files = timesMs.map { File(cacheDir, cacheName(sourceKey, it, height, precise)) }
+            // The editor asks for the same times every time it opens, so a strip it has seen before
+            // is usually on disk whole - and then opening the source would buy nothing: a
+            // descriptor through the content resolver and a container parse in the media server,
+            // per clip, on every reopen, for frames nobody reads. The same files come back in the
+            // same order the loop below would have handed them. The check is inside the lock
+            // because [writeJpeg] writes straight to the final name, and the lock is what keeps a
+            // reader from taking a tile that is still being written.
+            if (allCached(files)) return@synchronized files.map { Uri.fromFile(it).toString() }
             val retriever = MediaMetadataRetriever()
             val out = ArrayList<String?>(timesMs.size)
             try {
                 retriever.open(ctx, uri)
-                for (timeMs in timesMs) {
-                    val file = File(cacheDir, cacheName(sourceKey, timeMs, height, precise))
-                    if (file.exists() && file.length() > 0L) {
+                for ((i, timeMs) in timesMs.withIndex()) {
+                    val file = files[i]
+                    if (cached(file)) {
                         out += Uri.fromFile(file).toString()
                         continue
                     }
@@ -169,6 +178,11 @@ object Thumbnailer {
                 scaled
             }
         }
+
+    /** Whether every tile of a strip is already on disk; an empty file is a write that failed. */
+    internal fun allCached(files: List<File>): Boolean = files.all(::cached)
+
+    private fun cached(file: File): Boolean = file.exists() && file.length() > 0L
 
     /**
      * Which frame a seek settles on.

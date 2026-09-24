@@ -176,67 +176,89 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     throwIfAborted(options.signal);
     const atUs = Math.round(index * frameUs);
 
-    const draws: (LayerDraw | TransitionDraw)[] = [];
+    /*
+     * Every layer this frame draws is asked for its frame at once, and the frame is assembled when
+     * they have all landed. Each layer is its own `<video>`, so one seeking does not hold another up,
+     * and waiting for them in turn made a frame with a transition or a picture-in-picture cost the
+     * SUM of its seeks rather than the longest. Each layer is still asked for the same source moment,
+     * and painted only once every one of them has landed, so the frame is the same picture. The jobs
+     * are started in drawing order, which keeps the order elements are closed and re-pointed in.
+     */
 
     // The base track. A moment past its last clip draws nothing and the frame is black - the same
     // picture the native engines leave when a layer outlasts what is under it.
     const baseIndex = clipIndexAt(plan, atUs);
-    if (baseIndex >= 0) {
-      const clip = plan.clips[baseIndex];
-      const startUs = plan.prefixOutUs[baseIndex] ?? 0;
-      if (clip) {
-        // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
-        // destination of its own, so the angle comes off the clip; the painter turns it about that
-        // same rectangle's centre either way.
-        const draw = await layerDraw(layers, BASE_READER, clip, atUs - startUs, frameSeconds, WHOLE_FRAME, 1, clip.clip.rect?.rotationDeg ?? 0);
-        // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
-        // tail - read from its own element, drawn the way the base clip it continues was drawn - is
-        // the other. The spec was lowered, so the window opens exactly where the base clip starts
-        // and `clipIndexAt` has already named the right clip for it.
-        const active = hasTransitions ? transitionAt(plan, atUs) : null;
-        if (active && active.index === baseIndex) {
-          const tail = active.planned.tail;
-          const from = await layerDraw(layers, TAIL_READER, tail, atUs - active.planned.startUs, frameSeconds, WHOLE_FRAME, 1, tail.clip.rect?.rotationDeg ?? 0);
-          draws.push({
-            kind: 'transition',
-            from,
-            to: draw,
-            look: lookAt(active.planned.curves, active.progress),
-            transition: active.planned,
-          });
-        } else if (draw) {
-          draws.push(draw);
-        }
-      }
-    }
+    const base = baseIndex >= 0 ? plan.clips[baseIndex] : undefined;
+    // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
+    // destination of its own, so the angle comes off the clip; the painter turns it about that
+    // same rectangle's centre either way.
+    const baseJob = base
+      ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0)
+      : null;
+    // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
+    // tail - read from its own element, drawn the way the base clip it continues was drawn - is
+    // the other. The spec was lowered, so the window opens exactly where the base clip starts
+    // and `clipIndexAt` has already named the right clip for it.
+    const active = base && hasTransitions ? transitionAt(plan, atUs) : null;
+    const crossing = active && active.index === baseIndex ? active : null;
+    const tailJob = crossing
+      ? layerDraw(layers, TAIL_READER, crossing.planned.tail, atUs - crossing.planned.startUs, frameSeconds, WHOLE_FRAME, 1, crossing.planned.tail.clip.rect?.rotationDeg ?? 0)
+      : null;
+    // Never on a frame that asked for a tail: the last window has closed by the time this is true.
     if (tailsUntilUs > 0 && atUs >= tailsUntilUs) {
       layers.release(TAIL_READER);
       tailsUntilUs = 0;
     }
 
     // ...then every extra layer, bottom to top, each one placed by its own rectangle.
+    const trackJobs: Promise<LayerDraw | null>[] = [];
+    // A reader slot is one element, and two jobs on one element at once would each seek it from
+    // under the other. The editor never names two tracks alike, but a hand-written spec can, and
+    // nothing rejects it - so a job whose slot is already busy this frame waits for the one before
+    // it, which is the order the serial loop this replaced gave them.
+    const busy = new Map<string, Promise<LayerDraw | null>>();
     for (const track of plan.tracks) {
       const visible = visibleIndexAt(track, atUs);
       if (visible < 0) continue;
       const clip = track.clips[visible];
       const placement = track.placements[visible];
       if (!clip || !placement) continue;
+      const slot = layerReader(track.id);
       // The frame's shape goes with it, because an extra layer's destination narrows to the shape
       // its picture comes out at rather than staying its whole rectangle: bars inside a layer are
       // opaque black over the picture beneath it. See [pictureDest].
-      const draw = await layerDraw(
-        layers,
-        layerReader(track.id),
-        clip,
-        atUs - placement.startUs,
-        frameSeconds,
-        placement.rect,
-        track.opacity,
-        placement.rect.rotationDeg ?? 0,
-        plan.output.width / plan.output.height,
-      );
-      if (draw) draws.push(draw);
+      const run = () =>
+        layerDraw(
+          layers,
+          slot,
+          clip,
+          atUs - placement.startUs,
+          frameSeconds,
+          placement.rect,
+          track.opacity,
+          placement.rect.rotationDeg ?? 0,
+          plan.output.width / plan.output.height,
+        );
+      const before = busy.get(slot);
+      const job = before ? before.then(run, run) : run();
+      busy.set(slot, job);
+      trackJobs.push(job);
     }
+
+    const [draw, from, ...tracks] = await settleInOrder([baseJob, tailJob, ...trackJobs]);
+    const draws: (LayerDraw | TransitionDraw)[] = [];
+    if (crossing) {
+      draws.push({
+        kind: 'transition',
+        from: from ?? null,
+        to: draw ?? null,
+        look: lookAt(crossing.planned.curves, crossing.progress),
+        transition: crossing.planned,
+      });
+    } else if (draw) {
+      draws.push(draw);
+    }
+    for (const layer of tracks) if (layer) draws.push(layer);
 
     painter.paintLayers(draws);
 
@@ -320,6 +342,26 @@ async function layerDraw(
     opacity,
     rotationDeg,
   };
+}
+
+/**
+ * What each of a frame's layer jobs drew, in the order they were given, once EVERY one of them has
+ * settled; a job that was not needed is null.
+ *
+ * All of them settle before anything is thrown, and not merely the first to fail: a failure goes up
+ * to [renderSpec]'s cleanup, which closes every layer's element, and a layer still opening then would
+ * store its element after the close and hold its decoder for the life of the page. The failure
+ * thrown is the first in drawing order - the base clip before its tail before the layers - which is
+ * the clip the render blamed when the layers were asked in turn and the first failure stopped it.
+ *
+ * Exported for its unit test only.
+ */
+export async function settleInOrder(jobs: (Promise<LayerDraw | null> | null)[]): Promise<(LayerDraw | null)[]> {
+  const settled = await Promise.allSettled(jobs);
+  return settled.map(result => {
+    if (result.status === 'rejected') throw result.reason;
+    return result.value;
+  });
 }
 
 /**

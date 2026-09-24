@@ -2,8 +2,12 @@ package net.dotnetdreamer.videokit.videocomposer
 
 import android.media.MediaMetadataRetriever
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 /**
  * The two decisions in the thumbnailer that do not need a decoder: which seek a request asks for,
@@ -56,5 +60,34 @@ class ThumbnailerTest {
             Thumbnailer.cacheName("def456", 2000L, 160, precise = true),
         )
         assertEquals(names.size, names.toSet().size)
+    }
+
+    /**
+     * A strip that is on disk whole is served without opening the source, so "whole" has to mean
+     * what the loop that writes the tiles means by it: every file there, and none of them empty.
+     */
+    private fun tiles(vararg sizes: Int?): List<File> {
+        val dir = Files.createTempDirectory("thumbs").toFile().apply { deleteOnExit() }
+        return sizes.mapIndexed { i, size ->
+            File(dir, "tile-$i.jpg").also { file ->
+                if (size != null) file.writeBytes(ByteArray(size))
+                file.deleteOnExit()
+            }
+        }
+    }
+
+    @Test
+    fun `a strip with every tile on disk is served from the cache`() {
+        assertTrue(Thumbnailer.allCached(tiles(10, 10, 10)))
+    }
+
+    @Test
+    fun `one missing tile sends the strip back to the source`() {
+        assertFalse(Thumbnailer.allCached(tiles(10, null, 10)))
+    }
+
+    @Test
+    fun `an empty tile is a write that failed, not a cached frame`() {
+        assertFalse(Thumbnailer.allCached(tiles(10, 10, 0)))
     }
 }

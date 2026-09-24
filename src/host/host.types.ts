@@ -149,6 +149,10 @@ export interface EditorSource {
  *
  * Each of these RESOLVES WITH NULL on a cancel and REJECTS on a real failure. The editor shows a
  * different thing for each, and a host that rejects on a cancel makes every picker look broken.
+ *
+ * On Capacitor, `composerMediaHost()` from the package root is this with the composer behind the
+ * probe, the filmstrip, the microphone and, when asked, the sound library, so all a host brings is
+ * its own pickers and its `release`, where it has any.
  */
 export interface EditorMediaHost {
   pickVideo(): Promise<EditorSource | null>;

@@ -20,7 +20,6 @@ import {
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
 import type { EditorPanel } from '../../state/editor.types';
-import { createEditorRasterContext } from '../../state/editor-raster-context';
 import { OverlayBitmaps } from '../../state/overlay-bitmap';
 import { isPictureSource } from '../../web-runtime/picture';
 import { DISCARD_EDITS, EditorConfirm, RENDER_UNAVAILABLE, renderFailed } from '../ve-alert/editor-confirm';
@@ -770,7 +769,9 @@ export class VeEditor {
         ...(maxBytes !== null ? { maxBytes } : {}),
         // Made here, for the frame this post renders at, from the factory the preview's bitmaps come
         // out of: the host's render cannot build one that agrees with them (see RenderRequest.raster).
-        raster: createEditorRasterContext(this.store.host, manifest.output),
+        // It also carries those bitmaps, so a layer the preview has already drawn for this exact
+        // frame is placed rather than drawn a second time (see OverlayBitmaps.renderContext).
+        raster: this.bitmaps.renderContext(manifest.output),
       });
       if (abandoned()) return;
       this.finish({ sources, manifest, stitched });

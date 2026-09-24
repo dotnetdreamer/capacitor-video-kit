@@ -10,7 +10,6 @@ import {
 } from '../editor';
 
 import type { PickAudioFileResult } from '../video-composer/definitions';
-import { resolve } from '../web-runtime/files';
 import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
 
 import { setEditorDebug } from './debug';
@@ -31,6 +30,7 @@ import type {
   ThumbnailRequest,
   VideoEditorHost,
 } from './host.types';
+import { readFileBlob } from './read-file';
 import { webViewUrl } from './web-view-url';
 
 /**
@@ -299,8 +299,7 @@ export function browserMediaHost(): EditorMediaHost {
     },
 
     async probeDuration(source: EditorSource): Promise<number> {
-      const src = source.playbackUrl ?? source.sourcePath ?? '';
-      const durationMs = await mediaDuration('video', src, VIDEO_METADATA_TIMEOUT_MS);
+      const durationMs = await mediaDuration('video', pageUrl(source));
       if (durationMs === null) throw new Error(`The browser could not open ${source.fileName}`);
       return durationMs;
     },
@@ -365,7 +364,7 @@ export async function pickMediaFiles({ limit, pictures }: { limit: number; pictu
       if (isPicture(file)) {
         return { source: { key: pickedKey(), fileName: file.name, playbackUrl, kind: 'image' }, durationMs: 0 };
       }
-      const durationMs = await mediaDuration('video', playbackUrl, VIDEO_METADATA_TIMEOUT_MS);
+      const durationMs = await mediaDuration('video', playbackUrl);
       return { source: { key: pickedKey(), fileName: file.name, playbackUrl, kind: 'video' }, durationMs: durationMs ?? 0 };
     }),
   );
@@ -395,7 +394,7 @@ export function browserSoundLibrary(): EditorSoundLibrary {
     },
 
     async extract(source: EditorSource): Promise<SavedSound | null> {
-      const src = source.playbackUrl ?? source.sourcePath ?? '';
+      const src = pageUrl(source);
       if (!src) throw new Error(`there is no file behind ${source.fileName}`);
       const audio = await extractAudio(src);
       if (!audio) return null;
@@ -412,8 +411,12 @@ export function browserSoundLibrary(): EditorSoundLibrary {
   };
 }
 
-/** `holiday.mp4` as `holiday`: the library lists sounds, and `.mp4` on a sound reads as a mistake. */
-function withoutExtension(fileName: string): string {
+/**
+ * `holiday.mp4` as `holiday`: the library lists sounds, and `.mp4` on a sound reads as a mistake.
+ * Exported for the composer's library in `video-composer/media-host`, which names its sounds the
+ * same way.
+ */
+export function withoutExtension(fileName: string): string {
   const dot = fileName.lastIndexOf('.');
   return dot > 0 ? fileName.slice(0, dot) : fileName;
 }
@@ -453,6 +456,8 @@ interface NativeBridge {
 function bridgeWithAudioPicker(): NativeBridge | null {
   const bridge = (globalThis as { Capacitor?: Partial<NativeBridge> }).Capacitor;
   if (typeof bridge?.getPlatform !== 'function' || bridge.getPlatform() !== 'ios') return null;
+  // `convertFileSrc` is what [readFileBlob] reaches the copy through, by way of [webViewUrl], which
+  // reads this same global: without it the copy is a `file://` URI no page can fetch.
   if (typeof bridge.nativePromise !== 'function' || typeof bridge.convertFileSrc !== 'function') return null;
   const plugin = bridge.PluginHeaders?.find((header) => header.name === 'VideoComposer');
   return plugin?.methods.some((method) => method.name === 'pickAudioFile') ? (bridge as NativeBridge) : null;
@@ -468,13 +473,13 @@ function bridgeWithAudioPicker(): NativeBridge | null {
  * one the app cannot use. It was measured on an iOS 26.5 simulator, and `pickAudioFile` in
  * `video-composer/plugin.ts` has the whole of it. The kit's document picker makes its own copy.
  *
- * The kit's copy is read through Capacitor's local server, which answers a whole sound with no HTTP
- * status (`resolve` in `web-runtime/files` says why that is not a failure), into a `Blob` typed with
- * the MIME type the picker answered, because the server's answer carries none and a render names
- * its staged copy after it (`withNativeRenderInputs`). An empty file is refused, as a song with no
- * bytes cannot be one anybody picked. What comes back is an object URL over the bytes, exactly as
- * from the input: the preview plays it, a render stages it, a draft keeps the bytes, and nothing
- * after this learns the track came in another way.
+ * The kit's copy is read through Capacitor's local server by [readFileBlob], which takes the server's
+ * answer for a whole sound, with no HTTP status, as the file it is, and refuses an empty one, as a
+ * song with no bytes cannot be one anybody picked. The bytes are typed with the MIME type the picker
+ * answered, because the server's answer carries none and a render names its staged copy after it
+ * (`withNativeRenderInputs`). What comes back is an object URL over them, exactly as from the input:
+ * the preview plays it, a render stages it, a draft keeps the bytes, and nothing after this learns
+ * the track came in another way.
  *
  * The copy is not deleted from here, because a page cannot delete a file and a native call to do it
  * would buy back the space of one song only until the kit deletes it anyway: the next pick empties
@@ -484,10 +489,11 @@ function bridgeWithAudioPicker(): NativeBridge | null {
 async function pickAudioThroughKit(bridge: NativeBridge): Promise<PickedAudio | null> {
   const picked = await bridge.nativePromise<PickAudioFileResult>('VideoComposer', 'pickAudioFile', {});
   if (picked.cancelled || !picked.uri) return null;
-  const fileName = picked.fileName || 'Sound';
-  const bytes = await resolve(bridge.convertFileSrc(picked.uri));
-  if (!bytes.size) throw new Error(`${fileName} is empty`);
-  return await pickedAudio(picked.mimeType ? new Blob([bytes], { type: picked.mimeType }) : bytes, fileName);
+  const bytes = await readFileBlob(picked.uri);
+  return await pickedAudio(
+    picked.mimeType ? new Blob([bytes], { type: picked.mimeType }) : bytes,
+    picked.fileName || 'Sound',
+  );
 }
 
 /**
@@ -497,7 +503,7 @@ async function pickAudioThroughKit(bridge: NativeBridge): Promise<PickedAudio | 
  */
 async function pickedAudio(bytes: Blob, fileName: string): Promise<PickedAudio> {
   const uri = URL.createObjectURL(bytes);
-  const durationMs = await mediaDuration('audio', uri, AUDIO_METADATA_TIMEOUT_MS);
+  const durationMs = await mediaDuration('audio', uri);
   if (durationMs === null) {
     URL.revokeObjectURL(uri);
     throw new Error(`The browser could not open ${fileName}`);
@@ -553,11 +559,32 @@ function pickedKey(): string {
 }
 
 /**
+ * The URL the page reads a source by: its `playbackUrl`, or else its `sourcePath` through
+ * [webViewUrl], which is how the editor's own preview plays a source (`EditorMedia` in
+ * `state/editor-media`). A bare device path or a `file://` URI is nothing a `<video>` or a `fetch`
+ * in a WebView can open, so a source a native host handed over with a path and no URL was refused as
+ * unreadable here while the preview played it - and `composerMediaHost` falls back on these for
+ * exactly such sources, when the composer could not read one. In a page without Capacitor the path
+ * comes back as it came, which is what these read before. Empty when the source names neither.
+ */
+function pageUrl(source: EditorSource): string {
+  if (source.playbackUrl) return source.playbackUrl;
+  return source.sourcePath ? webViewUrl(source.sourcePath) : '';
+}
+
+/**
  * Reads a duration from a throwaway media element. Milliseconds, 0 when the element loaded but
  * reports no finite length (a stream without a header), null on an error or when nothing happened
- * within `timeoutMs`.
+ * within `timeoutMs`, which is the kind's own unless a caller says otherwise.
+ *
+ * Exported for `probeMediaDuration` in `video-composer/media-host`, which falls back on it for a
+ * file the composer could not read, or one it read no length from.
  */
-function mediaDuration(kind: 'video' | 'audio', src: string, timeoutMs: number): Promise<number | null> {
+export function mediaDuration(
+  kind: 'video' | 'audio',
+  src: string,
+  timeoutMs = kind === 'video' ? VIDEO_METADATA_TIMEOUT_MS : AUDIO_METADATA_TIMEOUT_MS,
+): Promise<number | null> {
   return new Promise((resolve) => {
     if (!src) {
       resolve(null);
@@ -620,7 +647,7 @@ function imageAspect(uri: string): Promise<number | null> {
  * between a keyframe and an exact frame.
  */
 async function canvasThumbnails({ source, timesMs, maxHeight }: ThumbnailRequest): Promise<string[]> {
-  const src = source.playbackUrl ?? source.sourcePath ?? '';
+  const src = pageUrl(source);
   if (!src) return [];
 
   const video = document.createElement('video');

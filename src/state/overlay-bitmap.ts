@@ -2,6 +2,7 @@ import { computed } from '@preact/signals-core';
 import {
   overlayRasterKey,
   rasteriseOverlay,
+  type EditOutput,
   type EditOverlay,
   type RasterContext,
   type RasterisedOverlay,
@@ -23,6 +24,13 @@ const RECENT_BITMAPS = 16;
 interface StaleLayer {
   overlay: EditOverlay;
   key: string;
+}
+
+/** A drawn bitmap and the frame (`RasterContext.output`) it was drawn against. */
+interface DrawnRaster {
+  raster: RasterisedOverlay;
+  frameW: number;
+  frameH: number;
 }
 
 /**
@@ -85,7 +93,7 @@ export class OverlayBitmaps {
    * that cannot be decoded would otherwise be attempted again on every frame of every drag.
    */
   private readonly failedKeys = new Map<string, string>();
-  private readonly recent = new Map<string, RasterisedOverlay>();
+  private readonly recent = new Map<string, DrawnRaster>();
 
   constructor(
     private readonly store: EditorStore,
@@ -130,6 +138,38 @@ export class OverlayBitmaps {
     this.destroyed = true;
     this.stopWatching();
     this.recent.clear();
+  }
+
+  /**
+   * The context a render at `output` draws its layers with: the one the preview's own bitmaps come
+   * out of (see [rasterContext]), plus `drawn`, which hands back the bitmap already on screen for
+   * any layer where drawing it again would produce the same PNG. `toComposeSpec` then places those
+   * instead of decoding, drawing and encoding each of them a second time, one after another, while
+   * the export screen sits at 0%.
+   *
+   * A bitmap is only handed back for the render's exact key AND frame. The key alone is not enough:
+   * an effect's key leaves the frame out, so the effect on screen can have been drawn for a frame the
+   * post no longer has, and a bitmap can come out of the [recent] cache from an older frame.
+   *
+   * Text and emoji are always drawn again. Both wait for a font, and a font that took longer than the
+   * rasteriser waits leaves the preview drawn in the fallback face - which the render, drawing later,
+   * would have drawn in the right one. They are also the small, cheap canvases; the time is in the
+   * photos, stickers and full-frame effects.
+   */
+  renderContext(output: EditOutput): RasterContext {
+    return {
+      ...createEditorRasterContext(this.host, output),
+      drawn: (overlay) => {
+        if (overlay.kind === 'text' || (overlay.kind === 'sticker' && overlay.emoji)) return null;
+        const bitmap = this.store.bitmaps.value.get(overlay.id);
+        if (!bitmap || bitmap.key !== overlayRasterKey(overlay, output.width)) return null;
+        if (bitmap.frameW !== output.width || bitmap.frameH !== output.height) return null;
+        // The key rounds the scale to a thousandth, but photos and stickers are drawn at the exact
+        // one, so a bitmap from a scale a hair away is a pixel off what the render would draw.
+        if (overlay.kind !== 'effect' && bitmap.scale !== overlay.scale) return null;
+        return { png: bitmap.png, wPx: bitmap.wPx, hPx: bitmap.hPx };
+      },
+    };
   }
 
   private schedule(): void {
@@ -189,7 +229,7 @@ export class OverlayBitmaps {
     }
   }
 
-  private async draw(overlay: EditOverlay, key: string): Promise<RasterisedOverlay | null> {
+  private async draw(overlay: EditOverlay, key: string): Promise<DrawnRaster | null> {
     const kept = this.recent.get(key);
     if (kept) {
       // Re-inserted, so the Map's insertion order stays least-recently-used first.
@@ -199,15 +239,20 @@ export class OverlayBitmaps {
       return kept;
     }
     try {
-      const raster = await rasteriseOverlay(overlay, this.rasterContext);
+      // The frame is read off the context the layer is actually drawn with, BEFORE the await: the
+      // frame can change while it draws, and a bitmap must never be labelled with a frame it was
+      // not drawn for (see [renderContext]).
+      const context = this.rasterContext;
+      const { width: frameW, height: frameH } = context.output;
+      const drawn: DrawnRaster = { raster: await rasteriseOverlay(overlay, context), frameW, frameH };
       this.failedKeys.delete(overlay.id);
-      this.recent.set(key, raster);
+      this.recent.set(key, drawn);
       while (this.recent.size > RECENT_BITMAPS) {
         const oldest = this.recent.keys().next().value;
         if (oldest === undefined) break;
         this.recent.delete(oldest);
       }
-      return raster;
+      return drawn;
     } catch (error) {
       // One layer that cannot be drawn must not take the others down with it; it keeps whatever
       // bitmap it had, and the render reports it properly if it still fails there.
@@ -218,7 +263,7 @@ export class OverlayBitmaps {
   }
 
   /** @param drawn the layer as it was when its bitmap was drawn, which may be older than now. */
-  private write(drawn: EditOverlay, raster: RasterisedOverlay, key: string): void {
+  private write(drawn: EditOverlay, { raster, frameW, frameH }: DrawnRaster, key: string): void {
     const id = drawn.id;
     const current = this.store.manifest.value.overlays.find((overlay) => overlay.id === id);
     // Deleted while it was being drawn.
@@ -227,7 +272,7 @@ export class OverlayBitmaps {
     // for; the bitmap just finished is for a state that no longer exists and must not replace it.
     if (this.store.bitmaps.value.get(id)?.key === overlayRasterKey(current, this.store.outputWidth.value)) return;
 
-    const bitmap: OverlayBitmap = { ...raster, key, scale: drawn.scale };
+    const bitmap: OverlayBitmap = { ...raster, key, scale: drawn.scale, frameW, frameH };
     // A signal write repaints the preview by itself, even this far after an image load resolved.
     this.store.bitmaps.value = new Map(this.store.bitmaps.value).set(id, bitmap);
   }

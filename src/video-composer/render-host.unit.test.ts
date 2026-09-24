@@ -831,7 +831,7 @@ describe('readRenderFile', () => {
 
     // A good answer with no bytes is no render either.
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob([], { type: 'video/mp4' }) })));
-    await expect(readRenderFile(RENDER)).rejects.toThrow('the render is empty');
+    await expect(readRenderFile(RENDER)).rejects.toThrow('it is empty');
 
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))));
     await expect(readRenderFile(RENDER)).rejects.toThrow('Failed to fetch');

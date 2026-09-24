@@ -47,6 +47,15 @@ export type {
 } from './video-composer/render-host';
 export { RenderFailedError } from './host/host.types';
 
+// The editor's media host over the composer - the browser defaults with the probe, the filmstrip,
+// the microphone and, when asked, the sound library answered natively - here beside the render host
+// for the same reason: it calls the plugin, and `capacitor-video-kit/ui` must never reach
+// `@capacitor/core`. `probeMediaDuration` is its probe for a host's own pickers, on a file that is
+// not a source yet. The helpers those pickers want that call no plugin - `readFileBlob`,
+// `readVoiceTake`, `filePickerCancelled` - are in `capacitor-video-kit/ui`.
+export { composerMediaHost, probeMediaDuration } from './video-composer/media-host';
+export type { ComposerMediaHostOptions, ComposerMediaPickers } from './video-composer/media-host';
+
 // The URL the WebView loads a device file by, which the editor's `/ui` defaults use as its
 // `platform.fileUrl` and a Capacitor host wants for everything else it shows: a done screen's
 // render, a poster. It reads Capacitor's global rather than importing it, so it lives beside those

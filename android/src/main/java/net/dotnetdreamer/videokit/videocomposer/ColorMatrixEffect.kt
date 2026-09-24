@@ -11,43 +11,31 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Applies the whole filter stack as ONE colour matrix, in a single fragment-shader pass.
  *
- * It also doubles as the render's progress meter. `Transformer.getProgress` averages the progress
- * of every sequence in the composition, so as soon as there is music or a voiceover the number
- * stops being invertible - a two-second voiceover that finished at the start keeps reporting 99 %
- * and drags the average up while the video is barely started. The frames arriving here carry the
- * continuous OUTPUT-timeline timestamp, which is exactly the quantity we want, so the newest one is
- * published into [progressTap] and the plugin divides it by the plan's total duration.
- *
- * That is why the effect is added even when there is no colour work to do: an identity matrix
- * costs one extra 720p pass and buys a progress signal that is actually correct.
+ * It holds nothing but the matrix, so one instance serves every clip of the post (see
+ * CompositionBuilder.toComposition, where the sharing is what keeps Media3 from rebuilding its
+ * effect chain at every cut). The render's progress meter used to ride along on an identity copy of
+ * this effect; it is [ProgressTap] now, which Media3 folds into a neighbouring pass instead of
+ * running one of its own.
  */
 @OptIn(UnstableApi::class)
 class ColorMatrixEffect(
     private val matrix: ColorMatrix,
-    private val progressTap: AtomicLong?,
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        ColorMatrixShaderProgram(useHdr, matrix, progressTap)
+        ColorMatrixShaderProgram(useHdr, matrix)
 
-    /**
-     * Never a no-op while a progress tap is attached - dropping the pass would drop the timestamps
-     * with it.
-     */
-    override fun isNoOp(inputWidth: Int, inputHeight: Int): Boolean =
-        progressTap == null && matrix.isIdentity()
+    override fun isNoOp(inputWidth: Int, inputHeight: Int): Boolean = matrix.isIdentity()
 }
 
 @OptIn(UnstableApi::class)
 private class ColorMatrixShaderProgram(
     useHdr: Boolean,
     matrix: ColorMatrix,
-    private val progressTap: AtomicLong?,
 ) : BaseGlShaderProgram(/* useHighPrecisionColorComponents= */ useHdr, /* texturePoolCapacity= */ 1) {
 
     private val glProgram: GlProgram
@@ -70,7 +58,6 @@ private class ColorMatrixShaderProgram(
     override fun configure(inputWidth: Int, inputHeight: Int): Size = Size(inputWidth, inputHeight)
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
-        progressTap?.set(presentationTimeUs)
         try {
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)

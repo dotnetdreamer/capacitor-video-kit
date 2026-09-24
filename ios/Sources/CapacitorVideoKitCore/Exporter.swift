@@ -31,7 +31,8 @@ enum Exporter {
     private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "Exporter")
 
     /// Encodes with the writer engine, falls back to the preset session once when the encoder turns
-    /// the writer down, and describes the file that results.
+    /// the writer down, and describes the file that results - without a poster, whose `posterUri`
+    /// comes back "": the registry cuts the one poster from the finished stitched.mp4.
     ///
     /// The only size ceiling on this path is the host's, `spec.output.maxBytes`, and with none
     /// there is none: the kit has no upload limit of its own to apply, and one host's - choisy's
@@ -110,7 +111,13 @@ enum Exporter {
 
         let result: ComposeResult
         do {
-            result = try await ResultBuilder.describe(url, spec: spec, jobId: spec.jobId, totalMs: built.totalMs)
+            // No poster from this pass. Its only caller, the registry, throws this result away and
+            // describes the file again once it is stitched.mp4, cutting the poster there; cutting one
+            // here as well was a second full-resolution decode and JPEG encode of the same frame into
+            // the same poster.jpg. The probe, the byte count and the truncation guard below all still
+            // run, because the too_large reinterpretation and `logDeliveredRate` depend on them.
+            result = try await ResultBuilder.describe(url, spec: spec, jobId: spec.jobId, totalMs: built.totalMs,
+                                                      cutPoster: false)
         } catch ExportError.truncated(let produced, let expected) {
             guard fellBack, let maxBytes = spec.output.maxBytes else {
                 throw ExportError.truncated(produced: produced, expected: expected)
@@ -316,7 +323,11 @@ enum ResultBuilder {
     /// `totalMs` is the composition's real duration (`BuiltComposition.totalMs`), which can be less
     /// than `spec.totalOutputMs` when a clip's `outMs` was clamped to its file. It is used for the
     /// truncation guard, and as the duration reported when the finished file cannot be measured.
-    static func describe(_ url: URL, spec: ComposeSpec, jobId: String, totalMs: Int64) async throws -> ComposeResult {
+    ///
+    /// `cutPoster: false` skips the poster alone and reports `posterUri` "", for a pass whose result
+    /// is never delivered (`Exporter.export`'s); everything else is measured exactly as it always is.
+    static func describe(_ url: URL, spec: ComposeSpec, jobId: String, totalMs: Int64,
+                         cutPoster: Bool = true) async throws -> ComposeResult {
         let probed = try? await Thumbnailer.probe(url)
         let bytes = Thumbnailer.fileBytes(url)
         let measured = probed?.durationMs ?? 0
@@ -348,8 +359,10 @@ enum ResultBuilder {
         let posterAt = min(spec.posterAtMs, max(0, durationMs - 1))
         // "" and never a black JPEG: JS reads `result.posterUri || undefined` and lets the server
         // cut its own, while a black poster becomes the post's thumbnail forever.
-        let posterUri = await Thumbnailer.poster(from: url, atMs: posterAt, to: posterURL)
-            ? posterURL.absoluteString : ""
+        var posterUri = ""
+        if cutPoster, await Thumbnailer.poster(from: url, atMs: posterAt, to: posterURL) {
+            posterUri = posterURL.absoluteString
+        }
 
         return ComposeResult(jobId: jobId, uri: url.absoluteString, posterUri: posterUri,
                              durationMs: durationMs, width: width, height: height, bytes: bytes)

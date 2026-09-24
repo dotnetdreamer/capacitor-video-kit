@@ -195,7 +195,7 @@ have, and the sync is what writes the right one.
 |---|---|---|
 | `NSPhotoLibraryAddUsageDescription` | `saveToGallery` | the app is terminated on the first save |
 | `NSPhotoLibraryUsageDescription` | `requestGalleryAccess`, and so the other three gallery calls; `saveToGallery` with an `album` | the app is terminated when access is asked for; a save with an album never asks, and goes to Recents |
-| `NSMicrophoneUsageDescription` | `startVoiceRecording` | the app is terminated when the first take starts |
+| `NSMicrophoneUsageDescription` | `startVoiceRecording`, which `composerMediaHost` calls for the voiceover sheet unless it is given `voice: false` | the app is terminated when the first take starts |
 | `NSCameraUsageDescription` | no call of the kit's: the editor's default pickers, which are `<input type="file">` elements, and a WKWebView offers the camera from every one that takes images or video | the app is terminated when somebody taps Take Photo or Video |
 
 A host that only saves needs only the first key. Filing into an album is what the second is for on
@@ -227,8 +227,8 @@ deletes it before it copies its own song there, and the plugin's next load delet
 plugin when it builds the bridge, in practice once a launch, and a web view reload only resets the
 bridge, so that load is the app's next launch. One song at most is ever on disk in that folder, and
 iOS may empty `tmp` while the app is not running besides. A host keeps all this by keeping the
-default: supply a media host of its own as `{ ...browserMediaHost(), pickVideo, ... }` and leave
-`pickAudio` out. No file picker plugin is needed for sounds.
+default: leave `pickAudio` out of `composerMediaHost`'s pickers (**Native media host**), or out of a
+media host of its own spread from `browserMediaHost()`. No file picker plugin is needed for sounds.
 
 Everywhere else the default is still an `<input type="file">`, and it names its formats, because
 `accept="audio/*"` alone is the input's other trap on iOS, for Safari and any page without the kit's
@@ -299,9 +299,9 @@ resolved, loaded and type checked out of an `npm pack` tarball installed into a 
 
 | Specifier | What it is | Needs |
 |---|---|---|
-| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract, the editor's render host over the composer (`composerRenderHost`) and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
+| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract, the editor's render and media hosts over the composer (`composerRenderHost`, `composerMediaHost`, `probeMediaDuration`) and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
 | `capacitor-video-kit/editor` | The edit contract on its own, reaching no `registerPlugin` call and no Capacitor at all | nothing |
-| `capacitor-video-kit/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath` | `@preact/signals-core` |
+| `capacitor-video-kit/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath`, and the host helpers that call no plugin (`readFileBlob`, `readVoiceTake`, `filePickerCancelled`) | `@preact/signals-core` |
 | `capacitor-video-kit/loader` | `defineCustomElements()`, which registers every component at once | `@preact/signals-core` |
 | `capacitor-video-kit/dist/components/<tag>.js` | One component's `defineCustomElement()`, for a host that tree shakes | `@preact/signals-core` |
 | `capacitor-video-kit/assets/*` | The 34 stickers and the 32 fonts, for a build step that copies them | nothing |
@@ -761,47 +761,29 @@ A host installing this package from a checkout rather than a tarball also needs
 
 Everything above is the same. What changes is that `host` is no longer left out, because on a phone
 there is a real answer to every question the browser defaults were guessing at - including the
-render, which the defaults leave null. The wiring below is the same wiring a plain web page uses
-with the web implementations; only the pickers differ.
+render, which the defaults leave null. The same object runs in a page too, which is where an app
+under `ionic serve` finds itself: `composerMediaHost` is the browser defaults there and
+`composerRenderHost` renders with the composer's web engine, so the one line that has to ask which it
+is on is the app's own gallery pickers, handed over on a phone alone (**Native media host** says why).
 
 ```ts
+import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { Keyboard } from '@capacitor/keyboard';
-import { VideoComposer, composerRenderHost, webViewUrl } from 'capacitor-video-kit';
-import { browserMediaHost, registerBackHandlerWith, type VideoEditorHost } from 'capacitor-video-kit/ui';
+import { VideoComposer, composerMediaHost, composerRenderHost } from 'capacitor-video-kit';
+import { registerBackHandlerWith, type VideoEditorHost } from 'capacitor-video-kit/ui';
 
 const host: VideoEditorHost = {
-  media: {
-    // The defaults for what the app does not replace: `pickImage`, and `pickAudio`, which on iOS is
-    // already the kit's own document picker (see iOS host setup).
-    ...browserMediaHost(),
-    pickVideo,       // the app's own clip pickers, resolving null on a cancel (see Native hosts)
-    pickMedia,
-    probeDuration: async (source) => (await VideoComposer.probe({ uri: source.sourcePath! })).durationMs,
-    thumbnails: async ({ source, timesMs, maxHeight, precise }) => {
-      const { uris } = await VideoComposer.thumbnails({
-        uri: source.sourcePath!,
-        timesMs: [...timesMs],
-        maxHeight,
-        precise,
-      });
-      // The composer writes files; the WebView needs URLs it is allowed to load.
-      return uris.map(webViewUrl);
-    },
-    sounds: {
-      list: async () => (await VideoComposer.listSounds()).sounds,
-      extract: async (source) => {
-        const out = await VideoComposer.extractAudio({ uri: source.sourcePath! });
-        return out.hasAudio ? { ...out, id: out.id!, uri: out.uri!, fileName: out.fileName!, durationMs: out.durationMs!, savedAt: out.savedAt! } : null;
-      },
-      remove: (id) => VideoComposer.deleteSound({ id }),
-    },
+  // The browser defaults with the composer behind the probe, the filmstrip and the microphone, and
+  // here its sound library too (see Native media host). On a phone the clip pickers are the app's
+  // own, resolving null on a cancel (see Native hosts); in a page they are the browser's file inputs.
+  // `pickImage` and `pickAudio`, which on iOS is already the kit's own document picker (see iOS host
+  // setup), stay the defaults.
+  media: composerMediaHost({
+    ...(Capacitor.isNativePlatform() ? { pickers: { pickVideo, pickMedia } } : {}),
+    sounds: 'native',
     release: ({ kept, dropped }) => discardRecordings(kept, dropped),
-    voice: {
-      start: () => VideoComposer.startVoiceRecording(),
-      stop: () => VideoComposer.stopVoiceRecording(),
-    },
-  },
+  }),
   // The render, over the same composer, on a phone and in a page alike. See below.
   render: composerRenderHost(),
   platform: {
@@ -955,6 +937,87 @@ A host that renders some other way - its own engine, a server - implements `Edit
 and a `RenderFailedError` with a code on the union for every failure. The class is exported from the
 root and from `capacitor-video-kit/ui`, and the editor recognises either.
 
+### Native media host
+
+`composerMediaHost(options?)`, from the package root, is `host.media` for a Capacitor app: the browser
+defaults, with the composer behind every member a phone has a better answer for. It sits at the root
+beside `composerRenderHost` for the same reason, that it calls the plugin and `capacitor-video-kit/ui`
+never reaches `@capacitor/core`. Every Capacitor host used to write these few lines over
+`VideoComposer` for itself, and the copies differed in ways that were mistakes: a probe and an extract
+that read `sourcePath!` of a source with none, a probe that called a file the composer had opened
+unreadable because a `<video>` could not open it too, a voiceover take kept by a name its folder
+forgets within a day.
+
+```ts
+import { Capacitor } from '@capacitor/core';
+import { composerMediaHost } from 'capacitor-video-kit';
+
+// An app whose drafts keep bytes: its own gallery pickers on a phone, and everything else the kit's.
+const media = composerMediaHost(Capacitor.isNativePlatform() ? { pickers: { pickVideo, pickMedia } } : {});
+
+// An app that uploads, whose pickers are a service of its own: the service passes itself, and
+// gives back a dropped clip itself, its object URL and its recording both, so its pickers are safe
+// to use in a page too. Its sounds are the composer's, a file each in app storage.
+class EditorMediaService {
+  readonly media = composerMediaHost({
+    pickers: this, // its pickVideo and pickImage; pickAudio is left to the kit
+    sounds: 'native',
+    release: (request) => this.release(request),
+  });
+  async pickVideo(): Promise<UploadClip | null> { /* the app's picker plugin */ }
+  async pickImage(): Promise<PickedImage | null> { /* likewise */ }
+  release({ kept, dropped }: ReleaseRequest): void { /* the app's own URLs and files */ }
+}
+```
+
+What it answers, member by member:
+
+| Member | On a phone | In a page |
+|---|---|---|
+| `probeDuration` | `VideoComposer.probe` on `sourcePath`, rounded. The browser probe, reading the source as the preview plays it, for a source with no path, a file the composer could not read, and one it opened with no finite length, where a `<video>` element sometimes knows better. A file the composer opened is 0 long rather than unreadable when the element cannot open it either, since a rejection is the editor's sentence for a clip that has gone. | the browser's |
+| `thumbnails` | `VideoComposer.thumbnails` on `sourcePath`, each frame through `webViewUrl`, since the WebView may load the composer's JPEGs only through Capacitor's local server. The browser's canvas for a source with no path. A failure rejects, and the editor shows the poster frame for it. | the browser's |
+| `voice` | `startVoiceRecording` and `stopVoiceRecording`, with the codes the editor reads (`already_recording`, `permission_denied`) passed straight on. A take comes back as an object URL over its bytes, typed `audio/mp4`, or as its file when it could not be read quickly (below). | none, as the browser defaults have none: the web composer's recorder answers a `videokit-file:` name, which the preview cannot play |
+| `sounds` | the browser library unless `sounds: 'native'` | the browser library either way: the web composer keeps its sounds in the same IndexedDB store |
+| pickers, `release` | the host's, and the browser's where it brought none | the same |
+
+**A voiceover take comes back as bytes, not as the recorder's file.** Both recorders write the take
+into their cache folder, `video-composer/voice` under the app's caches, which the plugin's next load
+empties of anything a day old and the system may empty sooner. The preview and the render would read
+that file well enough, but a draft is kept for longer than a day, and a host that keeps a draft's
+files by name - a path beats a copy, for a clip that is already in the customer's library - reopened
+it to a voiceover with nothing behind it. So the take is read into the page through Capacitor's local
+server and handed over exactly as a browser's sound is: the preview plays it, a draft keeps its bytes,
+and a render on a phone writes it out as a file of its own again (`withNativeRenderInputs`), named
+`.m4a` after its type. A take is AAC at 96 kbps in one channel, under a megabyte a minute. One that
+cannot be read into the page, or not within three seconds, is handed over by its file instead, which
+still plays and renders that day, rather than lost over a draft reopened tomorrow: the editor gives
+the whole stop eight seconds, the recorder's own included, before it tells the customer the take could
+not be saved. A host that keeps a draft past a day reads such a take with `readVoiceTake(uri)` from
+`capacitor-video-kit/ui` before it files the draft: the read the kit makes, typed the same way.
+
+The copy is held in memory for as long as the page lives, since no take's URL is revoked: `release`
+names sources and never a take, and a kept take is read again after the editor has gone, by a draft,
+a render or an edit opened again on the same manifest. A take the editor throws away is held too,
+because a stop cannot say who is waiting on it: the microphone turned straight back off when the
+sheet closed or lost its room while the permission prompt was up, or the editor taken away mid take.
+Those are a moment long, or one take. A recording a reloaded page left running, which the sheet
+stops after a start refused as `already_recording` and which can run for minutes, is handed back as
+its file without being read.
+
+The recorder is on by default on a phone, and it asks for the microphone on the first take: an iOS
+host declares `NSMicrophoneUsageDescription` (**iOS host setup**) or passes `voice: false`, since iOS
+terminates an app that asks without one. Android's `RECORD_AUDIO` comes with the kit's own manifest.
+
+| Option | What it is for | Left out |
+|---|---|---|
+| `pickers` | `{ pickVideo?, pickMedia?, pickImage?, pickAudio? }`, the app's own, on every platform, each resolving null on a cancel. Each is called as a method of the object it came on, so a service can pass itself. A host that brings `pickVideo` and no `pickMedia` gets no `pickMedia` at all, so that with `editing.pictures` on the editor's clip pickers fall back on its own `pickVideo` rather than on a file input that hands a phone a clip with no path. In a page, object URLs a host's picker mints (`pickMediaFiles` is one) are held until its own `release` revokes them, since the browser host's revokes only its own. So a host whose `release` gives back what its pickers mint, as the service above does, passes them everywhere, and one whose pickers are meant for a phone passes them only there: `composerMediaHost(Capacitor.isNativePlatform() ? { pickers } : {})`. | the browser host's: file inputs, and for `pickAudio` on iOS in a Capacitor app the kit's own document picker, which is why a native host leaves that one out |
+| `release` | What the app gives back once the edit has settled what it dropped (**What the host supplies**). It runs after the browser host's own, which revokes only the object URLs its own pickers minted, so a host that keeps any browser picker has those given back too and never has one of its own revoked. | the browser host's alone |
+| `sounds` | `'browser'`, `'native'`, or an `EditorSoundLibrary` of the host's own, used on every platform. `'native'` is the composer's library: a file per sound in the app's storage with a record beside it, the compressed track remuxed where the platform can manage it rather than decoded. A sound is a `file://` URI that the preview plays through `platform.fileUrl` and the engine reads where it is, so a draft that keeps paths keeps it for as long as it is in the library. `extract` reads `sourcePath`, or `playbackUrl` for a source with no path, and names the sound after the video without its extension, or leaves a source with no name to the composer, which names the sound after the file it read. `'browser'` keeps each sound in the page's IndexedDB as a WAV, about ten megabytes a minute, as a `blob:` URL a draft keeps the bytes of and a render stages. | `'browser'` |
+| `voice` | `false` for no voiceover sheet, or an `EditorVoiceHost` of the host's own, used on every platform. | the composer's recorder on a phone, none in a page |
+
+The platform is read once, when the host is made: it cannot change under a page, and whether `voice`
+is there at all is what decides whether the editor offers the voiceover sheet.
+
 ### What is left in the application
 
 The editor replaced one function, `VideoEditorService.open(clips)`, and the parts of it that were
@@ -966,7 +1029,7 @@ never editing stayed where they were.
 | the modal dismissing with `confirm` and data | `veDone`, with the same result object |
 | the modal dismissing with `back` | `veCancel` |
 | `VideoRenderService` | `host.render`: `composerRenderHost()` from the package root, with what the application does with the file in its `toSource` |
-| `discardUnusedClips` | `host.media.release`, still in the application, which is the only place that knows two keys can share one file |
+| `discardUnusedClips` | `host.media.release`, handed to `composerMediaHost({ release })` and still in the application, which is the only place that knows two keys can share one file |
 | `VideoComposer.systemInsets()` | `host.platform.measureInsets` |
 | the upload that follows | untouched. The editor hands back sources and a manifest and has no idea an upload exists |
 
@@ -1078,7 +1141,8 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 canvas, and a cross origin video taints that canvas, so `toDataURL` throws `SecurityError: Tainted
 canvases may not be exported` and the lane stays grey with nothing said. A file the customer picked
 is an object URL and is fine; a clip from a CDN is not. A host in that position supplies
-`media.thumbnails` of its own, which is what a Capacitor app does anyway.
+`media.thumbnails` of its own, which a Capacitor app has from `composerMediaHost` for every clip with
+a path.
 
 **A picker resolves with null on a cancel and rejects on a real failure.** The editor shows a
 different thing for each, and a host that rejects on a cancel makes every picker look broken.
@@ -1089,18 +1153,8 @@ so the library never grows a picker of its own - keeps it, and answers with the 
 deletes one. `extract` resolves with null for a video that carries no audio track, which is a fact
 about the file rather than a failure, and the editor says so plainly instead of showing an error.
 
-On a Capacitor host this is three lines over the composer, which owns the files and the records:
-
-```ts
-sounds = {
-  list: async () => (await VideoComposer.listSounds()).sounds,
-  extract: async (source) => {
-    const result = await VideoComposer.extractAudio({ uri: source.sourcePath ?? source.playbackUrl! });
-    return result.hasAudio ? { ...result, id: result.id!, uri: result.uri! } : null;
-  },
-  remove: (id) => VideoComposer.deleteSound({ id }),
-};
-```
+On a Capacitor host whose sounds should live with the composer, which owns the files and the records,
+that is `composerMediaHost({ sounds: 'native' })` (**Native media host**), and nothing to write.
 
 **A host with no `sounds` never opens the Sound sheet at all.** "Add sound" goes straight to
 `pickAudio`, which is what every host did before the library existed and is still the right answer
@@ -2090,17 +2144,21 @@ each with its source and its length in milliseconds, a picture as `kind: 'image'
 
 A Capacitor app with drafts was writing the same glue around the calls above whatever it edited:
 turning a pick into a source that lasts, turning a gallery item into one, giving the engine files
-rather than blobs, and letting go of copies nothing uses. That glue is in `capacitor-video-kit`, so
-what is left in the app is its picker plugin, its keys and its drafts. The whole of it:
+rather than blobs, and letting go of copies nothing uses. That glue is in the kit - at
+`capacitor-video-kit`, or at `capacitor-video-kit/ui` for the few parts that call no plugin - so what
+is left in the app is its picker plugin, its keys and its drafts. The whole of it:
 
 ```ts
+import { Capacitor } from '@capacitor/core';
+import { FilePicker, type PickedFile } from '@capawesome/capacitor-file-picker';
 import {
   VideoComposer,
+  composerMediaHost,
   composerRenderHost,
   gallerySource,
   retainPickedFile,
 } from 'capacitor-video-kit';
-import { browserMediaHost, type EditorMediaHost, type EditorSource } from 'capacitor-video-kit/ui';
+import { filePickerCancelled, type EditorSource } from 'capacitor-video-kit/ui';
 
 // A system picker's file as a source a draft can keep. Every Capacitor picker plugin answers a
 // `path` and a `webPath`, and a file picker its `mimeType`; this retains the first and answers what
@@ -2116,20 +2174,38 @@ async function sourceFor(file: { name: string; mimeType?: string; path?: string;
 // An item from the app's own gallery (`listGalleryVideos`), resolved into a source. A picture says so.
 const source = await gallerySource(video, crypto.randomUUID());
 
-// The editor's media host: the defaults, with the clip pickers replaced. `pickAudio` stays the
-// default, which on iOS is already the kit's own document picker, so there is no audio picker to write.
-const media: EditorMediaHost = {
-  ...browserMediaHost(),
-  async pickVideo() {
-    const file = await pickOneVideo(); // the app's picker plugin, null on a cancel
-    return file ? sourceFor(file) : null;
-  },
-  async pickMedia() {
-    const file = await pickOneVideoOrPicture(); // with editing.pictures on: the same, offering stills
-    return file ? sourceFor(file) : null;
-  },
-  // ...probeDuration, thumbnails and the rest over VideoComposer, as above
-};
+// The app's picker plugin, with a cancel as the null every editor picker answers one with and
+// anything else as the failure it is. `@capawesome/capacitor-file-picker` here.
+async function pickOne(pick: () => Promise<{ files: PickedFile[] }>): Promise<PickedFile | null> {
+  try {
+    return (await pick()).files[0] ?? null;
+  } catch (error) {
+    if (filePickerCancelled(error)) return null;
+    throw error;
+  }
+}
+
+// The editor's media host: the probe, the filmstrip and the microphone over the composer, with the
+// clip pickers the app's on a phone, since their object URLs in a page would outlive the edit (see
+// Native media host). `pickAudio` stays the default, which on iOS is already the kit's own document
+// picker, so there is no audio picker to write.
+const media = composerMediaHost(
+  Capacitor.isNativePlatform()
+    ? {
+        pickers: {
+          async pickVideo() {
+            const file = await pickOne(() => FilePicker.pickVideos({ limit: 1 }));
+            return file ? sourceFor(file) : null;
+          },
+          async pickMedia() {
+            // With editing.pictures on: the same, offering stills.
+            const file = await pickOne(() => FilePicker.pickMedia({ limit: 1 }));
+            return file ? sourceFor(file) : null;
+          },
+        },
+      }
+    : {},
+);
 
 // The render: every blob the spec names staged as a file, and released once the job has settled.
 const render = composerRenderHost();
@@ -2157,6 +2233,10 @@ for a picture, without which the editor opens a picture as a video and reports i
 rejects as the resolve does, `unreadable_input` for an item gone from the library since it was
 listed. The key is the app's, new for every pick, because the same item picked twice is two clips.
 
+**`composerMediaHost(options?)`** is the editor's media host over the composer, and **Native media
+host** has its options and what it does: the host brings its pickers and its `release`, and the kit
+answers the probe, the filmstrip, the voiceover and, when asked, the sound library.
+
 **`composerRenderHost(options?)`** is the editor's render host over the composer, and **A Capacitor
 app, where the native engines do the rendering** has its options and what it does. The host it
 answers always has `encodeSupport`, typed as required, so a host that wraps it calls it straight
@@ -2177,6 +2257,34 @@ already the editor's default `platform.fileUrl`, so it is for everything else a 
 screen's render, a poster. It reads `window.Capacitor`, which is the `Capacitor` `@capacitor/core`
 exports, so a test's spy on `Capacitor.convertFileSrc` is the one it calls.
 
+**`probeMediaDuration(uri, kind = 'video')`** is `composerMediaHost`'s probe for a file that is not
+a source yet: a track the app's own audio picker chose, a clip before it becomes one. On a phone a
+device file - a bare path, a `file://` or a `content://` URI - is asked of `VideoComposer.probe`
+first, and the page's own `<video>` or `<audio>`, as `kind` says, through `webViewUrl`, is the
+fallback for a file the composer could not read or found no length in, and the only probe for a
+`blob:`, `data:` or `http(s):` URL and for anything in a page. It answers milliseconds, 0 for a file
+that opens with no length to give, and null for one that neither can open, which a picker refuses
+rather than letting a render fail on it later.
+
+**`readFileBlob(uri)`**, from `capacitor-video-kit/ui`, is the bytes behind a file the way a page has
+to read them: a device path, `file://` or `content://` through `webViewUrl`, and anything the page
+loads as it is. It takes the iOS local server's answer for a whole file, which has no HTTP status and
+so is not `ok`, as the file it is, and rejects with a plain `Error` naming the URI for a fetch that
+failed, an HTTP error, a file of no bytes or no URI at all. The type is as the bytes came, which
+from the iOS local server is none. `readRenderFile`, the default audio picker on iOS and the
+voiceover recorder all read through it. **`readVoiceTake(uri)`**
+is the same read typed `audio/mp4`, what both recorders write, for a host that keeps a take the
+media host handed over as its file (**Native media host**).
+
+**`filePickerCancelled(error)`**, from `capacitor-video-kit/ui`, says whether
+`@capawesome/capacitor-file-picker` rejected because the customer backed out, for the picker's
+`catch` above. The plugin rejects a cancel exactly as it rejects a failure, with no code on any
+platform, so the test is its own message and all of it: `pickFiles canceled.`, which every pick call
+answers on iOS, Android and the web whether the sheet was cancelled, swiped away or finished with
+nothing chosen, and `pickDirectory canceled.`. Anything looser silences real failures, since on iOS a
+photo that could not be loaded rejects with the system's own sentence, in the customer's language.
+It reads the error's shape and does not depend on the plugin.
+
 **`withNativeRenderInputs(spec, render, signal?)`**, which `composerRenderHost` runs every render
 through and a host with a render of its own calls itself, gives the engine files instead of the
 `blob:` URLs a page holds - a sound from the browser's sound library, a track the default picker
@@ -2193,7 +2301,7 @@ and `unknown` for any other; an abort rejects with the signal's reason. In a bro
 `render(spec)` and nothing else.
 
 **The editor's default `pickAudio`** is the kit's document picker on iOS (**iOS host setup** says
-why), so a native host keeps it by spreading `browserMediaHost()` and leaving `pickAudio` out.
+why), so a native host keeps it by leaving `pickAudio` out of `composerMediaHost`'s pickers.
 
 The three native calls behind those, for a host that needs them on their own:
 

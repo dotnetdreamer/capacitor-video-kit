@@ -149,7 +149,7 @@ export class PreviewCanvas {
   private tailSince = 0;
   /** The redraw that ends a wait nothing else will end: a paused canvas only draws when told to. */
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  /** The transitions this painter has drawn at least once; see [warmUp]. A new painter starts cold. */
+  /** The transitions this painter has drawn at least once; see [warmUp]. A new or resized painter starts cold. */
   private warmed = new Set<string>();
   private playingSince = 0;
   /** The last op list folded into a matrix, and what it folded to. A fold a frame is a fold wasted:
@@ -223,11 +223,19 @@ export class PreviewCanvas {
     if (width === this.width && height === this.height) return;
     this.width = width;
     this.height = height;
-    // A painter's frame size is fixed when it is built, so a resize is a new one - and the old one
-    // has to give its GL context back rather than wait to be collected, or a few sheet openings use
-    // up every context the page is allowed.
-    this.painter?.dispose();
-    this.painter = new Painter({ width, height }, this.canvas);
+    // The same painter at the new size where it can be: its context, its programs and its textures
+    // outlive a size, and a new painter on every sheet opening and closing was a new context and a
+    // shader compile on the paused frame the customer was looking at - see [Painter.resize]. One
+    // with no live GPU context to keep is built again, which is what brings a lost GPU back, and the
+    // old one gives its GL context back first rather than wait to be collected, or a few sheet
+    // openings use up every context the page is allowed.
+    if (!this.painter?.resize({ width, height })) {
+      this.painter?.dispose();
+      this.painter = new Painter({ width, height }, this.canvas);
+    }
+    // Cold again either way. The programs survive a resize but the transitions' frame targets do
+    // not, and warming is what makes them at the new size on a paused frame rather than on the first
+    // frame of a transition the customer is watching.
     this.warmed = new Set();
     this.request();
   }

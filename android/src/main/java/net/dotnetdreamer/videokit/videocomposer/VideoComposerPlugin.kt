@@ -56,6 +56,8 @@ import kotlin.math.min
  *     is safe from any thread.
  *   - Staging a render input is file work too, but goes to [stagingScope], which has one worker,
  *     because the chunks of a file have to be written in the order they came.
+ *   - Opening and closing a voice take goes to [recorderScope], also one worker, because a stop
+ *     has to find the start that came before it finished.
  */
 @OptIn(UnstableApi::class)
 @CapacitorPlugin(
@@ -93,7 +95,19 @@ class VideoComposerPlugin : Plugin() {
      */
     private val stagingScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
 
-    private var voiceRecorder: VoiceRecorder? = null
+    /**
+     * The microphone's work, one call at a time and in the order the calls came. Opening a take is
+     * a folder, a file and `MediaRecorder.prepare()`/`start()` - the audio input and the encoder set
+     * up over binder, tens to hundreds of milliseconds - which is IO the shared plugin thread must
+     * not do, and which the permission callback would otherwise do on the MAIN thread, freezing the
+     * WebView on the first take after a grant. One worker rather than [pluginScope]'s many because
+     * a stop has to find the start that came before it finished: the calls are handed over in
+     * order, and one worker keeps that order, so a stop sent straight after a start is answered
+     * exactly as it was when the start ran on the plugin thread.
+     */
+    private val recorderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+
+    @Volatile private var voiceRecorder: VoiceRecorder? = null
 
     override fun load() {
         val appContext = context.applicationContext
@@ -113,7 +127,11 @@ class VideoComposerPlugin : Plugin() {
         // Jobs, the foreground service and the files all outlive the Bridge by design; only the
         // back-reference is dropped.
         JobRegistry.emitter = null
-        voiceRecorder?.abandon()
+        // Queued behind whatever start [recorderScope] still holds rather than run here: a start a
+        // permission grant queued would otherwise open the microphone after this had let it go, with
+        // nothing left to close it, and waiting on the recorder here would hold the main thread for
+        // a prepare that is still going.
+        recorderScope.launch { voiceRecorder?.abandon() }
         super.handleOnDestroy()
     }
 
@@ -150,7 +168,9 @@ class VideoComposerPlugin : Plugin() {
             batchId = spec.batchId,
             jobDir = JobFolders.dir(appContext, spec.batchId),
             partFile = JobFolders.part(appContext, spec.batchId, spec.jobId),
-            plan = RenderPlan.build(spec, emptyMap()),
+            // Without the overlays' pixels: this placeholder is what the registry holds if the
+            // pre-flight fails, and it holds it for a day. The pre-flight is handed the whole spec.
+            plan = RenderPlan.build(spec.withoutOverlayPixels(), emptyMap()),
         )
         JobRegistry.register(job)
         call.resolve(JSObject().put("jobId", spec.jobId))
@@ -275,7 +295,9 @@ class VideoComposerPlugin : Plugin() {
                 return
             }
 
-            job.plan = plan
+            // The plan the job keeps is the same plan without the overlays' data URLs, which are
+            // spent now that they are bitmaps - see [withoutOverlayPixels].
+            job.plan = RenderPlan.build(spec.withoutOverlayPixels(), probes)
             job.overlays = overlays
             main.post { startTransformer(job, overlays, relaxEncoder = false) }
         } catch (e: Exception) {
@@ -1310,23 +1332,32 @@ class VideoComposerPlugin : Plugin() {
      * no batch rather than a refusal ([VoiceRecorder.folderFor]).
      */
     private fun beginRecording(call: PluginCall) {
-        val recorder = voiceRecorder ?: VoiceRecorder(context.applicationContext).also { voiceRecorder = it }
-        try {
-            recorder.start(call.getString("batchId"))
-            call.resolve()
-        } catch (e: VoiceRecorder.RecordingException) {
-            call.reject(e.message ?: RECORDING_FAILED, e.message ?: RECORDING_FAILED)
+        // On [recorderScope]: see there. The call still resolves only once the take has started.
+        recorderScope.launch {
+            val recorder = voiceRecorder ?: VoiceRecorder(context.applicationContext).also { voiceRecorder = it }
+            try {
+                recorder.start(call.getString("batchId"))
+                call.resolve()
+            } catch (e: VoiceRecorder.RecordingException) {
+                call.reject(e.message ?: RECORDING_FAILED, e.message ?: RECORDING_FAILED)
+            } catch (e: Exception) {
+                // Anything else would take the app down from this worker, where the permission
+                // callback it can arrive through only ever logged it.
+                call.reject(e.message ?: RECORDING_FAILED, RECORDING_FAILED)
+            }
         }
     }
 
     @PluginMethod
     fun stopVoiceRecording(call: PluginCall) {
-        val recorder = voiceRecorder
-        if (recorder == null || !recorder.isRecording) {
-            call.reject("not recording", NOT_RECORDING)
-            return
-        }
-        pluginScope.launch {
+        // The whole of it on [recorderScope], the check included, so that it sees the start queued
+        // ahead of it as finished - which it always was when the start ran on the plugin thread.
+        recorderScope.launch {
+            val recorder = voiceRecorder
+            if (recorder == null || !recorder.isRecording) {
+                call.reject("not recording", NOT_RECORDING)
+                return@launch
+            }
             try {
                 val result = recorder.stop()
                 call.resolve(

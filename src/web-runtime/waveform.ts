@@ -148,19 +148,36 @@ export async function extractPeaks(src: string, stepMs: number = WAVEFORM_STEP_M
    * takes the whole file and hands back the whole decoded track. Demuxing instead reads only the
    * audio track's own byte ranges, decodes it a chunk at a time, and keeps nothing but the
    * measurements - so the memory it uses is the same for a ten-second clip and a ten-minute one.
+   *
+   * Only an `http(s)` source is read by range, though. Anything else - a `blob:`, a stored file, and
+   * on iOS every clip, whose `capacitor:` URL is no `http(s)` one - is read in full before the
+   * streamed pass can start, so it is read ONCE, here, and the same blob serves the whole-file pass
+   * too. Reading it again there was a second whole video through the WebView for every clip a
+   * WebView without an audio decoder measured, only for the size check below to refuse it. A source
+   * that will not read is null now, as it was after both passes had failed to read it.
    */
-  const streamed = await streamPeaks(src, stepMs);
+  let blob: Blob | undefined;
+  if (!isRanged(src)) {
+    try {
+      blob = await resolve(src);
+    } catch {
+      return null;
+    }
+  }
+
+  const streamed = await streamPeaks(src, stepMs, blob);
   if (streamed) return streamed;
 
-  // Asked before anything is read, so a track too long to decode is never even downloaded.
+  // Asked before anything more is read, so a track too long to decode is never even downloaded
+  // where it is read by range, and is never handed to the whole-file decoder anywhere.
   if (sourceDurationMs > MAX_SOURCE_MS) return null;
 
   const context = audioContext();
   if (!context) return null;
 
   try {
-    const blob = await resolve(src);
-    if (blob.size === 0 || blob.size > MAX_BYTES) return null;
+    const whole = blob ?? (await resolve(src));
+    if (whole.size === 0 || whole.size > MAX_BYTES) return null;
 
     /*
      * Handed straight in, not copied. A successful decode DETACHES this buffer, which would matter
@@ -168,7 +185,7 @@ export async function extractPeaks(src: string, stepMs: number = WAVEFORM_STEP_M
      * is the difference between one and two of the largest allocation in the function, both alive
      * at once for as long as the decode runs.
      */
-    const decoded = await decodeAudioData(context, await blob.arrayBuffer());
+    const decoded = await decodeAudioData(context, await whole.arrayBuffer());
     if (decoded.length === 0 || decoded.numberOfChannels === 0) return null;
 
     const channels: Float32Array[] = [];
@@ -221,15 +238,18 @@ export async function extractPeaks(src: string, stepMs: number = WAVEFORM_STEP_M
  *
  * The import is dynamic so the demuxer stays out of the editor's own bundle - the timeline asks
  * for it the first time a sound needs measuring, and never on a post that has none.
+ *
+ * `blob` is `src`'s bytes where the caller has already read them, which [extractPeaks] has for
+ * every source that is not read by range; an `http(s)` source ignores it and is read by range.
  */
-export async function streamPeaks(src: string, stepMs: number = WAVEFORM_STEP_MS): Promise<Peaks | null> {
+export async function streamPeaks(src: string, stepMs: number = WAVEFORM_STEP_MS, blob?: Blob): Promise<Peaks | null> {
   let input: { dispose?: () => void } | null = null;
   try {
     const { ALL_FORMATS, AudioBufferSink, BlobSource, Input, UrlSource } = await import('mediabunny');
 
     // A URL is read in ranges; anything else is resolved to a blob first, which is already backed
     // by the file on disk and is sliced rather than copied.
-    const source = /^https?:/i.test(src) ? new UrlSource(src) : new BlobSource(await resolve(src));
+    const source = isRanged(src) ? new UrlSource(src) : new BlobSource(blob ?? (await resolve(src)));
     const reader = new Input({ source, formats: ALL_FORMATS });
     input = reader;
 
@@ -285,6 +305,11 @@ export async function streamPeaks(src: string, stepMs: number = WAVEFORM_STEP_MS
       // Disposing a reader that never opened has nothing to undo.
     }
   }
+}
+
+/** Whether [streamPeaks] reads `src` by range rather than whole: an `http(s)` URL, and nothing else. */
+function isRanged(src: string): boolean {
+  return /^https?:/i.test(src);
 }
 
 /**

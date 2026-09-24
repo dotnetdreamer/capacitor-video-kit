@@ -10,8 +10,7 @@ import {
   type RenderFailureCode,
   type RenderRequest,
 } from '../host/host.types';
-import { webViewUrl } from '../host/web-view-url';
-import { resolve } from '../web-runtime/files';
+import { readFileBlob } from '../host/read-file';
 
 import { batchIdRefusal } from './batch-id';
 import type { ComposeFailureCode, ComposeResult, ComposeSpec } from './definitions';
@@ -522,24 +521,22 @@ async function renderContainer(uri: string): Promise<'mp4' | 'webm'> {
  * no MP4 encoder writes ([containerOf]): for a [ComposerRenderHostOptions.toSource] hook whose host
  * sends the render somewhere - an upload - rather than keeping its name.
  *
- * `uri` is `ComposeResult.uri`, read by the URL the page can fetch it by: a native engine's
- * `file://` through Capacitor's local server ([webViewUrl]), the web engine's `blob:` as it is. The
- * `File` is typed as its bytes came, or `video/mp4` where they came with no type, which is how the
- * iOS local server answers a whole file and what every native render is. `name` defaults to
- * `edited`, the default `toSource`'s name.
+ * `uri` is `ComposeResult.uri`, read by `readFileBlob` in `host/read-file`: a native engine's
+ * `file://` through Capacitor's local server, the web engine's `blob:` as it is. The `File` is typed
+ * as its bytes came, or `video/mp4` where they came with no type, which is how the iOS local server
+ * answers a whole file and what every native render is. `name` defaults to `edited`, the default
+ * `toSource`'s name.
  *
  * Rejects with a plain `Error` when there is nothing to send - a fetch that failed, an HTTP error, a
  * file of no bytes, which no render finishes as - so a hook that lets it through fails the render as
  * `unknown`, with the reason logged, rather than handing an upload an empty `File` the server
  * refuses after the customer waited for it. A response with no HTTP status is not an error by
  * itself: `fetch` reads the iOS local server's answer for a whole file as status 0, not `ok`, with
- * every byte behind it, so a check of `ok` alone refuses a good render there. The reading is
- * `resolve`'s, in `web-runtime/files`, which the editor's own read of a picked song goes through
- * too, and which says more.
+ * every byte behind it, so a check of `ok` alone refuses a good render there. `readFileBlob` says
+ * more.
  */
 export async function readRenderFile(uri: string, name = 'edited'): Promise<File> {
-  const bytes = await resolve(webViewUrl(uri));
-  if (!bytes.size) throw new Error(`could not read ${uri}: the render is empty`);
+  const bytes = await readFileBlob(uri);
   const type = bytes.type || 'video/mp4';
   return new File([bytes], `${name}.${containerOf(type)}`, { type });
 }

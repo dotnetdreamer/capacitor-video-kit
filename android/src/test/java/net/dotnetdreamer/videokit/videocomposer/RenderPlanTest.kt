@@ -238,6 +238,37 @@ class RenderPlanTest {
     /* ------------------------------------------------------------------------------------- */
 
     @Test
+    fun `a job's plan without the overlays' pixels is the same plan in every other respect`() {
+        val overlays = listOf(
+            Overlay("a", "data:image/png;base64,iVBORw0KGgo=", 0.1f, 0.2f, 100, 40, 30f, 0, 1_000, 0.5f),
+            Overlay("b", "data:image/png;base64,AAAA", 0.9f, 0.9f, 720, 1280, 0f, 500, 1_500, 1f),
+        )
+        val full = spec(
+            listOf(clip("a"), clip("b", speed = 2f)),
+            overlays = overlays,
+            filter = listOf(FilterOp.Sepia(0.5f)),
+        )
+        val probes = mapOf("file:///a.mp4" to probe(2_000), "file:///b.mp4" to probe(2_000))
+        val plan = RenderPlan.build(full, probes)
+        val kept = RenderPlan.build(full.withoutOverlayPixels(), probes)
+
+        assertTrue(kept.overlays.all { it.png.isEmpty() })
+        assertTrue(kept.spec.overlays.all { it.png.isEmpty() })
+        // Everything the render reads after the decode - the placements and their times, and the
+        // whole of the timeline - is untouched.
+        assertEquals(plan.overlays.map { it.copy(png = "") }, kept.overlays)
+        assertEquals(full.copy(overlays = overlays.map { it.copy(png = "") }), kept.spec)
+        assertEquals(plan.clips, kept.clips)
+        assertEquals(plan.totalUs, kept.totalUs)
+        assertEquals(plan.baseUs, kept.baseUs)
+        assertEquals(plan.tracks, kept.tracks)
+        assertEquals(plan.tails, kept.tails)
+        assertEquals(plan.posterAtUs, kept.posterAtUs)
+        assertEquals(plan.videoSeqHasAudio, kept.videoSeqHasAudio)
+        assertTrue(plan.colorMatrix!!.m.contentEquals(kept.colorMatrix!!.m))
+    }
+
+    @Test
     fun `overlay coordinates move from web space to GL space`() {
         val overlay = Overlay("o", "data:image/png;base64,x", 0.1f, 0.1f, 100, 40, 30f, 0, 1_000, 1f)
         val plan = RenderPlan.build(

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_OUTPUT,
@@ -15,9 +15,21 @@ import {
   videoBitrateFor,
 } from './edit-manifest';
 import { toComposeSpec, type ComposeSpecLimits } from './compose';
-import type { RasterContext } from './raster-context';
+import type { EditOverlay } from './edit-manifest';
+import { rasteriseOverlay } from './overlay-raster';
+import type { RasterContext, RasterisedOverlay } from './raster-context';
 import { resolveEditorHost } from '../host/defaults';
 import type { ComposeSpec } from '../video-composer/definitions';
+
+/* The mock DOM has no 2D canvas: a layer "drawn" here says which layer it was. */
+vi.mock('./overlay-raster', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./overlay-raster')>();
+  return {
+    ...actual,
+    rasteriseOverlay: vi.fn(async (overlay: EditOverlay) => ({ png: `drawn:${overlay.id}`, wPx: 10, hPx: 10 })),
+  };
+});
+const rasterise = vi.mocked(rasteriseOverlay);
 
 /**
  * The frame is a choice now, and it is the choice everything else in a manifest is measured
@@ -205,5 +217,43 @@ describe('the size ceiling a render is held to', () => {
       expect((await wire({ maxBytes: none })).output).not.toHaveProperty('maxBytes');
     }
     expect((await wire({ maxBytes: 1.5 })).output.maxBytes).toBe(1);
+  });
+});
+
+/*
+ * The editor hands a render the bitmaps its preview has already drawn (RasterContext.drawn), so a
+ * layer is not drawn twice between Next and the encode. Whatever it does not vouch for is drawn
+ * here exactly as before.
+ */
+describe('the layers a render places', () => {
+  const uris = new Map([['a', 'file:///a.mp4']]);
+  const layer = (id: string): EditOverlay => ({
+    kind: 'sticker', id, emoji: null, assetId: 'crown',
+    cx: 0.25, cy: 0.75, scale: 1, rotationDeg: 0, opacity: 1, startMs: 0, endMs: 0,
+  });
+  const post = { ...onePost(), overlays: [layer('kept'), layer('fresh')] };
+  const shown: RasterisedOverlay = { png: 'data:image/png;base64,preview', wPx: 321, hPx: 123 };
+  const context = (drawn?: RasterContext['drawn']): RasterContext =>
+    ({ output: post.output, textStyle: () => ({}), stickerUrl: () => '', fileUrl: (u: string) => u, drawn }) as unknown as RasterContext;
+
+  it('places the bitmap the editor already has instead of drawing it again', async () => {
+    rasterise.mockClear();
+    const spec = await toComposeSpec(post, uris, { jobId: 'j', batchId: 'b' }, context((o) => (o.id === 'kept' ? shown : null)));
+
+    expect(rasterise.mock.calls.map(([overlay]) => overlay.id)).toEqual(['fresh']);
+    expect(spec.overlays.map((o) => [o.id, o.png, o.wPx, o.hPx])).toEqual([
+      ['kept', shown.png, 321, 123],
+      ['fresh', 'drawn:fresh', 10, 10],
+    ]);
+    // Placed where the layer is, as a drawn one would be.
+    expect(spec.overlays[0]).toMatchObject({ cx: 0.25, cy: 0.75 });
+  });
+
+  it('draws every layer, as it always did, for a context that has no bitmaps to offer', async () => {
+    rasterise.mockClear();
+    const spec = await toComposeSpec(post, uris, { jobId: 'j', batchId: 'b' }, context());
+
+    expect(rasterise).toHaveBeenCalledTimes(2);
+    expect(spec.overlays.map((o) => o.png)).toEqual(['drawn:kept', 'drawn:fresh']);
   });
 });

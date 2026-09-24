@@ -106,7 +106,7 @@ enum GalleryLibrary {
             let image = asset.mediaType == .image
             videos.append(Video(
                 id: asset.localIdentifier,
-                fileName: resources(of: asset).map { displayName(of: $0) } ?? "",
+                fileName: listedName(of: asset),
                 // A picture has no length, and `PHAsset.duration` already says 0 for one; spelled out
                 // so the contract's "always 0 for a picture" does not rest on that.
                 durationMs: image ? 0 : Int64((asset.duration * 1000).rounded()),
@@ -351,6 +351,33 @@ enum GalleryLibrary {
         let original = all.first { $0.type == originalType }
         guard let copied = all.first(where: { $0.type == edited }) ?? original else { return nil }
         return (copied, original ?? copied)
+    }
+
+    /// The names `list` has already worked out, keyed by the asset AND its modification date.
+    ///
+    /// `PHAssetResource.assetResources(for:)` is a query of the Photos database per asset, which
+    /// `PHFetchResult` does not prefetch, and it was the one expensive thing in a row: a page of
+    /// sixty was sixty of them, and page 0 is listed again every time the gallery opens. The name
+    /// depends on nothing but the resources' file names, and those change only when the item is
+    /// edited or reverted, which moves `modificationDate`, so an edited item misses here and gets its
+    /// new extension exactly as it did before. Anything else that moves the date is only a miss.
+    ///
+    /// `NSCache` because `list` runs on the cooperative pool and two pages can be listed at once;
+    /// it is thread-safe and gives the memory back under pressure. A row with no name is never
+    /// kept, so an asset whose resources were not there yet is asked again next time.
+    private static let nameCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 2000
+        return cache
+    }()
+
+    private static func listedName(of asset: PHAsset) -> String {
+        let key = "\(asset.localIdentifier)|\(asset.modificationDate?.timeIntervalSince1970 ?? 0)" as NSString
+        if let hit = nameCache.object(forKey: key) { return hit as String }
+        guard let found = resources(of: asset) else { return "" }
+        let name = displayName(of: found)
+        if !name.isEmpty { nameCache.setObject(name as NSString, forKey: key) }
+        return name
     }
 
     private static func displayName(of resources: (copied: PHAssetResource, original: PHAssetResource)) -> String {
