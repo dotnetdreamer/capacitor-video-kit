@@ -146,11 +146,13 @@ class ComposeSpecParserTest {
     }
 
     @Test
-    fun `a maxBytes that is not a positive finite number is no ceiling, and no refusal either`() {
-        // The contract: absent, or not a positive finite number, means no ceiling. A string that
-        // spells a number is not a number, and neither is a boolean.
+    fun `a maxBytes that does not round down to at least one byte is no ceiling, and no refusal either`() {
+        // The contract: absent, or anything that does not round down to at least one byte, means no
+        // ceiling. A string that spells a number is not a number, and neither is a boolean. 0.5 is
+        // the one the rule is written on the rounded number for, as on iOS and the web: tested
+        // before rounding it would be a ceiling of 0 that fails every render.
         val notNumbers = listOf<Any>("100000000", true, JSONObject.NULL, JSONObject())
-        for (value in listOf<Any>(0, 0.0, -1, -100_000_000L) + notNumbers) {
+        for (value in listOf<Any>(0, 0.0, 0.5, 0.999, -1, -100_000_000L) + notNumbers) {
             val spec = ComposeSpecParser.parse(withMaxBytes(value))
             assertNull("$value", spec.output.maxBytes)
             assertEquals(720, spec.output.width)

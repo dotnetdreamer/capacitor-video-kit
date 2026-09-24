@@ -52,7 +52,7 @@ final class PluginSaveToGalleryTests: RenderTestCase {
 
 /// One plugin method run the way the bridge runs it, on a plugin with no bridge under it, and
 /// waited for until it settles - at once for a method that answers inline, later for one that
-/// hands off to a `Task`.
+/// hands off to a `Task`. A `VideoComposerPlugin` unless another plugin is handed over.
 enum PluginCalls {
     typealias Method = (VideoComposerPlugin) -> (CAPPluginCall) -> Void
 
@@ -71,13 +71,24 @@ enum PluginCalls {
 
     /// What the method rejected with; resolving fails the test.
     static func reject(_ method: Method, _ options: [String: Any]) throws -> (message: String, code: String?) {
-        switch try run(method, options) {
+        try reject(VideoComposerPlugin(), method, options)
+    }
+
+    /// What a method of `plugin` rejected with; resolving fails the test.
+    static func reject<Plugin: CAPPlugin>(_ plugin: Plugin, _ method: (Plugin) -> (CAPPluginCall) -> Void,
+                                          _ options: [String: Any]) throws -> (message: String, code: String?) {
+        switch try run(plugin, method, options) {
         case let .resolved(data): throw TestError("resolved with \(data)")
         case let .rejected(message, code): return (message, code)
         }
     }
 
     private static func run(_ method: Method, _ options: [String: Any]) throws -> Outcome {
+        try run(VideoComposerPlugin(), method, options)
+    }
+
+    private static func run<Plugin: CAPPlugin>(_ plugin: Plugin, _ method: (Plugin) -> (CAPPluginCall) -> Void,
+                                               _ options: [String: Any]) throws -> Outcome {
         let settled = XCTestExpectation(description: "the call settles")
         let lock = NSLock()
         var outcome: Outcome?
@@ -92,7 +103,6 @@ enum PluginCalls {
                 lock.lock(); outcome = .rejected(message: error?.message ?? "", code: error?.code); lock.unlock()
                 settled.fulfill()
             })!
-        let plugin = VideoComposerPlugin()
         method(plugin)(call)
         _ = XCTWaiter.wait(for: [settled], timeout: 10)
         lock.lock()

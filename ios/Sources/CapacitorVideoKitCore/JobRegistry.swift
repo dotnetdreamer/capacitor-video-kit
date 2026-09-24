@@ -1,12 +1,6 @@
 import Foundation
 import UIKit
 
-/// One render, from the moment `compose` accepts it until JS has seen how it ended.
-///
-/// Every mutable field here is guarded by the single `NSLock` inside `JobRegistry`, which is why
-/// this is a class with bare `var`s and no locking of its own: Kotlin marks the same fields
-/// `@Volatile` on a `ConcurrentHashMap` entry, and one lock in one place is the Swift equivalent
-/// that does not invite a second, re-entrant one.
 /// One background task assertion, endable exactly once.
 ///
 /// It exists as a class rather than a local `var` plus a closure because the expiration handler is
@@ -30,6 +24,12 @@ private final class BackgroundAssertion: @unchecked Sendable {
     }
 }
 
+/// One render, from the moment `compose` accepts it until JS has seen how it ended.
+///
+/// Every mutable field here is guarded by the single `NSLock` inside `JobRegistry`, which is why
+/// this is a class with bare `var`s and no locking of its own: Kotlin marks the same fields
+/// `@Volatile` on a `ConcurrentHashMap` entry, and one lock in one place is the Swift equivalent
+/// that does not invite a second, re-entrant one.
 final class ComposeJob: @unchecked Sendable {
     let id: String
     let batchId: String
@@ -125,11 +125,13 @@ struct StallWatch {
 
 /// The render jobs, held for the whole process rather than for the life of a plugin instance.
 ///
-/// A WebView reload or a route change builds a fresh `CAPPlugin` while an export is still running,
-/// and an outcome stored on the dead instance reaches nobody - retained events are retained on that
-/// instance. So the outcome lives here, and the next plugin instance replays whatever JS has not
-/// acknowledged. Under that sit two more nets: `getState` can always be asked, and if even the
-/// process died, `getState` answers `job_not_found` and JS restarts from its own manifest.
+/// A bridge built later in the same process loads a fresh `CAPPlugin` while an export may still be
+/// running, and an outcome stored on the dead instance reaches nobody - retained events are
+/// retained on that instance. So the outcome lives here, and the next plugin instance replays
+/// whatever JS has not acknowledged. A web view reload keeps the instance it has (see
+/// `VideoComposerPlugin.load`), and its retained events with it. Under that sit two more nets:
+/// `getState` can always be asked, and if even the process died, `getState` answers
+/// `job_not_found` and JS restarts from its own manifest.
 ///
 /// ONE non-recursive `NSLock` guards every field of every job. Keep locked sections leaf level,
 /// copy the emitter out before calling into it, and never call a locked method from inside a locked
@@ -201,7 +203,10 @@ final class JobRegistry: @unchecked Sendable {
 
     // MARK: - Emitter
 
-    /// Called from `VideoComposerPlugin.load()`, which happens again on every WebView reload.
+    /// Called from `VideoComposerPlugin.load()`, which runs as a bridge registers the plugin: once
+    /// a launch in an app with one bridge, with nothing here to replay yet, and again for a bridge
+    /// built later in the same process, which is handed what the page of an earlier one never
+    /// collected. A web view reload does not load the plugin again (see `VideoComposerPlugin.load`).
     func attach(emitter plugin: VideoComposerPlugin) {
         var replays: [(name: String, data: [String: Any])] = []
         lock.lock()
@@ -220,8 +225,9 @@ final class JobRegistry: @unchecked Sendable {
         }
     }
 
-    /// A reload constructs the new plugin BEFORE the old one deallocates, so clearing the emitter
-    /// unconditionally from `deinit` would unhook the live bridge.
+    /// A bridge built after another loads a plugin of its own, which can attach BEFORE the old one
+    /// deallocates, so clearing the emitter unconditionally from `deinit` would unhook the live
+    /// bridge.
     func detach(_ plugin: VideoComposerPlugin) {
         lock.lock()
         if emitter === plugin { emitter = nil }
@@ -236,7 +242,7 @@ final class JobRegistry: @unchecked Sendable {
         return jobs[jobId] != nil
     }
 
-    /// For `JobFolders.sweep`, which knows the post only by its folder name, i.e. the SANITISED id.
+    /// For `JobFolders.sweep`, which knows the post only by its folder name (`JobFolders.folderName`).
     ///
     /// "Live" includes a terminal job JS has not collected yet: its `stitched.mp4` and poster are
     /// the whole point of the folder, and deleting them while the outcome is still unacknowledged
@@ -246,7 +252,7 @@ final class JobRegistry: @unchecked Sendable {
         defer { lock.unlock() }
         return jobs.values.contains { job in
             guard job.batchId == batchId
-                    || JobFolders.sanitize(job.batchId) == batchId else { return false }
+                    || JobFolders.folderName(job.batchId) == batchId else { return false }
             return job.isLive
         }
     }
@@ -497,21 +503,54 @@ final class JobRegistry: @unchecked Sendable {
         try? FileManager.default.removeItem(at: RenderInputs.folder(job.batchId))
     }
 
-    /// Android's arithmetic exactly, so a device that fails to render on one platform fails on the
-    /// other. The 1.15 multiplies the bitrate product only and that product is truncated before the
-    /// 4 MiB of container overhead is added; the further 20 MiB is working margin for the export's
-    /// temporary files. A free space we cannot read ALLOWS, matching Android's `Long.MAX_VALUE`.
+    /// Refuses a render the disk has no room for, before it starts. A free space we cannot read
+    /// ALLOWS, matching Android's `Long.MAX_VALUE`.
     private func spaceFailure(for job: ComposeJob) -> ComposeFailure? {
-        let totalSeconds = max(1.0, Double(job.spec.totalOutputMs) / 1000.0)
-        let bitrate = Double(job.spec.output.videoBitrate + job.spec.output.audioBitrate)
-        let estimateBytes = Int64(bitrate / 8.0 * totalSeconds * 1.15) + 4 * 1024 * 1024
-        let needed = estimateBytes + 20 * 1024 * 1024
+        let needed = Self.bytesNeeded(for: job.spec)
         guard let available = JobFolders.freeBytes(at: job.jobDir), available < needed else { return nil }
         var failure = ComposeFailure(code: .noSpace, message: "no_space need=\(needed) free=\(available)")
         // The SHORTFALL, not the total need: it is the figure the copy names, and "free up 40 MB"
         // is actionable where "this needs 260 MB" is not.
         failure.needBytes = needed - available
         return failure
+    }
+
+    /// The room on disk `spec` asks for, in Android's arithmetic exactly (`VideoComposerPlugin.kt`
+    /// and `SizeCeiling.diskEstimate`), so a device that refuses a render on one platform refuses
+    /// it on the other. The 1.15 multiplies the bitrate product only and that product is truncated
+    /// before the 4 MiB of container overhead is added; the further 20 MiB is working margin for
+    /// the export's temporary files.
+    ///
+    /// With a host's ceiling (`output.maxBytes`) the estimate is never more than the file can reach
+    /// before it is stopped: the ceiling and a fifth, plus what one look at the file (`Transfer`'s
+    /// half second, Android's `PROGRESS_POLL_MS`) lets past it and the container's 4 MiB. Without
+    /// that, a long post on a nearly full phone would be refused `no_space` for a file the ceiling
+    /// keeps far smaller - a refusal by estimate, which is exactly what holding the ceiling against
+    /// the file itself is there to avoid. The fifth is Android's, for the gap its muxer can leave
+    /// ahead of the samples; the writer here leaves none, and the figure is kept so the two agree.
+    ///
+    /// Neither figure counts the writer's last pass, which holds the file on disk twice for a
+    /// while: the temporary file every sample went into, and beside it the copy with the index at
+    /// the front that becomes the part file (see `Transfer.watchSize`) - 8.6 MB at once for a
+    /// 4.3 MB file, measured. A disk with room for the file once and not twice gets through the
+    /// encode and fails `no_space` on that pass, with a ceiling or without one, and a ceiling lets
+    /// more renders through to find that out, because it asks for less. It is left at Android's
+    /// figure all the same: Android's muxer writes its file in place, with the room for the index
+    /// kept ahead of the samples and no second pass, and one post should be refused up front on
+    /// both platforms or on neither.
+    static func bytesNeeded(for spec: ComposeSpec) -> Int64 {
+        let totalSeconds = max(1.0, Double(spec.totalOutputMs) / 1000.0)
+        let bitrate = Double(spec.output.videoBitrate + spec.output.audioBitrate)
+        let containerBytes: Int64 = 4 * 1024 * 1024
+        var estimateBytes = Int64(bitrate / 8.0 * totalSeconds * 1.15) + containerBytes
+        if let maxBytes = spec.output.maxBytes {
+            // Worked in doubles, as Android works it, so a ceiling near the largest Int64 cannot
+            // overflow into a small one.
+            let slackBytes = Int64(bitrate / 8.0 * 1.15 * 0.5) + containerBytes
+            let most = Double(maxBytes) * 1.2 + Double(slackBytes)
+            if most < Double(estimateBytes) { estimateBytes = Int64(most) }
+        }
+        return estimateBytes + 20 * 1024 * 1024
     }
 
     // MARK: - State transitions

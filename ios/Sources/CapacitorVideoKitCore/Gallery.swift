@@ -35,8 +35,10 @@ enum Gallery {
 
      Android's checks, in Android's order and with its words: `directory` first, then `album`. A
      separator in the album name would be a caller asking for a nested album, which the photo library
-     cannot express at all. Refused rather than flattened, so the same options do the same thing on
-     both platforms instead of quietly doing different ones.
+     cannot express at all, and `.` or `..` is a folder Android would make on disk below API 29 that
+     is not a folder of its own - `..` puts the video beside `Movies` - though a photo library would
+     take either as a title. Refused rather than flattened, so the same options do the same thing on
+     both platforms instead of quietly doing different ones (Android's `Gallery.albumOf`).
      */
     static func album(_ album: String?, directory: String?) throws -> String? {
         switch directory?.lowercased() {
@@ -46,7 +48,7 @@ enum Gallery {
             throw GalleryError.invalidOption("directory is movies or dcim, not: \(directory ?? "")")
         }
         let name = album?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        if let name, name.contains("/") || name.contains("\\") {
+        if let name, name.contains("/") || name.contains("\\") || name == "." || name == ".." {
             throw GalleryError.invalidOption("album is one folder name, not a path: \(name)")
         }
         return name

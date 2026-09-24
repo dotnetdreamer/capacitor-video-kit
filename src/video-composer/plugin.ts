@@ -280,9 +280,9 @@ export interface VideoComposerPlugin {
    *    clip picked while the host gathers `keep`, or earlier in this launch and not saved yet, is
    *    safe. `before` alone could not say that: a gallery copy made in an earlier launch is dated
    *    then, however recently it was picked again.
-   *  - an input of a render still running, or of one whose outcome JS has not collected yet. A launch
-   *    sweep runs again when the web view reloads, which can happen mid render, and the edit being
-   *    rendered may be in no draft.
+   *  - an input of a render still running, or of one whose outcome JS has not collected yet. A host
+   *    runs its sweep as its page starts, so it runs again when the web view reloads, which can
+   *    happen mid render, and the edit being rendered may be in no draft.
    *
    * Android and the web keep no copies, and answer 0.
    *
@@ -308,23 +308,51 @@ export interface VideoComposerPlugin {
    * every song, because WebKit has no type identifier for that wildcard and makes one up that no file
    * has (`AUDIO_FORMATS` in the editor's defaults).
    *
-   * So this presents `UIDocumentPickerViewController` for any audio type, as a copy, one file at a
-   * time, from the bridge's view controller, and copies the choice to
-   * `tmp/videokit-audio/<uuid>.<ext>`, keeping its extension. It answers that copy's `file://` name,
-   * the name the file had and its MIME type; a cancel is `{ cancelled: true }`, never a rejection.
-   * The editor's default `pickAudio` is the caller on iOS, whenever the app's native build lists this
-   * call among the plugin's methods: it reads the copy through Capacitor's local server into a
-   * `blob:` URL and has no use for the file after that.
+   * So this presents `UIDocumentPickerViewController` for any audio type, one file at a time, from
+   * the bridge's view controller, and copies the choice to `tmp/videokit-audio/<uuid>.<ext>`,
+   * keeping its extension. It answers that copy's `file://` name, the name the file had and its MIME
+   * type; a cancel is `{ cancelled: true }`, never a rejection. The editor's default `pickAudio` is
+   * the caller on iOS, whenever the app's native build lists this call among the plugin's methods:
+   * it reads the copy through Capacitor's local server into a `blob:` URL and has no use for the
+   * file after that.
+   *
+   * The picker opens the song where it is (`asCopy: false`), and the kit's copy is the only one
+   * made. Asked for a copy of its own, the picker writes one into `tmp/<bundle id>-Inbox/` before it
+   * answers, and that one fails as the web view's does: with the same song picked again 57 to 63 s
+   * after the first time, on the same simulator, iOS's own picker code deletes its fresh copy before
+   * the kit is told, and a good song reads as one the app cannot use. So the kit copies from the
+   * person's own file, which nothing but the person deletes, inside the file's security scope -
+   * without it a file outside the app cannot be read at all - and through a coordinated read
+   * (`NSFileCoordinator`), as Apple asks of every file a document picker opens, so iCloud or the
+   * file's provider has downloaded it, or finished writing it, before a byte is copied
+   * (`AudioFilePicker.keep`).
+   *
+   * What that gives up is the picker's own download. Asked for a copy, the picker fetches a song
+   * still in iCloud, or at another app's file provider, inside its sheet, with a progress bar and a
+   * cancel. Opened in place, the song downloads after the sheet has closed, during that coordinated
+   * read, with no progress anybody can show, no cancel and no deadline - one short enough to matter
+   * would also fail a long song on a slow network, which is the one case the wait is for - and this
+   * call answers only once the song is down and copied. The editor stays busy until then, its
+   * pickers and Next greyed, and asks for no second pick; one a host asks for meanwhile has its copy
+   * made after the first. A download that fails, offline say, rejects `unknown`, which reads as a
+   * song the app cannot use though the song is good. Losing the song on every Replace made about a
+   * minute after the first pick is worse than all of that.
    *
    * The copy is for reading once, straight away, and is not the kit's to keep, so nothing has to be
-   * called once it is read: iOS may empty `tmp` while the app is not running, and the kit's launch
-   * sweep deletes a copy there once it is a day old - not sooner, because the plugin loads
-   * again when the web view reloads, which can be a minute after the pick. A host that wants the
-   * sound for good keeps the bytes or hands them to its sound library, never this name.
+   * called once it is read. The next pick deletes it, whatever its age, before it copies its own song
+   * into the folder, and the plugin's next load deletes whatever is left. Capacitor iOS loads a
+   * plugin when it builds the bridge (`CapacitorBridge.loadPlugin`), in practice once a launch, and a
+   * web view reload only resets that bridge, so the load is the app's next launch. By either time the
+   * page it was answered to has read it, because somebody has been through the picker again or the
+   * app has started over. So one song at most is on disk there, and iOS may empty `tmp` while the
+   * app is not running besides. A host that wants the sound for good keeps the bytes or hands
+   * them to its sound library, never this name.
    *
-   * Rejects `already_picking` while the picker an earlier call put up is still on screen, rather
-   * than stacking a second over it; Capacitor's `UNAVAILABLE` with no screen to present on; and
-   * `no_space` or `unknown` for a song that was picked but would not copy.
+   * Rejects `already_picking` while the picker an earlier call asked for is still open - on screen,
+   * or on its way up, which is where a double tap lands - rather than stacking a second over it and
+   * leaving the first to answer nobody; Capacitor's `UNAVAILABLE` with no screen to present on, which
+   * is checked before anything is presented; and `no_space` or `unknown` for a song that was picked
+   * but would not copy.
    *
    * iOS only. Android's WebView answers the same input with a documents browser that works, and a
    * browser has its own, so both reject with `UNIMPLEMENTED`, the code Capacitor gives a call a
@@ -395,10 +423,17 @@ export interface VideoComposerPlugin {
   /**
    * Moves (when the file is ours) or copies (when it is not) every input into the job folder, so
    * nothing the render or the upload depends on can be revoked or garbage-collected under it.
+   *
+   * Rejects `invalid_spec` before anything is written when `batchId` is missing, `.` or `..`
+   * ([PrepareJobOptions.batchId]), and when `inputs` is missing or an input has no key or no uri.
    */
   prepareJob(options: PrepareJobOptions): Promise<PrepareJobResult>;
 
-  /** Deletes the job folder and forgets its jobs. Idempotent. */
+  /**
+   * Deletes the job folder and forgets its jobs. Idempotent: a folder that is already gone is not
+   * an error. Rejects `invalid_spec`, deleting nothing, when `batchId` is missing, `.` or `..`
+   * ([CleanupOptions.batchId]).
+   */
   cleanup(options: CleanupOptions): Promise<void>;
 
   addListener(eventName: 'progress', listener: (event: ComposeProgressEvent) => void): Promise<PluginListenerHandle>;

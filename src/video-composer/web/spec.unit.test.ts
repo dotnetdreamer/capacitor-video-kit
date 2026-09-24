@@ -44,6 +44,14 @@ function spec(over: Partial<ComposeSpec> = {}): ComposeSpec {
 }
 
 describe('refusals', () => {
+  /* The ids that name no job folder of their own on a phone, refused here as `ComposeSpecParser` does. */
+  it('refuses a batch id that is empty, a dot or two dots, and takes any other', () => {
+    for (const batchId of ['', '.', '..', undefined]) {
+      expect(() => validateSpec(spec({ batchId: batchId as string })), String(batchId)).toThrow('invalid_spec:batchId');
+    }
+    for (const batchId of ['../x', '...', '.x', '__']) expect(validateSpec(spec({ batchId })).batchId).toBe(batchId);
+  });
+
   it('names the path that broke', () => {
     expect(() => validateSpec(spec({ jobId: '' }))).toThrow(SpecError);
     try {
@@ -220,7 +228,8 @@ describe('clamps', () => {
     expect(validateSpec(spec({ output: { ...output, maxBytes: 1000.9 } })).output.maxBytes).toBe(1000);
 
     expect(validateSpec(spec()).output).not.toHaveProperty('maxBytes');
-    for (const none of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, '100', null]) {
+    // A fraction under one byte is positive, but a ceiling of 0 once it is rounded down.
+    for (const none of [0, -5, 0.5, Number.NaN, Number.POSITIVE_INFINITY, '100', null]) {
       expect(validateSpec(spec({ output: { ...output, maxBytes: none as number } })).output).not.toHaveProperty('maxBytes');
     }
   });

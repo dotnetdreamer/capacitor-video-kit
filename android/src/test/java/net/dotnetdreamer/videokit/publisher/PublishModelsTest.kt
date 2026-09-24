@@ -116,6 +116,18 @@ class PublishModelsTest {
     }
 
     @Test
+    fun `a batch id that names no job folder of its own is refused, as the composer refuses it`() {
+        // iOS files a batch's bodies and its job folder's done marker under names made from the id,
+        // and `.` and `..` would be some other batch's there; refused on both platforms alike.
+        expectInvalid("invalid_request:batchId") { put("batchId", "") }
+        expectInvalid("invalid_request:batchId") { put("batchId", ".") }
+        expectInvalid("invalid_request:batchId") { put("batchId", "..") }
+        // Every other id is a batch like any other, as it is to the composer.
+        val dotted = requestJson().put("batchId", "../x")
+        assertEquals("../x", PublishRequest.from(dotted).batchId)
+    }
+
+    @Test
     fun `any tag at all is accepted, because the plugin never interprets one`() {
         val json = requestJson().apply {
             getJSONArray("uploads").getJSONObject(0).put("tag", "sideways")

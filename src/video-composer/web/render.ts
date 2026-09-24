@@ -1,4 +1,4 @@
-import { cssFor } from '../../editor/edit-manifest';
+import { byteCeiling, cssFor } from '../../editor/edit-manifest';
 import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
 import type { ComposeClip, ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
@@ -265,8 +265,9 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     // The last frame is only as long as there is timeline left for it.
     const holdUs = Math.max(1, Math.min(frameUs, plan.totalUs - atUs));
     await guard(() => sink.addFrame(atUs, holdUs), 'encoder');
-    // Every frame rather than a few times a second, as the native engines poll a file's size: this
-    // is a number the sink already holds, not a trip to the disk.
+    // Every frame rather than a few times a second, as iOS measures its writer's files and Android
+    // reads its muxer's count on each progress poll: this is a number the sink already holds, not a
+    // trip to the disk.
     holdToCeiling(plan.output.maxBytes, sink.bytes);
 
     const progress = FRAMES_FROM + ((index + 1) / frames) * (FRAMES_TO - FRAMES_FROM);
@@ -488,13 +489,12 @@ async function guard<T>(run: () => Promise<T>, code: ComposeFailureCode): Promis
  * engine uses, so a host's log reads the same whichever platform it came from.
  *
  * Checked as the file grows, where it stops the encode instead of spending the rest of it on a file
- * the host cannot send, and on the finished file. A ceiling that is absent or not a positive number
- * is none: `validateSpec` leaves such a key off, and this holds to the same rule for a spec handed
- * to [renderSpec] directly.
+ * the host cannot send, and on the finished file. Read through [byteCeiling], which `validateSpec`
+ * reads it through too, so a spec handed to [renderSpec] directly is held to the same rule.
  */
 function holdToCeiling(maxBytes: number | undefined, bytes: number): void {
-  if (maxBytes === undefined || !Number.isFinite(maxBytes) || maxBytes <= 0) return;
-  if (bytes > maxBytes) throw new RenderFailure('too_large', `too_large max=${maxBytes} bytes=${bytes}`);
+  const ceiling = byteCeiling(maxBytes);
+  if (ceiling !== null && bytes > ceiling) throw new RenderFailure('too_large', `too_large max=${ceiling} bytes=${bytes}`);
 }
 
 /** The poster, as a JPEG. Null where the canvas would not give one - a tainted canvas, mostly. */

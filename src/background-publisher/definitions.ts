@@ -170,7 +170,14 @@ export interface PublishFinalize {
 }
 
 export interface PublishRequest {
-  /** Your id for this batch. Everything - state, events, cancel, retry - is addressed by it. */
+  /**
+   * Your id for this batch. Everything - state, events, cancel, retry - is addressed by it.
+   *
+   * Refused as `invalid_request:batchId` when it is empty, `.` or `..`, on every platform, as the
+   * composer refuses them (`ComposeSpec.batchId`): iOS files a batch's upload bodies and its job
+   * folder's done marker under names made from the id, and those two would be some other batch's.
+   * Usually the post's `ComposeSpec.batchId`, which a render has already refused them for.
+   */
   batchId: string;
 
   /** Sent on every request in the batch, uploads and finalize alike. */
@@ -292,6 +299,10 @@ export interface PublishFailedEvent {
 /* -------------------------------------------------------------------------------------------- */
 
 export interface BatchOptions {
+  /**
+   * The batch's [PublishRequest.batchId]. Missing, `.` or `..` is refused with `invalid_request`
+   * rather than answered as a batch nothing is known about.
+   */
   batchId: string;
 }
 

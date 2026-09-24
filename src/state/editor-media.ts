@@ -743,9 +743,9 @@ export class EditorMedia {
    * again on the very next edit and the editor would spend the rest of the session retrying a
    * decode that has already failed.
    *
-   * The URL goes through `platform.fileUrl` first. On this package's own browser host that is the
-   * identity function and costs nothing, but a native host hands out URIs that only it can turn
-   * into something fetchable.
+   * The URL goes through `platform.fileUrl` first. In a plain page that hands the URL back as it came
+   * and costs nothing, but a native host hands out URIs that only its local server can turn into
+   * something fetchable.
    */
   private async cutWaveform(uri: string, sourceDurationMs: number, key: string): Promise<void> {
     if (this.destroyed) return;

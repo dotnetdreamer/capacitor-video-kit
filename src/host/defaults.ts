@@ -3,6 +3,7 @@ import {
   OUTPUT_FPS,
   OUTPUT_QUALITIES,
   aspectOf,
+  byteCeiling,
   normaliseOutput,
   outputFor,
   qualityOf,
@@ -30,6 +31,7 @@ import type {
   ThumbnailRequest,
   VideoEditorHost,
 } from './host.types';
+import { webViewUrl } from './web-view-url';
 
 /**
  * What the editor falls back on for everything a host did not supply.
@@ -39,10 +41,13 @@ import type {
  * built on these defaults opens a real file, plays it, cuts a real filmstrip and hands back a real
  * manifest, which is what makes the package droppable into a plain page with no host at all.
  *
- * One member reaches past the page, and only where the page cannot be trusted: on iOS in a
- * Capacitor app built with the kit's native side the audio picker is the kit's own document picker,
- * reached through the bridge the app already has (see [pickAudioThroughKit]). A host that spreads
- * these defaults into its own media host gets that with the rest.
+ * Two members reach past the page, both through the `window.Capacitor` a Capacitor app already has
+ * and neither through an import of `@capacitor/core`. `platform.fileUrl` turns a device path into
+ * Capacitor's local server URL for it, so a Capacitor host has no line of its own to write for it
+ * ([webViewUrl]). And where the page cannot be trusted - on iOS in a Capacitor app built with the
+ * kit's native side - the audio picker is the kit's own document picker (see
+ * [pickAudioThroughKit]); a host that spreads these defaults into its own media host gets that with
+ * the rest.
  *
  * The one thing with no web answer is the render, so it stays null. The editor greys nothing for
  * it: the edit is still an edit, and the manifest still comes back at the end.
@@ -102,7 +107,9 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
     media: host?.media ?? browserMediaHost(),
     render: host?.render ?? null,
     platform: {
-      fileUrl: platform?.fileUrl ?? identityFileUrl,
+      // Capacitor's local server where the page has Capacitor, and the URL as it came where it has
+      // not, where every file is an object URL already: see [webViewUrl].
+      fileUrl: platform?.fileUrl ?? webViewUrl,
       haptic: platform?.haptic ?? noHaptic,
       keyboard: platform?.keyboard ?? visualViewportKeyboard(),
       registerBackHandler: platform?.registerBackHandler ?? noBackHandler,
@@ -147,6 +154,7 @@ function resolveOutputOptions(options?: EditorOutputOptions): ResolvedOutputOpti
     fps,
     aspects,
     initial: allowed ? wanted : outputFor(aspects[0], qualities[0], fps[0]),
+    maxBytes: byteCeiling(options?.maxBytes),
   };
 }
 
@@ -155,11 +163,6 @@ function keep<T>(all: readonly T[], wanted: readonly T[] | undefined): T[] {
   if (!wanted?.length) return [...all];
   const kept = all.filter((one) => wanted.includes(one));
   return kept.length > 0 ? kept : [...all];
-}
-
-/** A browser picker already hands back a blob URL, which is loadable as it stands. */
-function identityFileUrl(uri: string): string {
-  return uri;
 }
 
 function noHaptic(): void {
@@ -474,9 +477,9 @@ function bridgeWithAudioPicker(): NativeBridge | null {
  * after this learns the track came in another way.
  *
  * The copy is not deleted from here, because a page cannot delete a file and a native call to do it
- * would buy back the space of one song until the next launch. It lives in the kit's
- * `tmp/videokit-audio/`, which iOS may empty while the app is not running and the kit's launch sweep
- * clears of anything a day old, and nothing reads it again after this.
+ * would buy back the space of one song only until the kit deletes it anyway: the next pick empties
+ * the kit's `tmp/videokit-audio/` before it copies its own song there, and so does the plugin's next
+ * load. Nothing reads it again after this.
  */
 async function pickAudioThroughKit(bridge: NativeBridge): Promise<PickedAudio | null> {
   const picked = await bridge.nativePromise<PickAudioFileResult>('VideoComposer', 'pickAudioFile', {});

@@ -52,7 +52,10 @@ function needs(ctx: TestContext, able: boolean, why: string): void {
   if (!able) ctx.skip(why);
 }
 
-/** A short solid-colour MP4, muxed the way the renderer muxes one. */
+/**
+ * A short MP4, muxed the way the renderer muxes one: a solid colour, or `'noise'` for random pixels
+ * in every frame, which no encoder can make small - the one picture whose size a test can count on.
+ */
 async function makeSourceVideo(colour: string): Promise<Blob> {
   const canvas = document.createElement('canvas');
   canvas.width = SOURCE_WIDTH;
@@ -72,8 +75,14 @@ async function makeSourceVideo(colour: string): Promise<Blob> {
   await output.start();
 
   for (let i = 0; i < SOURCE_FRAMES; i++) {
-    ctx.fillStyle = colour;
-    ctx.fillRect(0, 0, SOURCE_WIDTH, SOURCE_HEIGHT);
+    if (colour === 'noise') {
+      const pixels = ctx.createImageData(SOURCE_WIDTH, SOURCE_HEIGHT);
+      for (let at = 0; at < pixels.data.length; at++) pixels.data[at] = at % 4 === 3 ? 255 : Math.floor(Math.random() * 256);
+      ctx.putImageData(pixels, 0, 0);
+    } else {
+      ctx.fillStyle = colour;
+      ctx.fillRect(0, 0, SOURCE_WIDTH, SOURCE_HEIGHT);
+    }
     await source.add(i / SOURCE_FPS, 1 / SOURCE_FPS);
   }
   await output.finalize();
@@ -133,6 +142,20 @@ function spec(uri: string, over: Partial<ComposeSpec> = {}): ComposeSpec {
     posterAtMs: 100,
     ...over,
   };
+}
+
+/** What a render ended with: the failure's code and message, or null for a video. */
+async function failureOf(render: Promise<unknown>): Promise<{ code: string; message: string } | null> {
+  return await render.then(
+    () => null,
+    (error: unknown) => error as { code: string; message: string },
+  );
+}
+
+/** The two numbers in `too_large max=<maxBytes> bytes=<bytes>`, the message every engine writes. */
+function tooLarge(message: string | undefined): { max: number; bytes: number } | null {
+  const words = /^too_large max=(\d+) bytes=(\d+)$/.exec(message ?? '');
+  return words ? { max: Number(words[1]), bytes: Number(words[2]) } : null;
 }
 
 describe('the web renderer, end to end', () => {
@@ -223,73 +246,116 @@ describe('the web renderer, end to end', () => {
   );
 
   /*
-   * The host's upload ceiling. Two seconds of green at 800 kbps is tens of kilobytes whatever the
-   * encoder makes of it, so a ceiling of two kilobytes is passed by the first key frame, and one of
-   * fifty megabytes is never approached.
+   * The host's upload ceiling, held as the file grows and once more when it is finished.
+   *
+   * The sizes are the fixture's, not the encoder's whim. A second of noise at 800 kbps comes to
+   * about 85 KB, and its first frame alone passes 8 KB, so that ceiling stops the render almost as
+   * soon as it starts. A solid colour costs the encoder next to nothing, so most of its file of a
+   * little over a kilobyte is the MP4's own boxes, which are written last, and a ceiling of half that
+   * is passed only when the finished file is measured.
    */
-  it(
-    'stops a render that grows past the host\'s ceiling, and says by how much in every engine\'s words',
-    async ctx => {
-      const support = await supportFor(160, 284, 10);
-      needs(ctx, support.supported, support.reason);
-      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
-      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+  describe('held to the host\'s size ceiling', () => {
+    it(
+      'stops a render as soon as it grows past the ceiling, rather than finishing a file nobody can send',
+      async ctx => {
+        const support = await supportFor(160, 284, 10);
+        needs(ctx, support.supported, support.reason);
+        needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+        needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
 
-      const source = URL.createObjectURL(await makeSourceVideo('#0a0'));
-      try {
-        const seen: number[] = [];
-        const tooBig = spec(source, {
-          jobId: 'job-3',
-          // A black tail past the one second of footage, so there are frames left to not encode.
-          durationMs: 2000,
-          output: { ...spec(source).output, maxBytes: 2000 },
-        });
-        const failure = await renderSpec(tooBig, {
-          signal: new AbortController().signal,
-          onProgress: progress => seen.push(progress),
-        }).then(
-          () => null,
-          (error: unknown) => error as { code: string; message: string },
-        );
+        const source = URL.createObjectURL(await makeSourceVideo('noise'));
+        try {
+          const seen: number[] = [];
+          const base = spec(source);
+          const failure = await failureOf(
+            renderSpec(
+              {
+                ...base,
+                jobId: 'job-3',
+                clips: base.clips.map(clip => ({ ...clip, outMs: 1000 })),
+                output: { ...base.output, maxBytes: 8000 },
+              },
+              { signal: new AbortController().signal, onProgress: progress => seen.push(progress) },
+            ),
+          );
 
-        expect(failure?.code).toBe('too_large');
-        const [, max, bytes] = /^too_large max=(\d+) bytes=(\d+)$/.exec(failure?.message ?? '') ?? [];
-        expect(Number(max)).toBe(2000);
-        expect(Number(bytes)).toBeGreaterThan(2000);
-        // No video was handed back, and the bar never reached the end it only reaches with one.
-        expect(seen).not.toContain(1);
-      } finally {
-        URL.revokeObjectURL(source);
-      }
-    },
-    RENDER_TIMEOUT_MS,
-  );
+          expect(failure?.code).toBe('too_large');
+          const numbers = tooLarge(failure?.message);
+          expect(numbers?.max).toBe(8000);
+          expect(numbers?.bytes).toBeGreaterThan(8000);
+          // Stopped with most of the second still to draw: the bar reaches 0.98 only once every
+          // frame has gone to the encoder.
+          expect(Math.max(...seen)).toBeLessThan(0.9);
+        } finally {
+          URL.revokeObjectURL(source);
+        }
+      },
+      RENDER_TIMEOUT_MS,
+    );
 
-  it(
-    'finishes a render that stays under the host\'s ceiling, exactly as one with none',
-    async ctx => {
-      const support = await supportFor(160, 284, 10);
-      needs(ctx, support.supported, support.reason);
-      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
-      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+    it(
+      'measures the finished file too, and fails one the running count had not caught',
+      async ctx => {
+        const support = await supportFor(160, 284, 10);
+        needs(ctx, support.supported, support.reason);
+        needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+        needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
 
-      const source = URL.createObjectURL(await makeSourceVideo('#0a0'));
-      try {
-        const maxBytes = 50 * 1024 * 1024;
-        const outcome = await renderSpec(spec(source, { jobId: 'job-4', output: { ...spec(source).output, maxBytes } }), {
-          signal: new AbortController().signal,
-          onProgress: () => undefined,
-        });
+        const source = URL.createObjectURL(await makeSourceVideo('#0a0'));
+        try {
+          const quiet = { signal: new AbortController().signal, onProgress: () => undefined };
+          const whole = (await renderSpec(spec(source, { jobId: 'job-4' }), quiet)).blob.size;
 
-        expect(outcome.durationMs).toBe(500);
-        expect(outcome.blob.size).toBeGreaterThan(0);
-        expect(outcome.blob.size).toBeLessThanOrEqual(maxBytes);
-      } finally {
-        URL.revokeObjectURL(source);
-      }
-    },
-    RENDER_TIMEOUT_MS,
-  );
+          const seen: number[] = [];
+          const maxBytes = Math.floor(whole / 2);
+          const failure = await failureOf(
+            renderSpec(spec(source, { jobId: 'job-5', output: { ...spec(source).output, maxBytes } }), {
+              signal: new AbortController().signal,
+              onProgress: progress => seen.push(progress),
+            }),
+          );
+
+          expect(failure?.code).toBe('too_large');
+          const numbers = tooLarge(failure?.message);
+          expect(numbers?.max).toBe(maxBytes);
+          expect(numbers?.bytes).toBeGreaterThan(maxBytes);
+          // Every frame was drawn and none of it was handed back: the bar reached the last frame
+          // and never the end, which it reaches only with a video.
+          expect(Math.max(...seen)).toBeCloseTo(0.98, 5);
+          expect(seen).not.toContain(1);
+        } finally {
+          URL.revokeObjectURL(source);
+        }
+      },
+      RENDER_TIMEOUT_MS,
+    );
+
+    it(
+      'finishes a render that stays under the ceiling, exactly as one with none',
+      async ctx => {
+        const support = await supportFor(160, 284, 10);
+        needs(ctx, support.supported, support.reason);
+        needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+        needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+        const source = URL.createObjectURL(await makeSourceVideo('noise'));
+        try {
+          const maxBytes = 50 * 1024 * 1024;
+          const outcome = await renderSpec(spec(source, { jobId: 'job-6', output: { ...spec(source).output, maxBytes } }), {
+            signal: new AbortController().signal,
+            onProgress: () => undefined,
+          });
+
+          expect(outcome.durationMs).toBe(500);
+          expect(outcome.blob.size).toBeGreaterThan(8000);
+          expect(outcome.blob.size).toBeLessThanOrEqual(maxBytes);
+        } finally {
+          URL.revokeObjectURL(source);
+        }
+      },
+      RENDER_TIMEOUT_MS,
+    );
+  });
 
   it(
     'stops when the caller cancels',
@@ -813,6 +879,66 @@ describe('the MediaRecorder fallback', () => {
         } finally {
           URL.revokeObjectURL(url);
         }
+      } finally {
+        URL.revokeObjectURL(source);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'stops a recording once its chunks pass the size ceiling, before the last frame',
+    async ctx => {
+      /*
+       * The post runs two seconds of noise and the recorder hands over a chunk a second, so the
+       * first chunk arrives about halfway, and it alone is far past a ceiling of 2000 bytes. The
+       * finished file would be past it too, so the failure's code proves nothing on its own; the bar
+       * does. It reaches 0.98 with the last frame, which a recording held only by the finished-file
+       * check gets to before it fails, while one held by its running count stops about halfway.
+       *
+       * Recorded as WebM, which is what a browser this fallback is for records in practice
+       * (`RECORDER_TYPES`), and which Chromium hands over a chunk a timeslice. Chromium's MP4
+       * recorder, which it would pick first, hands over nothing but its header before the recording
+       * stops (see `RecorderSink.bytes`), and there only the finished-file check can hold it.
+       */
+      const encoderSupport = await supportFor(SOURCE_WIDTH, SOURCE_HEIGHT, SOURCE_FPS);
+      needs(ctx, encoderSupport.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+      needs(ctx, typeof MediaRecorder !== 'undefined', 'this browser has no MediaRecorder');
+      const source = URL.createObjectURL(await makeSourceVideo('noise'));
+
+      const Recorder = MediaRecorder;
+      vi.stubGlobal(
+        'MediaRecorder',
+        class extends Recorder {
+          static override isTypeSupported(type: string): boolean {
+            return !type.startsWith('video/mp4') && Recorder.isTypeSupported(type);
+          }
+        },
+      );
+      withoutWebCodecs();
+      const support = await renderSupport(160, 284, 10);
+      needs(ctx, support.engine === 'recorder' && support.container === 'webm', 'this browser cannot record WebM');
+
+      try {
+        const second = { ...spec(source).clips[0]!, outMs: 1000 };
+        const seen: number[] = [];
+        const failure = await failureOf(
+          renderSpec(
+            spec(source, {
+              jobId: 'job-rec-ceiling',
+              clips: [{ ...second, key: 'c1' }, { ...second, key: 'c2' }],
+              output: { ...spec(source).output, maxBytes: 2000 },
+            }),
+            { signal: new AbortController().signal, onProgress: progress => seen.push(progress) },
+          ),
+        );
+
+        expect(failure?.code).toBe('too_large');
+        const numbers = tooLarge(failure?.message);
+        expect(numbers?.max).toBe(2000);
+        expect(numbers?.bytes).toBeGreaterThan(2000);
+        expect(Math.max(...seen)).toBeLessThan(0.9);
       } finally {
         URL.revokeObjectURL(source);
       }

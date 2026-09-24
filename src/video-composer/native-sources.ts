@@ -1,5 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 
+import { debugWarn } from '../host/debug';
 import type { EditorSource } from '../host/host.types';
 
 import type { GalleryVideo } from './definitions';
@@ -12,7 +13,8 @@ import { VideoComposer } from './index';
  * picture opened as a video.
  *
  * `EditorSource` is the editor's type, from `host/host.types`, imported as a type alone: nothing of
- * the editor runs here, and this file stays the plugin's.
+ * the editor runs here, and this file stays the plugin's. The one thing it runs from `host/` is the
+ * package's debug switch, which imports nothing and is one switch for the page in either bundle.
  */
 
 /** What a file picker hands over for one file: the two names every Capacitor picker plugin answers. */
@@ -40,7 +42,9 @@ export interface RetainedPick {
  * `retainMedia` is asked when there is a `path`, and its answer is the `sourcePath` a draft stores.
  * It never throws: a picker that worked must not be undone by the step that was only ever about
  * tomorrow, so a call that fails answers the path as it came, `durable: false`, which still opens
- * for the rest of the launch. No `path` at all is the same answer with no `sourcePath`.
+ * for the rest of the launch. No `path` at all is the same answer with no `sourcePath`. The failure
+ * is logged through the package's debug switch (`host/debug.ts`), because nothing else says it:
+ * the pick carries on as though it had worked, and the draft only finds out a launch later.
  *
  * `playbackUrl` is usually the picker's own `webPath`, but not after iOS MOVED the file: the picker's
  * copy sits in Caches, which the system empties when it likes, so `retainMedia` moves it into
@@ -57,8 +61,9 @@ export async function retainPickedFile({ path, webPath }: PickedFileNames): Prom
   let durable = false;
   try {
     ({ uri: sourcePath, durable } = await VideoComposer.retainMedia({ uri: path }));
-  } catch {
+  } catch (error) {
     // The path as it came, which opens today and is reported missing tomorrow rather than failing now.
+    debugWarn('[retainPickedFile] retainMedia failed, keeping the picked path', path, error);
   }
   const moved = sourcePath !== path && sourcePath.startsWith('file://');
   return { sourcePath, ...(moved ? { playbackUrl: Capacitor.convertFileSrc(sourcePath) } : playing), durable };

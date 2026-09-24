@@ -156,7 +156,11 @@ final class RenderInputStagingTests: XCTestCase {
         for song in [oldSong, freshSong] { try Data([1]).write(to: song) }
         try date(oldSong, longAgo)
 
-        JobFolders.sweep(now: Date())
+        // All of it, as `load()` starts it: the walk on its own queue, and the songs on theirs.
+        let walked = expectation(description: "the launch sweep's walk")
+        JobFolders.sweepOnLaunch { walked.fulfill() }
+        wait(for: [walked], timeout: 60)
+        AudioFilePicker.copies.sync {}
 
         XCTAssertFalse(exists(oldInput))
         XCTAssertTrue(exists(freshInput), "a render may still be reading it")

@@ -99,6 +99,21 @@ describe('resolveEditorHost', () => {
     resolveEditorHost();
     expect(editorDebug()).toBe(false);
   });
+
+  /*
+   * A host's upload limit, which is no limit at all unless it is a positive number of bytes: a zero
+   * read from a typo would fail every render and mark every rung of the quality sheet.
+   */
+  it('takes a size ceiling in whole bytes, and reads one that is not a positive number as none', () => {
+    expect(resolveEditorHost({ output: { maxBytes: 104_857_600 } }).output.maxBytes).toBe(104_857_600);
+    expect(resolveEditorHost({ output: { maxBytes: 5_000_000.7 } }).output.maxBytes).toBe(5_000_000);
+
+    expect(resolveEditorHost().output.maxBytes).toBeNull();
+    // A fraction under one byte is positive, and a ceiling of 0 once rounded down: none, as well.
+    for (const none of [0, -1, 0.5, 0.999, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(resolveEditorHost({ output: { maxBytes: none } }).output.maxBytes).toBeNull();
+    }
+  });
 });
 
 describe('envSafeAreaInsets', () => {
@@ -239,7 +254,8 @@ describe('the audio picker in a Capacitor app on iOS', () => {
     expect(read).toHaveBeenCalledWith(SERVED);
     // The type goes with the bytes, because a render names its staged copy after it.
     expect(minted.map((blob) => blob.type)).toEqual(['audio/x-m4a']);
-    // One question of the bridge: the copy is read once and then left for the kit's launch sweep.
+    // One question of the bridge: the copy is read once and then left for the next pick or the
+    // plugin's next load to delete.
     expect(nativePromise).toHaveBeenCalledTimes(1);
     expect(nativePromise).toHaveBeenCalledWith('VideoComposer', 'pickAudioFile', {});
     // And no file input, which is the thing that could not be trusted.

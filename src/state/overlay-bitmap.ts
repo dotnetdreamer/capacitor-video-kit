@@ -38,13 +38,14 @@ interface StaleLayer {
  * Created by the editor shell next to [EditorStore]; nothing else writes `store.bitmaps`.
  */
 export class OverlayBitmaps {
-  /** The one context the editor draws with. The render builds its own from the same factory. */
   /**
    * The context the CURRENT frame is drawn with.
    *
    * Rebuilt whenever the frame changes rather than made once, because `output` is what every
    * layer's pixel size is worked out from: a sticker is a fraction of the frame's WIDTH, so the
-   * same layer is a different bitmap on a 720 post and a 4K one.
+   * same layer is a different bitmap on a 720 post and a 4K one. The render's context comes out of
+   * the same factory: the editor makes one for the frame it renders at and hands it to the host as
+   * `RenderRequest.raster`.
    */
   get rasterContext(): RasterContext {
     const width = this.store.outputWidth.value;

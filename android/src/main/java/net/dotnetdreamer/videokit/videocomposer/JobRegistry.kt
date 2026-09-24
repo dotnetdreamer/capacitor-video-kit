@@ -52,6 +52,14 @@ object JobRegistry {
         /** Latest output-timeline timestamp a frame carried; the real progress signal. */
         val lastFrameUs = AtomicLong(0L)
 
+        /**
+         * Bytes of encoded video and sound the current attempt's muxer has been handed, which is
+         * what the progress poll holds to the host's [Output.maxBytes] - see [SizeCeiling]. Counted
+         * by [CountingMuxer] on the muxer's thread, and only when there is a ceiling; set back to
+         * 0 before every attempt, because a relaxed retry writes its file again from the start.
+         */
+        val bytesWritten = AtomicLong(0L)
+
         /** Touched only from the Transformer looper. */
         @Volatile var transformer: Transformer? = null
 

@@ -104,7 +104,8 @@ enum ComposeSpecParser {
                                    height: o.height & ~1,
                                    fps: o.fps,
                                    videoBitrate: o.videoBitrate,
-                                   audioBitrate: o.audioBitrate)
+                                   audioBitrate: o.audioBitrate,
+                                   maxBytes: o.maxBytes)
 
         let overlays = d.overlays.map { o in
             ComposeOverlay(id: o.id,
@@ -508,7 +509,8 @@ private struct ComposeSpecDTO: Decodable {
         jobId = c.string(.jobId)
         batchId = c.string(.batchId)
         if jobId.isEmpty { throw SpecError("jobId") }
-        if batchId.isEmpty { throw SpecError("batchId") }
+        // Empty, `.` or `..`: an id that names no job folder of its own (`JobFolders.batchIdRefusal`).
+        if JobFolders.batchIdRefusal(batchId) != nil { throw SpecError("batchId") }
 
         // Missing, not an array, and empty all report the bare `clips` path.
         guard var clipArray = try? c.nestedUnkeyedContainer(forKey: .clips), (clipArray.count ?? 0) > 0 else {
@@ -966,8 +968,9 @@ private struct OutputDTO: Decodable {
     let fps: Int
     let videoBitrate: Int
     let audioBitrate: Int
+    let maxBytes: Int64?
 
-    private enum K: String, CodingKey { case width, height, fps, videoBitrate, audioBitrate }
+    private enum K: String, CodingKey { case width, height, fps, videoBitrate, audioBitrate, maxBytes }
 
     /// Deliberately total: every field falls back to 0 and the rejection happens in `validate`, so
     /// that a bad clip is still reported before a zero width.
@@ -978,6 +981,24 @@ private struct OutputDTO: Decodable {
         fps = c.int(.fps, 0)
         videoBitrate = c.int(.videoBitrate, 0)
         audioBitrate = c.int(.audioBitrate, 0)
+        maxBytes = Self.ceiling(c.number(.maxBytes))
+    }
+
+    /// `output.maxBytes` as the contract reads it (`ComposeOutput.maxBytes`, and `byteCeiling` in
+    /// edit-manifest.ts, which the web engine reads it with): rounded down to whole bytes, and
+    /// anything that does not round down to at least one byte - absent, null, 0, negative, a
+    /// fraction under one, NaN, not a number at all - is no ceiling, never a refusal, because it is
+    /// a host's optional limit and a host that sends a bad one has still asked for a video. The
+    /// test is made on the ROUNDED number: made before it, `0.5` would pass as positive and come
+    /// out a ceiling of 0 that fails every render, which the same spec on the web renders with no
+    /// ceiling at all. Android's `ComposeSpecParser.ceilingOrNull` reads it the same way. A number
+    /// past what `Int64` holds is a ceiling no file can reach.
+    static func ceiling(_ value: Double?) -> Int64? {
+        guard let value, value.isFinite else { return nil }
+        let whole = value.rounded(.down)
+        guard whole >= 1 else { return nil }
+        guard whole < 9.2e18 else { return Int64.max }
+        return Int64(whole)
     }
 }
 

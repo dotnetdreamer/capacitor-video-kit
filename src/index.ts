@@ -45,8 +45,8 @@
 
 
 /*
- * What the host supplies. Only the resolver and the browser defaults are values; the rest is the
- * shape a host implements.
+ * What the host supplies. Only the resolver, the browser defaults and the back button over Ionic's
+ * `Platform` are values; the rest is the shape a host implements.
  */
 export type {
   ConfirmRequest,
@@ -87,6 +87,7 @@ export {
   visualViewportKeyboard,
 } from './host/defaults';
 export { installEditorFonts } from './host/fonts';
+export { registerBackHandlerWith, type PrioritisedBackButton } from './host/back-button';
 
 /* The editor's own state, for a host that wants to read the edit or drive it from outside. */
 export type {

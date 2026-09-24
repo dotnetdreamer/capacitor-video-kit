@@ -180,11 +180,8 @@ export async function extractPeaks(src: string, stepMs: number = WAVEFORM_STEP_M
     return { stepMs, peaks, durationMs: Math.round(decoded.duration * 1000), max };
   } catch {
     /*
-     * Silent here, and said by the caller instead.
-     *
-     * Nothing in `web-runtime/` may reach into `src/host/`: the two are separate builds, and one
-     * import of `host/debug` was enough to pull that module into the PUBLISHED plugin bundle -
-     * where it would be a second copy with its own flag that `setEditorDebug` never reaches.
+     * Silent here, and said by the caller instead, which knows which sound it asked about:
+     * `EditorMedia` logs a waveform that came back empty through the package's debug switch.
      */
     return null;
   } finally {

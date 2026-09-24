@@ -29,22 +29,36 @@ class VoiceRecorder(private val appContext: Context) {
 
     class RecordingException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+    companion object {
+        /**
+         * Where a take for [batchId] is written. When the post already exists, straight into its
+         * job folder; the editor usually has no post yet, so the cache folder is the normal case and
+         * `prepareJob` relocates the file later.
+         *
+         * An id `compose` would refuse - empty, `.` or `..` ([JobFolders.batchIdRefusal]) - counts
+         * as none, as iOS's `VoiceRecorder.folder(for:)` reads it. The id only says where the take
+         * is kept, so refusing it would lose a take the customer still wants, and filing it in the
+         * folder [JobFolders.folderName] makes of it would put it in some other batch's (`..` is
+         * `__`'s, and the empty id `_`'s). The web's `startVoiceRecording` does the same.
+         */
+        fun folderFor(ctx: Context, batchId: String?): File =
+            if (batchId != null && JobFolders.batchIdRefusal(batchId) == null) {
+                JobFolders.inputs(ctx, batchId)
+            } else {
+                JobFolders.voiceCache(ctx)
+            }
+    }
+
     data class Result(val uri: String, val durationMs: Long)
 
     /**
-     * @param batchId when the post already exists, the take is written straight into its job
-     *   folder. The editor usually has no post yet, so the cache folder is the normal case and
-     *   `prepareJob` relocates the file later.
+     * @param batchId where the take is written: see [folderFor].
      */
     @Throws(RecordingException::class)
     fun start(batchId: String?) {
         if (recorder != null) throw RecordingException("already_recording")
 
-        val dir = if (batchId != null) {
-            JobFolders.inputs(appContext, batchId)
-        } else {
-            JobFolders.voiceCache(appContext)
-        }
+        val dir = folderFor(appContext, batchId)
         if (!dir.exists() && !dir.mkdirs()) {
             throw RecordingException("could not create ${dir.path}")
         }

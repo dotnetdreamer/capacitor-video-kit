@@ -215,8 +215,18 @@ answer the input gives. It reaches the plugin through the `window.Capacitor` the
 the page, so it works whether or not the app has imported `capacitor-video-kit` yet, and only when
 that native side lists `pickAudioFile` among the plugin's methods: iOS's bridge answers nothing at
 all for a method it lacks, so a binary older than the JS gets the input rather than a pick that never
-comes back. Nothing has to be called once the copy is read: iOS may empty `tmp` while the app is not
-running, and the kit's launch sweep deletes a copy there once it is a day old. A host keeps all this by keeping the
+comes back. The picker opens the song where it is rather than handing over a copy of its own,
+because its own copy fails the same way: with the same song picked again 57 to 63 s after the first
+time, iOS deletes that copy before the kit is told. The kit's copy is the only one, read inside the
+file's security scope and through a coordinated read, so a song still in iCloud or at another app's
+file provider downloads after the sheet has closed rather than inside it: with no progress bar, no
+cancel and no deadline, while the editor stays busy with its pickers and Next greyed, and a download
+that fails - offline, say - reads as a song the app cannot use. Losing the song on every Replace a
+minute after the first pick was worse. Nothing has to be called once the copy is read: the next pick
+deletes it before it copies its own song there, and the plugin's next load deletes whatever is left. Capacitor loads a
+plugin when it builds the bridge, in practice once a launch, and a web view reload only resets the
+bridge, so that load is the app's next launch. One song at most is ever on disk in that folder, and
+iOS may empty `tmp` while the app is not running besides. A host keeps all this by keeping the
 default: supply a media host of its own as `{ ...browserMediaHost(), pickVideo, ... }` and leave
 `pickAudio` out. No file picker plugin is needed for sounds.
 
@@ -289,7 +299,7 @@ resolved, loaded and type checked out of an `npm pack` tarball installed into a 
 
 | Specifier | What it is | Needs |
 |---|---|---|
-| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
+| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract, the editor's render host over the composer (`composerRenderHost`) and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
 | `capacitor-video-kit/editor` | The edit contract on its own, reaching no `registerPlugin` call and no Capacitor at all | nothing |
 | `capacitor-video-kit/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath` | `@preact/signals-core` |
 | `capacitor-video-kit/loader` | `defineCustomElements()`, which registers every component at once | `@preact/signals-core` |
@@ -412,9 +422,9 @@ await VideoComposer.compose(spec);
 |---|---|
 | `EditManifest`, `EditClip`, `EditOverlay`, `EditMusic`, `EditVoice` | The edit, in a form that survives being put down and picked up. Overlays keep their **text**, not a bitmap, so a reopened edit is still editable. |
 | `reconcileManifest` | Brings a saved edit back in line with a clip list that changed meanwhile. Clips are referred to by the host's own keys - the core never needs to know the host's clip shape. |
-| `toComposeSpec` | The one translation from an edit to a render. Rasterises text at output scale, computes the bitrate. |
+| `toComposeSpec` | The one translation from an edit to a render. Rasterises text at output scale, computes the bitrate, writes the host's size ceiling when there is one. |
 | `FILTER_PRESETS`, `cssFor`, `filterPreset` | CSS Filter Effects maths shared by the live preview and the native colour matrix. |
-| `videoBitrateFor`, `totalDurationMs`, `isUntouched` | Output policy: stay under the upload cap; skip the encode for one untouched clip. |
+| `videoBitrateFor`, `totalDurationMs`, `isUntouched` | Output policy: the bitrate a frame of this size needs to look like its source, however big that makes the file; skip the encode for one untouched clip. |
 | `rasteriseText`, `rasteriseArrow` | Canvas → PNG at output pixel scale, the caller's half of the overlay contract. |
 
 There is deliberately no UI in `src/editor/` itself. A host is free to build its own screen on the
@@ -755,11 +765,10 @@ render, which the defaults leave null. The wiring below is the same wiring a pla
 with the web implementations; only the pickers differ.
 
 ```ts
-import { Capacitor } from '@capacitor/core';
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { Keyboard } from '@capacitor/keyboard';
-import { VideoComposer } from 'capacitor-video-kit';
-import { browserMediaHost, type VideoEditorHost } from 'capacitor-video-kit/ui';
+import { VideoComposer, composerRenderHost, webViewUrl } from 'capacitor-video-kit';
+import { browserMediaHost, registerBackHandlerWith, type VideoEditorHost } from 'capacitor-video-kit/ui';
 
 const host: VideoEditorHost = {
   media: {
@@ -777,7 +786,7 @@ const host: VideoEditorHost = {
         precise,
       });
       // The composer writes files; the WebView needs URLs it is allowed to load.
-      return uris.map((uri) => Capacitor.convertFileSrc(uri));
+      return uris.map(webViewUrl);
     },
     sounds: {
       list: async () => (await VideoComposer.listSounds()).sounds,
@@ -793,9 +802,11 @@ const host: VideoEditorHost = {
       stop: () => VideoComposer.stopVoiceRecording(),
     },
   },
-  render: nativeRenderHost,
+  // The render, over the same composer, on a phone and in a page alike. See below.
+  render: composerRenderHost(),
   platform: {
-    fileUrl: (uri) => (/^(https?:|blob:|data:)/i.test(uri) ? uri : Capacitor.convertFileSrc(uri)),
+    // No `fileUrl`: the default is `webViewUrl`, which sends a device path through Capacitor's local
+    // server wherever the page has Capacitor.
     haptic: (kind) => {
       switch (kind) {
         case 'light':     void Haptics.impact({ style: ImpactStyle.Light }); break;
@@ -815,15 +826,10 @@ const host: VideoEditorHost = {
       },
       show: () => void Keyboard.show(),
     },
-    // 101 beats Ionic's own overlay handler at 100, so the editor closes its sheet before a modal
-    // decides the press was for it.
-    registerBackHandler: (handler) => {
-      // `ionic` here is Ionic's own Platform service, not the `platform` key this sits in.
-      const sub = ionic.backButton.subscribeWithPriority(101, (next) => {
-        if (!handler()) next();
-      });
-      return () => sub.unsubscribe();
-    },
+    // At 101, ahead of Ionic's own overlay handler at 100, so the editor closes its sheet before a
+    // modal decides the press was for it; a press it has nothing to close for goes on down. `ionic`
+    // here is Ionic's own Platform service, not the `platform` key this sits in.
+    registerBackHandler: registerBackHandlerWith(ionic),
     confirm: (request) => presentNativeAlert(request),
     measureInsets: () => VideoComposer.systemInsets(),
     debug: !environment.production,
@@ -831,89 +837,123 @@ const host: VideoEditorHost = {
 };
 ```
 
-The renderer is the half that has to be written rather than wired, and it is about sixty lines. The
-editor has already made every layer's bitmap current before it calls this, so the work is
-`toComposeSpec` with the same raster context, then the job, then the result as one more
-`EditorSource`:
+The render is `composerRenderHost()` from the package root: the editor's render host over
+`VideoComposer`, the same on a phone and in a page, because the composer's web implementation renders
+too and `isSupported` asks whichever implementation is loaded. Every host used to write the same
+sixty lines of it by hand, and got the same few of them wrong. What differs between hosts is what
+happens to the file afterwards, and that is what the options are for:
 
 ```ts
-import {
-  MissingClipError,
-  VideoComposer,
-  toComposeSpec,
-  withNativeRenderInputs,
-  type ComposeSpec,
-} from 'capacitor-video-kit';
-import {
-  RenderFailedError,
-  createEditorRasterContext,
-  resolveEditorHost,
-  type EditorRenderHost,
-} from 'capacitor-video-kit/ui';
+import { composerRenderHost, readRenderFile } from 'capacitor-video-kit';
 
-/*
- * The same context the preview draws its bitmaps with, or a layer comes out in one font on screen
- * and another in the file. All it takes from the host is `fileUrl`, so it is built from the
- * platform half alone rather than from the whole host, which names this renderer and would be
- * circular.
- */
-const rasterContext = createEditorRasterContext(resolveEditorHost({ platform }));
+// An app that keeps its renders, in drafts or the gallery: nothing to say.
+const render = composerRenderHost();
 
-const nativeRenderHost: EditorRenderHost = {
-  isSupported: async () =>
-    Capacitor.isNativePlatform() && (await VideoComposer.capabilities()).supported,
-
-  async render({ manifest, sources, onProgress, signal }) {
-    const uriByKey = new Map(sources.filter((s) => s.sourcePath).map((s) => [s.key, s.sourcePath!]));
-    const jobId = crypto.randomUUID();
-    const batchId = crypto.randomUUID();
-
-    let spec: ComposeSpec;
-    try {
-      spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, rasterContext);
-    } catch (error) {
-      // Refused before any segment id was handed out, so this one already names the host's source.
-      if (error instanceof MissingClipError) {
-        throw new RenderFailedError('unreadable_input', error.message, error.clipKey);
-      }
-      throw new RenderFailedError('unknown', String(error));
-    }
-
-    signal.addEventListener('abort', () => void VideoComposer.cancel({ jobId }));
-    // Every `blob:` URL the spec names - a sound from the browser's library, a track the default
-    // picker read in - written out as a file the engine can open, and deleted once the job is over.
-    // `runJob` settles on the `completed` or `failed` event, never on `compose`'s answer.
-    const result = await withNativeRenderInputs(spec, (prepared) => runJob(prepared, onProgress), signal);
-    return { key: `edited-${jobId}`, fileName: 'edited.mp4', sourcePath: result.uri };
+// An app whose render is only ever on its way to an upload.
+const uploadRender = composerRenderHost({
+  // The upload sends a File, so the render is read into one: `edited-<jobId>.mp4`, or `.webm` for
+  // a browser's WebM. `UploadClip` is the app's own source type: an `EditorSource` with the `File`
+  // on it, which the editor hands back untouched.
+  toSource: async (result, { jobId }): Promise<UploadClip> => {
+    const file = await readRenderFile(result.uri, `edited-${jobId}`);
+    return {
+      key: `edited-${jobId}`,
+      fileName: file.name,
+      file,
+      sourcePath: result.uri,
+      thumbnailUrl: result.posterUri || undefined,
+    };
   },
-};
+  // Each earlier render's folder deleted before the next starts, so an edit made twice leaves one file.
+  discardPreviousRenders: { storageKey: 'my-app.render-folders' },
+  // Every failed render's reason in the app's own log, in production too.
+  log: (...details) => console.error(...details),
+});
+
+// ...and when the upload flow ends, either way, so the last render is not left on disk either:
+await uploadRender.discardRenders();
 ```
 
-Four things about that are worth more than the code around them.
+| Option | What it is for | Left out |
+|---|---|---|
+| `toSource(result, { jobId, batchId, manifest })` | The finished file as the source `veDone` carries as `stitched`. The editor does nothing with that source but hand it back, so what it carries is the host's: a `File` for an upload, which `readRenderFile(result.uri, name?)` reads, a name for the gallery. It may be async. What it throws fails the render: a `RenderFailedError` as it is, anything else as `unknown`. It is not called for a job that finished after the customer called the render off, since the editor would throw its source away. | `{ key: 'edited-<jobId>', fileName: 'edited.mp4', sourcePath: result.uri, thumbnailUrl: result.posterUri }`, the name `edited.webm` for the WebM a browser with no MP4 encoder writes, and no thumbnail when no poster could be cut. No `playbackUrl`, because the editor plays a source without one through `platform.fileUrl(sourcePath)`. |
+| `discardPreviousRenders` | `true`, or `{ storageKey, remember }`. Deletes the folder of every earlier render with `VideoComposer.cleanup` before each new render starts, and makes `discardRenders()` do the same when the host's flow ends. The ids are written down in `localStorage` as each render starts, so a run the app was killed in is cleaned up by the next one; an id whose cleanup fails is kept for next time, and so is the folder of a render on the page that has not settled yet, since `cleanup` forgets the job in it and that render would never hear how it ended. Only the newest `remember` are kept at all. A host that already kept such a list names its key, and the folders on it are still deleted; an entry that is not a folder id of its own (empty, `.` or `..`) is dropped rather than handed to `cleanup`. | Off. Nothing is written down or deleted, and `discardRenders()` does nothing, which is right for an app that keeps its renders. The defaults once on are `capacitor-video-kit.render-folders` and 16. |
+| `log(...details)` | Where failures are reported: a spec `toComposeSpec` refused, a job the composer failed, an input that could not be staged, a `toSource` that threw, a cleanup that did not go through, a platform that could not be asked what it can encode. The editor can show only one of four fixed sentences, so this is the only record of why. | The package's debug switch, which the editor sets from `platform.debug`, so these lines appear exactly when the editor's own do. |
+| `ids()` | The job id and the folder id of one render, called once per render. Both must be new each time: composing under the id of a job that already exists answers with that job. A folder id that is empty, `.` or `..` fails the render as `unknown` before anything starts, because the native halves keep dots and `cleanup` of `..` would delete every job folder and the one they are in. | `render-<time>-<random>` and `edit-<time>-<random>`, from `crypto.getRandomValues`, since `crypto.randomUUID` is missing from a page served over plain http. |
 
-**Hand the engine files, not blobs.** A page holds some of a post as `blob:` URLs in the WebView's
-own memory - a sound from the browser's sound library, a track the default picker read in on iOS -
-and neither native engine can open one, so a post that used one failed at the last step as
-`unreadable_input`. `withNativeRenderInputs(spec, render, signal)` stages each distinct blob the spec
-names through `stageRenderInput`, a mebibyte per call, renders a copy of the spec that names the
-staged files instead, and releases them once `render` has settled, however it settled. So `render`
-must settle on the job's terminal event, as `runJob` does, and not on `compose`'s answer. In a
-browser it is `render(spec)` and nothing else.
+What it does for every host, which is the part that was written wrong by hand:
 
-**Throw `RenderFailedError` with a code on the union, and map everything else onto `unknown`.** The
-editor shows a different sentence for each of `no_space`, `unreadable_input` and `unknown`, and a
-code it does not know reads as a blank apology. `instanceof` is the test, which is why it is a class
-and not a field on a plain `Error`.
+**It draws with the editor's own raster context.** The editor hands it over as
+`RenderRequest.raster`, made for the frame this render is at, and the spec is built with it, so every
+layer in the file is drawn exactly as the preview drew it. That is why there is no `platform` to
+pass: the context resolves the sticker URLs against the asset base of the Stencil runtime the editor
+was loaded with, which the plugin at the root does not have, and a context built there could point a
+sticker at a different file than the customer saw. Its `output` being `manifest.output` is what keeps
+a 4K post's caption from being drawn at 720p and burned in soft.
 
-**Honour the signal.** The editor aborts it when the customer leaves mid render, and an encode
-nobody is waiting for keeps the phone warm until it finishes.
+**It reads each clip by the URL its engine can open.** `sourcePath` whenever there is one. Without
+one, in a browser, `playbackUrl`, since the web engine opens whatever the page can, an object URL
+from the editor's own picker included. On a phone only a `blob:` URL, which it writes out as a file
+first (below); a WebView URL such as Capacitor's local server is nothing a native engine can open,
+so a clip with only that is refused before any job as `unreadable_input`, naming the clip.
 
-**Do not call `prepareJob` from here.** That call takes ownership of its inputs and MOVES them into
-the job folder, and the originals still belong to whatever step recorded or picked them: the
-customer can step back, watch them, remove one, and come forward again. The composer reads each
-source where it already is, and the job folder only ever holds the output. This is the clearest
-example of why rendering is the host's and not the package's: only the application knows who owns
-the file.
+**It hands the engine files, not blobs.** A page holds some of a post as `blob:` URLs in the
+WebView's own memory - a sound from the browser's sound library, a track the default picker read in
+on iOS, a clip a host kept as bytes - and neither native engine can open one. Every render goes
+through `withNativeRenderInputs(spec, render, signal)`, which stages each distinct blob through
+`stageRenderInput`, a mebibyte per call, renders a copy of the spec that names the staged files, and
+releases them once the job has settled. In a browser it is the render and nothing else. An input
+that cannot be staged rejects with a `RenderInputError` in the composer's own terms, and the job
+never starts: a blob that will not read - revoked by whatever minted it, or empty - is
+`unreadable_input` naming the clip whose URL it was, and a write the phone refused is `no_space`
+for a full disk and `unknown` otherwise.
+
+**It listens before it starts.** `compose` answers with the job id at once and the rest arrives as
+events, and a two second clip can finish before an `await` comes back, so the three listeners are on
+before `compose` is called, match on the job id, and come off however the job ends. The render
+settles on the job's own `completed` or `failed`, never on `compose`'s answer, because the staged
+inputs are deleted the moment it settles.
+
+**It honours the signal at the moment a cancel can name the job.** The editor aborts when the
+customer backs out of the export screen or leaves mid render. An abort before `compose` never starts
+the job; one while `compose` is on its way is cancelled the moment the composer has the job, since a
+cancel sent before then names an id it has never heard of and is lost, and the encode runs on with
+nobody waiting. Once the signal is aborted, whatever fails after settles as the abort and is not logged:
+the `cancelled` that answers its own cancel, an encoder that broke as the cancel landed, an iOS job
+`interrupted` by a customer leaving the app on the way out, a `compose` that rejected, a spec
+refused, an input that would not stage, a `toSource` that threw, even a `RenderFailedError` it
+worded itself. The editor has let go of the render, and a line in the log would read as a broken
+render nobody had. A cancel nobody here asked for, with the signal still live, is reported like any
+other failure. A job that finishes after all, its cancel having lost the race with the last frame,
+settles as the abort too, and `toSource` is not called for a file nobody will use. The abort listener comes off when the job
+settles, so a finished render sends no cancel when the editor leaves.
+
+**It passes the host's size ceiling on.** `RenderRequest.maxBytes`, the host's own
+`output.maxBytes` handed back, goes to `toComposeSpec` as it comes, and writes nothing when it is
+unset (**A size ceiling is the host's to set**).
+
+**It rejects with `RenderFailedError` on the editor's union, whatever failed.** The composer's
+`no_space`, `unreadable_input` and `too_large` carry straight across, a `RenderInputError` from
+staging is read the same way, and everything else - an encoder, a muxer, an interrupted job, a
+listener the bridge refused, a `toSource` that threw - is `unknown` and logged, because the editor
+shows one sentence per code and a code it does not know reads as a blank apology. A render the
+customer called off rejects with the signal's reason instead. The composer blames a failure on the
+SEGMENT that had it, since split and duplicate put several segments over one source, and the
+failure's `sourceKey` is that segment's clip key, on the base track or on any layer, so the host
+hears about its own source. `instanceof` holds whichever door the class came through: every
+instance carries a `Symbol.for` brand, and every copy of the class on the page - the root's,
+`/ui`'s, `dist/components`' and the editor's own chunk's - looks for it. The editor also reads an
+error's `name` and code, so one built without the brand is still heard.
+
+**It does not call `prepareJob`.** That call takes ownership of its inputs and MOVES them into the
+job folder, and the originals still belong to whatever step recorded or picked them: the customer
+can step back, watch them, remove one, and come forward again. The composer reads each source where
+it already is, and the job folder only ever holds the output.
+
+A host that renders some other way - its own engine, a server - implements `EditorRenderHost` itself:
+`toComposeSpec(manifest, uriByKey, ids, request.raster, { maxBytes: request.maxBytes })`, its own job,
+and a `RenderFailedError` with a code on the union for every failure. The class is exported from the
+root and from `capacitor-video-kit/ui`, and the editor recognises either.
 
 ### What is left in the application
 
@@ -925,7 +965,7 @@ never editing stayed where they were.
 | `open(clips, manifest, maxClips)` | `<ve-editor [sources] [manifest] [maxSources]>`, placed in whatever the application shows a full screen step in |
 | the modal dismissing with `confirm` and data | `veDone`, with the same result object |
 | the modal dismissing with `back` | `veCancel` |
-| `VideoRenderService` | `host.render`, still in the application, still calling `VideoComposer` |
+| `VideoRenderService` | `host.render`: `composerRenderHost()` from the package root, with what the application does with the file in its `toSource` |
 | `discardUnusedClips` | `host.media.release`, still in the application, which is the only place that knows two keys can share one file |
 | `VideoComposer.systemInsets()` | `host.platform.measureInsets` |
 | the upload that follows | untouched. The editor hands back sources and a manifest and has no idea an upload exists |
@@ -1025,11 +1065,11 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 | `media.sounds` | The customer's kept sounds: list, extract one from a video, delete one | audio decoded in the page and kept in IndexedDB |
 | `media.release` | Give back what the edit dropped | the object URLs the default picker minted are revoked |
 | `media.voice` | Record a voiceover | the voiceover sheet does not offer itself |
-| `render` | Turn the edit into a file | Next hands back the manifest unrendered |
-| `platform.fileUrl` | A URL the WebView can load for a `file://` or `content://` path | the identity function |
+| `render` | Turn the edit into a file: `composerRenderHost()` from the package root, on Capacitor and in a browser | Next hands back the manifest unrendered |
+| `platform.fileUrl` | A URL the WebView can load for a `file://` or `content://` path | `webViewUrl`: a device path through `Capacitor.convertFileSrc` where the page has Capacitor, read off `window.Capacitor` rather than imported; every other URL, and every URL in a page without Capacitor, as it came |
 | `platform.haptic` | The buzz on a snap, a trim and a commit | nothing, which is what a phone with no motor does too |
 | `platform.keyboard` | The height the text sheet sits above | `visualViewport`, the only measurement a browser has |
-| `platform.registerBackHandler` | Android's back button, layer by layer | nothing is registered |
+| `platform.registerBackHandler` | Android's back button, layer by layer; `registerBackHandlerWith(platform)` from `/ui` is this over Ionic's `Platform`, at priority 101, passing on a press the editor had nothing to close for | nothing is registered |
 | `platform.confirm` | Discard this edit? | the package's own alert |
 | `platform.measureInsets` | What the status and navigation bars cover | `env(safe-area-inset-*, 0px)` |
 | `platform.debug` | Whether the package says anything on the console | silence |
@@ -1070,8 +1110,8 @@ for one with nowhere durable to put a file.
 because there was nothing to write, but because in each case "nobody answered" means something no
 invented value could stand in for. `render` is null because the editor is given one rather than
 finding one: the web engine lives behind `VideoComposer`, and wiring a plugin into the editor is the
-host's call, not this file's. There is no default answer to "encode
-this", and the editor greys nothing for it. `confirm` is null so that the editor knows to present
+host's call, not this file's, which `composerRenderHost()` makes a one line call. There is no default
+answer to "encode this", and the editor greys nothing for it. `confirm` is null so that the editor knows to present
 its own alert rather than the host's native one. `measureInsets` is null so that the editor pads
 with `env(safe-area-inset-*, 0px)` and writes nothing over it: a measurement that does arrive is set
 on the element as `--ve-safe-top` and `--ve-safe-bottom`, which beats both that fallback and
@@ -1101,6 +1141,53 @@ segment was deleted stays in the store so that an undo can bring it back, and on
 tapping Next settles which ones are gone. Left unimplemented, every dropped clip is held until the
 app is killed, up to 100 MB of recording each. The browser default revokes the object URLs it minted
 itself, and leaves alone both a URL a kept source still names and any URL the application handed in.
+
+### A size ceiling is the host's to set
+
+The package holds a video to no size of its own, because how big a finished file may be is a
+product decision and the apps on this editor decide it differently. LightSnip builds 4K for its own
+use and sets nothing, so its renders are as big as their rate makes them. A host whose server
+refuses a file over some size says so once, beside the rungs it offers:
+
+```ts
+import { MAX_UPLOAD_BYTES } from 'capacitor-video-kit/editor'; // 100 MiB, for a host with that limit
+
+editor.host = {
+  ...host,
+  output: { qualities: ['720p', '1080p'], maxBytes: MAX_UPLOAD_BYTES },
+};
+```
+
+From there it is carried all the way to the file:
+
+- **The quality sheet warns and refuses nothing.** A rung whose size estimate for this post is over
+  the ceiling is marked with it, and the chosen one gets a line under the size. Nothing is greyed,
+  because the estimate is an average rate the encoder may spend less than: a still or dark post
+  often comes in well under.
+- **The render is handed the number, and passes it on.** The editor gives it to the host's render
+  as `RenderRequest.maxBytes`, and `toComposeSpec(manifest, uriByKey, ids, raster, { maxBytes })`
+  writes it as the spec's `output.maxBytes`, and writes nothing when there is none.
+  `composerRenderHost()` always does; a render a host wrote itself has to, because one that leaves
+  it out sends no ceiling, whatever the quality sheet warned.
+- **Every engine holds the file to it.** An engine stops the encode as soon as the file grows past
+  the ceiling and deletes what it wrote, and measures the finished file once more before
+  `completed`; either way the job fails `too_large` with the message
+  `too_large max=<maxBytes> bytes=<bytes>`. iOS measures the files its writer is writing a few
+  times a second and gives its `AVAssetExportSession` fallback the ceiling as `fileLengthLimit`; a
+  fallback that meets that limit by stopping at it hands back a file cut short, which fails
+  `too_large` too, since the ceiling is what cut it, with `bytes` the size it stopped at - at or
+  UNDER `max`. So the code is the test, never `bytes > max`.
+  Android counts the encoded samples its muxer is handed and checks the count on each progress
+  poll, since Media3's muxer leaves room in the file it is writing that makes it read up to a fifth
+  larger than it will finish. The web counts what its encoders hand the muxer, or the recorder's
+  chunks, after every frame; a recorder that hands its media over only when it stops, as
+  Chromium's MP4 one does, is held by the finished-file check. Nothing is refused by estimate
+  before the encode starts.
+- **The customer is told in a sentence of its own.** `composerRenderHost()` turns the composer's
+  `too_large` into `RenderFailedError('too_large', ...)`, as a render a host wrote must, and the
+  editor says the video is too big to post, with a lower quality or a shorter video as the way out
+  and Keep editing where the other failures offer Try again, since trying again would build the
+  same file.
 
 ### Theming
 
@@ -1593,13 +1680,17 @@ track at all when no source has sound. Measured on the simulator, 64 and 256 kbp
 out within a fifth of that. So one quality chip is one file size on both native platforms, and the
 quality sheet's estimate, which is that same arithmetic, now describes an iOS file as well.
 
-**There is no size ceiling.** Earlier versions carried one host's 100 MiB upload cap inside the
-engine - a `fileLengthLimit` of 90 MiB on the export session, a check that refused a timeline the
-preset estimated would not fit, and a guard after the encode - so a long or high-quality render
-failed as `unsupported`, sometimes after the whole encode had run. All three are gone. A ceiling is a
-host's policy: `MAX_UPLOAD_BYTES` in `edit-manifest.ts` says it is applied to nothing here, and a
-host with a limit expresses it by the rungs it offers (`EditorOutputOptions`). Android and the web
-engine have never had one. What stays is the check that the file came out as long as the timeline.
+**The only size ceiling is the one the spec carries.** Earlier versions carried one host's 100 MiB
+upload cap inside the engine - a `fileLengthLimit` of 90 MiB on the export session, a check that
+refused a timeline the preset estimated would not fit, and a guard after the encode - so every
+host's long or high-quality render failed as `unsupported`, sometimes after the whole encode had
+run. All three are gone. A ceiling is a host's policy, set as `EditorOutputOptions.maxBytes` and
+sent as `output.maxBytes` (**A size ceiling is the host's to set**), and with none the render is as
+big as its rate makes it. With one, `WriterEngine` polls the size of the file it is writing a few
+times a second and stops with `too_large` once it passes the ceiling, the `AVAssetExportSession`
+fallback is given it as `fileLengthLimit`, and the finished file is measured before `completed`
+whichever of the two wrote it. There is no refusal by estimate. What stays besides is the check
+that the file came out as long as the timeline.
 
 **One fallback, to `AVAssetExportSession`.** An encoder that turns the writer down - no encoder for
 the request, the encoder busy, or the settings refused, before the first frame or at it - gets one
@@ -1949,8 +2040,8 @@ app started, which a web view reload does not restart - so a clip picked while t
 `keep`, or earlier in the launch and not saved yet, is safe; `before` alone could not promise that,
 because a gallery copy made in an earlier launch is dated then however recently it was picked again.
 The other is an input of a render still running, or of one whose outcome JS has not collected,
-because a launch sweep runs again when the web view reloads and the edit being rendered may be in
-no draft. `releaseMedia` does delete a copy handed out in this launch: that is the host saying it is
+because a host runs its sweep as its page starts, so the sweep runs again when the web view reloads,
+which can happen mid render, and the edit being rendered may be in no draft. `releaseMedia` does delete a copy handed out in this launch: that is the host saying it is
 done with it.
 
 A host with drafts uses the five like this, and **Native hosts**, below, is the same glue with the
@@ -2005,9 +2096,9 @@ what is left in the app is its picker plugin, its keys and its drafts. The whole
 ```ts
 import {
   VideoComposer,
+  composerRenderHost,
   gallerySource,
   retainPickedFile,
-  withNativeRenderInputs,
 } from 'capacitor-video-kit';
 import { browserMediaHost, type EditorMediaHost, type EditorSource } from 'capacitor-video-kit/ui';
 
@@ -2041,7 +2132,7 @@ const media: EditorMediaHost = {
 };
 
 // The render: every blob the spec names staged as a file, and released once the job has settled.
-const result = await withNativeRenderInputs(spec, (prepared) => runJob(prepared, onProgress), signal);
+const render = composerRenderHost();
 
 // A draft deleted: what it named, less whatever the drafts still kept name.
 await VideoComposer.releaseMedia({ uris: pathsIn(deleted), keep: pathsIn(remaining) });
@@ -2066,14 +2157,39 @@ for a picture, without which the editor opens a picture as a video and reports i
 rejects as the resolve does, `unreadable_input` for an item gone from the library since it was
 listed. The key is the app's, new for every pick, because the same item picked twice is two clips.
 
-**`withNativeRenderInputs(spec, render, signal?)`** gives the engine files instead of the `blob:`
-URLs a page holds - a sound from the browser's sound library, a track the default picker read in -
-which no native engine can open. Every place a spec names media is covered: the base clips, every
-layer's clips, each transition's outgoing side, the music and every voiceover. Each distinct blob is
-staged through `stageRenderInput` a mebibyte of bytes per call, named with the extension its type
-calls for (a better default rather than a requirement, since iOS's `RenderInputs` and Android's
-Media3 both read what a file holds), and released through `releaseRenderInputs` once `render` has
-settled, whatever it settled with. The caller's spec is not touched. In a browser it is
+**`composerRenderHost(options?)`** is the editor's render host over the composer, and **A Capacitor
+app, where the native engines do the rendering** has its options and what it does. The host it
+answers always has `encodeSupport`, typed as required, so a host that wraps it calls it straight
+through with no fallback of its own.
+
+**`readRenderFile(uri, name = 'edited')`** is the finished render as a `File`, for a `toSource` that
+sends it somewhere: read through `webViewUrl`, named `<name>.mp4`, or `.webm` for a browser's WebM,
+and typed as its bytes came or `video/mp4` where they came with none. It takes the iOS local server's
+answer for a whole file, which has no HTTP status and so is not `ok`, as the file it is, and rejects
+with a plain `Error` - an HTTP error, a failed fetch, a file of no bytes - which fails the render as
+`unknown` with the reason logged, rather than handing an upload an empty `File`. **`containerOf(type)`**
+is its naming on its own: `webm` for a MIME type that says WebM, `mp4` for anything else, no type
+included, since every native render is MP4.
+
+**`webViewUrl(uri)`** is the URL the WebView loads a file by: a `file://`, a `content://` or a bare
+path through `Capacitor.convertFileSrc`, and an `http(s):`, `blob:` or `data:` URL as it came. It is
+already the editor's default `platform.fileUrl`, so it is for everything else a host shows: a done
+screen's render, a poster. It reads `window.Capacitor`, which is the `Capacitor` `@capacitor/core`
+exports, so a test's spy on `Capacitor.convertFileSrc` is the one it calls.
+
+**`withNativeRenderInputs(spec, render, signal?)`**, which `composerRenderHost` runs every render
+through and a host with a render of its own calls itself, gives the engine files instead of the
+`blob:` URLs a page holds - a sound from the browser's sound library, a track the default picker
+read in - which no native engine can open. Every place a spec names media is covered: the base
+clips, every layer's clips, each transition's outgoing side, the music and every voiceover. Each
+distinct blob is staged through `stageRenderInput` a mebibyte of bytes per call, named with the
+extension its type calls for (a better default rather than a requirement, since iOS's
+`RenderInputs` and Android's Media3 both read what a file holds), and released through
+`releaseRenderInputs` once `render` has settled, whatever it settled with. The caller's spec is not
+touched. An input it cannot stage rejects with a **`RenderInputError`**, also from the root, before
+`render` is called: `code` is `unreadable_input` for a blob that will not read, with `clipKey` the
+wire key of the clip that named it (none for a sound), `no_space` for a write a full disk refused,
+and `unknown` for any other; an abort rejects with the signal's reason. In a browser it is
 `render(spec)` and nothing else.
 
 **The editor's default `pickAudio`** is the kit's document picker on iOS (**iOS host setup** says
@@ -2083,7 +2199,7 @@ The three native calls behind those, for a host that needs them on their own:
 
 | Call | Android | iOS | Web |
 |---|---|---|---|
-| `pickAudioFile()` answers `{ cancelled, uri?, fileName?, mimeType? }` | rejects `UNIMPLEMENTED` | presents the document picker for any audio type and copies the choice to `tmp/videokit-audio/<uuid>.<ext>`, which the launch sweep clears once a day old; rejects `already_picking` while its picker is up | rejects `UNIMPLEMENTED` |
+| `pickAudioFile()` answers `{ cancelled, uri?, fileName?, mimeType? }` | rejects `UNIMPLEMENTED` | presents the document picker for any audio type, opens the choice in place and copies it to `tmp/videokit-audio/<uuid>.<ext>`, after downloading it first when it is still in iCloud, with no progress or cancel; the copy is deleted by the next pick or the plugin's next load, whichever comes first; rejects `already_picking` while its picker is open or on its way up | rejects `UNIMPLEMENTED` |
 | `stageRenderInput({ data, uri?, extension? })` answers `{ uri }` | writes or appends to a file in `cacheDir/videokit-render-inputs/` | writes or appends to a file in `tmp/videokit-render-inputs/` | rejects `UNIMPLEMENTED` |
 | `releaseRenderInputs({ uris })` | deletes the named files in that folder, and nothing else | the same | rejects `UNIMPLEMENTED` |
 
@@ -2091,17 +2207,28 @@ The three native calls behind those, for a host that needs them on their own:
 absent, and appends to the file `uri` names otherwise. It refuses with `invalid_spec` a `uri` that is
 not a staged file still there, data that is not base64 and an extension that is not one to sixteen
 letters and digits, and answers `no_space` for a full disk. Chunks are written one at a time in the
-order they were sent, on both platforms. A staged file a killed render left behind is deleted by a later launch once it is a
-day old, and not sooner, because the plugin loads again when the web view reloads, which can happen
-while a render is reading its inputs.
+order they were sent, on both platforms. `withNativeRenderInputs` releases what it staged the moment
+the render has settled. A staged file nobody released - its app killed mid render, or its page
+reloaded before the render settled - is deleted when the plugin next loads, once it is a day old.
+The plugin loads once per bridge, before the bridge loads its page, and a web view reload does not
+load it again, since a reload only resets the bridge; in an app with one bridge that is once a
+launch, so a leftover goes on the first launch a day or more after it was written, and iOS may empty
+`tmp` sooner while the app is not running. Not sooner than a day, because a bridge can be built
+again in a process whose render is still reading its inputs - on Android, an Activity made again
+while the render's foreground service keeps the process.
 
 ## Failure codes
 
 Composer: `unreadable_input` (blame `clipKey`), `encoder`, `muxer`, `interrupted`, `cancelled`,
-`no_space` (carries `needBytes`), `unsupported`, `unknown`. `interrupted` is the platform stopping a
-render with nothing wrong with the post - on iOS, the app leaving the foreground - and the same spec
-composed again under a new `jobId` can succeed. `unknown` with the message `timeout` is an iOS render
-that stopped moving for 90 seconds.
+`no_space` (carries `needBytes`), `too_large`, `unsupported`, `unknown`. `interrupted` is the
+platform stopping a render with nothing wrong with the post - on iOS, the app leaving the
+foreground - and the same spec composed again under a new `jobId` can succeed. `too_large` is a file
+that grew past the spec's `output.maxBytes` and was deleted, with the message
+`too_large max=<maxBytes> bytes=<bytes>` on every engine; the same spec fails the same way. `bytes`
+can read under `max`: on iOS a render that fell back to the preset export session, which is handed
+the ceiling as its `fileLengthLimit`, may come back cut short at it, and fails `too_large` with the
+size it stopped at. The code is the answer and the numbers are for the log.
+`unknown` with the message `timeout` is an iOS render that stopped moving for 90 seconds.
 
 `saveToGallery`: `invalid_spec`, `permission_denied`, `unreadable_input`, `no_space`, `unsupported`
 (web only), `unknown`.

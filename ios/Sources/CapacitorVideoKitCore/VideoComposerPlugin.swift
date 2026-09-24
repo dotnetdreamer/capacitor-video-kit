@@ -57,15 +57,22 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     private static let defaultThumbnailHeight = 160
 
     override public func load() {
-        // The registry outlives this instance. `load()` runs again on every WebView reload, and
-        // `attach` is where an outcome that finished while no bridge was up gets replayed.
+        // Capacitor iOS (8.5.2) calls `load()` as a bridge registers the plugin, on main, from the
+        // bridge's init in `CAPBridgeViewController.loadView`, before the bridge loads its page: once
+        // a launch in an app with one bridge. A web view reload does not call it again - a navigation
+        // and a web content process that died only call `bridge.reset()`
+        // (`WebViewDelegationHandler.swift:47` and `:166`), which drops the page's listeners and
+        // stored calls and keeps this instance. The registry outlives every instance all the same,
+        // and `attach` replays to a bridge built later in the same process whatever outcome the
+        // page of an earlier one never collected.
         JobRegistry.shared.attach(emitter: self)
         JobFolders.sweepOnLaunch()
     }
 
     deinit {
         JobRegistry.shared.detach(self)
-        // A page reload in the middle of a take must not leave the microphone open.
+        // A bridge torn down in the middle of a take must not leave the microphone open. A web view
+        // reload tears nothing down (see `load`), so this is not what closes a take a reload leaves.
         Task { await VoiceRecorder.shared.abandon() }
     }
 
@@ -492,12 +499,16 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     /// its type. See `AudioFilePicker` for why iOS has a native picker for this at all, and where the
     /// copy lives and for how long.
     ///
-    /// Rejects `already_picking` while a picker it put up is still on screen, rather than stacking a
-    /// second over it and leaving the first to answer nobody. A picker that has gone without saying so
-    /// is answered as a cancel first, so one lost callback cannot refuse every pick after it. With no
-    /// view controller to present from - a bridge with no screen - it rejects as unavailable, which
-    /// is Capacitor's own `UNAVAILABLE`, and so it does when UIKit would not put the picker up, which
-    /// would otherwise leave the call waiting for an answer that cannot come (see
+    /// Rejects `already_picking` while a picker it put up is still open - on screen, or asked for
+    /// and still on its way up, which a double tap lands in - rather than stacking a second over it
+    /// and leaving the first to answer nobody. A picker that is no longer open, gone without saying
+    /// so or never come up, is answered as a cancel first, so one lost callback cannot refuse every
+    /// pick after it (see `AudioFilePicker.isOpen`); one UIKit never put up is answered as a cancel
+    /// on its own besides, once `AudioFilePicker.presentationGrace` has passed, so a page that waits
+    /// for this answer before it asks again is not left waiting for good. With no view controller
+    /// to present from - a bridge with no screen - it rejects as unavailable, which is Capacitor's
+    /// own `UNAVAILABLE`, and so it does when the view controller is in no window, which UIKit
+    /// would put nothing up over and so leave the call waiting for an answer that cannot come (see
     /// `AudioFilePicker.present`). A song that picked but would not copy rejects `no_space` or
     /// `unknown`, as `stageRenderInput` does.
     @objc func pickAudioFile(_ call: CAPPluginCall) {
@@ -509,7 +520,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     @MainActor
     private func presentAudioPicker(_ call: CAPPluginCall) {
         if let open = audioPicker {
-            guard !open.isOnScreen else {
+            guard !open.isOpen() else {
                 call.reject("the audio picker is already open", Reject.alreadyPicking)
                 return
             }
@@ -534,16 +545,12 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         audioPicker = picker
     }
 
-    /// Where `AudioFilePicker.keep` runs, one song at a time: each clears the folder before it puts
-    /// its own song there, and two at once could clear a song the other is still writing. Without
-    /// this two would overlap only for a host that asks again before its last pick has answered and
-    /// a person quick enough to pick in between, which is rare, and costs a song when it happens.
-    private static let audioCopies = DispatchQueue(label: "net.dotnetdreamer.videokit.audio", qos: .userInitiated)
-
-    /// Answers `call` with the copy `AudioFilePicker.keep` makes of `picked`, made off main: a song
-    /// copied from outside the app is a copy of every byte, and main is drawing the picker away.
+    /// Answers `call` with the copy `AudioFilePicker.keep` makes of `picked`, made off main - every
+    /// song is a copy of every byte, and one still in iCloud a download first, while main is drawing
+    /// the picker away - and on `AudioFilePicker.copies`, one song at a time and in turn with the
+    /// clear each load makes.
     private static func keep(_ picked: URL, answering call: CAPPluginCall) {
-        audioCopies.async {
+        AudioFilePicker.copies.async {
             do {
                 call.resolve(try AudioFilePicker.keep(picked).json)
             } catch {
@@ -617,9 +624,10 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - Voice
 
+    /// `batchId` only says where the take is kept, and an id `compose` would refuse is a take with
+    /// no batch rather than a refusal (`VoiceRecorder.folder(for:)`).
     @objc func startVoiceRecording(_ call: CAPPluginCall) {
-        let requested = call.getString("batchId")
-        let batchId = (requested?.isEmpty ?? true) ? nil : requested
+        let batchId = call.getString("batchId")
         Task {
             do {
                 // The permission prompt happens inside this one await, so the JS promise still
@@ -721,9 +729,13 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - prepareJob, cleanup
 
+    /// `batchId` is refused as `invalid_spec` when it is missing or names no folder of its own,
+    /// `.` and `..` (`JobFolders.batchIdRefusal`), before anything is written: Android refuses the
+    /// same ids with the same words.
     @objc func prepareJob(_ call: CAPPluginCall) {
-        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
-            call.reject("batchId is required", Reject.invalidSpec)
+        let batchId = call.getString("batchId") ?? ""
+        if let refusal = JobFolders.batchIdRefusal(batchId) {
+            call.reject(refusal, Reject.invalidSpec)
             return
         }
         guard let raw = call.getArray("inputs") else {
@@ -767,9 +779,12 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Refuses `batchId` as `prepareJob` does, so a discard of `..` deletes nothing at all rather
+    /// than the folder `JobFolders.folderName` would put it in, which is the batch `__`'s.
     @objc func cleanup(_ call: CAPPluginCall) {
-        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
-            call.reject("batchId is required", Reject.invalidSpec)
+        let batchId = call.getString("batchId") ?? ""
+        if let refusal = JobFolders.batchIdRefusal(batchId) {
+            call.reject(refusal, Reject.invalidSpec)
             return
         }
         Task {

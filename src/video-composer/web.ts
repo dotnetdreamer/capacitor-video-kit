@@ -44,6 +44,7 @@ import type {
   ThumbnailsResult,
   VoiceRecordingResult,
 } from './definitions';
+import { batchIdRefusal } from './batch-id';
 import type { VideoComposerPlugin } from './plugin';
 import { encodableAt, webCapabilities } from './web/capabilities';
 import { cancelJob, cleanupBatch, jobState, startJob, sweepJobs } from './web/jobs';
@@ -250,7 +251,7 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
     // `undefined` is absent, as it is once a call is JSON on its way to a phone, and so is `null`,
     // which survives that trip and names nothing to spare: Android's `releaseMedia` reads it as left
     // out too, as Capacitor's getters read a JSON null on both phones.
-    if (options.keep != null && !Array.isArray(options.keep)) throw coded('keep must be a list of URIs', 'invalid_spec');
+    if (options.keep != null && !Array.isArray(options.keep)) throw coded('keep must be a list of uris', 'invalid_spec');
   }
 
   async sweepMedia(options: SweepMediaOptions): Promise<SweepMediaResult> {
@@ -350,10 +351,11 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
    *
    * The URIs handed back are `blob:` URLs, because that is what a caller can put straight into a
    * `<video>` or a `ComposeSpec`. The copy behind them is durable, and `jobDir` names the folder
-   * `cleanup` deletes.
+   * `cleanup` deletes. A `batchId` that is missing, `.` or `..` is refused before anything is
+   * copied, in the words a phone refuses it with ([folderId]).
    */
   async prepareJob(options: PrepareJobOptions): Promise<PrepareJobResult> {
-    const batchId = required(options?.batchId, 'batchId');
+    const batchId = folderId(options?.batchId);
     const inputs = options?.inputs;
     if (!Array.isArray(inputs)) throw coded('inputs is required', 'invalid_spec');
 
@@ -374,9 +376,9 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
     return { jobDir: fileUri(batchId, '').replace(/\/+$/, ''), inputs: prepared };
   }
 
-  /** Deletes the folder and forgets its jobs. Idempotent. */
+  /** Deletes the folder and forgets its jobs. Idempotent. Refuses `batchId` as `prepareJob` does. */
   async cleanup(options: CleanupOptions): Promise<void> {
-    const batchId = required(options?.batchId, 'batchId');
+    const batchId = folderId(options?.batchId);
     // Stops anything still rendering into the folder, forgets the records, and deletes the files.
     // A render that finished writing after the folder went would put its file back and leave it
     // there for good, which is why the order is not ours to choose.
@@ -418,6 +420,17 @@ function coded(message: string, code: string): Error {
 function required(value: string | undefined, name: string): string {
   if (typeof value !== 'string' || value.length === 0) throw coded(`${name} is required`, 'invalid_spec');
   return value;
+}
+
+/**
+ * `prepareJob`'s and `cleanup`'s `batchId`, refused as `invalid_spec` in the native words when it is
+ * missing, `.` or `..` ([batchIdRefusal]). A browser's folder is an IndexedDB key and cannot climb
+ * anywhere, but a call a phone refuses is refused here too.
+ */
+function folderId(value: string | undefined): string {
+  const refusal = batchIdRefusal(value);
+  if (refusal !== null) throw coded(refusal, 'invalid_spec');
+  return value as string;
 }
 
 /** A last-resort extension for a blob whose URL carried none - a `blob:` URL never does. */

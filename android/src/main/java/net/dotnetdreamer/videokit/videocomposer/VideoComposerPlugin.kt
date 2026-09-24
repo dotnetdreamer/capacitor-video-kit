@@ -246,9 +246,16 @@ class VideoComposerPlugin : Plugin() {
             }
 
             val totalSeconds = max(1.0, plan.totalUs / 1_000_000.0)
-            val estimateBytes =
-                ((spec.output.videoBitrate + spec.output.audioBitrate) / 8.0 * totalSeconds * 1.15).toLong() +
-                    4L * 1024 * 1024
+            val bytesPerSecond = (spec.output.videoBitrate + spec.output.audioBitrate) / 8.0 * 1.15
+            // The header and the index, which no bitrate pays for.
+            val containerBytes = 4L * 1024 * 1024
+            // Held to the host's ceiling when there is one, which stops the file long before a
+            // long post's bitrate says it would end - see [SizeCeiling.diskEstimate].
+            val estimateBytes = SizeCeiling.diskEstimate(
+                estimate = (bytesPerSecond * totalSeconds).toLong() + containerBytes,
+                maxBytes = spec.output.maxBytes,
+                slackBytes = (bytesPerSecond * PROGRESS_POLL_MS / 1000.0).toLong() + containerBytes,
+            )
             val available = JobFolders.availableBytes(job.jobDir)
             val needed = estimateBytes + 20L * 1024 * 1024
             if (available < needed) {
@@ -302,7 +309,7 @@ class VideoComposerPlugin : Plugin() {
                 job.lastFrameUs,
             )
             val transformer = CompositionBuilder
-                .newTransformer(appContext, job.plan, relaxEncoder)
+                .newTransformer(appContext, job.plan, relaxEncoder, job.bytesWritten)
                 .addListener(listenerFor(job, overlays))
                 .build()
 
@@ -310,6 +317,7 @@ class VideoComposerPlugin : Plugin() {
             job.state = JobRegistry.State.RENDERING
             job.partFile.parentFile?.mkdirs()
             job.partFile.delete()
+            job.bytesWritten.set(0L)
             transformer.start(composition, job.partFile.absolutePath)
             pollProgress(job)
         } catch (e: Exception) {
@@ -325,11 +333,11 @@ class VideoComposerPlugin : Plugin() {
     ): Transformer.Listener = object : Transformer.Listener {
 
         override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+            if (settled(job)) return
             // The export is over, so it is let go of here rather than when the job is finished,
             // which stops the progress poll on its next tick. Without that, the poll's size check
-            // could measure the finished file while [finalizeJob] measures and moves it, and
-            // report one render too large twice. Nothing is lost: a cancel of a finished export
-            // is a no-op.
+            // could stop an export that has already finished, and delete the file [finalizeJob] is
+            // measuring and moving. Nothing is lost: a cancel of a finished export is a no-op.
             job.transformer = null
             pluginScope.launch { finalizeJob(job, exportResult) }
         }
@@ -339,6 +347,7 @@ class VideoComposerPlugin : Plugin() {
             exportResult: ExportResult,
             exportException: ExportException,
         ) {
+            if (settled(job)) return
             val mapped = ErrorMapping.map(exportException)
             if (mapped.retryWithRelaxedEncoder && !job.retriedEncoder) {
                 // One retry with whatever the encoder factory picks for itself. Low-end devices
@@ -376,6 +385,22 @@ class VideoComposerPlugin : Plugin() {
     }
 
     /**
+     * Whether a Transformer outcome arriving now is too late to act on: the job has already ended,
+     * or somebody has asked for it to end. Main looper only, where the outcomes arrive.
+     *
+     * Transformer can hand over `onCompleted` or `onError` after `cancel()`. It closes the muxer on
+     * its own thread and only then posts the outcome to this looper (`TransformerInternal
+     * .endInternal`), and a cancel that runs in between - [stopTooLarge] from a poll, a caller's
+     * [cancel], [cleanup] - finds nothing left to stop and does not take the posted outcome back.
+     * Acting on it would finish the job a second time: [finalizeJob] on a part file that has been
+     * deleted fails `unknown` after the `too_large` and overwrites the error [getState] reports,
+     * and a relaxed retry puts a failed job back to rendering. Whoever asked for the end sees to it
+     * instead: [stopTooLarge] has already failed the job, a caller's [cancel] fails it `cancelled`,
+     * and [cleanup] forgets it along with its folder.
+     */
+    private fun settled(job: JobRegistry.Job): Boolean = job.isTerminal || job.cancelRequested
+
+    /**
      * Progress comes from the output-timeline timestamp of the frames passing through the colour
      * pass, not from `Transformer.getProgress`. With music or a voiceover in the composition,
      * Transformer averages the progress of every sequence, and an audio sequence that finished
@@ -383,12 +408,11 @@ class VideoComposerPlugin : Plugin() {
      * The frame timestamps are the real thing. `getProgress` is still useful for the moment before
      * the first frame arrives, and only when a single sequence makes it invertible.
      *
-     * The same tick holds the export to the host's ceiling, [Output.maxBytes], by measuring the
-     * file being written - see [SizeCeiling] for why the file and not an estimate. Here because
-     * this is the looper the Transformer has to be cancelled on, and twice a second is often enough
-     * that a file stopped past the ceiling is a poll's worth of video past it and no more.
-     * Measuring is one read of the file's metadata, and this looper already creates and deletes the
-     * same file around every attempt.
+     * The same tick holds the export to the host's ceiling, [Output.maxBytes], against the bytes
+     * the muxer has been handed so far - see [SizeCeiling] for why those, and neither an estimate
+     * nor the part file's length. Here because this is the looper the Transformer has to be
+     * cancelled on, and twice a second is often enough that a render stopped past the ceiling is a
+     * poll's worth of video past it and no more. Asking is one read of a counter.
      */
     private fun pollProgress(job: JobRegistry.Job) {
         val holder = ProgressHolder()
@@ -399,7 +423,7 @@ class VideoComposerPlugin : Plugin() {
                 val transformer = job.transformer ?: return
 
                 if (maxBytes != null) {
-                    SizeCeiling.tooLarge(job.partFile.length(), maxBytes)?.let { message ->
+                    SizeCeiling.tooLarge(job.bytesWritten.get(), maxBytes)?.let { message ->
                         stopTooLarge(job, transformer, message)
                         return
                     }
@@ -443,14 +467,22 @@ class VideoComposerPlugin : Plugin() {
      * this looper and at once, as [listenerFor]'s `onError` does it, so the job is already finished
      * by the time anything else posted here runs: a caller's cancel landing a moment later finds a
      * terminal job and adds nothing, and a second poll loop - a relaxed retry starts one of its
-     * own - finds no render to measure.
+     * own - finds no render to measure. An outcome Transformer had already posted when it was
+     * cancelled is turned away by [settled].
+     *
+     * Any failure of the cancel is logged and gone past, not only the `IllegalStateException` a
+     * caller's [cancel] expects: `TransformerInternal.cancel` rethrows whatever releasing a
+     * decoder, an encoder or the muxer threw, and nobody asked for this cancel, so an exception let
+     * out here would take the app down on the main looper and leave the partial file on disk with
+     * the job still rendering. It rethrows only once it has been through every release, the
+     * muxer's included, so the file is as finished with as it will ever be when it is deleted.
      */
     private fun stopTooLarge(job: JobRegistry.Job, transformer: Transformer, message: String) {
         Log.w(TAG, "render ${job.jobId} stopped: $message")
         try {
             transformer.cancel()
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "cancel past the size ceiling failed for ${job.jobId}: ${e.message}")
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "cancel past the size ceiling failed for ${job.jobId}", e)
         }
         job.partFile.delete()
         failJob(job, FailureCodes.TOO_LARGE, message)
@@ -459,9 +491,10 @@ class VideoComposerPlugin : Plugin() {
     private fun finalizeJob(job: JobRegistry.Job, exportResult: ExportResult) {
         val appContext = context.applicationContext
         try {
-            // Measured once more now that the muxer has written the file's index, which comes last
-            // and which no poll saw. Before the file is moved, so a render that fails here touches
-            // nothing but its own part file, as every other failed render does.
+            // The file itself, now that the muxer has closed it: the polls counted only its
+            // samples, and it is those plus the header and the index, with the gap the muxer
+            // kept while writing trimmed away. Measured before the file is moved, so a render that
+            // fails here touches nothing but its own part file, as every other failed render does.
             val maxBytes = job.plan.spec.output.maxBytes
             SizeCeiling.tooLarge(job.partFile.length(), maxBytes)?.let { message ->
                 Log.w(TAG, "render ${job.jobId} finished too large: $message")
@@ -1272,6 +1305,10 @@ class VideoComposerPlugin : Plugin() {
         }
     }
 
+    /**
+     * `batchId` only says where the take is kept, and an id `compose` would refuse is a take with
+     * no batch rather than a refusal ([VoiceRecorder.folderFor]).
+     */
     private fun beginRecording(call: PluginCall) {
         val recorder = voiceRecorder ?: VoiceRecorder(context.applicationContext).also { voiceRecorder = it }
         try {
@@ -1433,11 +1470,16 @@ class VideoComposerPlugin : Plugin() {
         }
     }
 
+    /**
+     * `batchId` is refused as `invalid_spec` when it is missing or names no folder of its own, `.`
+     * and `..` ([JobFolders.batchIdRefusal]), before anything is written: iOS refuses the same ids
+     * with the same words.
+     */
     @PluginMethod
     fun prepareJob(call: PluginCall) {
-        val batchId = call.getString("batchId")
-        if (batchId.isNullOrEmpty()) {
-            call.reject("batchId is required", INVALID_SPEC)
+        val batchId = call.getString("batchId").orEmpty()
+        JobFolders.batchIdRefusal(batchId)?.let {
+            call.reject(it, INVALID_SPEC)
             return
         }
         val inputsArray = call.getArray("inputs")
@@ -1479,11 +1521,15 @@ class VideoComposerPlugin : Plugin() {
         }
     }
 
+    /**
+     * Refuses `batchId` as [prepareJob] does, so a discard of `..` deletes nothing at all rather
+     * than the folder [JobFolders.folderName] would put it in, which is the batch `__`'s.
+     */
     @PluginMethod
     fun cleanup(call: PluginCall) {
-        val batchId = call.getString("batchId")
-        if (batchId.isNullOrEmpty()) {
-            call.reject("batchId is required", INVALID_SPEC)
+        val batchId = call.getString("batchId").orEmpty()
+        JobFolders.batchIdRefusal(batchId)?.let {
+            call.reject(it, INVALID_SPEC)
             return
         }
         // Anything still rendering into this folder has to stop before the folder goes.

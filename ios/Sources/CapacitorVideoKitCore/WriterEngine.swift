@@ -11,6 +11,10 @@ import Foundation
 /// `CompositionBuilder.kt` - and the quality sheet's size estimate is that same arithmetic, so an
 /// engine that ignored it would give one quality chip a different file on each platform.
 ///
+/// When the host sets a size ceiling (`output.maxBytes`) the transfer watches the file grow and
+/// stops with `ExportError.tooLarge` as soon as it is past it, rather than finish a video that
+/// cannot be used; see `Transfer.watchSize`.
+///
 /// The shape is the usual reader-writer pairing. One `AVAssetReader` over the composition, with a
 /// video-composition output that draws every frame through the compositor and an audio-mix output
 /// that mixes every sound track through the audio mix; one `AVAssetWriter` with an input for each;
@@ -35,13 +39,22 @@ enum WriterEngine: RenderEngine {
         // The writer refuses to start over an existing file, and a part left by a render the
         // process died in the middle of is exactly that.
         try? FileManager.default.removeItem(at: url)
-        // Where the writer does the second pass that puts the index at the front of the file. In
-        // the job folder rather than the system's temporary directory, so a render that dies midway
-        // leaves nothing behind that `JobFolders.cleanup` does not also delete.
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        // Where the writer keeps the file while it writes it, and does the second pass that puts
+        // the index at the front: with `shouldOptimizeForNetworkUse` every sample goes into a
+        // temporary file here, and `url` stays empty until that last pass - measured, both. In the
+        // job folder rather than the system's temporary directory, so a render that dies midway
+        // leaves nothing behind that `JobFolders.cleanup` does not also delete, and in a folder of
+        // this transfer's own inside it, so that what is in the folder is what this transfer has
+        // written: the size ceiling is measured there, and a temporary file left by a render the
+        // process died in, or one still being written by another render of the same post, would
+        // otherwise count against this one. The writer deletes its temporary file whichever way it
+        // ends, and the folder goes once the transfer has answered.
+        let scratch = tmpDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
 
         do {
-            let transfer = try Transfer(built, to: url, tmpDir: tmpDir, spec: spec, onProgress: onProgress)
+            let transfer = try Transfer(built, to: url, tmpDir: scratch, spec: spec, onProgress: onProgress)
             // An already cancelled task runs `onCancel` before `run`, which then finds the flag set
             // and throws without starting anything.
             try await withTaskCancellationHandler {
@@ -224,11 +237,24 @@ private final class Transfer: @unchecked Sendable {
     /// `cleanup` may be about to delete.
     private static let cancelGrace: DispatchTimeInterval = .milliseconds(500)
 
+    /// How often the watch asks the writer whether it has failed and how big its file has got:
+    /// twice a second, the rate of Android's `PROGRESS_POLL_MS`, which is where Android measures
+    /// what it has written against the ceiling. Reading a size is a `stat` or two, and at the top
+    /// of the ladder a render writes a few megabytes between two looks, which is all a render over
+    /// its ceiling can overshoot by before it is stopped.
+    private static let watchInterval: DispatchTimeInterval = .milliseconds(500)
+
     private let reader: AVAssetReader
     private let writer: AVAssetWriter
     private let lanes: [Lane]
     private let totalMs: Int64
     private let onProgress: @Sendable (Double) -> Void
+    /// Where the file ends up, and where the writer keeps it until its last pass. The size the
+    /// ceiling is held to is theirs together.
+    private let url: URL
+    private let tmpDir: URL
+    /// The host's `output.maxBytes`; nil for none, and then nothing is measured.
+    private let maxBytes: Int64?
 
     /// Guards every `var` below and every lane's `ended`, and is never held across a call into
     /// AVFoundation that can wait on another thread - except in `start`, on purpose; see there.
@@ -239,21 +265,24 @@ private final class Transfer: @unchecked Sendable {
     /// Set with the last lane's `ended`, in the same locked section. From then on the answer is
     /// `close`'s to give, whichever branch it takes, and `abandon` stands aside.
     private var closing = false
-    /// The first failure seen, reader or writer. Recorded when it is seen rather than read back off
-    /// the status at the end, because cancelling the reader to stop the other lane may move a
-    /// failed reader's status on and lose the error that mattered.
+    /// The first failure seen, reader or writer, or the file grown past its ceiling. Recorded when
+    /// it is seen rather than read back off the status at the end, because cancelling the reader to
+    /// stop the other lane may move a failed reader's status on and lose the error that mattered.
     private var failure: Error?
-    /// Asks the writer, twice a second, whether it has failed on its own. The encoders run behind
-    /// the appends, so a writer can fail after every append has succeeded, and a failed writer
-    /// makes no input ready again: nothing would ever call a pump to find out, and the render would
-    /// sit silent until the registry's stall watch called it a timeout instead of the writer's
-    /// own error.
+    /// Every `watchInterval`, asks the writer whether it has failed on its own, and measures the
+    /// file against its ceiling (`watchSize`). The encoders run behind the appends, so a writer can
+    /// fail after every append has succeeded, and a failed writer makes no input ready again:
+    /// nothing would ever call a pump to find out, and the render would sit silent until the
+    /// registry's stall watch called it a timeout instead of the writer's own error.
     private var watch: DispatchSourceTimer?
 
     init(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
          onProgress: @escaping @Sendable (Double) -> Void) throws {
         self.totalMs = built.totalMs
         self.onProgress = onProgress
+        self.url = url
+        self.tmpDir = tmpDir
+        self.maxBytes = spec.output.maxBytes
 
         // The same range the composition was built to, which can be shorter than the spec's total
         // when a clip's trim was clamped to its file.
@@ -397,10 +426,14 @@ private final class Transfer: @unchecked Sendable {
             writer.startSession(atSourceTime: .zero)
             started = true
             let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-            timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
+            timer.schedule(deadline: .now() + Self.watchInterval, repeating: Self.watchInterval)
             timer.setEventHandler { [weak self] in
-                guard let self, self.writer.status == .failed else { return }
-                self.stop(because: self.writer.error ?? AVError(.unknown))
+                guard let self else { return }
+                if self.writer.status == .failed {
+                    self.stop(because: self.writer.error ?? AVError(.unknown))
+                } else {
+                    self.watchSize()
+                }
             }
             timer.resume()
             watch = timer
@@ -440,6 +473,43 @@ private final class Transfer: @unchecked Sendable {
             }
             if lane.reportsProgress { report(sample) }
         }
+    }
+
+    /// Stops the transfer with `ExportError.tooLarge` once the file has grown past `maxBytes`.
+    ///
+    /// The file is `url` and the writer's temporary folder together. While the lanes run, every
+    /// byte is in the temporary file and `url` is empty; `url` is counted too so that a writer that
+    /// ever wrote in place would be held all the same. The temporary file is the samples as they
+    /// are written and nothing held in reserve - it grew from 35 KB to 2.04 MB for a file that
+    /// finished at 2.17 MB, measured - so a file stopped for it could not have come in under the
+    /// ceiling. Not measured once the file is closing: the last pass copies the temporary file into
+    /// `url` beside it, so the two would count the file twice, and by then nothing is left to stop
+    /// - `Exporter` checks the finished file instead.
+    ///
+    /// Stopped as a failure, so the lanes end behind their pumps and `close` cancels the writer,
+    /// which deletes what it wrote, and `encode` deletes whatever is left at `url`.
+    private func watchSize() {
+        guard let maxBytes else { return }
+        lock.lock()
+        let closing = self.closing
+        lock.unlock()
+        guard !closing else { return }
+        let bytes = Exporter.size(of: url) + Self.bytes(in: tmpDir)
+        guard bytes > maxBytes else { return }
+        stop(because: ExportError.tooLarge(maxBytes: maxBytes, bytes: bytes))
+    }
+
+    /// Every file in `folder` and below it, added up; a folder in it counts for nothing. Read off
+    /// the walk's own attributes, which it fetches afresh for each entry as it reaches it.
+    private static func bytes(in folder: URL) -> Int64 {
+        guard let walker = FileManager.default.enumerator(atPath: folder.path) else { return 0 }
+        var total: Int64 = 0
+        while walker.nextObject() != nil {
+            guard let attributes = walker.fileAttributes,
+                  attributes[.type] as? FileAttributeType == .typeRegular else { continue }
+            total += (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        return total
     }
 
     private func isLive(_ lane: Lane) -> Bool {

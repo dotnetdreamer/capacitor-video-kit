@@ -131,13 +131,29 @@ export const RENDER_UNAVAILABLE: ConfirmRequest = {
 
 /**
  * A render that produced no file, with a different first sentence for each way it can fail, because
- * two of the three are things the customer can do something about.
+ * most of them are things the customer can do something about.
  *
  * Both answers move forward: try the encode again, or post the clips as they are without the edits.
  * Dismissing it does neither and leaves the editor exactly as it was, which is the third answer and
  * the reason the dialog has no cancel button of its own.
+ *
+ * Except for a video too big to post (`too_large`, past the host's `EditorOutputOptions.maxBytes`),
+ * where trying again builds the same file and fails the same way. There the way forward IS the
+ * editor - a lower rung on the quality sheet, or a shorter post - so staying is offered as a button
+ * in place of the retry, and the sentence says which two changes make a video smaller.
  */
 export function renderFailed(code: RenderFailureCode): ConfirmRequest {
+  if (code === 'too_large') {
+    return {
+      header: 'Couldn’t build your video',
+      message: 'This video is too big to post. You can choose a lower quality or make it shorter, or post your clips without the edits.',
+      buttons: [
+        { text: 'Post without edits', role: 'plain' },
+        { text: 'Keep editing', role: 'cancel' },
+      ],
+    };
+  }
+
   const cause =
     code === 'no_space'
       ? 'There is not enough space on your phone to build this video.'

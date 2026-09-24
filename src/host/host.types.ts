@@ -1,4 +1,4 @@
-import type { EditManifest } from '../editor';
+import type { EditManifest, RasterContext } from '../editor';
 
 /**
  * Everything the editor needs from the application that hosts it.
@@ -83,8 +83,8 @@ export interface EditorEditingOptions {
  * device: an app may offer 4K on a phone that cannot encode it, and that chip is greyed out with
  * its own reason.
  *
- * Every field is optional and an absent one means "all of them", so a host that says nothing gets
- * the whole ladder, which is what every host got before this existed.
+ * Every field is optional and an absent one means "all of them", or for `maxBytes` no ceiling, so a
+ * host that says nothing gets the whole ladder, which is what every host got before this existed.
  */
 export interface EditorOutputOptions {
   /** Ids from `OUTPUT_QUALITIES`, in any order; the editor shows them smallest first. */
@@ -101,6 +101,24 @@ export interface EditorOutputOptions {
    * post whose quality sheet opens with nothing lit.
    */
   initial?: { width: number; height: number; fps: number };
+  /**
+   * The most bytes a finished video may have: this app's upload limit, when it has one. Rounded down
+   * to whole bytes; absent, or anything that does not round down to at least one byte - zero, a
+   * negative, a fraction under one, not a finite number - is no ceiling at all, which is what every
+   * host had before this.
+   *
+   * It is a limit on the FILE and not on the rungs, so it greys out nothing. The quality sheet marks
+   * a rung whose size estimate is over it, and the customer may still choose it, because the rate
+   * behind an estimate is one the encoder is allowed to spend less than: a still or dark post often
+   * comes in well under. The render is what holds the file to it - the editor hands it on as
+   * [RenderRequest.maxBytes] for `toComposeSpec` to write as the spec's `output.maxBytes` - and a
+   * render that passes it fails `too_large`, which the editor says in a sentence of its own.
+   *
+   * An app that builds 4K for its own use sets none. One that posts to a server refusing anything
+   * over 100 MB sets that, and a customer who picks 4K for a long post is told before the upload
+   * rather than by it.
+   */
+  maxBytes?: number;
 }
 
 /**
@@ -297,17 +315,46 @@ export interface EditorVoiceHost {
   stop(): Promise<{ uri: string; durationMs: number }>;
 }
 
-/** How a render ended without a video. The editor shows a different sentence for each. */
-export type RenderFailureCode = 'no_space' | 'unreadable_input' | 'unknown';
+/**
+ * How a render ended without a video. The editor shows a different sentence for each.
+ *
+ * `too_large` is the composer's own code of that name: the file passed [EditorOutputOptions.maxBytes].
+ */
+export type RenderFailureCode = 'no_space' | 'unreadable_input' | 'too_large' | 'unknown';
+
+/**
+ * The mark every [RenderFailedError] carries, under a registered symbol so that every copy of the
+ * class on the page writes and reads the same key.
+ */
+const RENDER_FAILED: unique symbol = Symbol.for('capacitor-video-kit.render-failed');
 
 /**
  * What `EditorRenderHost.render` rejects with when it could not produce a file.
  *
  * A class rather than a code on a plain Error because the editor has to tell a disk that filled up
- * from a clip it cannot read, and `instanceof` is the one test that survives a host wrapping the
- * rejection on its way back up.
+ * from a clip it cannot read, and `instanceof` is the test a host reaches for.
+ *
+ * `instanceof` is answered by a brand rather than by the prototype chain, because a page holds
+ * several copies of this class and there is no arranging that away. The editor's own bundle has
+ * one, `capacitor-video-kit/dist/components` and `capacitor-video-kit/ui` are other builds with one
+ * each, and the plugin at the package root has one for `composerRenderHost` to throw. By the
+ * prototype chain an error from one copy is not an instance of another. The editor stopped relying
+ * on that some time ago and reads a failure's `name` and code as well (`renderFailureCode` in
+ * `ve-editor.tsx`), so the customer hears the right sentence either way; what the brand fixes is
+ * `instanceof` everywhere else. A host that tested a failure with the class from one door and got it
+ * from another was told it was not a `RenderFailedError`, which is why a host once had to take the
+ * class from the lazily loaded editor chunk rather than import it, and an error whose `name`
+ * something rewrote on its way up was not recognised by any test. Each instance carries the
+ * `Symbol.for` key above, the same key in every copy, and each copy's `instanceof` looks for it. A
+ * subclass, should anyone write one, is still tested by its prototype chain, since the brand says
+ * only that something is a `RenderFailedError`.
  */
 export class RenderFailedError extends Error {
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    if (this === RenderFailedError && typeof value === 'object' && value !== null && RENDER_FAILED in value) return true;
+    return Function.prototype[Symbol.hasInstance].call(this, value);
+  }
+
   constructor(
     readonly code: RenderFailureCode,
     message: string,
@@ -316,6 +363,8 @@ export class RenderFailedError extends Error {
   ) {
     super(message);
     this.name = 'RenderFailedError';
+    // Not enumerable, so the mark stays out of a logged error and out of anything that copies one.
+    Object.defineProperty(this, RENDER_FAILED, { value: true });
   }
 }
 
@@ -340,7 +389,9 @@ export interface EditorRenderHost {
    * Turns the edit into a file. Rejects with [RenderFailedError].
    *
    * The editor has already made every layer's bitmap current before this is called, so the host
-   * only has to call `toComposeSpec` with the same raster context and run it.
+   * only has to call `toComposeSpec` with [RenderRequest.raster] and run it. On Capacitor, and in a
+   * browser the package's web composer can render in, that is all `composerRenderHost()` from the
+   * package root does, and a host has nothing of this to write.
    */
   render(request: RenderRequest): Promise<EditorSource>;
 
@@ -368,13 +419,36 @@ export interface RenderRequest {
    * the file or with a failure - is ignored either way.
    */
   signal: AbortSignal;
+  /**
+   * [EditorOutputOptions.maxBytes] as the editor resolved it, absent when the host set none. Handed
+   * back so a render passes it to `toComposeSpec` rather than keep a second copy of the number,
+   * which is what keeps the ceiling the quality sheet warned about and the one the render is held
+   * to the same ceiling.
+   */
+  maxBytes?: number;
+  /**
+   * What `toComposeSpec` draws this render's layers with: the context the editor's own preview draws
+   * with, made for the frame this render is at. A render passes it on as it comes.
+   *
+   * Handed over rather than built by the host because only the editor's bundle can build it
+   * correctly. The sticker URLs in it resolve against the package's asset base, which falls back to
+   * the base of the Stencil runtime the editor was loaded with, and a context built from any other
+   * copy of the package - the plugin at its root has no Stencil runtime at all - can point a sticker
+   * somewhere else and burn a different picture into the file than the customer saw. Its `fileUrl`
+   * is the host's own `platform.fileUrl`, and its `output` is `manifest.output`, because every
+   * layer's pixel size is measured against the frame: a context left on the default frame would
+   * draw a 4K post's caption at 720p and burn it in soft.
+   */
+  raster: RasterContext;
 }
 
 export interface EditorPlatformHost {
   /**
-   * A URL the WebView can load for whatever the picker or the recorder handed back. Defaults to the
-   * identity function, which is right for a plain web host. On Capacitor this is one line:
-   * `uri => /^(https?:|blob:|data:)/i.test(uri) ? uri : Capacitor.convertFileSrc(uri)`.
+   * A URL the WebView can load for whatever the picker or the recorder handed back. Defaults to
+   * `webViewUrl`, which the package root exports: in a page with Capacitor a `file://`, a
+   * `content://` or a bare path goes through `Capacitor.convertFileSrc`, and every other URL, and
+   * every URL in a page without Capacitor, comes back as it came. So a Capacitor host leaves this
+   * out; one whose files need something else - a server of its own - supplies it.
    */
   fileUrl?(uri: string): string;
 
@@ -390,9 +464,9 @@ export interface EditorPlatformHost {
   /**
    * Registers the editor's own back handler and returns an unsubscribe. The handler answers whether
    * it consumed the press; false means the editor has nothing left to close and the host should do
-   * whatever it does with a back press. Defaults to registering nothing. In a typical host this is
-   * `platform.backButton.subscribeWithPriority(101, handler)`, where 101 beats Ionic's overlay
-   * handler at 100.
+   * whatever it does with a back press. Defaults to registering nothing. An Ionic host passes
+   * `registerBackHandlerWith(platform)` with Ionic's `Platform`, which subscribes at 101, ahead of
+   * Ionic's overlay handler at 100, and passes a press the editor did not consume on.
    */
   registerBackHandler?(handler: () => boolean): () => void;
 
@@ -481,8 +555,8 @@ export interface VideoEditorResult extends EditorSnapshot {
  * file can find. It is null by default on every platform, the web included - the package does have a
  * browser engine now, behind `VideoComposer`, and reaching for it from here would pull the plugin
  * half into the editor half, which is the one dependency this package does not have. A host wires
- * it in the same two lines on a phone and in a page. Null, the editor greys nothing and simply hands
- * the manifest back unrendered.
+ * it in one line on a phone and in a page alike, `render: composerRenderHost()` from the package
+ * root. Null, the editor greys nothing and simply hands the manifest back unrendered.
  */
 export interface ResolvedEditorHost {
   media: EditorMediaHost;
@@ -504,6 +578,8 @@ export interface ResolvedOutputOptions {
   fps: readonly number[];
   aspects: readonly ('9:16' | '16:9')[];
   initial: { width: number; height: number; fps: number };
+  /** Whole bytes, or null for no ceiling: an absent or unusable [EditorOutputOptions.maxBytes]. */
+  maxBytes: number | null;
 }
 
 export interface ResolvedPlatformHost {

@@ -16,6 +16,12 @@ protocol RenderEngine {
     /// goes. Throws `CancellationError` when the task is cancelled, and leaves nothing at `url`
     /// whenever it throws. A cancel too late to stop the file may be answered with the finished
     /// file instead; `Exporter` is what turns that into a cancel.
+    ///
+    /// Holds the file to `spec.output.maxBytes` when there is one, in whatever way the engine can:
+    /// the writer stops with `ExportError.tooLarge` as soon as its file grows past it, and the
+    /// preset session is handed it as its `fileLengthLimit`. An engine may still hand back a file
+    /// over it - the session was measured overshooting a small one - which `Exporter` then refuses,
+    /// and the session may hand back one cut short at it, which `Exporter` refuses as too large too.
     static func encode(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
                        onProgress: @escaping @Sendable (Double) -> Void) async throws
 }
@@ -27,10 +33,29 @@ enum Exporter {
     /// Encodes with the writer engine, falls back to the preset session once when the encoder turns
     /// the writer down, and describes the file that results.
     ///
-    /// There is no size ceiling anywhere on this path, and that is the contract rather than an
-    /// omission: `MAX_UPLOAD_BYTES` in `edit-manifest.ts` is one host's limit and "is NOT applied to
-    /// anything here", and a host with a limit expresses it by the ladder rungs it offers. Android
-    /// and the web engine encode at the spec's rates with no limit either.
+    /// The only size ceiling on this path is the host's, `spec.output.maxBytes`, and with none
+    /// there is none: the kit has no upload limit of its own to apply, and one host's - choisy's
+    /// server refuses a file over 100 MB - is exactly what another host, lighsnip, which sets none
+    /// and offers 4K, must not be held to. With one, each engine holds the file to it as it can
+    /// (see `RenderEngine.encode`), and the finished file is checked against it here, after the
+    /// cancel and before anything describes it: a file over it is deleted and the render fails
+    /// `too_large`, as Android's and the web engine's do. Nothing refuses a render by an estimate
+    /// beforehand. The ladder's rates are averages, the encoder spends less on a quiet picture, and
+    /// a render the arithmetic puts over the ceiling often comes in under it.
+    ///
+    /// A `too_large` from the writer is not handed to the fallback. The preset would meet the
+    /// ceiling by picking a lower rate of its own, which is a quality nobody chose; the customer is
+    /// told the video is too big and picks a lower quality or a shorter video.
+    ///
+    /// A fallback that ran under a ceiling and handed back a file shorter than the timeline fails
+    /// `too_large` rather than `encoder`. The limit it was handed is what ends a session's file
+    /// early, and the length check would otherwise report an encoder that stopped, where the
+    /// contract has a file that would have been larger than the ceiling fail `too_large`, the one
+    /// answer that tells the customer what to change. Its `bytes` is the file's size, which is how
+    /// far it got - the contract's `bytes` for a render stopped partway - and so may read under the
+    /// ceiling it stopped at. Only the fallback is read this way: the writer stops itself at the
+    /// ceiling rather than hand back a short file, and a short file from it is an encoder that
+    /// stopped.
     ///
     /// The fallback is Android's one relaxed retry (`VideoComposerPlugin.kt`, `onError`): an
     /// encoder that refuses the request is given one more go with settings it picks for itself. A
@@ -51,12 +76,14 @@ enum Exporter {
                        engines: (first: RenderEngine.Type, fallback: RenderEngine.Type) = (WriterEngine.self, PresetEngine.self),
                        onProgress: @escaping @Sendable (Double) -> Void) async throws -> ComposeResult {
         var engine = engines.first
+        var fellBack = false
         do {
             try await engine.encode(built, to: url, tmpDir: tmpDir, spec: spec, onProgress: onProgress)
         } catch {
             guard !Task.isCancelled, !shouldStop(), isRetryable(error) else { throw error }
             log.error("\(engine.name, privacy: .public) was refused, encoding once more with \(engines.fallback.name, privacy: .public), which picks its own bitrate: \(ErrorMapping.describe(error), privacy: .public)")
             engine = engines.fallback
+            fellBack = true
             try await engine.encode(built, to: url, tmpDir: tmpDir, spec: spec, onProgress: onProgress)
         }
         // A cancel that lands while the file is being closed finds nothing left to stop - the
@@ -69,13 +96,42 @@ enum Exporter {
             try? FileManager.default.removeItem(at: url)
             throw CancellationError()
         }
+        if let maxBytes = spec.output.maxBytes {
+            let bytes = size(of: url)
+            if bytes > maxBytes {
+                try? FileManager.default.removeItem(at: url)
+                log.error("\(engine.name, privacy: .public) finished \(bytes) bytes against a ceiling of \(maxBytes)")
+                throw ExportError.tooLarge(maxBytes: maxBytes, bytes: bytes)
+            }
+        }
         // Neither engine promises to report 1. The registry clamps what it emits to 0.99 and lets
         // the `completed` event take the bar to 100.
         onProgress(1)
 
-        let result = try await ResultBuilder.describe(url, spec: spec, jobId: spec.jobId, totalMs: built.totalMs)
+        let result: ComposeResult
+        do {
+            result = try await ResultBuilder.describe(url, spec: spec, jobId: spec.jobId, totalMs: built.totalMs)
+        } catch ExportError.truncated(let produced, let expected) {
+            guard fellBack, let maxBytes = spec.output.maxBytes else {
+                throw ExportError.truncated(produced: produced, expected: expected)
+            }
+            let bytes = size(of: url)
+            try? FileManager.default.removeItem(at: url)
+            log.error("\(engine.name, privacy: .public) stopped at \(produced) of \(expected) ms and \(bytes) bytes under a ceiling of \(maxBytes)")
+            throw ExportError.tooLarge(maxBytes: maxBytes, bytes: bytes)
+        }
         logDeliveredRate(result, spec: spec, engine: engine.name, totalMs: built.totalMs)
         return result
+    }
+
+    /// How many bytes the file at `url` holds now, 0 when there is none.
+    ///
+    /// Read from the file system every time rather than from the URL's resource values, which a URL
+    /// caches once asked: both the writer's poll and the check of the finished file ask about a
+    /// file that has changed since, and a cached size would be the answer to an earlier question.
+    static func size(of url: URL) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     /// What landed on disk against what the ladder asked for. For the writer the two should agree
@@ -161,9 +217,19 @@ enum PresetEngine: RenderEngine {
 
     /// The session, configured and not yet started.
     ///
-    /// `fileLengthLimit` is left at its default of none, and deliberately: a limit is a host's
-    /// policy, and a session that meets one stops writing and hands back a video cut short rather
-    /// than a smaller one.
+    /// `fileLengthLimit` is the host's `output.maxBytes`, and left at its default of none when the
+    /// host sets none. How a session meets it is the session's own affair, seen rather than
+    /// promised. On the simulator it kept every frame of the timeline and lowered its own video
+    /// rate until the file fit: a 1.5 MB render held to 1 MB came back 0.99 MB and just as long.
+    /// The other way to meet a limit is to stop writing at it and hand back a file cut short, which
+    /// no simulator run did and no device run has been made to rule out; `Exporter` fails such a
+    /// file `too_large`, since the limit is what cut it. Apple promises only that the file "should
+    /// not exceed" the limit and may "slightly exceed" it, and it was seen doing more than that at
+    /// a limit too small for the sound alone - 177 KB against 100 KB, of which 136 KB was audio the
+    /// session leaves at its own rate. That is why `Exporter` still checks the finished file. The
+    /// session is not also watched as it writes, as the writer is: whichever way it meets its limit
+    /// it ends on its own, and what it overshoots by - the sound's share - is small by then and
+    /// found in the finished file all the same.
     static func session(for built: BuiltComposition, spec: ComposeSpec, tmpDir: URL) throws -> AVAssetExportSession {
         let presetName = preset(width: spec.output.width, height: spec.output.height)
         guard let session = AVAssetExportSession(asset: built.composition, presetName: presetName) else {
@@ -181,6 +247,7 @@ enum PresetEngine: RenderEngine {
         session.shouldOptimizeForNetworkUse = true       // moov atom first, the feed streams it
         session.timeRange = CMTimeRange(start: .zero, duration: ms(built.totalMs))
         session.directoryForTemporaryFiles = tmpDir
+        if let maxBytes = spec.output.maxBytes { session.fileLengthLimit = maxBytes }
         // canPerformMultiplePassesOverSourceMediaData stays at its default false: a second pass
         // doubles an already slow export for quality the ladder never asked for.
         return session
@@ -254,9 +321,8 @@ enum ResultBuilder {
         let bytes = Thumbnailer.fileBytes(url)
         let measured = probed?.durationMs ?? 0
 
-        // How big the file is is not checked here or anywhere else in the package. A size ceiling
-        // is the host's policy, expressed by the rungs it offers, and a render refused for its size
-        // after the whole encode is a render the customer waited for and cannot have.
+        // How big the file is is not checked here: the host's ceiling, when it set one, was checked
+        // by `Exporter` before the file got this far, and without one there is nothing to check.
 
         // The truncation guard, and it only applies when the duration was actually measured: a
         // probe that failed tells us nothing about the file's length, and failing a good render on

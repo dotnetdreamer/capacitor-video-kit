@@ -112,8 +112,8 @@ extension PublishRecord {
 /// in-flight batch, and because each atomic write then stays small enough to be cheap on the
 /// progress path. It also matches Android's layout, so the two engines' records read the same.
 ///
-/// The lock exists for exactly one caller: `JobFolders.sweepOnLaunch` reads `phase(for:)` from a
-/// utility queue while everything else in the publisher runs on `PublisherSession.queue`.
+/// The lock exists for exactly one caller: `JobFolders.sweepOnLaunch` reads `holdsUnfinished` from
+/// a utility queue while everything else in the publisher runs on `PublisherSession.queue`.
 final class PublishStore: @unchecked Sendable {
     static let shared = PublishStore()
 
@@ -125,10 +125,10 @@ final class PublishStore: @unchecked Sendable {
     private var records: [String: PublishRecord] = [:]
     private var loaded = false
 
+    /// Library/Application Support/background-publisher/, below `JobFolders.applicationSupport`
+    /// so that a test that puts a folder of its own there moves this too.
     static var root: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("background-publisher", isDirectory: true)
+        JobFolders.applicationSupport.appendingPathComponent("background-publisher", isDirectory: true)
     }
 
     /// The request bodies: the multipart envelopes, or the copies a raw PUT sends. Deliberately NOT
@@ -136,7 +136,15 @@ final class PublishStore: @unchecked Sendable {
     /// would delete a live body out from under a running upload task.
     static func bodiesDir(_ batchId: String) -> URL {
         root.appendingPathComponent("bodies", isDirectory: true)
-            .appendingPathComponent(PublishModels.safe(batchId), isDirectory: true)
+            .appendingPathComponent(bodiesName(batchId), isDirectory: true)
+    }
+
+    /// `PublishModels.safe` keeps `.`, so on its own it would make the bodies of a batch called `..`
+    /// the store's own root, and `delete` - which `clear` makes for any id at all - would take every
+    /// record and every body with it. `JobFolders.childName` makes that `__`, and `.` `_`, and leaves
+    /// every other name as it has always been.
+    private static func bodiesName(_ batchId: String) -> String {
+        JobFolders.childName(PublishModels.safe(batchId))
     }
 
     /// Reads every record into memory once, drops the ones that will not decode, and sweeps. Safe
@@ -270,17 +278,26 @@ final class PublishStore: @unchecked Sendable {
         return base
     }
 
-    /// For `JobFolders.sweep`, which must never delete a folder whose batch is still in flight or
-    /// has failed and not yet been answered. nil means there is no record for that batch at all.
-    func phase(for batchId: String) -> String? {
+    /// Whether a publish that is not done - queued, uploading, creating, failed or cancelled - owns
+    /// the job folder called `folder`, for `JobFolders.isSweepable`, which must never delete one.
+    ///
+    /// Asked by the FOLDER's name, because that is all the sweep has, and matched through
+    /// `JobFolders.folderName`, the one function that names a batch's folder: the records are keyed
+    /// by the raw batch id, and `post:1`'s folder is `post_1`, so a lookup of the folder name among
+    /// the keys found only the ids that needed no renaming. Not through `PublishModels.safe`, which
+    /// names the record files and keeps a whole `Character` as one underscore where `sanitize`
+    /// makes one of every UTF-16 unit, so the two part ways over an emoji or an accent written as a
+    /// combining mark. Every record that lands in the folder is asked, since two ids can share one
+    /// (`post:1` and `post_1`), and one of them not done is enough to keep it.
+    func holdsUnfinished(folder: String) -> Bool {
         // Self-initialising, because this is the one entry point that can arrive before the session
-        // has been built. Answering nil there would tell the composer's sweep that a batch nobody
+        // has been built. Answering false there would tell the composer's sweep that a batch nobody
         // has answered yet is garbage. `load()` takes the lock itself and returns at once when it
         // has already run, so the two acquisitions are sequential and never nested.
         load()
         lock.lock()
         defer { lock.unlock() }
-        return records[batchId]?.phase
+        return records.values.contains { $0.phase != Phase.done && JobFolders.folderName($0.batchId) == folder }
     }
 
     /* ---------------------------------------------------------------------------------------- */
@@ -320,7 +337,7 @@ final class PublishStore: @unchecked Sendable {
         }
         // Bodies whose record is gone. A 100 MB body left behind by a cleared batch would
         // otherwise sit in Application Support until the app is deleted.
-        let live = Set(records.keys.map { PublishModels.safe($0) })
+        let live = Set(records.keys.map(Self.bodiesName))
         let bodies = Self.root.appendingPathComponent("bodies", isDirectory: true)
         let dirs = (try? FileManager.default.contentsOfDirectory(at: bodies, includingPropertiesForKeys: nil)) ?? []
         for dir in dirs where !live.contains(dir.lastPathComponent) {

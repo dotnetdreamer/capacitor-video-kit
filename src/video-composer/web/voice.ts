@@ -1,4 +1,5 @@
 import { describe, putFile } from '../../web-runtime/files';
+import { batchIdRefusal } from '../batch-id';
 import type { VoiceRecordingResult } from '../definitions';
 
 import { canRecordVoice } from './capabilities';
@@ -86,7 +87,9 @@ export async function startVoiceRecording(batchId?: string): Promise<void> {
     stream,
     chunks,
     startedAt: Date.now(),
-    batchId: batchId && batchId.length > 0 ? batchId : 'voice-cache',
+    // A batch id that names no folder of its own ([batchIdRefusal]) - empty, `.` or `..` - is a take
+    // with no batch, as on iOS and Android, rather than one filed in some other batch's folder.
+    batchId: batchIdRefusal(batchId) === null ? (batchId as string) : 'voice-cache',
     mimeType: recorder.mimeType || mimeType || 'audio/webm',
   };
 }

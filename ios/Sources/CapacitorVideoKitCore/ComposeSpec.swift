@@ -238,6 +238,12 @@ struct ComposeOutput: Sendable {
     let fps: Int
     let videoBitrate: Int
     let audioBitrate: Int
+    /// The most bytes the finished file may have, or nil for no ceiling at all. It is the host's
+    /// upload limit - choisy's server refuses a file over 100 MB, lighsnip has none - and the kit
+    /// holds the render to it rather than pick one of its own: the writer stops once its file grows
+    /// past it, the preset session is told it, and `Exporter` checks the finished file against it.
+    /// Rounded down to a whole byte, because a file has no fraction of one.
+    let maxBytes: Int64?
 }
 
 /// A CSS Filter Effects operation in gamma-encoded sRGB. The list is folded into one 3x3 plus bias

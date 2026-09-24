@@ -153,7 +153,13 @@ enum PublishModels {
     /// empty coding path, so it cannot say `invalid_request:uploads[1].path`, which is the whole
     /// value of these messages.
     static func parse(_ call: CAPPluginCall) throws -> PublishRequest {
-        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
+        // Empty, `.` or `..` (`JobFolders.batchIdRefusal`) as well as missing. The publisher files a
+        // batch under names made from its id - its bodies folder (`PublishStore.bodiesDir`) and its
+        // job folder's done marker (`JobFolders.doneMarker`) - and both rename `.` and `..` to `_`
+        // and `__`, which are other batches' names: `clear` of `..` would delete the live bodies of
+        // a publish called `__`, and a `..` publish that finished would mark `__`'s job folder done
+        // for the sweep. Refused, as the composer's `prepareJob` refuses them, rather than renamed.
+        guard let batchId = call.getString("batchId"), JobFolders.batchIdRefusal(batchId) == nil else {
             throw PublishRequestError(message: "invalid_request:batchId")
         }
 

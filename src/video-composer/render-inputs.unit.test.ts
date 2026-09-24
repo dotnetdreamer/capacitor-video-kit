@@ -18,7 +18,7 @@ vi.mock('@capacitor/core', () => ({
   WebPlugin: class {},
 }));
 
-import { extensionFor, withNativeRenderInputs } from './render-inputs';
+import { RenderInputError, extensionFor, withNativeRenderInputs } from './render-inputs';
 
 const MIB = 1024 * 1024;
 
@@ -211,6 +211,55 @@ describe('withNativeRenderInputs', () => {
 
     await expect(withNativeRenderInputs(musicOnly('blob:app/revoked'), vi.fn())).rejects.toThrow('404');
     expect(bridge.stageRenderInput).not.toHaveBeenCalled();
+  });
+
+  /*
+   * In the composer's own terms, so a render host reads it as it reads a job's `failed` event: a
+   * blob that will not read is the clip it belongs to, by its wire key, and a sound names none.
+   */
+  it('reports an input it could not read as unreadable_input, naming the clip whose URL it was', async () => {
+    const layer = spec();
+    layer.tracks![0]!.clips[0]!.uri = 'blob:app/revoked';
+    const unread = await withNativeRenderInputs(layer, vi.fn()).catch((error: unknown) => error);
+    expect(unread).toBeInstanceOf(RenderInputError);
+    expect(unread).toMatchObject({ code: 'unreadable_input', clipKey: 'c', message: 'Could not read a render input: HTTP 404' });
+
+    // A transition's outgoing side is its own segment, under its own key.
+    const outgoing = spec();
+    outgoing.clips[1]!.transitionIn!.from = clip('a-tail', 'blob:app/revoked');
+    await expect(withNativeRenderInputs(outgoing, vi.fn())).rejects.toMatchObject({ code: 'unreadable_input', clipKey: 'a-tail' });
+
+    // A revoked blob, as a WebView's fetch reports one.
+    fetchInput.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const revoked = await withNativeRenderInputs(spec(), vi.fn()).catch((error: unknown) => error);
+    expect(revoked).toMatchObject({ code: 'unreadable_input', clipKey: 'a', message: 'Could not read a render input: TypeError: Failed to fetch' });
+
+    const music = await withNativeRenderInputs(musicOnly('blob:app/revoked'), vi.fn()).catch((error: unknown) => error);
+    expect(music).toMatchObject({ code: 'unreadable_input' });
+    expect((music as RenderInputError).clipKey).toBeUndefined();
+  });
+
+  it('reports a write a full disk refused as no_space, and any other as unknown, blaming no clip', async () => {
+    bridge.stageRenderInput.mockRejectedValueOnce(Object.assign(new Error('No space left on device'), { code: 'no_space' }));
+    const full = await withNativeRenderInputs(spec(), vi.fn()).catch((error: unknown) => error);
+    expect(full).toBeInstanceOf(RenderInputError);
+    expect(full).toMatchObject({ code: 'no_space', message: 'Could not write a render input: No space left on device' });
+    expect((full as RenderInputError).clipKey).toBeUndefined();
+
+    bridge.stageRenderInput.mockRejectedValueOnce(Object.assign(new Error('data is required'), { code: 'invalid_spec' }));
+    await expect(withNativeRenderInputs(spec(), vi.fn())).rejects.toMatchObject({ code: 'unknown' });
+  });
+
+  /* The customer backing out is not a broken input: the fetch the signal stopped rejects as the abort. */
+  it('rejects with the abort, not an unreadable input, when the signal stops a read', async () => {
+    const controller = new AbortController();
+    fetchInput.mockImplementationOnce(async () => {
+      controller.abort(new Error('left the editor'));
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    });
+
+    const failure = await withNativeRenderInputs(spec(), vi.fn(), controller.signal).catch((error: unknown) => error);
+    expect(failure).toBe(controller.signal.reason);
   });
 
   /* A finished video is not an error because a temporary file could not be deleted: the launch sweep takes it. */

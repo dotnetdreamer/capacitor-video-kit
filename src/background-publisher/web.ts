@@ -1,5 +1,6 @@
 import { WebPlugin } from '@capacitor/core';
 
+import { batchIdRefusal } from '../video-composer/batch-id';
 import { describe } from '../web-runtime/files';
 
 import type { BackgroundPublisherPlugin, BatchOptions, PublishRequest, PublishState, RetryOptions } from './definitions';
@@ -67,7 +68,7 @@ export class BackgroundPublisherWeb extends WebPlugin implements BackgroundPubli
 
   /** `null` when nothing is known about this batch - it never started, or its record was cleared. */
   async getState(options: BatchOptions): Promise<{ state: PublishState | null }> {
-    const batchId = required(options?.batchId, 'batchId');
+    const batchId = batchIdOf(options?.batchId);
     const entry = await loadEntry(batchId);
     if (!entry) return { state: null };
 
@@ -91,7 +92,7 @@ export class BackgroundPublisherWeb extends WebPlugin implements BackgroundPubli
 
   /** Stops the job. Ids already obtained are kept, so a retry does not re-send those files. */
   async cancel(options: BatchOptions): Promise<void> {
-    const batchId = required(options?.batchId, 'batchId');
+    const batchId = batchIdOf(options?.batchId);
     abort(batchId);
     await updateEntry(batchId, entry => {
       entry.state.phase = 'cancelled';
@@ -106,7 +107,7 @@ export class BackgroundPublisherWeb extends WebPlugin implements BackgroundPubli
 
   /** Re-queues from wherever it stopped, skipping files the server already has. */
   async retry(options: RetryOptions): Promise<void> {
-    const batchId = required(options?.batchId, 'batchId');
+    const batchId = batchIdOf(options?.batchId);
     const updated = await updateEntry(batchId, entry => {
       if (options.headers) {
         entry.request.headers = { ...entry.request.headers, ...options.headers };
@@ -126,7 +127,7 @@ export class BackgroundPublisherWeb extends WebPlugin implements BackgroundPubli
 
   /** Forgets the record entirely. Does not touch the caller's own files - only our copies. */
   async clear(options: BatchOptions): Promise<void> {
-    const batchId = required(options?.batchId, 'batchId');
+    const batchId = batchIdOf(options?.batchId);
     abort(batchId);
     await deleteEntry(batchId);
   }
@@ -166,7 +167,7 @@ export class BackgroundPublisherWeb extends WebPlugin implements BackgroundPubli
 function validate(input: PublishRequest): PublishRequest {
   const request = input as Partial<PublishRequest> | null | undefined;
   if (!request || typeof request !== 'object') throw invalidRequest('request');
-  const batchId = required(request.batchId, 'batchId');
+  const batchId = batchIdOf(request.batchId);
 
   const transport = request.upload;
   if (!transport || typeof transport !== 'object') throw invalidRequest('upload');
@@ -224,6 +225,17 @@ function validate(input: PublishRequest): PublishRequest {
 function required(value: string | undefined, name: string): string {
   if (typeof value !== 'string' || value.length === 0) throw invalidRequest(name);
   return value;
+}
+
+/**
+ * A call's `batchId`, refused as `invalid_request:batchId` when it is missing, `.` or `..`
+ * ([batchIdRefusal]). A browser keeps a batch under an IndexedDB key nothing climbs out of, but iOS
+ * files a batch's bodies and done marker under names made from its id, where `.` and `..` would be
+ * some other batch's, and both phones refuse them: a call refused on a phone is refused here too.
+ */
+function batchIdOf(value: string | undefined): string {
+  if (batchIdRefusal(value) !== null) throw invalidRequest('batchId');
+  return value as string;
 }
 
 function invalidRequest(path: string): Error {

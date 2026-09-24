@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import net.dotnetdreamer.videokit.videocomposer.JobFolders
 import org.json.JSONObject
 import java.io.File
 import java.lang.ref.WeakReference
@@ -119,11 +120,7 @@ class BackgroundPublisherPlugin : Plugin() {
 
     @PluginMethod
     fun getState(call: PluginCall) {
-        val batchId = call.getString("batchId")
-        if (batchId.isNullOrEmpty()) {
-            call.reject("batchId is required", INVALID_REQUEST)
-            return
-        }
+        val batchId = batchIdOf(call) ?: return
         val entry = store.load(batchId)
         if (entry == null) {
             call.resolve(JSObject().put("state", JSONObject.NULL))
@@ -148,11 +145,7 @@ class BackgroundPublisherPlugin : Plugin() {
 
     @PluginMethod
     fun cancel(call: PluginCall) {
-        val batchId = call.getString("batchId")
-        if (batchId.isNullOrEmpty()) {
-            call.reject("batchId is required", INVALID_REQUEST)
-            return
-        }
+        val batchId = batchIdOf(call) ?: return
         Workers.cancel(context.applicationContext, batchId)
         store.update(batchId) { entry ->
             entry.state.phase = Phase.CANCELLED
@@ -170,11 +163,7 @@ class BackgroundPublisherPlugin : Plugin() {
 
     @PluginMethod
     fun retry(call: PluginCall) {
-        val batchId = call.getString("batchId")
-        if (batchId.isNullOrEmpty()) {
-            call.reject("batchId is required", INVALID_REQUEST)
-            return
-        }
+        val batchId = batchIdOf(call) ?: return
         val headers = call.getObject("headers")
         val updated = store.update(batchId) { entry ->
             headers?.let { entry.request.headers = entry.request.headers + readHeaders(it) }
@@ -198,11 +187,7 @@ class BackgroundPublisherPlugin : Plugin() {
 
     @PluginMethod
     fun clear(call: PluginCall) {
-        val batchId = call.getString("batchId")
-        if (batchId.isNullOrEmpty()) {
-            call.reject("batchId is required", INVALID_REQUEST)
-            return
-        }
+        val batchId = batchIdOf(call) ?: return
         Workers.cancel(context.applicationContext, batchId)
         // Only the record goes; the files belong to whoever put them there.
         store.delete(batchId)
@@ -212,6 +197,24 @@ class BackgroundPublisherPlugin : Plugin() {
     }
 
     /* ======================================================================================== */
+
+    /**
+     * The call's `batchId`, or null once the call has been rejected `invalid_request` because the id
+     * is missing, `.` or `..`, in [JobFolders.batchIdRefusal]'s words. Those two name no batch of
+     * their own on iOS, which files a batch's bodies and done marker under names made from its id
+     * and would file them under `_`'s and `__`'s, so iOS refuses them (`BackgroundPublisherPlugin`'s
+     * `required`) and this engine and the web's do too: the same call is refused on every platform,
+     * even though a record here is only ever `<safe id>.json`. [publish] does not use it: its id check comes out of
+     * [PublishRequest.from], which reports the path (`invalid_request:batchId`) like every field.
+     */
+    private fun batchIdOf(call: PluginCall): String? {
+        val batchId = call.getString("batchId").orEmpty()
+        JobFolders.batchIdRefusal(batchId)?.let {
+            call.reject(it, INVALID_REQUEST)
+            return null
+        }
+        return batchId
+    }
 
     private fun readHeaders(o: JSObject): Map<String, String> {
         val map = LinkedHashMap<String, String>()

@@ -22,11 +22,14 @@ enum JobState: String, Sendable { case pending, rendering, interrupted, done, fa
 /// `CancellationError` and only this tells them apart.
 enum StopReason: Sendable { case cancelled, interrupted, timeout }
 
-/// Exactly the eight strings of the TypeScript `ComposeFailureCode` union.
+/// Exactly the nine strings of the TypeScript `ComposeFailureCode` union.
 enum ComposeFailureCode: String, Sendable {
     case unreadableInput = "unreadable_input"
     case encoder, muxer, interrupted, cancelled
     case noSpace = "no_space"
+    /// The file would have been larger than the host's `output.maxBytes`. Android's `failed` event
+    /// and the web engine's carry the same string.
+    case tooLarge = "too_large"
     case unsupported, unknown
 }
 
@@ -101,12 +104,18 @@ enum BuildError: Error {
 }
 
 /// Thrown by `Exporter` and its engines, for the failures that are ours rather than AVFoundation's.
-/// The first two are the preset fallback's guards around `AVAssetExportSession`; the writer engine
-/// throws AVFoundation's own errors. The size of the output is not among them: a size ceiling is the
-/// host's to apply, and the package applies none.
+/// The first two are the preset fallback's guards around `AVAssetExportSession`; `tooLarge` is the
+/// host's size ceiling, which either engine and `Exporter`'s check of the finished file can meet;
+/// `truncated` is the check of the finished file's length, which `Exporter` turns into `tooLarge`
+/// for a fallback that ran under a ceiling. Everything else the writer engine throws is
+/// AVFoundation's own.
 enum ExportError: Error {
     case presetUnavailable
     case fileTypeUnsupported
+    /// `bytes` is how far the file had got when it was found past `maxBytes`: the writer's size at
+    /// the poll that caught it, or the finished file's - which for a fallback the ceiling cut short
+    /// is the size it stopped at, and may be under `maxBytes` (see `Exporter.export`).
+    case tooLarge(maxBytes: Int64, bytes: Int64)
     case truncated(produced: Int64, expected: Int64)
 
     var asFailure: ComposeFailure {
@@ -115,6 +124,10 @@ enum ExportError: Error {
             return ComposeFailure(code: .unsupported, message: "preset_unavailable")
         case .fileTypeUnsupported:
             return ComposeFailure(code: .unsupported, message: "mp4_unsupported")
+        case .tooLarge(let maxBytes, let bytes):
+            // The contract's literal format, the same on every engine, so a host can log one line
+            // whichever platform sent it.
+            return ComposeFailure(code: .tooLarge, message: "too_large max=\(maxBytes) bytes=\(bytes)")
         case .truncated(let produced, let expected):
             // The container closed cleanly and is short, which is an encoder that stopped early
             // rather than a muxer that could not write.

@@ -4,7 +4,8 @@ import XCTest
 
 /// How an export ends when it does not simply succeed: the one fallback to the preset session and
 /// the cases that must not take it, a cancel partway through - including into a render whose frames
-/// have stopped coming, and as its file closes - and the absence of any size ceiling.
+/// have stopped coming, and as its file closes - and the host's size ceiling, `output.maxBytes`,
+/// which fails a render `too_large` when it is set and holds nothing back when it is not.
 final class ExportFailureTests: RenderTestCase {
 
     // MARK: - The fallback
@@ -167,38 +168,263 @@ final class ExportFailureTests: RenderTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: out.path), "the closed file was kept")
     }
 
-    // MARK: - No size ceiling
+    // MARK: - The size ceiling
 
-    func testThePresetSessionCarriesNoFileLengthLimit() async throws {
-        let source = try await TestMedia.video(file("red.mp4"), durationMs: 500, color: .red)
-        let job = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 500)]))
-        defer { job.cleanup() }
+    func testTheCeilingAloneDecidesWhetherTheSameRenderFails() async throws {
+        // Eight seconds of noise at 4 Mbps, about four megabytes finished: long enough that a render
+        // stopped at its first look at the file is stopped a long way short of the end.
+        let source = try await TestMedia.noise(file("noise.mp4"), durationMs: 8000, audio: true)
+        func spec(maxBytes: Double?) throws -> ComposeSpec {
+            var output: [String: Any] = ["width": 360, "height": 640, "fps": 30,
+                                         "videoBitrate": 4_000_000, "audioBitrate": 128_000]
+            if let maxBytes { output["maxBytes"] = maxBytes }
+            return try TestCalls.parse(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 8000)],
+                                                      ["output": output]))
+        }
 
-        let session = try PresetEngine.session(for: job.built, spec: job.spec, tmpDir: job.tmpDir)
-        // Zero is AVAssetExportSession's "no limit". The session used to carry 90 MiB, which cut a
-        // long or high-rate render short instead of encoding it.
-        XCTAssertEqual(session.fileLengthLimit, 0)
+        let unlimited = try spec(maxBytes: nil)
+        let free = try await Registry.render(unlimited)
+        defer { JobFolders.cleanup(batchId: unlimited.batchId) }
+        XCTAssertEqual(free["state"] as? String, "done", "\(free)")
+        let bytes = try XCTUnwrap((free["result"] as? [String: Any])?["bytes"] as? Int64)
+        XCTAssertGreaterThan(bytes, 2_000_000, "the render the ceilings below are measured against")
+
+        // Just over the finished size. The look at the file while it is written counts what the
+        // writer has written and nothing else, so a render that fits is not stopped for one that
+        // only seemed not to: a file counted twice, or a stale one counted with it, would fail here.
+        let roomy = try spec(maxBytes: (Double(bytes) * 1.03).rounded(.down))
+        let fits = try await Registry.render(roomy)
+        defer { JobFolders.cleanup(batchId: roomy.batchId) }
+        XCTAssertEqual(fits["state"] as? String, "done", "\(fits)")
+
+        // Just under it, which only the end of the render can find out: by the last look at the
+        // file, or by the check of the finished one.
+        let snug = Int64((Double(bytes) * 0.97).rounded(.down))
+        let justUnder = try spec(maxBytes: Double(snug))
+        let past = try await Registry.render(justUnder)
+        defer { JobFolders.cleanup(batchId: justUnder.batchId) }
+        XCTAssertEqual(past["state"] as? String, "failed", "\(past)")
+        let pastError = try XCTUnwrap(past["error"] as? [String: Any])
+        XCTAssertEqual(pastError["code"] as? String, "too_large")
+        let pastMessage = try XCTUnwrap(pastError["message"] as? String)
+        XCTAssertGreaterThan(try XCTUnwrap(Self.reachedBytes(pastMessage, max: snug), pastMessage), snug, pastMessage)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: JobFolders.stitched(justUnder.batchId).path),
+                       "a render past its ceiling was moved into place")
+
+        let tight = try spec(maxBytes: 200_000)
+        let over = try await Registry.render(tight)
+        defer { JobFolders.cleanup(batchId: tight.batchId) }
+        XCTAssertEqual(over["state"] as? String, "failed", "\(over)")
+        let error = try XCTUnwrap(over["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "too_large")
+        let message = try XCTUnwrap(error["message"] as? String)
+        let reached = try XCTUnwrap(Self.reachedBytes(message, max: 200_000), message)
+        XCTAssertGreaterThan(reached, 200_000, message)
+        // Stopped as the file grew, not at the end: well short of the finished size, and of the
+        // end of the timeline.
+        XCTAssertLessThan(reached, bytes / 2, message)
+        XCTAssertLessThan(over["progress"] as? Double ?? 1, 0.9, "\(over)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: JobFolders.part(tight.batchId, jobId: tight.jobId).path),
+                       "the part file was left behind")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: JobFolders.stitched(tight.batchId).path),
+                       "a render past its ceiling was moved into place")
+        XCTAssertEqual(Self.files(in: JobFolders.exportTmp(tight.batchId)), [], "the writer's temporary file was left behind")
     }
 
-    func testAFileOverTheOldCeilingIsDescribedNotRefused() async throws {
+    func testAFinishedFilePastTheCeilingIsDeletedAndFailsTooLarge() async throws {
         let source = try await TestMedia.video(file("red.mp4"), durationMs: 1000, color: .red)
-        let options = TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 1000)])
-        let (out, _) = try await TestRender.render(options, to: file("out.mp4"))
+        let job = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 1000)], [
+            "output": ["width": 360, "height": 640, "fps": 30, "videoBitrate": 2_000_000, "audioBitrate": 128_000,
+                       "maxBytes": Double(GrownEngine.size - 1)],
+        ]))
+        defer { job.cleanup() }
+        let out = file("out.mp4")
 
-        // Grown past the 100 MiB the package used to refuse after the whole encode, without writing
-        // 100 MiB: the extension is a hole in a sparse file, and the size is what is read back.
-        let ceiling: UInt64 = 104_857_600
-        let handle = try FileHandle(forWritingTo: out)
-        try handle.truncate(atOffset: ceiling + 10 * 1024 * 1024)
-        try handle.close()
+        do {
+            _ = try await Exporter.export(job.built, to: out, tmpDir: job.tmpDir, spec: job.spec,
+                                          engines: (GrownEngine.self, MustNotRunEngine.self)) { _ in }
+            XCTFail("a file past its ceiling was described")
+        } catch {
+            let failure = ErrorMapping.failure(for: error, stopReason: nil)
+            XCTAssertEqual(failure.code, .tooLarge)
+            XCTAssertEqual(failure.message, "too_large max=\(GrownEngine.size - 1) bytes=\(GrownEngine.size)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.path), "the file past its ceiling was kept")
+    }
 
-        // A fresh URL, because a URL caches the resource values it has been asked for, and this one
-        // was asked for its size when the render described it.
-        let grown = URL(fileURLWithPath: out.path)
-        let spec = try TestCalls.parse(options)
-        let result = try await ResultBuilder.describe(grown, spec: spec, jobId: spec.jobId, totalMs: 1000)
-        XCTAssertGreaterThan(UInt64(result.bytes), ceiling)
-        XCTAssertEqual(Double(result.durationMs), 1000, accuracy: 70)
+    func testAFileAtItsCeilingOrWithNoneOfAnySizeIsDescribed() async throws {
+        let source = try await TestMedia.video(file("red.mp4"), durationMs: 1000, color: .red)
+        let output: [String: Any] = ["width": 360, "height": 640, "fps": 30,
+                                     "videoBitrate": 2_000_000, "audioBitrate": 128_000]
+        var atCeiling = output
+        atCeiling["maxBytes"] = Double(GrownEngine.size)
+
+        // Past the 100 MiB the package used to refuse whatever the host wanted, and exactly at a
+        // ceiling, which is the most a file may have rather than more than it.
+        for output in [output, atCeiling] {
+            let job = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 1000)], ["output": output]))
+            defer { job.cleanup() }
+            let result = try await Exporter.export(job.built, to: file("out.mp4"), tmpDir: job.tmpDir, spec: job.spec,
+                                                   engines: (GrownEngine.self, MustNotRunEngine.self)) { _ in }
+            XCTAssertEqual(result.bytes, GrownEngine.size, "\(output)")
+            XCTAssertEqual(Double(result.durationMs), 1000, accuracy: 70)
+        }
+    }
+
+    func testThePresetSessionIsHandedTheCeiling() async throws {
+        let source = try await TestMedia.video(file("red.mp4"), durationMs: 500, color: .red)
+        let unlimited = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 500)]))
+        defer { unlimited.cleanup() }
+        let limited = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 500)], [
+            "output": ["width": 360, "height": 640, "fps": 30, "videoBitrate": 2_000_000, "audioBitrate": 128_000,
+                       "maxBytes": 100_000_000],
+        ]))
+        defer { limited.cleanup() }
+
+        // Zero is AVAssetExportSession's "no limit". A host that sets none gets none, as lighsnip
+        // does; the 90 MiB the session once carried for every host cut a long render short.
+        let free = try PresetEngine.session(for: unlimited.built, spec: unlimited.spec, tmpDir: unlimited.tmpDir)
+        XCTAssertEqual(free.fileLengthLimit, 0)
+        let held = try PresetEngine.session(for: limited.built, spec: limited.spec, tmpDir: limited.tmpDir)
+        XCTAssertEqual(held.fileLengthLimit, 100_000_000)
+    }
+
+    func testTheFallbacksFinishedFileIsHeldToTheCeiling() async throws {
+        // The session given a limit below what its sound alone takes, which it was measured
+        // overshooting: the check of the finished file is what fails it.
+        let source = try await TestMedia.noise(file("noise.mp4"), durationMs: 4000, audio: true)
+        let job = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 4000)], [
+            "output": ["width": 360, "height": 640, "fps": 30, "videoBitrate": 4_000_000, "audioBitrate": 128_000,
+                       "maxBytes": 100_000],
+        ]))
+        defer { job.cleanup() }
+        let out = file("out.mp4")
+
+        do {
+            _ = try await Exporter.export(job.built, to: out, tmpDir: job.tmpDir, spec: job.spec,
+                                          engines: (RefusedEngine.self, PresetEngine.self)) { _ in }
+            XCTFail("the fallback's file past its ceiling was described")
+        } catch {
+            let failure = ErrorMapping.failure(for: error, stopReason: nil)
+            XCTAssertEqual(failure.code, .tooLarge, "\(error)")
+            XCTAssertNotNil(Self.reachedBytes(failure.message, max: 100_000), failure.message)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.path), "the file past its ceiling was kept")
+    }
+
+    func testAFallbackCutShortUnderACeilingFailsTooLarge() async throws {
+        // Two seconds of timeline, and a fallback that hands back half a second of it, as a session
+        // that met its `fileLengthLimit` by stopping would.
+        let source = try await TestMedia.video(file("red.mp4"), durationMs: 2000, color: .red)
+        _ = try await TestMedia.video(CutShortEngine.short, durationMs: 500, color: .red)
+        defer { try? FileManager.default.removeItem(at: CutShortEngine.short) }
+        let shortBytes = Exporter.size(of: CutShortEngine.short)
+        let output: [String: Any] = ["width": 360, "height": 640, "fps": 30,
+                                     "videoBitrate": 2_000_000, "audioBitrate": 128_000]
+        var held = output
+        held["maxBytes"] = 100_000_000
+        let out = file("out.mp4")
+        func failure(_ output: [String: Any],
+                     _ engines: (first: RenderEngine.Type, fallback: RenderEngine.Type)) async throws -> ComposeFailure? {
+            let job = try await Job(TestSpecs.spec([TestSpecs.clip("seg-1", source, outMs: 2000)], ["output": output]))
+            defer { job.cleanup() }
+            do {
+                _ = try await Exporter.export(job.built, to: out, tmpDir: job.tmpDir, spec: job.spec,
+                                              engines: engines) { _ in }
+                return nil
+            } catch {
+                return ErrorMapping.failure(for: error, stopReason: nil)
+            }
+        }
+
+        // The limit is what cut it, so it is the ceiling the customer is told about, at the size it
+        // stopped at.
+        let cut = try await failure(held, (RefusedEngine.self, CutShortEngine.self))
+        XCTAssertEqual(cut?.code, .tooLarge)
+        XCTAssertEqual(cut?.message, "too_large max=100000000 bytes=\(shortBytes)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.path), "the file the ceiling cut short was kept")
+
+        // With no ceiling the fallback had no limit to stop at, and the writer stops itself at one
+        // rather than hand back a short file: either way a short file is an encoder that stopped.
+        let unlimited = try await failure(output, (RefusedEngine.self, CutShortEngine.self))
+        XCTAssertEqual(unlimited?.code, .encoder)
+        XCTAssertEqual(unlimited?.message.hasPrefix("truncated "), true, unlimited?.message ?? "described")
+        let writer = try await failure(held, (CutShortEngine.self, MustNotRunEngine.self))
+        XCTAssertEqual(writer?.code, .encoder)
+        XCTAssertEqual(writer?.message.hasPrefix("truncated "), true, writer?.message ?? "described")
+    }
+
+    func testTheParserReadsOnlyANumberOfAtLeastOneByteAsACeiling() throws {
+        func ceiling(_ value: Any?) throws -> Int64? {
+            var output: [String: Any] = ["width": 360, "height": 640, "fps": 30,
+                                         "videoBitrate": 2_000_000, "audioBitrate": 128_000]
+            if let value { output["maxBytes"] = value }
+            let spec = try TestCalls.parse(TestSpecs.spec([TestSpecs.clip("seg-1", file("a.mp4"), outMs: 1000)],
+                                                          ["output": output]))
+            return spec.output.maxBytes
+        }
+        // Every one of these is no ceiling, and none of them is a refusal: a host that sends a bad
+        // limit has still asked for a video.
+        XCTAssertNil(try ceiling(nil), "absent")
+        XCTAssertNil(try ceiling(NSNull()), "null")
+        XCTAssertNil(try ceiling(0), "zero")
+        XCTAssertNil(try ceiling(-100_000_000), "negative")
+        XCTAssertNil(try ceiling(Double.nan), "NaN")
+        XCTAssertNil(try ceiling(Double.infinity), "infinite")
+        XCTAssertNil(try ceiling("100000000"), "not a number")
+        // Under one byte once rounded down, as the web's `byteCeiling` reads it: a ceiling of 0
+        // would fail every render the web engine renders with no ceiling at all.
+        XCTAssertNil(try ceiling(0.5), "a fraction under one")
+
+        XCTAssertEqual(try ceiling(100_000_000), 100_000_000)
+        XCTAssertEqual(try ceiling(1000.7), 1000, "a file has no fraction of a byte")
+        XCTAssertEqual(try ceiling(1e30), Int64.max, "past what a file can reach")
+    }
+
+    func testTheDiskIsAskedForNoMoreThanTheCeilingLetsTheFileReach() throws {
+        // Ten minutes at 12 Mbps, which the bitrate says is about a gigabyte.
+        func spec(maxBytes: Double?) throws -> ComposeSpec {
+            var output: [String: Any] = ["width": 1080, "height": 1920, "fps": 30,
+                                         "videoBitrate": 11_808_000, "audioBitrate": 192_000]
+            if let maxBytes { output["maxBytes"] = maxBytes }
+            return try TestCalls.parse(TestSpecs.spec([TestSpecs.clip("seg-1", file("a.mp4"), outMs: 600_000)],
+                                                      ["output": output]))
+        }
+        let mib: Int64 = 1024 * 1024
+        // Android's figures: the bitrate product and fifteen percent more, the container, the margin.
+        let uncapped = Int64(12_000_000.0 / 8 * 600 * 1.15) + 4 * mib + 20 * mib
+        XCTAssertEqual(JobRegistry.bytesNeeded(for: try spec(maxBytes: nil)), uncapped)
+
+        // A 100 MB ceiling: the ceiling and a fifth, half a second of the bitrate and the container
+        // past it, and the same margin.
+        let slack = Int64(12_000_000.0 / 8 * 1.15 * 0.5) + 4 * mib
+        XCTAssertEqual(JobRegistry.bytesNeeded(for: try spec(maxBytes: 100_000_000)),
+                       Int64(100_000_000.0 * 1.2 + Double(slack)) + 20 * mib)
+
+        // A ceiling the estimate never reaches changes nothing.
+        XCTAssertEqual(JobRegistry.bytesNeeded(for: try spec(maxBytes: 5e9)), uncapped)
+        XCTAssertEqual(JobRegistry.bytesNeeded(for: try spec(maxBytes: 1e30)), uncapped)
+    }
+
+    /// The bytes a `too_large` message says the file reached, when the message is exactly the
+    /// contract's `too_large max=<maxBytes> bytes=<bytes>` for `max`; nil for any other text.
+    private static func reachedBytes(_ message: String, max: Int64) -> Int64? {
+        let prefix = "too_large max=\(max) bytes="
+        guard message.hasPrefix(prefix) else { return nil }
+        let digits = message.dropFirst(prefix.count)
+        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
+        return Int64(digits)
+    }
+
+    /// Every file in `folder` and below it, by its path inside it; empty when there is no folder.
+    private static func files(in folder: URL) -> [String] {
+        guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey])
+        else { return [] }
+        return walker.compactMap { item -> String? in
+            guard let url = item as? URL,
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { return nil }
+            return url.path.replacingOccurrences(of: folder.path + "/", with: "")
+        }
     }
 }
 
@@ -234,6 +460,35 @@ private enum ClosesAnywayEngine: RenderEngine {
     }
 }
 
+/// The writer's real file, grown past 100 MiB without writing 100 MiB: the extension is a hole in a
+/// sparse file, and the size is what the checks read back. The front of the file is the writer's,
+/// index first, so it still reads as a one second video.
+private enum GrownEngine: RenderEngine {
+    static let name = "grown"
+    static let size: Int64 = 110 * 1024 * 1024
+
+    static func encode(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        try await WriterEngine.encode(built, to: url, tmpDir: tmpDir, spec: spec, onProgress: onProgress)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(size))
+        try handle.close()
+    }
+}
+
+/// A session that met its limit by stopping: hands back `short`, a video the test made shorter than
+/// the timeline, in place of the render.
+private enum CutShortEngine: RenderEngine {
+    static let name = "cut-short"
+    static let short = FileManager.default.temporaryDirectory.appendingPathComponent("vk-cut-short.mp4")
+
+    static func encode(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        try? FileManager.default.removeItem(at: url)
+        try FileManager.default.copyItem(at: short, to: url)
+    }
+}
+
 private enum MustNotRunEngine: RenderEngine {
     static let name = "must-not-run"
     static func encode(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
@@ -260,6 +515,22 @@ private struct Job {
     }
 
     func cleanup() { JobFolders.cleanup(batchId: spec.batchId) }
+}
+
+/// A render started through the registry, as `compose` starts one.
+private enum Registry {
+    /// Starts `spec` and answers `getState`'s answer once the render has ended.
+    static func render(_ spec: ComposeSpec) async throws -> [String: Any] {
+        JobRegistry.shared.start(spec: spec)
+        for _ in 0..<1200 {
+            if let state = JobRegistry.shared.stateJSON(spec.jobId),
+               let name = state["state"] as? String, ["done", "failed", "interrupted"].contains(name) {
+                return state
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw TestError("the render never ended")
+    }
 }
 
 /// True for the first caller only, from any thread.

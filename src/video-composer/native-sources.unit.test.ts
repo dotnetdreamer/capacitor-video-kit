@@ -17,6 +17,8 @@ vi.mock('@capacitor/core', () => ({
   WebPlugin: class {},
 }));
 
+import { setEditorDebug } from '../host/debug';
+
 import { gallerySource, retainPickedFile } from './native-sources';
 
 const CONTAINER = 'file:///var/mobile/Containers/Data/Application/5E68153E-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
@@ -79,6 +81,35 @@ describe('retainPickedFile', () => {
       playbackUrl: 'http://served/42',
       durable: false,
     });
+  });
+
+  /*
+   * Said on the console, behind the package's debug switch, because nothing else says it: the pick
+   * carries on as though it had worked, and the draft only finds out a launch later.
+   *
+   * The switch is thrown through a second copy of its module, which is how it happens in an app: the
+   * editor's bundle sets it when it is handed its host, and this file reads the plugin bundle's copy.
+   */
+  it('says why retaining failed when the host asked to hear, and nothing when it did not', async () => {
+    vi.resetModules();
+    const editorsCopy = await import('../host/debug');
+    expect(editorsCopy.setEditorDebug).not.toBe(setEditorDebug);
+
+    const refusal = new Error('not implemented on android');
+    bridge.retainMedia.mockRejectedValue(refusal);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      editorsCopy.setEditorDebug(false);
+      await retainPickedFile({ path: 'content://media/picker/0/42' });
+      expect(warn).not.toHaveBeenCalled();
+
+      editorsCopy.setEditorDebug(true);
+      await retainPickedFile({ path: 'content://media/picker/0/42' });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('[retainPickedFile]'), 'content://media/picker/0/42', refusal);
+    } finally {
+      setEditorDebug(false);
+      warn.mockRestore();
+    }
   });
 
   it('asks nothing for a pick with no path, and answers what it can play', async () => {

@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 
-import type { ComposeClip, ComposeSpec } from './definitions';
+import type { ComposeClip, ComposeFailureCode, ComposeSpec } from './definitions';
 import { VideoComposer } from './index';
 
 /**
@@ -27,6 +27,11 @@ const CHUNK_BYTES = 1024 * 1024;
  * voiceover. One URL named several times - a split clip, a transition's outgoing side, the same
  * sound as music and as a take - is staged once.
  *
+ * An input that cannot be staged rejects with a [RenderInputError] in the composer's own terms, and
+ * `render` is never started: a blob that will not read - revoked, or empty - is `unreadable_input`,
+ * naming the clip whose URL it was, and a chunk the phone would not write is `no_space` for a full
+ * disk and `unknown` for anything else.
+ *
  * The staged files are released in `finally`, after `render` has settled, whatever it settled with -
  * a video, a failure or a cancel - so `render` must not settle before the engine has let go of its
  * inputs: it awaits the job's terminal event, not `compose`'s answer, which comes back the moment the
@@ -51,16 +56,15 @@ export async function withNativeRenderInputs<T>(
   const staged: string[] = [];
   const stagedByBlob = new Map<string, string>();
 
-  const nativeUri = async (uri: string): Promise<string> => {
+  // `clipKey` is the wire key of the clip that names `uri`, for a failure to blame, and is absent for
+  // the music and a voiceover take.
+  const nativeUri = async (uri: string, clipKey?: string): Promise<string> => {
     signal?.throwIfAborted();
     if (!uri.startsWith('blob:')) return uri;
     const known = stagedByBlob.get(uri);
     if (known) return known;
 
-    const response = await fetch(uri, { signal });
-    if (!response.ok) throw new Error(`Could not read a render input: HTTP ${response.status}`);
-    const blob = await response.blob();
-    if (!blob.size) throw new Error('A render input is empty');
+    const blob = await readInput(uri, clipKey, signal);
     const extension = extensionFor(blob.type);
 
     let file = '';
@@ -68,12 +72,16 @@ export async function withNativeRenderInputs<T>(
       signal?.throwIfAborted();
       const data = await base64(blob.slice(offset, offset + CHUNK_BYTES));
       signal?.throwIfAborted();
-      if (!file) {
-        file = (await VideoComposer.stageRenderInput({ data, ...(extension ? { extension } : {}) })).uri;
-        // Remembered before the next chunk, so a file whose append fails is still released.
-        staged.push(file);
-      } else {
-        await VideoComposer.stageRenderInput({ data, uri: file });
+      try {
+        if (!file) {
+          file = (await VideoComposer.stageRenderInput({ data, ...(extension ? { extension } : {}) })).uri;
+          // Remembered before the next chunk, so a file whose append fails is still released.
+          staged.push(file);
+        } else {
+          await VideoComposer.stageRenderInput({ data, uri: file });
+        }
+      } catch (error) {
+        throw writeFailure(error);
       }
     }
     stagedByBlob.set(uri, file);
@@ -81,8 +89,9 @@ export async function withNativeRenderInputs<T>(
   };
 
   const stageClip = async (clip: ComposeClip): Promise<void> => {
-    clip.uri = await nativeUri(clip.uri);
-    if (clip.transitionIn) clip.transitionIn.from.uri = await nativeUri(clip.transitionIn.from.uri);
+    clip.uri = await nativeUri(clip.uri, clip.key);
+    const from = clip.transitionIn?.from;
+    if (from) from.uri = await nativeUri(from.uri, from.key);
   };
 
   try {
@@ -101,6 +110,77 @@ export async function withNativeRenderInputs<T>(
       await VideoComposer.releaseRenderInputs({ uris: staged }).catch(() => undefined);
     }
   }
+}
+
+/**
+ * Why [withNativeRenderInputs] could not write an input out as a file, in the terms of a job's own
+ * `failed` event ([ComposeError]), so that whoever reads one reads the other the same way.
+ *
+ * It exists because a staging failure used to arrive as a bare `Error` - "Could not read a render
+ * input: HTTP 404" - that named neither a code nor a clip, and a render host could only call it
+ * `unknown`. The customer was then told their video could not be built and to try again, and every
+ * retry read the same revoked blob and failed the same way, where the composer's own
+ * `unreadable_input` for a clip it could not open tells them a clip could not be read and tells the
+ * host which. `composerRenderHost` maps this exactly as it maps a `failed` event: the code onto the
+ * editor's union, and `clipKey` back to the host's source.
+ */
+export class RenderInputError extends Error {
+  constructor(
+    /**
+     * `unreadable_input` for a blob the page could not read back - revoked, refused or empty;
+     * `no_space` for a chunk a full disk would not take; `unknown` for any other failed write.
+     */
+    readonly code: Extract<ComposeFailureCode, 'unreadable_input' | 'no_space' | 'unknown'>,
+    message: string,
+    /**
+     * The wire key of the clip whose URL would not read, which is a segment id as a `failed`
+     * event's is, on `unreadable_input` alone; absent for the music and a voiceover take, which
+     * name no clip, and for a failed write, which is the disk's fault and not the clip's.
+     */
+    readonly clipKey?: string,
+  ) {
+    super(message);
+    this.name = 'RenderInputError';
+  }
+}
+
+/**
+ * The bytes behind a `blob:` URL, or an `unreadable_input` [RenderInputError] naming `clipKey`.
+ *
+ * An abort is not a clip that could not be read: `fetch` rejects with the signal's reason when the
+ * signal is what stopped it, and that reason is what comes out, so the caller can tell the customer
+ * backing out from a broken input.
+ */
+async function readInput(uri: string, clipKey: string | undefined, signal: AbortSignal | undefined): Promise<Blob> {
+  const unreadable = (why: string) => new RenderInputError('unreadable_input', why, clipKey);
+  const reading = async <T>(step: () => Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw unreadable(`Could not read a render input: ${String(error)}`);
+    }
+  };
+
+  const response = await reading(() => fetch(uri, { signal }));
+  if (!response.ok) throw unreadable(`Could not read a render input: HTTP ${response.status}`);
+  const blob = await reading(() => response.blob());
+  if (!blob.size) throw unreadable('A render input is empty');
+  return blob;
+}
+
+/**
+ * A `stageRenderInput` rejection as a [RenderInputError]. Both platforms reject a write a full disk
+ * refused with the code `no_space` (iOS `rejectWrite`, Android's `hasNoSpaceCause`), which the
+ * editor has a sentence of its own for; `invalid_spec` is this file's own mistake, and it and
+ * everything else is `unknown`.
+ */
+function writeFailure(error: unknown): RenderInputError {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  return new RenderInputError(
+    code === 'no_space' ? 'no_space' : 'unknown',
+    `Could not write a render input: ${typeof message === 'string' ? message : String(error)}`,
+  );
 }
 
 /**

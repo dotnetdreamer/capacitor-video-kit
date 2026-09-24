@@ -35,6 +35,9 @@ object Gallery {
     /** What a video is when its own name does not say. Every render this package makes is one. */
     private const val DEFAULT_MIME_TYPE = "video/mp4"
 
+    /** What a video is called when neither the caller nor its source names it. */
+    private const val DEFAULT_NAME = "video.mp4"
+
     /**
      * Copies `uri` into the gallery and answers with the row it now occupies.
      *
@@ -49,19 +52,9 @@ object Gallery {
         directory: String?,
     ): Uri {
         val source = Uri.parse(uri).let { if (it.scheme == null) Uri.fromFile(File(uri)) else it }
-        val name = (fileName?.takeIf { it.isNotBlank() } ?: source.lastPathSegment ?: "video.mp4").trim()
+        val name = nameOf(fileName, source.lastPathSegment)
         val folder = folderOf(directory)
-        val subFolder = album?.trim()?.takeIf { it.isNotEmpty() }
-
-        /*
-         * A separator here would be a caller asking for a nested album, which iOS cannot express at
-         * all - a photo library has albums and no folders under them. Refused rather than
-         * flattened, so the same options do the same thing on both platforms instead of quietly
-         * doing different ones.
-         */
-        require(subFolder == null || (!subFolder.contains('/') && !subFolder.contains('\\'))) {
-            "album is one folder name, not a path: $subFolder"
-        }
+        val subFolder = albumOf(album)
 
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             insert(context, source, name, folder, subFolder)
@@ -132,6 +125,43 @@ object Gallery {
 
         MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf(mimeTypeOf(name)), null)
         return Uri.fromFile(file)
+    }
+
+    /**
+     * The album, trimmed, or null for none; refused when it is not one folder name.
+     *
+     * A separator here would be a caller asking for a nested album, which iOS cannot express at
+     * all - a photo library has albums and no folders under them. `.` and `..` are no folder of
+     * their own either: below API 29 the album is a directory made on disk, and `..` would put the
+     * video beside `Movies` rather than in it. Refused rather than flattened, so the same options
+     * do the same thing on both platforms instead of quietly doing different ones; iOS's
+     * `Gallery.album` refuses the same names in the same words.
+     */
+    internal fun albumOf(album: String?): String? {
+        val name = album?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        require(!name.contains('/') && !name.contains('\\') && name != "." && name != "..") {
+            "album is one folder name, not a path: $name"
+        }
+        return name
+    }
+
+    /**
+     * The name the video is saved under: [fileName], or else the source's own name, or else
+     * `video.mp4`, trimmed, and made a NAME rather than a path.
+     *
+     * Below API 29 the video is written with `File(directory, name)`, so a name with a separator in
+     * it - `a/../../x.mp4` - would put it outside `Movies` or `DCIM`, anywhere on shared storage.
+     * From 29 on, MediaStore makes a valid file name of `DISPLAY_NAME` itself, a separator becoming
+     * `_`, and files the row by `RELATIVE_PATH` alone. So a separator becomes `_` here, on every
+     * release, and a name that is `.` or `..`, which names a folder rather than a file, is
+     * `video.mp4` as a missing one is. Flattened rather than refused, unlike [albumOf]: a name is
+     * what the gallery prints under the video, and a slash in a title is no reason to lose a save.
+     */
+    internal fun nameOf(fileName: String?, sourceName: String?): String {
+        val name = (fileName?.takeIf { it.isNotBlank() } ?: sourceName ?: DEFAULT_NAME).trim()
+            .replace('/', '_')
+            .replace('\\', '_')
+        return if (name.isEmpty() || name == "." || name == "..") DEFAULT_NAME else name
     }
 
     /**

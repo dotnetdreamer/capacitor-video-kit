@@ -115,11 +115,14 @@ final class GalleryCopyTests: XCTestCase {
 
     func testTrimsTheAlbumAndReadsABlankOneAsNone() throws {
         XCTAssertEqual(try Gallery.album("  LightSnip \n", directory: nil), "LightSnip")
+        XCTAssertEqual(try Gallery.album("...", directory: nil), "...")
         XCTAssertNil(try Gallery.album("   ", directory: "movies"))
     }
 
     func testRefusesANestedAlbumInAndroidsWords() {
-        for album in ["Trips/2026", "Trips\\2026", " a/b "] {
+        // A dot or two as well: below API 29 Android makes the album a folder on disk, and `..` is
+        // not a folder of its own there (Android's `GalleryNamesTest`).
+        for album in ["Trips/2026", "Trips\\2026", " a/b ", ".", "..", " .. "] {
             XCTAssertThrowsError(try Gallery.album(album, directory: nil)) { error in
                 let rejection = Gallery.rejection(for: error)
                 XCTAssertEqual(rejection.code, "invalid_spec")

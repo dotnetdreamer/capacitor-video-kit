@@ -31,8 +31,9 @@ export interface FrameSink {
    * it is still being made. A running count rather than a measurement: neither sink has a file to
    * measure until it is finished, since the MP4 is held in memory until its index can go at the
    * front and the recorder's chunks are only joined at the end. It lags the frames by what the
-   * encoder has not handed back yet, and leaves out the container's own boxes, which the finished
-   * file's size then includes.
+   * encoder has not handed back yet, which on Chromium's MP4 recorder can be the whole recording
+   * ([RecorderSink.bytes]), and leaves out the container's own boxes, which the finished file's size
+   * then includes.
    */
   readonly bytes: number;
   /** The finished file. Called once. */
@@ -210,7 +211,14 @@ const EMPTY = new Float32Array(0);
 class RecorderSink implements FrameSink {
   private chunks: Blob[] = [];
   private startedAt = 0;
-  /** What the recorder has handed over so far: a chunk a second, from the timeslice below. */
+  /**
+   * What the recorder has handed over so far, which is only as current as the recorder makes it. A
+   * WebM recorder hands over a chunk a timeslice: in Chromium, a 2.8 s recording came at 1.1 s,
+   * 2.1 s and its stop. Chromium's MP4 recorder, which `RECORDER_TYPES` asks for first, hands over
+   * whole fragments, and the same recording came as a 752 byte header at 1.9 s and everything else
+   * at the stop. So on that recorder this count can lag by as much as the whole recording, and it is
+   * the finished-file check in `render.ts` that is sure to hold the post to its ceiling.
+   */
   bytes = 0;
 
   private constructor(
@@ -248,7 +256,7 @@ class RecorderSink implements FrameSink {
     });
 
     // A timeslice, so a render that goes wrong still has most of itself rather than nothing, and so
-    // `bytes` grows as the recording does rather than all at once at the end.
+    // `bytes` grows as the recording does wherever the recorder hands over what it has (see `bytes`).
     recorder.start(1000);
     if (audio) {
       await audio.context.resume().catch(() => undefined);

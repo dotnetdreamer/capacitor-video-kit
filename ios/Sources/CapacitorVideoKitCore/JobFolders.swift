@@ -74,17 +74,41 @@ enum JobFolders {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].deletingLastPathComponent()
     }
 
+    /// Library/Application Support, where `root` and the publisher's `PublishStore.root` are made.
+    ///
+    /// A variable only so that a test can put a temporary folder in its place, and nothing but a
+    /// test sets it: `JobFolderNamesTests` does, before it cleans up `..` and the ids like it, so
+    /// that a regression that lets one out of `video-batches` deletes a folder of the test's own
+    /// rather than the simulator's Application Support, which a deliberately broken build (a
+    /// mutation run) once did to the test simulator's. Falls back to the path iOS always answers, rather than trapping, should the lookup ever
+    /// come back empty.
+    static var applicationSupport: URL = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
+
     /// Library/Application Support/video-batches/
     ///
     /// This is a pure path getter: Application Support does not exist on a fresh install and
     /// `urls(for:in:)` does not create it, so nothing may write here without `ensure` first.
     static var root: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("video-batches", isDirectory: true)
+        applicationSupport.appendingPathComponent("video-batches", isDirectory: true)
     }
 
+    /// `root`/`folderName(batchId)`, and never anywhere else.
+    ///
+    /// Every path the kit builds for a batch - its inputs, its render, its poster, its done marker,
+    /// the folder `cleanup` deletes - is built on this one, so this is the one place that has to be
+    /// sure a batch id cannot name a folder outside `root`. `folderName` is what makes it so; the
+    /// check is what keeps it so whatever `folderName` becomes, because the answer is handed to
+    /// `removeItem` and a folder outside `root` is Application Support or more. Standardizing is
+    /// what turns a `..` into the folder it names, and it leaves every name `folderName` makes as it
+    /// is. Android's `JobFolders.dir` makes the same check.
     static func jobDir(_ batchId: String) -> URL {
-        root.appendingPathComponent(sanitize(batchId), isDirectory: true)
+        let root = self.root
+        let dir = root.appendingPathComponent(folderName(batchId), isDirectory: true)
+        precondition(dir.standardizedFileURL.deletingLastPathComponent().path == root.standardizedFileURL.path,
+                     "a job folder outside video-batches: \(dir.path)")
+        return dir
     }
 
     static func inputsDir(_ batchId: String) -> URL {
@@ -128,10 +152,17 @@ enum JobFolders {
 
     // MARK: - Names and URIs
 
-    /// Android is `s.replace(Regex("[^A-Za-z0-9._-]"), "_")`, which runs over UTF-16 code units, so
-    /// an astral character there becomes TWO underscores. Matching that is why this counts
-    /// `UTF16.width` instead of appending one underscore per scalar: the two platforms have to
-    /// agree on a file name, not merely produce a safe one.
+    /// Every character outside `[A-Za-z0-9._-]` becomes `_`, one for each UTF-16 unit it takes, so
+    /// an astral character - an emoji - becomes TWO underscores. That was written to match Android's
+    /// `JobFolders.safeSegment`, `s.replace(Regex("[^A-Za-z0-9._-]"), "_")`, on the belief that the
+    /// JVM's regex runs over UTF-16 units. It does not: `java.util.regex` matches a surrogate pair as
+    /// the one code point it is, so Android makes ONE underscore of an astral character, and
+    /// `"a😀b"` is `a_b` there and `a__b` here. The two agree for every character in the Basic
+    /// Multilingual Plane, one underscore per code point, which covers accents, combining marks and
+    /// every script an id is likely to be written in; the web's `safeSegment`, a JavaScript regex
+    /// with no `u` flag, does run over UTF-16 units and agrees with this. Left as it is, because a
+    /// changed rule moves every folder it has already named, and drafts and hosts hold those names;
+    /// a phone's folders never meet the other platform's, so the difference names no wrong folder.
     ///
     /// This is also what keeps a `vo:<id>` key from becoming a path separator: it lands as `vo_<id>`.
     static func sanitize(_ s: String) -> String {
@@ -149,6 +180,48 @@ enum JobFolders {
             }
         }
         return out
+    }
+
+    /// The name of `batchId`'s folder below `root`: `sanitize(batchId)`, the name every folder has
+    /// had since the first build and drafts and hosts still hold, unless that would be a name a path
+    /// reads as somewhere else. `sanitize` keeps `.`, as it must for an id such as `post-1.2`, so it
+    /// answers `.` for `.` and `..` for `..`. `root` + `..` is Application Support itself, which
+    /// `cleanup` of a batch called `..` would delete whole, and the empty name is `root`, every
+    /// post's folder at once. `childName` turns those three into underscores.
+    ///
+    /// Every way in keeps the three ids from getting here (`batchIdRefusal`): `compose`,
+    /// `prepareJob`, `cleanup` and the publisher refuse them, and `startVoiceRecording` files such a
+    /// take in the voice cache. This is for a path that forgets to ask, so that no route leads
+    /// outside `root` all the same. Android's `JobFolders.folderName` is the same rule.
+    static func folderName(_ batchId: String) -> String {
+        childName(sanitize(batchId))
+    }
+
+    /// `name`, made a name that can only be a child of the folder it is put in: the empty name, `.`
+    /// and `..` become one underscore per character of the name, and at least one. Every other name
+    /// is left exactly as it is. For the two folder names built from an id with `.` kept in it: a
+    /// batch's (`folderName`) and the publisher's bodies folder (`PublishStore.bodiesDir`).
+    static func childName(_ name: String) -> String {
+        name.isEmpty || name == "." || name == ".."
+            ? String(repeating: "_", count: max(1, name.count))
+            : name
+    }
+
+    /// Why `compose`, `prepareJob` and `cleanup` refuse `batchId` as `invalid_spec`, or nil when it
+    /// names a folder of its own below `root`. Only an id `folderName` has to rename is refused:
+    /// `""`, `.` and `..`, the only ids `sanitize` makes one of those three names of, since it keeps
+    /// every `.` and turns every character outside its set into at least one underscore. Refused
+    /// rather than renamed, because the renamed folder is some other batch's - `..` would be filed
+    /// under, and cleaned up with, the batch called `__`. Every other id is accepted and keeps the
+    /// folder it has always had, `../x` included: that is `.._x`, a folder inside `root` like any
+    /// other. Android's `JobFolders.batchIdRefusal` and the web's (`video-composer/batch-id.ts`)
+    /// answer the same strings. The publisher refuses the same ids as `invalid_request`
+    /// (`PublishModels.parse`), and `startVoiceRecording` reads one as no batch
+    /// (`VoiceRecorder.folder(for:)`).
+    static func batchIdRefusal(_ batchId: String) -> String? {
+        if batchId.isEmpty { return "batchId is required" }
+        let name = sanitize(batchId)
+        return childName(name) == name ? nil : "batchId cannot be '.' or '..'"
     }
 
     /// The file a URI names: `file://` or a bare `/path`. Anything else - notably Android's
@@ -384,8 +457,7 @@ enum JobFolders {
     /// After a copy, the source is deleted only when it is a scratch copy in our own container -
     /// under `tmp/` or `Library/Caches/`, where the file picker leaves a pick - so the net effect
     /// for a picked file is still a move. Deleting what is not ours is not our call, and what is
-    /// ours anywhere else is being kept on purpose (see `isAppOwned`). `AudioFilePicker` deletes the
-    /// document picker's copies of a song nobody will take by the same rule.
+    /// ours anywhere else is being kept on purpose (see `isAppOwned`).
     static func removeIfScratch(_ url: URL) {
         guard let relative = containerRelativePath(url),
               relative.hasPrefix("tmp/") || relative.hasPrefix("Library/Caches/") else { return }
@@ -409,22 +481,31 @@ enum JobFolders {
     // MARK: - cleanup
 
     /// A missing folder is not an error: the contract calls `cleanup` idempotent and JS calls it on
-    /// every discard, whether or not anything was ever written.
+    /// every discard, whether or not anything was ever written. What goes is `jobDir(batchId)` and
+    /// nothing else - never `root`, nor anything above it, whatever the id (see `jobDir`).
     static func cleanup(batchId: String) {
         try? FileManager.default.removeItem(at: jobDir(batchId))
     }
 
     // MARK: - sweep
 
-    /// Housekeeping on plugin load. Hops to its own queue: `load()` runs on the Capacitor queue,
-    /// which is shared by every plugin in the app, and walking a folder tree there stalls them all.
+    /// Housekeeping on plugin load. Hops to its own queue: `load()` runs on main, inside
+    /// `CAPBridgeViewController.loadView` (see `VideoComposerPlugin.load`), and walking a folder tree
+    /// there would hold up the app's first screen. The picked songs are cleared too, on the queue
+    /// their copies are made on, and queued before the walk starts rather than after it ends
+    /// (`AudioFilePicker.clearOnLoad` says why).
     ///
     /// The copies kept for a host, in `videokit-picked/` and `videokit-gallery/`, are never looked
     /// at here, however old: whether a draft still uses one is something only the host knows, and it
     /// says so through `sweepMedia` (`RetainedMedia.sweep`).
-    static func sweepOnLaunch() {
+    ///
+    /// `done` is called on the sweep's queue once the walk has ended. It is for the tests, which
+    /// wait on it to see what the walk left; the plugin passes none.
+    static func sweepOnLaunch(then done: (@Sendable () -> Void)? = nil) {
+        AudioFilePicker.clearOnLoad()
         DispatchQueue.global(qos: .utility).async {
             sweep(now: Date())
+            done?()
         }
     }
 
@@ -436,14 +517,15 @@ enum JobFolders {
     /// 3. an unmarked job folder after 7 days, and only when nothing still claims it
     ///
     /// The staged inputs (`StagedRenderInputs`) are in `tmp`, which iOS may purge while the app is
-    /// not running and never while it runs, and a render in this process may still be reading one:
-    /// `load()` runs again when the web view reloads, which can happen in the middle of a render. A
-    /// day is long past that, so nothing here needs to know who still holds a name. Android's
+    /// not running and never while it runs. `load()` runs as a bridge registers the plugin and not
+    /// when the web view reloads (see `VideoComposerPlugin.load`), so in an app with one bridge this
+    /// comes before any render of the launch; a bridge built later in the same process runs it
+    /// again while a render of the first one's may still be reading its inputs. A day is long past
+    /// any render, so nothing here needs to know who still holds a name. Android's
     /// `JobFolders.sweep` clears its staged inputs by the same rule.
     ///
-    /// The picked songs beside them go whatever their age (`AudioFilePicker.clear`): each was read by
-    /// the page it was answered to as it was answered, and that page is gone by the time the plugin
-    /// loads again.
+    /// The picked songs beside them are not this walk's: `sweepOnLaunch` clears them whatever their
+    /// age, on the queue their copies are made on (`AudioFilePicker.clearOnLoad`).
     static func sweep(now: Date) {
         let fm = FileManager.default
         // A missing root is the normal state on a fresh install, and `contentsOfDirectory` throws
@@ -464,26 +546,28 @@ enum JobFolders {
         sweepCache(thumbsDir(), now: now)
         sweepCache(voiceDir(), now: now)
         sweepCache(StagedRenderInputs.folder, now: now)
-        AudioFilePicker.clear()
     }
 
-    /// The folder name IS the sanitised batchId, which is what both of the guards below are
-    /// asked about: `JobRegistry` compares it against its jobs' sanitised ids, and `PublishStore`
-    /// names its records by `PublishModels.safe`, whose character class is the same as `sanitize`'s,
-    /// so sanitising an already sanitised id is a no-op.
+    /// The folder name IS `folderName(batchId)`, not the batch id, so both of the guards below
+    /// are asked about it by that name and match it through `folderName`: `JobRegistry` against its
+    /// jobs' folder names, and `PublishStore` against the folder names of its records, which are
+    /// keyed by the RAW id. Asked by the raw id instead, `post:1` - whose folder is `post_1` - would
+    /// never match, and a failed publish of it would lose its files to the week-old sweep.
     static func isSweepable(_ folder: URL, now: Date) -> Bool {
         let id = folder.lastPathComponent
 
         // A render in flight, or a terminal outcome JS has not collected yet, owns this folder.
         // Android never needed this check because its sweep runs once at load() with nothing in
-        // flight; on iOS load() also fires on a WebView reload, which CAN happen mid render.
+        // flight. On iOS load() runs once per bridge, not on a web view reload (see
+        // `VideoComposerPlugin.load`), and a bridge built later in the same process sweeps while
+        // the registry, which outlives every plugin, may still hold a render of the first one's.
         if JobRegistry.shared.hasLiveJob(batchId: id) { return false }
 
         // A publish that is queued, uploading, creating, failed or cancelled keeps its files
         // however old they are. A failed publish the customer has not answered yet is not garbage,
         // and deleting it turns their next Retry into `file_missing` for a post they never
         // discarded.
-        if let phase = PublishStore.shared.phase(for: id), phase != Phase.done { return false }
+        if PublishStore.shared.holdsUnfinished(folder: id) { return false }
 
         if let marker = markerDate(in: folder) {
             return now.timeIntervalSince(marker) > doneTTL

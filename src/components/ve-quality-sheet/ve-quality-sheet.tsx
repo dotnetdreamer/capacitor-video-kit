@@ -32,6 +32,13 @@ const ALL_ASPECTS: readonly { id: OutputAspect; label: string; hint: string }[] 
  * The size is an estimate in the honest sense - an encoder allowed to spend less on a still shot
  * does - and it is worth showing anyway: it is the difference between choosing 4K and understanding
  * what choosing 4K means.
+ *
+ * A host with an upload limit (`EditorOutputOptions.maxBytes`) has every rung whose estimate is
+ * over it marked with the limit, and the chosen one explained under the size. Marked and never
+ * greyed: that same estimate is a rate the encoder may spend less than, a still or dark post often
+ * comes in well under it, and the render measures the real file and says so if it does not fit. A
+ * greyed rung would refuse a post that would have gone through; a marked one tells the customer
+ * before the render rather than after it.
  */
 @Component({
   tag: 've-quality-sheet',
@@ -145,6 +152,12 @@ export class VeQualitySheet {
         .map((one) => this.answerFor(outputFor(aspect, one.id, output.fps)))
         .find((answer) => answer && !answer.supported && !!answer.reason);
 
+      // The host's upload limit, and whether a frame's estimate for this post is over it. Asked of
+      // each chip at the frame it would choose, so 60fps is marked where 30 is not.
+      const ceiling = allowed.maxBytes;
+      const limit = ceiling === null ? '' : megabytes(ceiling);
+      const overLimit = (frame: EditOutput): boolean => ceiling !== null && estimatedBytes(totalMs, frame) > ceiling;
+
       return (
         <Host>
           <ve-sheet heading="Quality" onVeConfirm={this.close}>
@@ -170,8 +183,11 @@ export class VeQualitySheet {
 
               <div class="qs__row" role="group" aria-label="Resolution">
                 {qualities.map((one) => {
-                  const answer = this.answerFor(outputFor(aspect, one.id, output.fps));
+                  const frame = outputFor(aspect, one.id, output.fps);
+                  const answer = this.answerFor(frame);
                   const off = !!answer && !answer.supported;
+                  // A rung that cannot be chosen at all has nothing to warn about.
+                  const over = !off && overLimit(frame);
                   return (
                     <button
                       key={one.id}
@@ -185,6 +201,7 @@ export class VeQualitySheet {
                       onClick={() => this.pickQuality(one.id)}
                     >
                       <span class="qs__label">{one.label}</span>
+                      {over ? <span class="qs__hint qs__hint--over">{`Over ${limit}`}</span> : null}
                     </button>
                   );
                 })}
@@ -193,8 +210,10 @@ export class VeQualitySheet {
               {allowed.fps.length > 1 ? (
               <div class="qs__row" role="group" aria-label="Frame rate">
                 {allowed.fps.map((fps) => {
-                  const answer = this.answerFor(outputFor(aspect, quality.id, fps));
+                  const frame = outputFor(aspect, quality.id, fps);
+                  const answer = this.answerFor(frame);
                   const off = !!answer && !answer.supported;
+                  const over = !off && overLimit(frame);
                   return (
                     <button
                       key={fps}
@@ -206,6 +225,7 @@ export class VeQualitySheet {
                       onClick={() => this.pickFps(fps)}
                     >
                       <span class="qs__label">{fps}fps</span>
+                      {over ? <span class="qs__hint qs__hint--over">{`Over ${limit}`}</span> : null}
                     </button>
                   );
                 })}
@@ -215,6 +235,7 @@ export class VeQualitySheet {
               <p class="qs__size">
                 {`${output.width}x${output.height} · about ${megabytes(estimatedBytes(totalMs, output))}`}
               </p>
+              {overLimit(output) ? <p class="qs__note qs__note--over">{`May be too big to post. The limit is ${limit}.`}</p> : null}
               {blocked?.reason ? <p class="qs__note">{blocked.reason}</p> : null}
             </div>
           </ve-sheet>

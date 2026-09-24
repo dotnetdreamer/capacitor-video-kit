@@ -14,7 +14,10 @@ import {
   qualityOf,
   videoBitrateFor,
 } from './edit-manifest';
+import { toComposeSpec, type ComposeSpecLimits } from './compose';
+import type { RasterContext } from './raster-context';
 import { resolveEditorHost } from '../host/defaults';
+import type { ComposeSpec } from '../video-composer/definitions';
 
 /**
  * The frame is a choice now, and it is the choice everything else in a manifest is measured
@@ -122,8 +125,9 @@ describe('what a frame costs', () => {
   it("is decided by the frame alone, and never by somebody else's upload limit", () => {
     // The plugin has two apps: one posts to a feed with a 100MB ceiling, the other builds 4K
     // because that is what it is for. A bitrate quietly held down to the first app's limit made the
-    // second app's 4K a bigger, softer 1080p. A host that has a limit expresses it by choosing
-    // which rungs to OFFER, which is a decision it can explain to its customer.
+    // second app's 4K a bigger, softer 1080p. A host that has a limit expresses it by the rungs it
+    // OFFERS and by a ceiling on the file, both of which it can explain to its customer, and
+    // neither of which moves the rate.
     const long = 600_000;
     const perSecond = estimatedBytes(1000, outputFor('9:16', '4k', 60));
 
@@ -165,5 +169,41 @@ describe('what a host allows', () => {
     const resolved = resolveEditorHost({ output: { qualities: ['8k'] } });
 
     expect(resolved.output.qualities).toEqual(OUTPUT_QUALITIES.map((one) => one.id));
+  });
+});
+
+/*
+ * The host's size ceiling on the wire. It is written only when there is one, so a host with no
+ * upload limit sends exactly the spec it always sent, and an engine that has never heard of the key
+ * is never handed one that means nothing.
+ */
+describe('the size ceiling a render is held to', () => {
+  const uris = new Map([['a', 'file:///a.mp4']]);
+  // No layers on the post, so nothing is drawn and the raster context is never asked for anything.
+  const wire = (limits?: ComposeSpecLimits): Promise<ComposeSpec> =>
+    toComposeSpec(onePost(), uris, { jobId: 'j', batchId: 'b' }, {} as RasterContext, limits);
+
+  it('writes the host\'s ceiling as the output\'s, beside the rate it does not change', async () => {
+    const capped = await wire({ maxBytes: 100 * 1024 * 1024 });
+    const uncapped = await wire();
+
+    expect(capped.output.maxBytes).toBe(104_857_600);
+    expect(capped.output.videoBitrate).toBe(uncapped.output.videoBitrate);
+  });
+
+  it('writes no ceiling at all for a host that set none, or one that is not a positive number', async () => {
+    expect((await wire()).output).not.toHaveProperty('maxBytes');
+    expect((await wire({})).output).not.toHaveProperty('maxBytes');
+    for (const none of [null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect((await wire({ maxBytes: none })).output).not.toHaveProperty('maxBytes');
+    }
+  });
+
+  /* Positive, but a zero once rounded down to whole bytes, and a zero fails every render. */
+  it('writes no ceiling for a fraction under one byte, and whole bytes for one over it', async () => {
+    for (const none of [0.5, 0.999, Number.MIN_VALUE]) {
+      expect((await wire({ maxBytes: none })).output).not.toHaveProperty('maxBytes');
+    }
+    expect((await wire({ maxBytes: 1.5 })).output.maxBytes).toBe(1);
   });
 });

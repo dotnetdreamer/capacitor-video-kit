@@ -2,6 +2,7 @@ import type { ComposeClip, ComposeOverlay, ComposePlacement, ComposeRect, Compos
 
 import {
   MIN_LAYER_MS,
+  byteCeiling,
   clamp,
   isFullFrameRect,
   isUprightRect,
@@ -24,6 +25,19 @@ import { compileTransition, transitionSpans } from './transitions';
 export interface ComposeSpecIds {
   jobId: string;
   batchId: string;
+}
+
+/**
+ * What the host holds the finished file to, which is not part of the edit: the same manifest may be
+ * rendered by an app with an upload limit and by one without.
+ */
+export interface ComposeSpecLimits {
+  /**
+   * The spec's `output.maxBytes`: the host's upload limit, usually [RenderRequest.maxBytes] passed
+   * straight on. Written in whole bytes, rounded down; absent, null, or anything that does not round
+   * down to at least one byte writes no ceiling at all (see [byteCeiling]).
+   */
+  maxBytes?: number | null;
 }
 
 /** Thrown when a manifest names a clip the host has no file for. */
@@ -62,8 +76,16 @@ const UNKNOWN_TRACK_END_MS = 3_600_000;
  * @param uriByKey the file each clip key refers to (`file://` or `content://`).
  * @param raster the host's fonts, stickers and file URLs. Its `output` must be `manifest.output`, the frame this spec
  *   renders (`DEFAULT_OUTPUT`), because every `wPx`/`hPx` is measured against it.
+ * @param limits the host's size ceiling, written as `output.maxBytes` only when there is one, so a host with no upload
+ *   limit sends exactly the spec it always sent.
  */
-export async function toComposeSpec(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>, ids: ComposeSpecIds, raster: RasterContext): Promise<ComposeSpec> {
+export async function toComposeSpec(
+  manifest: EditManifest,
+  uriByKey: ReadonlyMap<string, string>,
+  ids: ComposeSpecIds,
+  raster: RasterContext,
+  limits: ComposeSpecLimits = {},
+): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
   const clips: ComposeClip[] = baseClips(manifest, uriByKey);
@@ -111,6 +133,7 @@ export async function toComposeSpec(manifest: EditManifest, uriByKey: ReadonlyMa
   }
 
   const music = manifest.music;
+  const maxBytes = byteCeiling(limits.maxBytes);
 
   const spec: ComposeSpec = {
     jobId: ids.jobId,
@@ -120,6 +143,7 @@ export async function toComposeSpec(manifest: EditManifest, uriByKey: ReadonlyMa
       ...manifest.output,
       videoBitrate: videoBitrateFor(manifest.output),
       audioBitrate: 128_000,
+      ...(maxBytes !== null ? { maxBytes } : {}),
     },
     filter: resolveFilterOps(manifest),
     overlays,

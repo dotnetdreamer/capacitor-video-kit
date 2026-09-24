@@ -10,6 +10,27 @@ import type { VideoComposerPlugin } from './plugin';
 import { VideoComposerWeb } from './web';
 
 /*
+ * A browser's job folders are IndexedDB keys, which nothing climbs out of, but a batch id a phone
+ * refuses is refused here too, in the phone's words, before anything is copied or deleted.
+ */
+describe('job folders, in a browser', () => {
+  const plugin: VideoComposerPlugin = new VideoComposerWeb();
+  const refusals = [
+    ['..', "batchId cannot be '.' or '..'"],
+    ['.', "batchId cannot be '.' or '..'"],
+    ['', 'batchId is required'],
+  ] as const;
+
+  it('refuses the ids that name no folder of their own to prepareJob and cleanup', async () => {
+    for (const [batchId, message] of refusals) {
+      await expect(plugin.prepareJob({ batchId, inputs: [] })).rejects.toMatchObject({ code: 'invalid_spec', message });
+      await expect(plugin.cleanup({ batchId })).rejects.toMatchObject({ code: 'invalid_spec', message });
+    }
+    await expect(plugin.cleanup({} as never)).rejects.toMatchObject({ code: 'invalid_spec', message: 'batchId is required' });
+  });
+});
+
+/*
  * The five calls a host that keeps picks makes on every platform, as a browser answers them: the
  * honest answers rather than refusals, and the same refusals as the phones for a call that is wrong.
  */
@@ -59,8 +80,10 @@ describe('keeping picked media, in a browser', () => {
     await expect(plugin.releaseMedia({ uris: [], keep: undefined })).resolves.toBeUndefined();
     await expect(plugin.releaseMedia({ uris: [], keep: null } as never)).resolves.toBeUndefined();
 
+    // In the words iOS and Android refuse it with, so a host's log reads the same on all three.
     await expect(plugin.releaseMedia({ uris: [], keep: 'blob:https://example.test/a' } as never)).rejects.toMatchObject({
       code: 'invalid_spec',
+      message: 'keep must be a list of uris',
     });
     await expect(plugin.releaseMedia({ uris: [], keep: { uri: 'blob:https://example.test/a' } } as never)).rejects.toMatchObject({
       code: 'invalid_spec',

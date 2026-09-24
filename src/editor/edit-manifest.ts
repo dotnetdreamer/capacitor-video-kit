@@ -580,19 +580,41 @@ export const TEXT_COLORS = [
 /**
  * A ceiling one particular host happens to have, kept only because an app may want the number.
  *
- * It is NOT applied to anything here. A render size is the host's policy and not this package's:
+ * Nothing here applies it on its own. A render size is the host's policy and not this package's:
  * one app posts to a server with a 100MB limit and offers 720p and 1080p, another builds 4K for a
  * different purpose entirely, and a bitrate quietly held down to somebody else's ceiling would make
- * the second app's 4K a bigger, softer 1080p. What a host allows is [EditorOutputOptions], and the
- * editor offers exactly that.
+ * the second app's 4K a bigger, softer 1080p. A host with this limit says so as
+ * [EditorOutputOptions.maxBytes], which the quality sheet warns against and every render engine
+ * holds the file to; a host that says nothing gets no ceiling.
  */
 export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /**
+ * A size ceiling as every part of the package reads one: whole bytes, or null for none.
+ *
+ * Rounded down, as `ComposeSpecParser` reads it on iOS and Android, which changes no answer for a
+ * ceiling of a byte or more - a file is a whole number of bytes, and past 1000.7 exactly when past
+ * 1000 - and keeps the `too_large` message the same on all three. Anything that does not round down
+ * to at least one byte - absent, not a number, not finite, zero, negative, or a fraction under one -
+ * is no ceiling rather than a zero, which would fail every render and mark every rung of the quality
+ * sheet. So the test is made on the rounded number: made before rounding, `0.5` would pass as
+ * positive and come out a ceiling of 0.
+ *
+ * Read in one place because the host's options (and through them the quality sheet), [toComposeSpec]
+ * and the web engine all read it, and a rule written out in each of them is a rule that drifts.
+ */
+export function byteCeiling(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const bytes = Math.floor(value);
+  return bytes > 0 ? bytes : null;
+}
+
+/**
  * Enough bitrate to make a frame of THIS size look like the source, and nothing to do with how big
- * the resulting file is. A host that has a size limit expresses it by choosing which rungs of the
- * ladder to offer, which is a decision it can explain to its customer; a bitrate secretly reduced
- * to fit somebody's upload endpoint is one nobody can see and everybody blames the encoder for.
+ * the resulting file is. A host that has a size limit expresses it by the rungs of the ladder it
+ * offers and by [EditorOutputOptions.maxBytes], both of which it can explain to its customer; a
+ * bitrate secretly reduced to fit somebody's upload endpoint is one nobody can see and everybody
+ * blames the encoder for.
  */
 export function videoBitrateFor(output: EditOutput = DEFAULT_OUTPUT): number {
   return Math.max(1_200_000, idealBitrate(output));

@@ -27,6 +27,7 @@ import androidx.media3.effect.TextureOverlay
 import androidx.media3.transformer.AudioEncoderSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.DefaultMuxer
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
@@ -186,7 +187,18 @@ object CompositionBuilder {
         return builder.build()
     }
 
-    fun newTransformer(context: Context, plan: RenderPlan, relaxEncoder: Boolean): Transformer.Builder {
+    /**
+     * A Transformer for [plan]'s output. [bytesWritten] is where the muxer counts the encoded bytes
+     * it is handed, for the plugin's poll to hold against the host's size ceiling; with no ceiling
+     * nothing is counted, and the export goes through the muxer Transformer picks for itself, by
+     * the path every render took before there were ceilings.
+     */
+    fun newTransformer(
+        context: Context,
+        plan: RenderPlan,
+        relaxEncoder: Boolean,
+        bytesWritten: AtomicLong,
+    ): Transformer.Builder {
         val output = plan.spec.output
         val videoSettings = if (relaxEncoder) {
             // Second attempt after an encoder refused our request: let the factory choose
@@ -210,7 +222,7 @@ object CompositionBuilder {
             .setEnableFallback(true)
             .build()
 
-        return Transformer.Builder(context)
+        val builder = Transformer.Builder(context)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
             .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .setEncoderFactory(encoderFactory)
@@ -218,6 +230,11 @@ object CompositionBuilder {
             .setLooper(Looper.getMainLooper())
         // The H.264 profile is deliberately NOT requested: DefaultEncoderFactory ignores a
         // requested profile and picks High itself on API 29+ wherever the encoder offers it.
+        if (output.maxBytes != null) {
+            // The muxer Transformer uses when given none, counting what it is handed.
+            builder.setMuxerFactory(CountingMuxer.Factory(DefaultMuxer.Factory(), bytesWritten))
+        }
+        return builder
     }
 
     /* ---------------------------------------------------------------------------------------- */

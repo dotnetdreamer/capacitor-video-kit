@@ -347,19 +347,29 @@ export interface ComposeOutput {
    */
   audioBitrate: number;
   /**
-   * The most bytes the finished file may have. Absent, or anything but a positive finite number,
-   * is no ceiling at all, which is what every spec written before this key meant.
+   * The most bytes the finished file may have, rounded down to whole bytes. Absent, or anything that
+   * does not round down to at least one byte - zero, a negative, a fraction under one, not a finite
+   * number - is no ceiling at all, which is what every spec written before this key meant, rather
+   * than a ceiling of 0 that would fail every render.
    *
    * It is the HOST's upload limit and not a property of the video, which is why the package sets
    * none of its own: one app posts to a server that refuses a file over 100 MB, and another builds
-   * 4K for a different purpose entirely. The editor writes it from `EditorOutputOptions.maxBytes`.
+   * 4K for a different purpose entirely. The editor hands a host's `EditorOutputOptions.maxBytes` to
+   * its render as `RenderRequest.maxBytes`, and `toComposeSpec` writes it here when the host passes it
+   * on; a host that does not pass it on renders with no ceiling, whatever its quality sheet warned.
    *
-   * Every engine holds the file to it the same way. While encoding it watches the output grow - iOS
-   * and Android poll the file's size a few times a second, and the web counts the bytes its encoder
-   * hands the muxer - and stops the moment it passes the ceiling, deleting what it wrote, rather than
-   * spend the rest of the encode on a file the host cannot send. The finished file is measured once
-   * more before `completed`, because a container's index is written last. Either way the render
-   * fails `too_large`.
+   * Every engine holds the file to it the same way. While encoding it watches the output grow and
+   * stops the moment it passes the ceiling, deleting what it wrote, rather than spend the rest of the
+   * encode on a file the host cannot send. What each one watches is what it can read truthfully:
+   * iOS measures the files its `AVAssetWriter` is writing a few times a second (`WriterEngine`);
+   * Android adds up the encoded samples its muxer is handed and checks the sum on each progress poll,
+   * because Media3's muxer leaves room ahead of the samples that makes the file being written read
+   * larger than it will finish (`CountingMuxer`, `SizeCeiling`); and the web counts the packets its
+   * encoders hand its muxer, or the recorder's chunks, after every frame, since neither has a file
+   * until the end. The finished file is measured once more before `completed`, because a
+   * container's index is written last and none of those counts saw it, and because a recorder that
+   * hands over its media only when it stops, as Chromium's MP4 one does, is held by that check
+   * alone. Either way the render fails `too_large`.
    *
    * Nothing is refused by estimate before the encode starts. The rate above is an average the
    * encoder may spend less than, and a still or dark post often comes in well under a budget the
@@ -466,7 +476,17 @@ export interface ComposeAudio {
 export interface ComposeSpec {
   /** Caller-generated; also the idempotency key - composing twice with one id starts one render. */
   jobId: string;
-  /** Selects the job folder the output and any scratch files are written to. */
+  /**
+   * Selects the job folder the output and any scratch files are written to, the same folder
+   * [PrepareJobOptions.batchId] copies the inputs into and [CleanupOptions.batchId] deletes.
+   *
+   * Refused as `invalid_spec:batchId` when it is empty, `.` or `..`, on every platform. A phone
+   * makes a folder name of the id by turning every character outside `[A-Za-z0-9._-]` into `_`
+   * and keeping dots, so those three are the only ids that would name the folder every job's
+   * folder is in, or the one above it, rather than a folder of their own; the web refuses them too,
+   * so that a spec is refused everywhere or nowhere. Any other id is fine, `../x` included, which
+   * is the folder `.._x` like any other.
+   */
   batchId: string;
   /**
    * The BASE track. It always starts at 0, and its length is the output's length unless
@@ -566,9 +586,18 @@ export type ComposeFailureCode =
   /**
    * The file would have been larger than [ComposeOutput.maxBytes], found while it was being written
    * or once it was finished, and it has been deleted. The message is `too_large max=<maxBytes>
-   * bytes=<bytes>` on every engine, `bytes` being the size it had reached when it was stopped, which
-   * is not the size a finished file would have had. The same spec will fail the same way: a lower
-   * rate, a smaller frame or a shorter post is what fits.
+   * bytes=<bytes>` on every engine. On a render stopped while it was being written, `bytes` is how
+   * far it had got - the size of the file on iOS, the media bytes handed to the muxer on Android and
+   * the web - and not the size a finished file would have had, which nobody knows without writing
+   * it; on the finished-file check it is the finished file's size. The same spec will fail the same
+   * way: a lower rate, a smaller frame or a shorter post is what fits.
+   *
+   * So `bytes` can read BELOW `max`, and a host must not take `bytes > max` as the test for this
+   * code. It happens on iOS when a render has fallen back to the preset export session, which is
+   * handed the ceiling as its `fileLengthLimit`: a session that meets that limit by stopping at it
+   * hands back a file cut short, the render fails `too_large` because the ceiling is what cut it, and
+   * `bytes` is the size the file stopped at, which is at or under the limit. The code is the answer;
+   * the two numbers are for the log.
    */
   | 'too_large'
   /** Something this platform cannot do at all: a browser with no encoder, a format it has no decoder for. */
@@ -719,6 +748,9 @@ export interface SaveToGalleryOptions {
   /**
    * What the video is called in the gallery, EXTENSION INCLUDED - the platforms file it by that
    * name and a gallery prints it. Defaults to the source file's own name.
+   *
+   * A name and never a path: on Android a `/` or `\` in it becomes `_`, and a name that is `.` or
+   * `..` is `video.mp4`, rather than a folder somewhere else on the phone's shared storage.
    */
   fileName?: string;
 
@@ -728,7 +760,8 @@ export interface SaveToGalleryOptions {
    *
    * Usually the app's name. A plain segment rather than a path: a separator in here is refused
    * with `invalid_spec`, because a nested folder is not something every platform can express - on
-   * iOS this is an album in the photo library, which has no folders at all.
+   * iOS this is an album in the photo library, which has no folders at all - and so is `.` or `..`,
+   * which below Android 10 would name a folder on disk other than one of its own.
    *
    * On iOS the video is filed in the album only with FULL photo library access, because finding an
    * album and making one both need read access, and only when the host's `Info.plist` declares
@@ -913,6 +946,11 @@ export interface StartVoiceRecordingOptions {
   /**
    * When known, the take is written straight into the job folder. The editor usually has no batch
    * yet, so the normal case is the cache folder and `prepareJob` moves the file in later.
+   *
+   * An id `compose` would refuse - empty, `.` or `..` (see [ComposeSpec.batchId]) - is the same as
+   * none: the take goes into the cache folder, on every platform. Not refused, because the id only
+   * says where the take is kept and the take is still wanted; and not filed under the folder a
+   * phone would make of it, because that is some other batch's (`..` would be `__`'s).
    */
   batchId?: string;
 }
@@ -965,6 +1003,11 @@ export interface PrepareJobInput {
 }
 
 export interface PrepareJobOptions {
+  /**
+   * The job folder the inputs are copied into. Refused as `invalid_spec` before anything is copied
+   * when it is missing, `.` or `..` - `batchId is required`, or `batchId cannot be '.' or '..'` -
+   * for the reason [ComposeSpec.batchId] gives.
+   */
   batchId: string;
   inputs: PrepareJobInput[];
 }
@@ -976,6 +1019,11 @@ export interface PrepareJobResult {
 }
 
 export interface CleanupOptions {
+  /**
+   * The job folder to delete. Refused as `invalid_spec`, with nothing deleted, when it is missing,
+   * `.` or `..`, in the words [PrepareJobOptions.batchId] gives: natively those name the folder
+   * every post's folder is in, or the one above it.
+   */
   batchId: string;
 }
 
@@ -1189,10 +1237,20 @@ export interface PickAudioFileResult {
  * `stageRenderInput` writes a chunk of base64 per call rather than the whole file at once: a sound
  * the browser extracted is a WAV of about ten megabytes a minute, and as one message it would be
  * held whole, a third bigger, as a string on each side of the bridge. `releaseRenderInputs` deletes
- * what it wrote. Both touch only one folder of the kit's: `tmp/videokit-render-inputs/` on iOS and
- * `cacheDir/videokit-render-inputs/` on Android. A file left there by a render whose app was killed
- * is deleted by a later launch once it is a day old - not sooner, because the plugin also loads
- * again when the web view reloads, which can happen while a render is reading its inputs.
+ * what it wrote, and `withNativeRenderInputs` calls it the moment its render has settled, whichever
+ * way. Both touch only one folder of the kit's: `tmp/videokit-render-inputs/` on iOS and
+ * `cacheDir/videokit-render-inputs/` on Android.
+ *
+ * A file nobody released - its app killed mid render, or its page reloaded before the render
+ * settled, which loses the page that would have released it - is deleted when the plugin next loads,
+ * once it is a day old. The plugin loads once per bridge, as the bridge registers it and before the
+ * bridge loads its page (iOS `VideoComposerPlugin.load`, Android `VideoComposerPlugin.load`), and a
+ * web view reload does not load it again: a reload only resets the bridge it has. In an app with one
+ * bridge that is once a launch, so a leftover goes on the first launch a day or more after it was
+ * written, and iOS may empty `tmp` sooner while the app is not running. Not sooner than a day,
+ * because a bridge can be built again in a process whose render is still reading its inputs - on
+ * Android, an Activity made again while the render's foreground service keeps the process - and a
+ * day is long past any render.
  *
  * `withNativeRenderInputs`, from `capacitor-video-kit`, is all of this for a whole `ComposeSpec`,
  * and the two calls are public for a host that stages something the spec does not name.
