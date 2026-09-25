@@ -204,19 +204,91 @@ enum TransitionMath {
         let rows = max(1, Int((h * k).rounded()))
         let cellW = w / Double(columns)
         let cellH = h / Double(rows)
+        let frame = MaskFrame(mask, reveal: reveal, w: w, h: h)
         var values = [UInt8](repeating: 0, count: columns * rows)
-        for row in 0..<rows {
-            let qy = (Double(row) + 0.5) * cellH
-            for column in 0..<columns {
-                let qx = (Double(column) + 0.5) * cellW
-                let m = maskAlpha(mask, reveal, qx, qy, w, h)
-                // A NaN would trap in the conversion, and none can reach here - every divisor above
-                // is a positive size - but `>= 0` is false for one, which sends it to 0 regardless.
-                let unit = m >= 0 ? min(1, m) : 0
-                values[row * columns + column] = UInt8((unit * 255).rounded())
+        // Rows in parallel. This runs on the compositor's one serial queue for every frame of a
+        // masked transition, and each row writes only its own slice of the buffer, so splitting the
+        // grid by row changes when a cell is worked out and never what it comes to.
+        values.withUnsafeMutableBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            DispatchQueue.concurrentPerform(iterations: rows) { row in
+                let qy = (Double(row) + 0.5) * cellH
+                let out = base + row * columns
+                for column in 0..<columns {
+                    let qx = (Double(column) + 0.5) * cellW
+                    let m = frame.alpha(qx, qy)
+                    // A NaN would trap in the conversion, and none can reach here - every divisor
+                    // above is a positive size - but `>= 0` is false for one, which sends it to 0
+                    // regardless.
+                    let unit = m >= 0 ? min(1, m) : 0
+                    out[column] = UInt8((unit * 255).rounded())
+                }
             }
         }
         return MaskGrid(columns: columns, rows: rows, values: values)
+    }
+
+    /// `maskAlpha` with everything that does not depend on the pixel worked out ONCE per frame
+    /// instead of once per cell: the angle's sine and cosine, the extent, the circle's radius, the
+    /// diamond's denominator, the clamped feather and the widened reveal.
+    ///
+    /// `maskAlpha` and `maskMeasure` above stay as they are, because they are the line-for-line
+    /// ports that get reviewed against transitions.ts. This is the same arithmetic, expression for
+    /// expression and in the same order, over the same doubles - `cos` and `sin` of one angle are
+    /// the same value however often they are asked for - so every cell comes out bit-identical to
+    /// the reference, which `TransitionMaskGridTests` checks shape by shape.
+    private struct MaskFrame {
+        let shape: ComposeTransitionMask.Shape
+        let invert: Bool
+        let slats: Double
+        let w: Double, h: Double
+        let cosA: Double, sinA: Double, extent: Double
+        let circleR: Double, diamondD: Double
+        let e0: Double, e1: Double
+
+        init(_ mask: ComposeTransitionMask, reveal: Double, w: Double, h: Double) {
+            shape = mask.shape
+            invert = mask.invert
+            slats = Double(max(1, mask.count))
+            self.w = w
+            self.h = h
+            let angle = mask.angleDeg * .pi / 180
+            cosA = cos(angle)
+            sinA = sin(angle)
+            extent = abs(w * cosA) + abs(h * sinA)
+            circleR = hypot(w / 2, h / 2)
+            diamondD = w / 2 + h / 2
+            let fw = min(0.5, max(0.0005, mask.feather))
+            let r = TransitionMath.clamp01(reveal) * (1 + 2 * fw) - fw
+            e0 = r - fw
+            e1 = r + fw
+        }
+
+        func alpha(_ qx: Double, _ qy: Double) -> Double {
+            let inside = 1 - TransitionMath.smoothstep(e0, e1, measure(qx, qy))
+            return invert ? 1 - inside : inside
+        }
+
+        private func measure(_ qx: Double, _ qy: Double) -> Double {
+            let dx = qx - w / 2
+            let dy = qy - h / 2
+            switch shape {
+            case .linear:
+                return (dx * cosA + dy * sinA) / extent + 0.5
+            case .circle:
+                return hypot(dx, dy) / circleR
+            case .diamond:
+                return (abs(dx) + abs(dy)) / diamondD
+            case .clock:
+                let turn = atan2(dx, -dy) / (2 * .pi)
+                return turn < 0 ? turn + 1 : turn
+            case .blinds:
+                let along = ((dx * cosA + dy * sinA) / extent + 0.5) * slats
+                return along - along.rounded(.down)
+            case .split:
+                return abs(dx * cosA + dy * sinA) / (extent / 2)
+            }
+        }
     }
 
     // MARK: - Moving a side

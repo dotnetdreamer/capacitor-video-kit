@@ -69,6 +69,14 @@ export interface OverlayBitmap extends RasterisedOverlay {
    * follows the fingers, and swaps in the sharp one when it lands.
    */
   scale: number;
+  /**
+   * The frame (`RasterContext.output`) the bitmap was drawn against. Not implied by `key`: an
+   * effect's key leaves the frame out, so the effect on screen can have been drawn for a frame the
+   * post has since left. A render only places this bitmap, rather than drawing its own, when the
+   * frame is the render's.
+   */
+  frameW: number;
+  frameH: number;
 }
 
 /**

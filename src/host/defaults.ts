@@ -3,11 +3,13 @@ import {
   OUTPUT_FPS,
   OUTPUT_QUALITIES,
   aspectOf,
+  byteCeiling,
   normaliseOutput,
   outputFor,
   qualityOf,
 } from '../editor';
 
+import type { PickAudioFileResult } from '../video-composer/definitions';
 import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
 
 import { setEditorDebug } from './debug';
@@ -20,6 +22,7 @@ import type {
   EditorSource,
   PickedAudio,
   PickedImage,
+  PickedMediaFile,
   ReleaseRequest,
   ResolvedEditorHost,
   ResolvedOutputOptions,
@@ -27,6 +30,8 @@ import type {
   ThumbnailRequest,
   VideoEditorHost,
 } from './host.types';
+import { readFileBlob } from './read-file';
+import { webViewUrl } from './web-view-url';
 
 /**
  * What the editor falls back on for everything a host did not supply.
@@ -35,6 +40,14 @@ import type {
  * canvas for the filmstrip, `visualViewport` for the keyboard. None of it is a stub - an editor
  * built on these defaults opens a real file, plays it, cuts a real filmstrip and hands back a real
  * manifest, which is what makes the package droppable into a plain page with no host at all.
+ *
+ * Two members reach past the page, both through the `window.Capacitor` a Capacitor app already has
+ * and neither through an import of `@capacitor/core`. `platform.fileUrl` turns a device path into
+ * Capacitor's local server URL for it, so a Capacitor host has no line of its own to write for it
+ * ([webViewUrl]). And where the page cannot be trusted - on iOS in a Capacitor app built with the
+ * kit's native side - the audio picker is the kit's own document picker (see
+ * [pickAudioThroughKit]); a host that spreads these defaults into its own media host gets that with
+ * the rest.
  *
  * The one thing with no web answer is the render, so it stays null. The editor greys nothing for
  * it: the edit is still an edit, and the manifest still comes back at the end.
@@ -48,6 +61,42 @@ const IMAGE_DECODE_TIMEOUT_MS = 8000;
 const FRAME_SEEK_TIMEOUT_MS = 4000;
 
 /**
+ * The sound formats the default audio picker names one by one, each as its extensions and its MIME
+ * types, several of which have two spellings in the wild.
+ *
+ * `audio/*` alone is enough everywhere but WebKit on iOS. A WKWebView turns every entry of `accept`
+ * into a Uniform Type Identifier for the Files picker, and has none for a wildcard of this kind: it
+ * makes up a type that no file has, so the picker opens with every song in it greyed out, and the
+ * only other things its menu offers are the photo library and the camera. A MIME type or an
+ * extension that WebKit can map to a real identifier adds that type, and one it cannot map adds
+ * nothing, so naming each format both ways costs nothing and covers whichever of the two a WebKit
+ * resolves. A format missing here is a line to add, and nothing else has to change with it.
+ *
+ * A Capacitor app on iOS built with the kit's native side never opens this input for a sound at all,
+ * because WebKit's input fails there in a worse way than this one (see [pickAudioThroughKit]). The
+ * list is still what Safari and any other iOS page without that native side get, and it costs every
+ * other engine nothing.
+ */
+const AUDIO_FORMATS: readonly (readonly string[])[] = [
+  ['.mp3', 'audio/mpeg'],
+  ['.m4a', 'audio/mp4', 'audio/x-m4a'],
+  ['.aac', 'audio/aac'],
+  ['.wav', 'audio/wav', 'audio/x-wav'],
+  ['.aif', '.aiff', 'audio/aiff', 'audio/x-aiff'],
+  ['.caf', 'audio/x-caf'],
+  ['.flac', 'audio/flac'],
+  ['.ogg', 'audio/ogg'],
+];
+
+/**
+ * `audio/*` FIRST, and then the list. First is what every engine but WebKit goes by: a desktop
+ * browser filters by the whole set, of which the wildcard is the widest, and an Android WebView opens
+ * its documents browser for the first type and hands the rest to it as extra types, so both offer
+ * exactly what they offered before the list existed.
+ */
+const AUDIO_ACCEPT = ['audio/*', ...AUDIO_FORMATS.flat()].join(',');
+
+/**
  * Fills in everything the host left out. Called once, by whoever owns the editor element, and the
  * result is what every other file in the package is written against.
  */
@@ -58,7 +107,9 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
     media: host?.media ?? browserMediaHost(),
     render: host?.render ?? null,
     platform: {
-      fileUrl: platform?.fileUrl ?? identityFileUrl,
+      // Capacitor's local server where the page has Capacitor, and the URL as it came where it has
+      // not, where every file is an object URL already: see [webViewUrl].
+      fileUrl: platform?.fileUrl ?? webViewUrl,
       haptic: platform?.haptic ?? noHaptic,
       keyboard: platform?.keyboard ?? visualViewportKeyboard(),
       registerBackHandler: platform?.registerBackHandler ?? noBackHandler,
@@ -103,6 +154,7 @@ function resolveOutputOptions(options?: EditorOutputOptions): ResolvedOutputOpti
     fps,
     aspects,
     initial: allowed ? wanted : outputFor(aspects[0], qualities[0], fps[0]),
+    maxBytes: byteCeiling(options?.maxBytes),
   };
 }
 
@@ -111,11 +163,6 @@ function keep<T>(all: readonly T[], wanted: readonly T[] | undefined): T[] {
   if (!wanted?.length) return [...all];
   const kept = all.filter((one) => wanted.includes(one));
   return kept.length > 0 ? kept : [...all];
-}
-
-/** A browser picker already hands back a blob URL, which is loadable as it stands. */
-function identityFileUrl(uri: string): string {
-  return uri;
 }
 
 function noHaptic(): void {
@@ -215,11 +262,7 @@ export function browserMediaHost(): EditorMediaHost {
       if (!file) return null;
       const playbackUrl = URL.createObjectURL(file);
       minted.add(playbackUrl);
-      return {
-        key: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        fileName: file.name,
-        playbackUrl,
-      };
+      return { key: pickedKey(), fileName: file.name, playbackUrl };
     },
 
     /** One file input offering both, and the file's own type says which it turned out to be. */
@@ -228,12 +271,7 @@ export function browserMediaHost(): EditorMediaHost {
       if (!file) return null;
       const playbackUrl = URL.createObjectURL(file);
       minted.add(playbackUrl);
-      return {
-        key: `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        fileName: file.name,
-        playbackUrl,
-        kind: file.type.startsWith('image/') ? 'image' : 'video',
-      };
+      return { key: pickedKey(), fileName: file.name, playbackUrl, kind: isPicture(file) ? 'image' : 'video' };
     },
 
     async pickImage(): Promise<PickedImage | null> {
@@ -245,18 +283,23 @@ export function browserMediaHost(): EditorMediaHost {
       return { uri, fileName: file.name, aspect };
     },
 
+    /**
+     * A sound from the customer's files: through the kit's own document picker on iOS in a
+     * Capacitor app built with it, where WebKit's file input cannot be trusted with one (see
+     * [pickAudioThroughKit]), and through the file input, naming its formats, everywhere else -
+     * an iOS build without the picker included, for the reason [bridgeWithAudioPicker] gives. Both
+     * answer the same way, with an object URL over the bytes.
+     */
     async pickAudio(): Promise<PickedAudio | null> {
-      const file = await pickFile('audio/*');
+      const bridge = bridgeWithAudioPicker();
+      if (bridge) return await pickAudioThroughKit(bridge);
+      const file = await pickFile(AUDIO_ACCEPT);
       if (!file) return null;
-      const uri = URL.createObjectURL(file);
-      const durationMs = await mediaDuration('audio', uri, AUDIO_METADATA_TIMEOUT_MS);
-      if (durationMs === null) throw new Error(`The browser could not open ${file.name}`);
-      return { uri, fileName: file.name, sourceDurationMs: durationMs };
+      return await pickedAudio(file, file.name);
     },
 
     async probeDuration(source: EditorSource): Promise<number> {
-      const src = source.playbackUrl ?? source.sourcePath ?? '';
-      const durationMs = await mediaDuration('video', src, VIDEO_METADATA_TIMEOUT_MS);
+      const durationMs = await mediaDuration('video', pageUrl(source));
       if (durationMs === null) throw new Error(`The browser could not open ${source.fileName}`);
       return durationMs;
     },
@@ -292,6 +335,42 @@ export function browserMediaHost(): EditorMediaHost {
 }
 
 /**
+ * Up to `limit` clips from the customer's files at once, each with how long it runs, for the step
+ * BEFORE the editor: a new project, a template's slots. The editor's own pickers take one file at a
+ * time, and this is the same file input asked for several, in the order the browser lists them.
+ *
+ * An empty array is a cancel, which is an ordinary answer and not a failure: somebody opened the
+ * picker, changed their mind and backed out. `limit` caps what is kept when more were chosen, since
+ * a file input can only be told one or many; 0 keeps them all.
+ *
+ * `pictures` offers stills beside the videos, for a host that lets them onto the timeline (see
+ * [EditorEditingOptions.pictures]). A picture comes back with `kind: 'image'` and a length of 0,
+ * because a still has none - the editor gives it its own - and without being opened, because
+ * opening one as a video would only wait out the timeout. A video's length is asked of the element
+ * that will play it, because a `File` has none; one that never answers within ten seconds, or
+ * cannot be opened at all, is 0, which is what the platform probes answer for a length they cannot
+ * read.
+ *
+ * Every source carries a `blob:` URL and no `sourcePath`, like every pick in a page, and the URLs
+ * are the CALLER's: the browser host's `release` revokes only what its own pickers minted, so a host
+ * done with one of these revokes it itself.
+ */
+export async function pickMediaFiles({ limit, pictures }: { limit: number; pictures?: boolean }): Promise<PickedMediaFile[]> {
+  const files = await pickFiles(pictures ? 'video/*,image/*' : 'video/*', limit !== 1);
+  const chosen = limit > 0 ? files.slice(0, limit) : files;
+  return Promise.all(
+    chosen.map(async (file): Promise<PickedMediaFile> => {
+      const playbackUrl = URL.createObjectURL(file);
+      if (isPicture(file)) {
+        return { source: { key: pickedKey(), fileName: file.name, playbackUrl, kind: 'image' }, durationMs: 0 };
+      }
+      const durationMs = await mediaDuration('video', playbackUrl);
+      return { source: { key: pickedKey(), fileName: file.name, playbackUrl, kind: 'video' }, durationMs: durationMs ?? 0 };
+    }),
+  );
+}
+
+/**
  * A sound library kept in the page: the audio decoded out of a video, written to IndexedDB, and
  * still there after a reload.
  *
@@ -315,7 +394,7 @@ export function browserSoundLibrary(): EditorSoundLibrary {
     },
 
     async extract(source: EditorSource): Promise<SavedSound | null> {
-      const src = source.playbackUrl ?? source.sourcePath ?? '';
+      const src = pageUrl(source);
       if (!src) throw new Error(`there is no file behind ${source.fileName}`);
       const audio = await extractAudio(src);
       if (!audio) return null;
@@ -332,42 +411,180 @@ export function browserSoundLibrary(): EditorSoundLibrary {
   };
 }
 
-/** `holiday.mp4` as `holiday`: the library lists sounds, and `.mp4` on a sound reads as a mistake. */
-function withoutExtension(fileName: string): string {
+/**
+ * `holiday.mp4` as `holiday`: the library lists sounds, and `.mp4` on a sound reads as a mistake.
+ * Exported for the composer's library in `video-composer/media-host`, which names its sounds the
+ * same way.
+ */
+export function withoutExtension(fileName: string): string {
   const dot = fileName.lastIndexOf('.');
   return dot > 0 ? fileName.slice(0, dot) : fileName;
 }
 
 /**
- * One file from the customer, or null when they closed the picker without choosing.
+ * The four things the default host reads off a Capacitor app's native bridge, without importing
+ * `@capacitor/core`: the editor half never does (`src/tsconfig.json`), and a web host has none.
+ *
+ * A Capacitor app's native side puts `window.Capacitor` into the page before any script runs, and
+ * these four are on it from the start: the platform, the local server's URL for a file,
+ * `nativePromise`, the call every plugin proxy `registerPlugin` makes is built on, and
+ * `PluginHeaders`, the native plugins the app was built with and the methods each one has, which is
+ * what that proxy asks before it calls one. So nothing has to be imported or registered first, and
+ * the default works whether or not the host has imported the plugin yet.
+ */
+interface NativeBridge {
+  getPlatform(): string;
+  convertFileSrc(filePath: string): string;
+  nativePromise<R>(pluginName: string, methodName: string, options?: object): Promise<R>;
+  PluginHeaders?: readonly { readonly name: string; readonly methods: readonly { readonly name: string }[] }[];
+}
+
+/**
+ * The bridge, when the page is a Capacitor app on iOS whose native side has `pickAudioFile`; null in
+ * a browser, on every other platform, and on an iOS build without the call.
+ *
+ * WHY THE HEADERS ARE ASKED. iOS's bridge answers NOTHING for a method the native side lacks:
+ * `CapacitorBridge.handleJSCall` logs it and returns, so a promise made straight through
+ * `nativePromise` never settles. `registerPlugin`'s proxy guards against exactly that, by looking the
+ * method up in `PluginHeaders` first and rejecting `UNIMPLEMENTED` when it is missing, and calling
+ * the bridge directly skips the proxy. A build without the call is not far-fetched - a pod or package
+ * checkout older than the JS, a JS update shipped over the air to an older binary, a native project
+ * that leaves the plugin out - and there a pick that never answers holds the editor busy for good,
+ * with every picker and Next greyed and nothing said. So such a build gets the file input it had
+ * before, which works for every pick but the one `pickAudioThroughKit` is for.
+ */
+function bridgeWithAudioPicker(): NativeBridge | null {
+  const bridge = (globalThis as { Capacitor?: Partial<NativeBridge> }).Capacitor;
+  if (typeof bridge?.getPlatform !== 'function' || bridge.getPlatform() !== 'ios') return null;
+  // `convertFileSrc` is what [readFileBlob] reaches the copy through, by way of [webViewUrl], which
+  // reads this same global: without it the copy is a `file://` URI no page can fetch.
+  if (typeof bridge.nativePromise !== 'function' || typeof bridge.convertFileSrc !== 'function') return null;
+  const plugin = bridge.PluginHeaders?.find((header) => header.name === 'VideoComposer');
+  return plugin?.methods.some((method) => method.name === 'pickAudioFile') ? (bridge as NativeBridge) : null;
+}
+
+/**
+ * [EditorMediaHost.pickAudio] on iOS in a Capacitor app: the kit's `pickAudioFile`, then the answer
+ * the file input gives everywhere else. Null on a cancel.
+ *
+ * WHY NOT THE FILE INPUT. WKWebView copies what an input picks into a folder of its own before the
+ * page is told, and that copy comes out EMPTY when the same song is picked again about a minute after
+ * the first time - which is Replace on a track somebody has just set up - so a good song reads as
+ * one the app cannot use. It was measured on an iOS 26.5 simulator, and `pickAudioFile` in
+ * `video-composer/plugin.ts` has the whole of it. The kit's document picker makes its own copy.
+ *
+ * The kit's copy is read through Capacitor's local server by [readFileBlob], which takes the server's
+ * answer for a whole sound, with no HTTP status, as the file it is, and refuses an empty one, as a
+ * song with no bytes cannot be one anybody picked. The bytes are typed with the MIME type the picker
+ * answered, because the server's answer carries none and a render names its staged copy after it
+ * (`withNativeRenderInputs`). What comes back is an object URL over them, exactly as from the input:
+ * the preview plays it, a render stages it, a draft keeps the bytes, and nothing after this learns
+ * the track came in another way.
+ *
+ * The copy is not deleted from here, because a page cannot delete a file and a native call to do it
+ * would buy back the space of one song only until the kit deletes it anyway: the next pick empties
+ * the kit's `tmp/videokit-audio/` before it copies its own song there, and so does the plugin's next
+ * load. Nothing reads it again after this.
+ */
+async function pickAudioThroughKit(bridge: NativeBridge): Promise<PickedAudio | null> {
+  const picked = await bridge.nativePromise<PickAudioFileResult>('VideoComposer', 'pickAudioFile', {});
+  if (picked.cancelled || !picked.uri) return null;
+  const bytes = await readFileBlob(picked.uri);
+  return await pickedAudio(
+    picked.mimeType ? new Blob([bytes], { type: picked.mimeType }) : bytes,
+    picked.fileName || 'Sound',
+  );
+}
+
+/**
+ * A picked sound as the editor takes one: an object URL over its bytes and how long it runs, asked of
+ * an element that can play it. A sound that element cannot open is refused, and its URL given back
+ * first, because nothing else will ever revoke it.
+ */
+async function pickedAudio(bytes: Blob, fileName: string): Promise<PickedAudio> {
+  const uri = URL.createObjectURL(bytes);
+  const durationMs = await mediaDuration('audio', uri);
+  if (durationMs === null) {
+    URL.revokeObjectURL(uri);
+    throw new Error(`The browser could not open ${fileName}`);
+  }
+  return { uri, fileName, sourceDurationMs: durationMs };
+}
+
+/** One file from the customer, or null when they closed the picker without choosing. */
+async function pickFile(accept: string): Promise<File | null> {
+  const [file] = await pickFiles(accept, false);
+  return file ?? null;
+}
+
+/**
+ * The files the customer chose, or none when they closed the picker without choosing.
  *
  * The `cancel` event is what tells the two apart, and every browser the editor supports has fired
- * it since 2023. A browser that does not simply leaves the promise pending, which reads as a
- * picker still being open - the same thing the customer sees.
+ * it since 2023. A `change` with nothing in it is a cancel as well, for an engine that reports one
+ * that way. A browser that does neither simply leaves the promise pending, which reads as a picker
+ * still being open - the same thing the customer sees. The first of the two to arrive settles it,
+ * and the input goes with it.
  */
-function pickFile(accept: string): Promise<File | null> {
+function pickFiles(accept: string, multiple: boolean): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = accept;
+    input.multiple = multiple;
     input.style.display = 'none';
-    const done = (file: File | null): void => {
+    const done = (files: File[]): void => {
       input.remove();
-      resolve(file);
+      resolve(files);
     };
-    input.addEventListener('change', () => done(input.files?.[0] ?? null), { once: true });
-    input.addEventListener('cancel', () => done(null), { once: true });
+    input.addEventListener('change', () => done(Array.from(input.files ?? [])), { once: true });
+    input.addEventListener('cancel', () => done([]), { once: true });
     document.body.appendChild(input);
     input.click();
   });
 }
 
+/** The file's own type, which is what says whether a pick from a mixed input was a still. */
+function isPicture(file: File): boolean {
+  return file.type.startsWith('image/');
+}
+
+/**
+ * The key a picked file is known by for the life of the edit. Made fresh for every pick rather than
+ * from the file, because the same video chosen twice is two clips, and a manifest that gave them
+ * one key could not tell them apart.
+ */
+function pickedKey(): string {
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * The URL the page reads a source by: its `playbackUrl`, or else its `sourcePath` through
+ * [webViewUrl], which is how the editor's own preview plays a source (`EditorMedia` in
+ * `state/editor-media`). A bare device path or a `file://` URI is nothing a `<video>` or a `fetch`
+ * in a WebView can open, so a source a native host handed over with a path and no URL was refused as
+ * unreadable here while the preview played it - and `composerMediaHost` falls back on these for
+ * exactly such sources, when the composer could not read one. In a page without Capacitor the path
+ * comes back as it came, which is what these read before. Empty when the source names neither.
+ */
+function pageUrl(source: EditorSource): string {
+  if (source.playbackUrl) return source.playbackUrl;
+  return source.sourcePath ? webViewUrl(source.sourcePath) : '';
+}
+
 /**
  * Reads a duration from a throwaway media element. Milliseconds, 0 when the element loaded but
  * reports no finite length (a stream without a header), null on an error or when nothing happened
- * within `timeoutMs`.
+ * within `timeoutMs`, which is the kind's own unless a caller says otherwise.
+ *
+ * Exported for `probeMediaDuration` in `video-composer/media-host`, which falls back on it for a
+ * file the composer could not read, or one it read no length from.
  */
-function mediaDuration(kind: 'video' | 'audio', src: string, timeoutMs: number): Promise<number | null> {
+export function mediaDuration(
+  kind: 'video' | 'audio',
+  src: string,
+  timeoutMs = kind === 'video' ? VIDEO_METADATA_TIMEOUT_MS : AUDIO_METADATA_TIMEOUT_MS,
+): Promise<number | null> {
   return new Promise((resolve) => {
     if (!src) {
       resolve(null);
@@ -430,7 +647,7 @@ function imageAspect(uri: string): Promise<number | null> {
  * between a keyframe and an exact frame.
  */
 async function canvasThumbnails({ source, timesMs, maxHeight }: ThumbnailRequest): Promise<string[]> {
-  const src = source.playbackUrl ?? source.sourcePath ?? '';
+  const src = pageUrl(source);
   if (!src) return [];
 
   const video = document.createElement('video');

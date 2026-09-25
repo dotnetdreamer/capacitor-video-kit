@@ -139,7 +139,25 @@ describe('the two questions the editor asks', () => {
     }
   });
 
+  /*
+   * Past the host's size ceiling a retry builds the same file and fails the same way, so the way out
+   * is the edit itself: the sentence names the two changes that make a video smaller, and staying in
+   * the editor is the button where Try again would be.
+   */
+  it('tells a video too big to post how to make it smaller, and offers the edit rather than a retry', () => {
+    const tooBig = renderFailed('too_large');
+
+    expect(tooBig.message).toContain('too big to post');
+    expect(tooBig.message).toContain('lower quality');
+    expect(tooBig.message).toContain('shorter');
+    expect(tooBig.message).toContain('post your clips without the edits');
+    expect(tooBig.message).not.toContain('try again');
+    expect(tooBig.buttons.map(button => button.role)).toEqual(['plain', 'cancel']);
+    expect(tooBig.buttons.map(button => button.text)).toEqual(['Post without edits', 'Keep editing']);
+  });
+
   it('keeps the curly apostrophe the header is written with', () => {
     expect(renderFailed('unknown').header).toBe('Couldn’t build your video');
+    expect(renderFailed('too_large').header).toBe('Couldn’t build your video');
   });
 });

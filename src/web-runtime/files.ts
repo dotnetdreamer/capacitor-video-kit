@@ -123,8 +123,20 @@ export async function resolve(uri: string): Promise<Blob> {
     // and all mean the same thing to the caller.
     throw new Error(`could not read ${uri}: ${describe(error)}`);
   }
-  if (!response.ok) throw new Error(`could not read ${uri}: HTTP ${response.status}`);
-  return await response.blob();
+  /*
+   * Status 0 is not a failure by itself. Capacitor's iOS local server answers a request for a whole
+   * video or sound with a plain URL response rather than an HTTP one (`WebViewAssetHandler.swift`),
+   * and `fetch` reports a response with no HTTP status as 0 and not `ok` - with every byte of the
+   * file behind it. Refusing it was every Extract from video on iOS failing on a file that was
+   * there. An EMPTY body at 0 is still refused: from that server it is a file of no bytes, which
+   * nothing anybody picked or rendered can be, and reading it on would only fail further in with a
+   * worse message. (Another origin is not what it means: a `fetch` in its default mode never
+   * resolves with an opaque answer, it rejects, and that is the catch above.)
+   */
+  if (!response.ok && response.status !== 0) throw new Error(`could not read ${uri}: HTTP ${response.status}`);
+  const blob = await response.blob();
+  if (!response.ok && blob.size === 0) throw new Error(`could not read ${uri}: nothing came back`);
+  return blob;
 }
 
 /**

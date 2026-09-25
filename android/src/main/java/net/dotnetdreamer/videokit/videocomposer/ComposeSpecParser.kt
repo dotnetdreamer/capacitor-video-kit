@@ -52,6 +52,8 @@ object ComposeSpecParser {
     fun parse(json: JSONObject): ComposeSpec {
         val jobId = json.nonEmptyString("jobId")
         val batchId = json.nonEmptyString("batchId")
+        // `.` or `..`: an id that names no job folder of its own ([JobFolders.batchIdRefusal]).
+        if (JobFolders.batchIdRefusal(batchId) != null) throw SpecException("batchId")
 
         val clipsJson = json.optJSONArray("clips") ?: throw SpecException("clips")
         if (clipsJson.length() == 0) throw SpecException("clips")
@@ -536,7 +538,40 @@ object ComposeSpecParser {
         val audioBitrate = o.optInt("audioBitrate", 0)
         if (audioBitrate <= 0) throw SpecException("output.audioBitrate")
         // H.264 encoders refuse odd dimensions; rounding down is invisible and always safe.
-        return Output(width and 1.inv(), height and 1.inv(), fps, videoBitrate, audioBitrate)
+        return Output(
+            width and 1.inv(),
+            height and 1.inv(),
+            fps,
+            videoBitrate,
+            audioBitrate,
+            maxBytes = ceilingOrNull(o.opt("maxBytes")),
+        )
+    }
+
+    /**
+     * `output.maxBytes` as a ceiling in whole bytes, or null for none.
+     *
+     * Only a finite JSON NUMBER that rounds down to at least one byte is a ceiling. Anything else -
+     * absent, null, zero, a negative number, a fraction under one, a string that spells a number -
+     * is no ceiling, because that is what the contract says it means (`ComposeOutput.maxBytes`, and
+     * `byteCeiling` in edit-manifest.ts, which the web engine reads it with), and it is neither
+     * refused as a shape error nor clamped as a value: a host with no ceiling of its own may well
+     * write out a 0 or a null it computed, and a ceiling guessed at would stop renders the host
+     * never asked to stop. A number is read as a JSON number or not at all, as the mask's fields
+     * are: `optDouble` would also read the string "1e8" as a ceiling, and the contract's `number`
+     * is not a string.
+     *
+     * Rounded down, which changes no answer for a ceiling of a byte or more: a file's size is a
+     * whole number of bytes, and a whole number is past a ceiling exactly when it is past that
+     * ceiling rounded down. The test is made on the ROUNDED number: made before it, `0.5` would
+     * pass as positive and come out a ceiling of 0 that fails every render, which the same spec on
+     * the web renders with no ceiling at all. iOS's `OutputDTO.ceiling` reads it the same way. A
+     * ceiling too large for a Long becomes the largest one, which no file reaches, so it behaves
+     * as the no ceiling it effectively is.
+     */
+    private fun ceilingOrNull(value: Any?): Long? {
+        val whole = floor(finiteNumber(value) ?: return null)
+        return if (whole >= 1.0) whole.toLong() else null
     }
 
     private fun parseFilterOp(o: JSONObject, i: Int): FilterOp? = when (val op = o.optString("op")) {

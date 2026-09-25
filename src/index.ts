@@ -37,7 +37,8 @@
  *
  * What else belongs here: the host interface the editor is handed, the types a caller needs to read
  * a result, the editor's own state for a host that wants to drive it from outside, the catalogues
- * the sheets are built from, and the two functions that have to run before the editor renders. The
+ * the sheets are built from, the two functions that have to run before the editor renders, and the
+ * few helpers a Capacitor host writes around the editor that need no Capacitor import. The
  * manifest itself - `EditManifest` and the edit operations over it - is the contract the Swift and
  * Kotlin engines are written against, so it lives at `capacitor-video-kit` and `capacitor-video-kit/editor`
  * rather than here.
@@ -45,8 +46,8 @@
 
 
 /*
- * What the host supplies. Only the resolver and the browser defaults are values; the rest is the
- * shape a host implements.
+ * What the host supplies. Only the resolver, the browser defaults and the back button over Ionic's
+ * `Platform` are values; the rest is the shape a host implements.
  */
 export type {
   ConfirmRequest,
@@ -65,6 +66,7 @@ export type {
   HapticKind,
   PickedAudio,
   PickedImage,
+  PickedMediaFile,
   ReleaseRequest,
   RenderFailureCode,
   RenderRequest,
@@ -77,8 +79,26 @@ export type {
   VideoEditorResult,
 } from './host/host.types';
 export { RenderFailedError } from './host/host.types';
-export { browserMediaHost, browserSoundLibrary, envSafeAreaInsets, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
+export {
+  browserMediaHost,
+  browserSoundLibrary,
+  envSafeAreaInsets,
+  pickMediaFiles,
+  resolveEditorHost,
+  visualViewportKeyboard,
+} from './host/defaults';
 export { installEditorFonts } from './host/fonts';
+export { registerBackHandlerWith, type PrioritisedBackButton } from './host/back-button';
+
+/*
+ * What a Capacitor host's own pickers and drafts need around the editor and call no plugin for, so
+ * here rather than at the root, where only what imports `@capacitor/core` has to be: a file read the
+ * way a WebView has to read one, a voiceover take the same way and typed as the recorder writes it,
+ * and a cancel told from a failure for `@capawesome/capacitor-file-picker`. The root's
+ * `probeMediaDuration` is the one that asks the composer.
+ */
+export { readFileBlob, readVoiceTake } from './host/read-file';
+export { filePickerCancelled } from './host/file-picker';
 
 /* The editor's own state, for a host that wants to read the edit or drive it from outside. */
 export type {

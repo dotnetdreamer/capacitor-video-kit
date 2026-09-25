@@ -1,6 +1,7 @@
 package net.dotnetdreamer.videokit.videocomposer
 
 import androidx.media3.effect.Presentation
+import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -350,9 +351,13 @@ class CameraTest {
             assertEquals(1, item.effects.videoEffects.size)
             assertTrue(item.effects.videoEffects[0] is Presentation)
         }
-        // The composition's own effects are the Presentation and the progress tap, never a camera,
-        // so overlays - chained after them - stay where they were put.
-        assertEquals(2, composition.effects.videoEffects.size)
+        // The composition's own effects are the Presentation, and the progress tap when a render is
+        // being watched - never a camera, so overlays chained after them stay where they were put.
+        assertEquals(1, composition.effects.videoEffects.size)
+        assertTrue(composition.effects.videoEffects[0] is Presentation)
+        val watched = CompositionBuilder.toComposition(plan, emptyList(), AtomicLong())
+        assertEquals(2, watched.effects.videoEffects.size)
+        assertTrue(watched.effects.videoEffects[0] is Presentation)
     }
 
     @Test

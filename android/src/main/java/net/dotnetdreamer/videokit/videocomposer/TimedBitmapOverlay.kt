@@ -58,10 +58,12 @@ class TimedBitmapOverlay(
     /**
      * Deliberately does NOT recycle the bitmap.
      *
-     * Media3 rebuilds the shader-program chain whenever it registers a new input stream, which for
-     * a multi-clip sequence means once per clip - and rebuilding releases every overlay first. An
-     * overlay that destroyed its bitmap here would therefore work for the first clip and fail the
-     * export at the very first item boundary, which is exactly what it did. The bitmap belongs to
+     * Media3 rebuilds the shader-program chain whenever it registers a new input stream whose
+     * effect list differs from the running one, which on a multi-clip sequence is every item a
+     * reframe, a speed change or a transition sets apart (plain clips share their effects - see
+     * CompositionBuilder's Geometries) - and rebuilding releases every overlay first. An overlay
+     * that destroyed its bitmap here would therefore work for the first clip and fail the export
+     * at the first such boundary, which is exactly what it did. The bitmap belongs to
      * whoever created the overlay; [recycle] is how they hand it back once the job is finished.
      */
     override fun release() {

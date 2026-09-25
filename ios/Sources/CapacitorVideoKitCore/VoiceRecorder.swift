@@ -37,9 +37,12 @@ enum VoiceError: Error {
 
 /// The microphone, as the module's only actor.
 ///
-/// It is process-wide rather than per-plugin because a WebView reload builds a fresh `CAPPlugin`
-/// while a take is still open, and an `AVAudioRecorder` owned by the dead instance keeps the
-/// microphone. Both entry points are already `async`, so the actor costs nothing and closes the
+/// It is process-wide rather than per-plugin because a bridge built later in the same process loads
+/// a fresh `CAPPlugin` while a take may still be open, and an `AVAudioRecorder` owned by the dead
+/// instance would keep the microphone. A web view reload keeps the plugin it has (see
+/// `VideoComposerPlugin.load`), and a take it leaves open is closed by the next `start`'s
+/// `already_recording`, which JS answers with a `stop`, or by the app going to the background
+/// (`abandon`). Both entry points are already `async`, so the actor costs nothing and closes the
 /// hole where two concurrent `start` calls both pass the same nil check.
 actor VoiceRecorder {
 
@@ -66,15 +69,26 @@ actor VoiceRecorder {
 
     // MARK: - Start
 
-    /// Opens a take. `batchId` decides only where the file lands: inside the job folder when
-    /// the caller already has one, so `prepareJob` never has to relocate it, and the voice cache
-    /// otherwise.
+    /// Where a take for `batchId` is written: inside the job folder when the caller already has
+    /// one, so `prepareJob` never has to relocate it, and the voice cache otherwise.
+    ///
+    /// An id `compose` would refuse - empty, `.` or `..` (`JobFolders.batchIdRefusal`) - counts as
+    /// none. The id only says where the take is kept, so refusing it would lose a take the customer
+    /// still wants, and filing it in the folder `JobFolders.folderName` makes of it would put it in
+    /// some other batch's (`..` is `__`'s). Android's `VoiceRecorder.folderFor` and the web's
+    /// `startVoiceRecording` read the id the same way.
+    static func folder(for batchId: String?) -> URL {
+        guard let batchId, JobFolders.batchIdRefusal(batchId) == nil else { return JobFolders.voiceDir() }
+        return JobFolders.inputsDir(batchId)
+    }
+
+    /// Opens a take. `batchId` decides only where the file lands (`folder(for:)`).
     func start(batchId: String?) async throws {
         guard recorder == nil else { throw VoiceError.alreadyRecording }
 
         try await requestPermission()
 
-        let dir = batchId.map { JobFolders.inputsDir($0) } ?? JobFolders.voiceDir()
+        let dir = Self.folder(for: batchId)
         do {
             try JobFolders.ensure(dir)
         } catch {

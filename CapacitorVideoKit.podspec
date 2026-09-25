@@ -3,12 +3,16 @@ require 'json'
 package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
 
 Pod::Spec.new do |s|
-  # The name is not a choice. The Capacitor CLI writes `pod 'CapacitorVideoKitCore', :path => ...` into
+  # The name is not a choice. The Capacitor CLI writes `pod 'CapacitorVideoKit', :path => ...` into
   # the host's Podfile from the npm package name - dropping the `@`, treating every `/` and `-` as a
   # word break and uppercasing what follows one (`fixName` in @capacitor/cli) - and CocoaPods then
   # looks for a podspec of exactly that name at the package root. `capacitor-video-kit` gives
-  # `CapacitorVideoKitCore`, the scope's `/core` being what puts `Core` on the end.
-  s.name = 'CapacitorVideoKitCore'
+  # `CapacitorVideoKit`, which is also the SwiftPM package and product name in Package.swift.
+  s.name = 'CapacitorVideoKit'
+  # The Swift module keeps the SwiftPM target's name, so a host that has to import it - an
+  # AppDelegate forwarding background URLSession events to `PublisherSession` - writes
+  # `import CapacitorVideoKitCore` whichever package manager installed it.
+  s.module_name = 'CapacitorVideoKitCore'
   s.version = package['version']
   s.summary = 'Native video composition and native background publishing for Capacitor'
   s.license = package['license']

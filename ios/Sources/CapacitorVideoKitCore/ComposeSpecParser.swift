@@ -92,11 +92,14 @@ enum ComposeSpecParser {
         // Absence has to survive the parser intact: it is what the builder tests to keep the
         // single-layer path a single-layer edit has always taken.
         let tracks = d.tracks.map { list in
-            list.map { t in
+            list.enumerated().map { i, t in
                 ComposeTrack(id: t.id,
                              clips: t.clips.map { clip($0) },
                              startMs: t.startMs,
-                             z: t.z,
+                             // Android's default, `optInt("z", i + 1)`: a layer that names no z sits
+                             // above the base and above every layer listed before it. Resolved here
+                             // rather than in `TrackDTO` because a track cannot see its own index.
+                             z: t.z ?? i + 1,
                              opacity: clamp01(t.opacity))
             }
         }
@@ -107,7 +110,8 @@ enum ComposeSpecParser {
                                    height: o.height & ~1,
                                    fps: o.fps,
                                    videoBitrate: o.videoBitrate,
-                                   audioBitrate: o.audioBitrate)
+                                   audioBitrate: o.audioBitrate,
+                                   maxBytes: o.maxBytes)
 
         let overlays = d.overlays.map { o in
             ComposeOverlay(id: o.id,
@@ -192,16 +196,21 @@ enum ComposeSpecParser {
                     uri: c.uri,
                     inMs: c.inMs,
                     outMs: c.outMs,
-                    speed: clamp(c.speed, minSpeed, maxSpeed),
+                    // A picture is silent at 1x whatever the rest of the clip says, and it is made so
+                    // HERE, once, as Android's `parseClip` does it: the builder then times and mixes
+                    // it off the two fields it already reads for every clip, rather than each place
+                    // that reads them asking what kind of clip this is.
+                    speed: c.image ? 1 : clamp(c.speed, minSpeed, maxSpeed),
                     volume: clamp01(c.volume),
-                    muted: c.muted,
+                    muted: c.image || c.muted,
                     // Only the exact string "cover" selects cover. A typo, or "COVER", silently
                     // renders contain, exactly as Android's `== "cover"` test does. Rejecting it
                     // would fail specs the Android build accepts.
                     fit: c.fit == Fit.cover.rawValue ? .cover : .contain,
                     crop: clampRect(c.crop),
                     rect: clampPlacement(c.rect),
-                    transitionIn: transitionIn)
+                    transitionIn: transitionIn,
+                    image: c.image)
     }
 
     /// A decoded transition as the value the builder consumes. Every curve sample, mask number and
@@ -337,8 +346,12 @@ private extension KeyedDecodingContainer {
 
     func double(_ key: Key, _ fallback: Double) -> Double { number(key) ?? fallback }
 
-    func int(_ key: Key, _ fallback: Int) -> Int {
-        guard let v = number(key), v > -2_147_483_648, v < 2_147_483_648 else { return fallback }
+    func int(_ key: Key, _ fallback: Int) -> Int { int(key) ?? fallback }
+
+    /// `int` with no fallback, for the one key whose default is not a constant: a track's `z`
+    /// defaults to its own position, which only the caller holding the array knows.
+    func int(_ key: Key) -> Int? {
+        guard let v = number(key), v > -2_147_483_648, v < 2_147_483_648 else { return nil }
         return Int(v.rounded(.towardZero))
     }
 
@@ -529,7 +542,8 @@ private struct ComposeSpecDTO: Decodable {
         jobId = c.string(.jobId)
         batchId = c.string(.batchId)
         if jobId.isEmpty { throw SpecError("jobId") }
-        if batchId.isEmpty { throw SpecError("batchId") }
+        // Empty, `.` or `..`: an id that names no job folder of its own (`JobFolders.batchIdRefusal`).
+        if JobFolders.batchIdRefusal(batchId) != nil { throw SpecError("batchId") }
 
         // Missing, not an array, and empty all report the bare `clips` path.
         guard var clipArray = try? c.nestedUnkeyedContainer(forKey: .clips), (clipArray.count ?? 0) > 0 else {
@@ -592,6 +606,11 @@ private struct ComposeSpecDTO: Decodable {
                 let i = trackArray.currentIndex
                 do {
                     decoded.append(try trackArray.decode(TrackDTO.self))
+                } catch let e as EmptyTrack {
+                    // Android's wording to the character, which names the track by its id as well
+                    // as its index: the index alone names nothing the caller can look up.
+                    throw SpecError("tracks[\(i)].clips",
+                                    "invalid_spec:tracks[\(i)].clips track '\(e.id)' has no clips")
                 } catch let e as SpecError {
                     throw SpecError("tracks[\(i)]\(e.path.isEmpty ? "" : ".\(e.path)")")
                 } catch {
@@ -797,9 +816,12 @@ private struct ClipDTO: Decodable {
     /// Raw, not yet clamped: `validate` does that, in the same pass that clamps speed and volume.
     let crop: RectDTO?
     let rect: RectDTO?
+    /// Raw as well: `validate` is where a picture's speed and sound are overridden, beside the
+    /// clamps those two fields get for every other clip.
+    let image: Bool
 
     private enum K: String, CodingKey {
-        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect
+        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, image
     }
 
     init(from decoder: Decoder) throws {
@@ -823,6 +845,10 @@ private struct ClipDTO: Decodable {
         // still reports the old field. Nothing before this line has changed meaning.
         crop = try c.rect(.crop, "crop")
         rect = try c.rect(.rect, "rect")
+        // After `rect`, for the reason `crop` and `rect` come after the rest, although this one
+        // cannot fail: a value that is not a boolean reads as a video, the lenient reading `muted`
+        // gets too.
+        image = c.flag(.image, false)
     }
 }
 
@@ -1031,7 +1057,8 @@ private struct TrackDTO: Decodable {
     let id: String
     let clips: [ClipDTO]
     let startMs: Int64
-    let z: Int
+    /// nil when the wire carried no usable z, for `validate` to default from the track's index.
+    let z: Int?
     let opacity: Double
 
     private enum K: String, CodingKey { case id, clips, startMs, z, opacity }
@@ -1041,11 +1068,13 @@ private struct TrackDTO: Decodable {
         id = c.string(.id)
         if id.isEmpty { throw SpecError("id") }
 
-        // Missing, not an array, and empty all report the bare `clips` path, exactly as the base
-        // track's do. An empty layer draws nothing and the editor drops it rather than carrying it
-        // around, so one arriving here is a manifest that was already wrong.
+        // Missing, not an array, and empty all fail the same way, as the base track's do. An empty
+        // layer draws nothing and the editor drops it rather than carrying it around, so one
+        // arriving here is a manifest that was already wrong. Thrown as `EmptyTrack` rather than as
+        // a leaf path, because Android's message names this track's id and its index together and
+        // only the container knows the index.
         guard var array = try? c.nestedUnkeyedContainer(forKey: .clips), (array.count ?? 0) > 0 else {
-            throw SpecError("clips")
+            throw EmptyTrack(id: id)
         }
         var decoded: [ClipDTO] = []
         while !array.isAtEnd {
@@ -1069,10 +1098,17 @@ private struct TrackDTO: Decodable {
         // Clamped, in this file's usual direction for a value that is merely out of range. Zero is
         // the base track's own z and a tie breaks on spec order with the base first, so a negative
         // one lands the layer immediately above the base rather than underneath it, where nothing
-        // may go: the base is the bottom of the frame.
-        z = max(0, c.int(.z, 0))
+        // may go: the base is the bottom of the frame. An absent one is left for `validate`.
+        z = c.int(.z).map { max(0, $0) }
         opacity = c.double(.opacity, 1)
     }
+}
+
+/// A track whose `clips` is missing, not an array or empty. Its own type rather than a `SpecError`
+/// for the reason `FilterParseError` is one: the message Android sends for it carries the track's
+/// index, which the track cannot see, so the container that can see it writes the message.
+private struct EmptyTrack: Error {
+    let id: String
 }
 
 private struct OutputDTO: Decodable {
@@ -1081,8 +1117,9 @@ private struct OutputDTO: Decodable {
     let fps: Int
     let videoBitrate: Int
     let audioBitrate: Int
+    let maxBytes: Int64?
 
-    private enum K: String, CodingKey { case width, height, fps, videoBitrate, audioBitrate }
+    private enum K: String, CodingKey { case width, height, fps, videoBitrate, audioBitrate, maxBytes }
 
     /// Deliberately total: every field falls back to 0 and the rejection happens in `validate`, so
     /// that a bad clip is still reported before a zero width.
@@ -1093,6 +1130,24 @@ private struct OutputDTO: Decodable {
         fps = c.int(.fps, 0)
         videoBitrate = c.int(.videoBitrate, 0)
         audioBitrate = c.int(.audioBitrate, 0)
+        maxBytes = Self.ceiling(c.number(.maxBytes))
+    }
+
+    /// `output.maxBytes` as the contract reads it (`ComposeOutput.maxBytes`, and `byteCeiling` in
+    /// edit-manifest.ts, which the web engine reads it with): rounded down to whole bytes, and
+    /// anything that does not round down to at least one byte - absent, null, 0, negative, a
+    /// fraction under one, NaN, not a number at all - is no ceiling, never a refusal, because it is
+    /// a host's optional limit and a host that sends a bad one has still asked for a video. The
+    /// test is made on the ROUNDED number: made before it, `0.5` would pass as positive and come
+    /// out a ceiling of 0 that fails every render, which the same spec on the web renders with no
+    /// ceiling at all. Android's `ComposeSpecParser.ceilingOrNull` reads it the same way. A number
+    /// past what `Int64` holds is a ceiling no file can reach.
+    static func ceiling(_ value: Double?) -> Int64? {
+        guard let value, value.isFinite else { return nil }
+        let whole = value.rounded(.down)
+        guard whole >= 1 else { return nil }
+        guard whole < 9.2e18 else { return Int64.max }
+        return Int64(whole)
     }
 }
 

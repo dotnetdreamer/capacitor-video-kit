@@ -1,7 +1,8 @@
 /*
- * Three rows of chips and two lines of text, inside the 320px a compact sheet is given. Everything
- * shared with the other sheets - the centring, the horizontal clip - comes from `sheet-common.css`;
- * only the padding and the chips are this sheet's own, because no two sheets agree on either.
+ * Three rows of chips and up to three lines of text, inside the 320px a compact sheet is given.
+ * Everything shared with the other sheets - the centring, the horizontal clip - comes from
+ * `sheet-common.css`; only the padding and the chips are this sheet's own, because no two sheets
+ * agree on either.
  */
 .qs {
   padding: 4px 20px;
@@ -90,4 +91,15 @@
   font-size: 11px;
   line-height: 15px;
   color: var(--ve-faint, rgba(255, 255, 255, 0.35));
+}
+
+/*
+ * A rung whose estimate is over the host's upload limit, and the line that explains the chosen one.
+ * Last in the file so it beats the chosen chip's inherited hint colour and the note's own faint one:
+ * the warning matters most on the chip that is chosen. The chip itself is left alone, because it can
+ * still be chosen and a dimmed or struck-through one would say it cannot.
+ */
+.qs__chip .qs__hint--over,
+.qs__note--over {
+  color: var(--ve-danger, #ff4d6a);
 }

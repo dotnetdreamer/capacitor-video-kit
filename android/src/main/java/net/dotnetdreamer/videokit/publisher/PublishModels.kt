@@ -1,5 +1,6 @@
 package net.dotnetdreamer.videokit.publisher
 
+import net.dotnetdreamer.videokit.videocomposer.JobFolders
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -257,8 +258,12 @@ data class PublishRequest(
 
     companion object {
         fun from(o: JSONObject): PublishRequest {
+            // Empty, `.` or `..` ([JobFolders.batchIdRefusal]). This engine names a batch's record
+            // `<safe id>.json`, which nothing climbs out of, but iOS files a batch's bodies and done
+            // marker under names made from its id, where `.` and `..` would be some other batch's,
+            // and a request one platform refuses is refused on every one.
             val batchId = o.optString("batchId")
-            if (batchId.isEmpty()) throw RequestException("invalid_request:batchId")
+            if (JobFolders.batchIdRefusal(batchId) != null) throw RequestException("invalid_request:batchId")
 
             val uploadsJson = o.optJSONArray("uploads")
                 ?: throw RequestException("invalid_request:uploads")

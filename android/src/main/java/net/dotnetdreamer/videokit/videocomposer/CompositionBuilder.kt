@@ -27,6 +27,7 @@ import androidx.media3.effect.TextureOverlay
 import androidx.media3.transformer.AudioEncoderSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.DefaultMuxer
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
@@ -74,6 +75,13 @@ object CompositionBuilder {
         val sequences = ArrayList<EditedMediaItemSequence>(
             1 + plan.tracks.size + (if (plan.tails.isEmpty()) 0 else 1) + plan.extraAudioSequences,
         )
+        // The grade is ONE instance for the whole post, handed to every clip on every sequence. It
+        // holds nothing but the matrix, and Media3 turns it into a fresh shader program wherever it
+        // builds a chain, so sharing it cannot carry anything from one clip or sequence to another;
+        // what it buys is that Media3 sees the SAME effect on consecutive clips - see [Geometries]
+        // for why that saves rebuilding the whole chain at every cut.
+        val grade = plan.colorMatrix?.let { ColorMatrixEffect(it) }
+
         // TOP LAYER FIRST and the base LAST, which is the order Media3 1.11.1 actually draws in.
         // DefaultCompositorGlProgram.drawFrame walks its frame list from the END backwards, blending
         // each one over what is already there, and DefaultVideoCompositor.getFramesToComposite puts
@@ -126,14 +134,14 @@ object CompositionBuilder {
         // anything else.
         val layers = plan.tracks.asReversed()
         for (track in layers) {
-            sequences += layerSequence(track, plan.totalUs, output, plan.colorMatrix)
+            sequences += layerSequence(track, plan.totalUs, output, grade)
         }
         sequences += videoSequence(
             plan.clips,
             plan.totalUs - plan.baseUs,
             plan.videoSeqHasAudio,
             output,
-            plan.colorMatrix,
+            grade,
             plan.tails.associateBy { it.index },
             plan.camera,
         )
@@ -143,22 +151,25 @@ object CompositionBuilder {
         // layers and the base when there are none, so the output keeps the cadence it has today
         // and never takes on the 30 fps of the blank frames that fill the tails' gaps.
         if (plan.tails.isNotEmpty()) {
-            sequences += tailSequence(plan.tails, plan.totalUs, output, plan.colorMatrix, plan.camera)
+            sequences += tailSequence(plan.tails, plan.totalUs, output, grade, plan.camera)
         }
         plan.music?.let { sequences += musicSequence(it) }
         plan.voice?.let { sequences += voiceSequence(it) }
 
         val compositionEffects = ArrayList<Effect>()
         // A no-op when every item already arrives at the output size, and a safety net when one
-        // does not.
+        // does not. Its own instance, never one of [Geometries]': Media3 folds this and the clip's
+        // Presentation into one matrix list and configures each in turn, and the same instance
+        // twice in that list would be configured twice and keep only the second size.
         compositionEffects += Presentation.createForWidthAndHeight(
             output.width,
             output.height,
             Presentation.LAYOUT_SCALE_TO_FIT,
         )
-        // The colour itself is applied per clip (see editedClip); this identity pass is only the
-        // progress tap, and it sits before the overlays like the colour did.
-        compositionEffects += ColorMatrixEffect(ColorMatrix.IDENTITY, progressTap)
+        // The colour itself is applied per clip (see editedClip); this is only the progress tap,
+        // and it sits before the overlays like the colour did. An RGB matrix, so Media3 folds it
+        // into the Presentation's pass instead of drawing the frame once more - see [ProgressTap].
+        progressTap?.let { compositionEffects += ProgressTap(it) }
         overlays.chunked(OVERLAYS_PER_EFFECT).forEach { chunk ->
             compositionEffects += OverlayEffect(ImmutableList.copyOf(chunk))
         }
@@ -187,7 +198,18 @@ object CompositionBuilder {
         return builder.build()
     }
 
-    fun newTransformer(context: Context, plan: RenderPlan, relaxEncoder: Boolean): Transformer.Builder {
+    /**
+     * A Transformer for [plan]'s output. [bytesWritten] is where the muxer counts the encoded bytes
+     * it is handed, for the plugin's poll to hold against the host's size ceiling; with no ceiling
+     * nothing is counted, and the export goes through the muxer Transformer picks for itself, by
+     * the path every render took before there were ceilings.
+     */
+    fun newTransformer(
+        context: Context,
+        plan: RenderPlan,
+        relaxEncoder: Boolean,
+        bytesWritten: AtomicLong,
+    ): Transformer.Builder {
         val output = plan.spec.output
         val videoSettings = if (relaxEncoder) {
             // Second attempt after an encoder refused our request: let the factory choose
@@ -211,7 +233,7 @@ object CompositionBuilder {
             .setEnableFallback(true)
             .build()
 
-        return Transformer.Builder(context)
+        val builder = Transformer.Builder(context)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
             .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .setEncoderFactory(encoderFactory)
@@ -219,6 +241,11 @@ object CompositionBuilder {
             .setLooper(Looper.getMainLooper())
         // The H.264 profile is deliberately NOT requested: DefaultEncoderFactory ignores a
         // requested profile and picks High itself on API 29+ wherever the encoder offers it.
+        if (output.maxBytes != null) {
+            // The muxer Transformer uses when given none, counting what it is handed.
+            builder.setMuxerFactory(CountingMuxer.Factory(DefaultMuxer.Factory(), bytesWritten))
+        }
+        return builder
     }
 
     /* ---------------------------------------------------------------------------------------- */
@@ -247,19 +274,21 @@ object CompositionBuilder {
         tailUs: Long,
         hasAudio: Boolean,
         output: Output,
-        colorMatrix: ColorMatrix?,
+        grade: ColorMatrixEffect?,
         transitionsInto: Map<Int, RenderPlan.PlannedTail>,
         camera: CameraTrack? = null,
     ): EditedMediaItemSequence {
+        val geometries = Geometries()
         val items = clips.mapIndexed { i, planned ->
             val tail = transitionsInto[i]
             if (tail == null) {
-                editedClip(planned, output, colorMatrix, camera = camera)
+                editedClip(planned, output, grade, geometries, camera = camera)
             } else {
                 editedClip(
                     planned,
                     output,
-                    colorMatrix,
+                    grade,
+                    geometries,
                     transition = TransitionEffect(TransitionRole.TO, tail.transition, tail.startUs, tail.durUs),
                     fadeInUs = tail.durUs,
                     camera = camera,
@@ -339,7 +368,7 @@ object CompositionBuilder {
         track: RenderPlan.PlannedTrack,
         totalUs: Long,
         output: Output,
-        colorMatrix: ColorMatrix?,
+        grade: ColorMatrixEffect?,
     ): EditedMediaItemSequence {
         val trackTypes = if (track.hasAudio) {
             setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO)
@@ -348,7 +377,8 @@ object CompositionBuilder {
         }
         val builder = EditedMediaItemSequence.Builder(trackTypes)
         if (track.startUs > 0L) builder.addGap(track.startUs)
-        for (planned in track.clips) builder.addItem(editedClip(planned, output, colorMatrix))
+        val geometries = Geometries()
+        for (planned in track.clips) builder.addItem(editedClip(planned, output, grade, geometries))
         // A gap must have a positive duration or Media3 rejects it, and a layer cut at the base's
         // own end has no room left for one.
         val tailUs = totalUs - track.endUs
@@ -384,7 +414,7 @@ object CompositionBuilder {
         tails: List<RenderPlan.PlannedTail>,
         totalUs: Long,
         output: Output,
-        colorMatrix: ColorMatrix?,
+        grade: ColorMatrixEffect?,
         camera: CameraTrack? = null,
     ): EditedMediaItemSequence {
         val trackTypes = if (tails.any { !it.clip.removeAudio }) {
@@ -393,6 +423,7 @@ object CompositionBuilder {
             setOf(C.TRACK_TYPE_VIDEO)
         }
         val builder = EditedMediaItemSequence.Builder(trackTypes)
+        val geometries = Geometries()
         var cursorUs = 0L
         for (tail in tails) {
             // A gap must have a positive duration or Media3 rejects it; two windows that meet
@@ -403,7 +434,8 @@ object CompositionBuilder {
                 editedClip(
                     tail.clip,
                     output,
-                    colorMatrix,
+                    grade,
+                    geometries,
                     transition = TransitionEffect(TransitionRole.FROM, tail.transition, tail.startUs, tail.durUs),
                     // Over the part of the window the item still plays: all of it, unless the next
                     // tail borrowed its end, and then the fade still reaches silence rather than
@@ -432,7 +464,8 @@ object CompositionBuilder {
     private fun editedClip(
         planned: RenderPlan.PlannedClip,
         output: Output,
-        colorMatrix: ColorMatrix?,
+        grade: ColorMatrixEffect?,
+        geometries: Geometries,
         transition: TransitionEffect? = null,
         fadeInUs: Long = 0L,
         fadeOutUs: Long = 0L,
@@ -498,11 +531,7 @@ object CompositionBuilder {
         val geometry: Effect = if (planned.reframed) {
             Reframe(clip, planned.frame, planned.rotationGlDeg)
         } else {
-            Presentation.createForWidthAndHeight(
-                planned.frame.width,
-                planned.frame.height,
-                layoutFor(clip.fit),
-            )
+            geometries.presentation(planned.frame.width, planned.frame.height, layoutFor(clip.fit))
         }
 
         // The colour goes on the picture BEFORE the geometry letterboxes it. Applied to the finished
@@ -525,7 +554,7 @@ object CompositionBuilder {
         // transition's move, blur and mask then acting in output pixels as they always have. A
         // clip the plan did not mark zoomed - every clip of a post with no camera - gets nothing.
         val videoEffects: List<Effect> = listOfNotNull(
-            colorMatrix?.let { ColorMatrixEffect(it, progressTap = null) },
+            grade,
             geometry,
             camera?.takeIf { planned.zoomed }?.let { CameraTransformation(it) },
             transition,
@@ -638,6 +667,41 @@ object CompositionBuilder {
     private fun layoutFor(fit: Fit): Int = when (fit) {
         Fit.COVER -> Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
         Fit.CONTAIN -> Presentation.LAYOUT_SCALE_TO_FIT
+    }
+
+    /**
+     * One sequence's Presentations, one per frame size and fit, handed out again to every clip on
+     * that sequence that asks for the same one.
+     *
+     * Media3 keeps a sequence's effect chain from one item to the next only when the next item's
+     * effect list EQUALS the one running (`DefaultVideoFrameProcessor.configure`), and effects
+     * compare by identity. A fresh Presentation per clip therefore tore the whole chain down at
+     * every cut - every shader program released, recompiled and its textures reallocated - and on a
+     * post that is one sequence, where the composition's effects ride on each item's list, that
+     * included every overlay, whose texture `BitmapOverlay.release` deletes and the next frame
+     * uploads again. The same instance on consecutive plain clips makes their lists equal, and the
+     * chain simply carries on. A clip whose list differs anyway - reframed, sped, on either side of
+     * a transition - still rebuilds exactly as it always did.
+     *
+     * The picture cannot tell: `Presentation.configure` works everything out afresh from the input
+     * size it is handed and keeps nothing from the call before, and Media3 calls it again whenever
+     * the size of the frames arriving changes (`BaseGlShaderProgram.queueInputFrame`,
+     * `FinalShaderProgramWrapper.ensureConfigured`). The items of a sequence go through its one
+     * frame processor one after another, so a shared instance is never configured for two clips at
+     * once.
+     *
+     * PER SEQUENCE, never shared between them: under a compositor every sequence has its own frame
+     * processor, running at the same time as the others, and one Presentation configured by two of
+     * them would hand each the other's matrix. Nor is it ever used for the composition's own
+     * Presentation - see [toComposition].
+     */
+    private class Geometries {
+        private val presentations = HashMap<Triple<Int, Int, Int>, Presentation>()
+
+        fun presentation(width: Int, height: Int, layout: Int): Presentation =
+            presentations.getOrPut(Triple(width, height, layout)) {
+                Presentation.createForWidthAndHeight(width, height, layout)
+            }
     }
 
     /**

@@ -15,6 +15,13 @@ object FailureCodes {
     const val CANCELLED = "cancelled"
     const val NO_SPACE = "no_space"
     const val UNSUPPORTED = "unsupported"
+
+    /**
+     * The file grew past the host's `output.maxBytes`. No Media3 error is ever mapped to it: only
+     * [SizeCeiling] decides it, from the bytes the muxer has been handed and then from the finished
+     * file itself.
+     */
+    const val TOO_LARGE = "too_large"
     const val UNKNOWN = "unknown"
 }
 

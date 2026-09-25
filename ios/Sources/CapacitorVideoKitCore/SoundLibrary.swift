@@ -52,15 +52,6 @@ enum SoundLibrary {
         return base.appendingPathComponent("video-composer/sounds", isDirectory: true)
     }
 
-    /// Whether this file is one of the library's own.
-    ///
-    /// Asked by `JobFolders.place`, which MOVES app-owned inputs into the job folder - and a
-    /// library sound moved out of the library is a row that plays nothing from the next post
-    /// onwards. A sound is the customer's and outlives every job that uses it, so a job takes a copy.
-    static func owns(_ url: URL) -> Bool {
-        url.standardizedFileURL.path.hasPrefix(dir.standardizedFileURL.path + "/")
-    }
-
     // MARK: - Extract
 
     /// Writes the video's audio track out on its own.
@@ -105,6 +96,9 @@ enum SoundLibrary {
         }
 
         let durationMs = (try? await Thumbnailer.probe(target).durationMs) ?? 0
+        // Android reads the content resolver's DISPLAY_NAME here. The file's own name is the same
+        // thing on iOS, a photo library pick included: `GalleryLibrary.copyURL` names its copy
+        // after the item, `IMG_0042.MOV`, rather than after anything of its own.
         let sourceName = source.lastPathComponent
         let sound = Sound(id: id,
                           url: target,

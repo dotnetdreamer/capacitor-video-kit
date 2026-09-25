@@ -2,35 +2,186 @@
 import Foundation
 import os
 
-/// The encode half of a render, behind a protocol so the preset engine can be swapped for an
-/// `AVAssetWriter` one without touching the registry.
+/// The encode half of a render: one attempt at turning a built composition into the file at `url`.
 ///
-/// The trigger for building that second conformance is written down rather than left to taste:
-/// when the delivered rate logged below is more than 1.5x the ladder on a real device, when the
-/// 100 MiB cap fires on a timeline the product considers normal, or when the ladder has to be
-/// honoured literally for parity with Android, which sets the bitrate on the encoder directly.
+/// Two engines conform. `WriterEngine` is the one every render starts with, because it is the one
+/// that encodes at the rate the spec asks for; `PresetEngine` is `AVAssetExportSession`, kept as the
+/// single fallback for an encoder that turns the writer's settings down. Neither decides anything
+/// about retrying: an engine makes one attempt, and `Exporter` is where the second one is decided.
 protocol RenderEngine {
-    /// `shouldStop` is part of the contract rather than an Exporter detail: any engine has a point
-    /// where it decides to try again, and every engine has to stop deciding that once the app is on
-    /// its way to the background.
-    static func export(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
-                       shouldStop: @escaping @Sendable () -> Bool,
-                       onProgress: @escaping @Sendable (Double) -> Void) async throws -> ComposeResult
+    /// For the log, which is the only place the two are told apart once a render has finished.
+    static var name: String { get }
+
+    /// Writes the whole of `built` to `url`, reporting the fraction of the timeline reached as it
+    /// goes. Throws `CancellationError` when the task is cancelled, and leaves nothing at `url`
+    /// whenever it throws. A cancel too late to stop the file may be answered with the finished
+    /// file instead; `Exporter` is what turns that into a cancel.
+    ///
+    /// Holds the file to `spec.output.maxBytes` when there is one, in whatever way the engine can:
+    /// the writer stops with `ExportError.tooLarge` as soon as its file grows past it, and the
+    /// preset session is handed it as its `fileLengthLimit`. An engine may still hand back a file
+    /// over it - the session was measured overshooting a small one - which `Exporter` then refuses,
+    /// and the session may hand back one cut short at it, which `Exporter` refuses as too large too.
+    static func encode(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws
 }
 
-enum Exporter: RenderEngine {
+enum Exporter {
 
     private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "Exporter")
 
-    /// 0.9 of the app's own 100 MiB upload ceiling. Apple documents this as a limit the session
-    /// aims at and tells you to test the output, never as rate control, so it is a belt beside the
-    /// two braces in `ResultBuilder.describe` rather than the thing that keeps files small.
-    static let fileLengthLimit: Int64 = 94_371_840
+    /// Encodes with the writer engine, falls back to the preset session once when the encoder turns
+    /// the writer down, and describes the file that results - without a poster, whose `posterUri`
+    /// comes back "": the registry cuts the one poster from the finished stitched.mp4.
+    ///
+    /// The only size ceiling on this path is the host's, `spec.output.maxBytes`, and with none
+    /// there is none: the kit has no upload limit of its own to apply, and one host's - choisy's
+    /// server refuses a file over 100 MB - is exactly what another host, lighsnip, which sets none
+    /// and offers 4K, must not be held to. With one, each engine holds the file to it as it can
+    /// (see `RenderEngine.encode`), and the finished file is checked against it here, after the
+    /// cancel and before anything describes it: a file over it is deleted and the render fails
+    /// `too_large`, as Android's and the web engine's do. Nothing refuses a render by an estimate
+    /// beforehand. The ladder's rates are averages, the encoder spends less on a quiet picture, and
+    /// a render the arithmetic puts over the ceiling often comes in under it.
+    ///
+    /// A `too_large` from the writer is not handed to the fallback. The preset would meet the
+    /// ceiling by picking a lower rate of its own, which is a quality nobody chose; the customer is
+    /// told the video is too big and picks a lower quality or a shorter video.
+    ///
+    /// A fallback that ran under a ceiling and handed back a file shorter than the timeline fails
+    /// `too_large` rather than `encoder`. The limit it was handed is what ends a session's file
+    /// early, and the length check would otherwise report an encoder that stopped, where the
+    /// contract has a file that would have been larger than the ceiling fail `too_large`, the one
+    /// answer that tells the customer what to change. Its `bytes` is the file's size, which is how
+    /// far it got - the contract's `bytes` for a render stopped partway - and so may read under the
+    /// ceiling it stopped at. Only the fallback is read this way: the writer stops itself at the
+    /// ceiling rather than hand back a short file, and a short file from it is an encoder that
+    /// stopped.
+    ///
+    /// The fallback is Android's one relaxed retry (`VideoComposerPlugin.kt`, `onError`): an
+    /// encoder that refuses the request is given one more go with settings it picks for itself. A
+    /// preset is that here, and it picks its own bitrate, which is why the move is logged - the
+    /// file it writes is not the rate the ladder asked for.
+    ///
+    /// `shouldStop` is asked before that retry, and it exists because `Task.isCancelled` answers too
+    /// late. When the app is backgrounded the registry writes the stop reason synchronously inside
+    /// the notification, but the cancellation of this task is a hop behind it. Without the
+    /// predicate the first thing a backgrounded render could do is build an export session and a
+    /// second Metal context and run them into the same wall, which burns the suspension window the
+    /// registry needs to report `interrupted` at all.
+    ///
+    /// `engines` is the seam the tests use to make the first attempt fail on purpose; every real
+    /// caller takes the default.
+    static func export(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
+                       shouldStop: @escaping @Sendable () -> Bool = { false },
+                       engines: (first: RenderEngine.Type, fallback: RenderEngine.Type) = (WriterEngine.self, PresetEngine.self),
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws -> ComposeResult {
+        var engine = engines.first
+        var fellBack = false
+        do {
+            try await engine.encode(built, to: url, tmpDir: tmpDir, spec: spec, onProgress: onProgress)
+        } catch {
+            guard !Task.isCancelled, !shouldStop(), isRetryable(error) else { throw error }
+            log.error("\(engine.name, privacy: .public) was refused, encoding once more with \(engines.fallback.name, privacy: .public), which picks its own bitrate: \(ErrorMapping.describe(error), privacy: .public)")
+            engine = engines.fallback
+            fellBack = true
+            try await engine.encode(built, to: url, tmpDir: tmpDir, spec: spec, onProgress: onProgress)
+        }
+        // A cancel that lands while the file is being closed finds nothing left to stop - the
+        // writer's pass that moves the index to the front takes seconds on a long 4K file - and the
+        // engine hands back a finished file. It is still a cancel: the contract's `cancel` "emits
+        // `failed` with code `cancelled`", and Android writes exactly that the moment it is asked,
+        // whatever its encoder was doing. The preset session already throws for a cancel during
+        // its own closing pass, so this also makes the two engines agree.
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: url)
+            throw CancellationError()
+        }
+        if let maxBytes = spec.output.maxBytes {
+            let bytes = size(of: url)
+            if bytes > maxBytes {
+                try? FileManager.default.removeItem(at: url)
+                log.error("\(engine.name, privacy: .public) finished \(bytes) bytes against a ceiling of \(maxBytes)")
+                throw ExportError.tooLarge(maxBytes: maxBytes, bytes: bytes)
+            }
+        }
+        // Neither engine promises to report 1. The registry clamps what it emits to 0.99 and lets
+        // the `completed` event take the bar to 100.
+        onProgress(1)
 
-    /// `media.service.ts` and `video-record.component.ts` both refuse anything over this
-    /// client-side, so a render above it cannot be posted at all. A clean failure is recoverable
-    /// through the flow's "post the originals" path; an oversized success is not.
-    static let hardCapBytes: Int64 = 104_857_600
+        let result: ComposeResult
+        do {
+            // No poster from this pass. Its only caller, the registry, throws this result away and
+            // describes the file again once it is stitched.mp4, cutting the poster there; cutting one
+            // here as well was a second full-resolution decode and JPEG encode of the same frame into
+            // the same poster.jpg. The probe, the byte count and the truncation guard below all still
+            // run, because the too_large reinterpretation and `logDeliveredRate` depend on them.
+            result = try await ResultBuilder.describe(url, spec: spec, jobId: spec.jobId, totalMs: built.totalMs,
+                                                      cutPoster: false)
+        } catch ExportError.truncated(let produced, let expected) {
+            guard fellBack, let maxBytes = spec.output.maxBytes else {
+                throw ExportError.truncated(produced: produced, expected: expected)
+            }
+            let bytes = size(of: url)
+            try? FileManager.default.removeItem(at: url)
+            log.error("\(engine.name, privacy: .public) stopped at \(produced) of \(expected) ms and \(bytes) bytes under a ceiling of \(maxBytes)")
+            throw ExportError.tooLarge(maxBytes: maxBytes, bytes: bytes)
+        }
+        logDeliveredRate(result, spec: spec, engine: engine.name, totalMs: built.totalMs)
+        return result
+    }
+
+    /// How many bytes the file at `url` holds now, 0 when there is none.
+    ///
+    /// Read from the file system every time rather than from the URL's resource values, which a URL
+    /// caches once asked: both the writer's poll and the check of the finished file ask about a
+    /// file that has changed since, and a cached size would be the answer to an earlier question.
+    static func size(of url: URL) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    /// What landed on disk against what the ladder asked for. For the writer the two should agree
+    /// to within what a variable rate spends on the content; for the preset fallback this line is
+    /// the whole record of how far it strayed.
+    private static func logDeliveredRate(_ result: ComposeResult, spec: ComposeSpec,
+                                         engine: String, totalMs: Int64) {
+        let seconds = Double(max(totalMs, result.durationMs)) / 1000
+        guard seconds > 0 else { return }
+        let delivered = Int64((Double(result.bytes) * 8 / seconds).rounded())
+        log.info("export \(engine, privacy: .public) \(result.width)x\(result.height) \(result.durationMs) ms \(result.bytes) bytes, delivered \(delivered) bps against a ladder of \(spec.output.videoBitrate + spec.output.audioBitrate) bps")
+    }
+
+    /// Android retries `ENCODER_INIT_FAILED` and `ENCODING_FORMAT_UNSUPPORTED` once with relaxed
+    /// settings, and these are the AVFoundation members of that family: no encoder for the request,
+    /// the encoder busy, or the encoder refusing the settings - the last is what the writer throws
+    /// when it turns a configuration down before the first frame, and what AVFoundation answers an
+    /// append with when the encoder only finds out at the first sample. A failure to encode a frame
+    /// the encoder had accepted is not retried, on either platform.
+    private static func isRetryable(_ error: Error) -> Bool {
+        guard let av = error as? AVError else { return false }
+        switch av.code {
+        case .encoderNotFound, .encoderTemporarilyUnavailable, .unsupportedOutputSettings:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// `AVAssetExportSession` at the preset that matches the render size: the fallback, and the engine
+/// every render used before `WriterEngine`.
+///
+/// A preset takes no bitrate, no key-frame interval and no profile, so the file it writes is the
+/// preset's idea of the size rather than the spec's. It is kept because it is the one other door
+/// AVFoundation has to the same composition, and an encoder that turns the writer's explicit
+/// settings down can still take the settings a preset chooses for itself - the bet Android's
+/// relaxed retry makes too.
+enum PresetEngine: RenderEngine {
+
+    static let name = "AVAssetExportSession"
+
+    private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "Exporter")
 
     /// Presets are "fits inside" boxes, not landscape boxes: a 720x1280 render size under
     /// `AVAssetExportPreset1280x720` comes out 720x1280. That is why the choice is made on the
@@ -43,94 +194,80 @@ enum Exporter: RenderEngine {
         }
     }
 
-    /// Android retries an encoder refusal once with `VideoEncoderSettings.DEFAULT`, which lets the
-    /// factory pick its own size and rate. A preset session has no settings to relax, so the
-    /// equivalent move is stepping the preset down once.
-    static func fallbackPreset() -> String { AVAssetExportPresetMediumQuality }
+    static func encode(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
+                       onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        // The session refuses to start when the output already exists. The writer removes its own
+        // partial when it fails, so this is the belt to that brace.
+        try? FileManager.default.removeItem(at: url)
+        // "The export will fail if the URL points to a location that is not a directory, does not
+        // exist, ..." - AVAssetExportSession.h on directoryForTemporaryFiles.
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
 
-    /// `shouldStop` is asked before the one retry, and it exists because `Task.isCancelled` answers
-    /// too late. When the app is backgrounded the registry writes the stop reason synchronously
-    /// inside the notification, but the cancellation of this task is a hop behind it. Without the
-    /// predicate the first thing a backgrounded render does is build a second export session and a
-    /// second Metal context and run them into the same wall, which burns the suspension window the
-    /// registry needs to report `interrupted` at all - `.exportFailed` is both what a backgrounded
-    /// export throws and a member of `isRetryable`.
-    static func export(_ built: BuiltComposition, to url: URL, tmpDir: URL, spec: ComposeSpec,
-                       shouldStop: @escaping @Sendable () -> Bool = { false },
-                       onProgress: @escaping @Sendable (Double) -> Void) async throws -> ComposeResult {
-        var attempt = 0
-        while true {
-            attempt += 1
-            let presetName = attempt == 1
-                ? preset(width: spec.output.width, height: spec.output.height)
-                : fallbackPreset()
+        let session = try session(for: built, spec: spec, tmpDir: tmpDir)
+        log.info("\(session.presetName, privacy: .public) picks its own rate; the ladder asked for \(spec.output.videoBitrate) bps")
 
-            // The session refuses to start when the output already exists, and a partial from the
-            // previous attempt is exactly the case this loop creates.
+        // Unstructured on purpose, and therefore NOT cancelled when the render task is: the
+        // sequence would otherwise keep the session alive past the export. Cancelled by the
+        // `defer`, whichever way the export ends.
+        let monitor = progressMonitor(session, onProgress: onProgress)
+        defer { monitor.cancel() }
+        do {
+            // Cancelling the enclosing Task is what cancels the export: the back-deployed body
+            // installs a withTaskCancellationHandler that calls cancelExport() and then throws
+            // CancellationError, never an AVError. Never call cancelExport() by hand.
+            try await session.export(to: url, as: .mp4)
+        } catch {
             try? FileManager.default.removeItem(at: url)
-            // "The export will fail if the URL points to a location that is not a directory, does
-            // not exist, ..." - AVAssetExportSession.h on directoryForTemporaryFiles.
-            try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-
-            guard let session = AVAssetExportSession(asset: built.composition, presetName: presetName) else {
-                throw ExportError.presetUnavailable
-            }
-            // Assigning an outputFileType outside supportedFileTypes raises an ObjC
-            // NSInvalidArgumentException, which Swift cannot catch: it is a crash, not a throw.
-            // export(to:as:) assigns it for us on the way in, so the check has to happen here.
-            guard session.supportedFileTypes.contains(.mp4) else { throw ExportError.fileTypeUnsupported }
-
-            // Both of these are declared `copy`, so the session takes an immutable snapshot and
-            // mutating `built` after this line changes nothing.
-            session.videoComposition = built.videoComposition
-            session.audioMix = built.audioMix
-            session.shouldOptimizeForNetworkUse = true       // moov atom first, the feed streams it
-            session.fileLengthLimit = fileLengthLimit
-            session.timeRange = CMTimeRange(start: .zero, duration: ms(built.totalMs))
-            session.directoryForTemporaryFiles = tmpDir
-            // canPerformMultiplePassesOverSourceMediaData stays at its default false: a second pass
-            // doubles an already slow export for quality the ladder never asked for.
-
-            try await checkDurationFits(session, totalMs: built.totalMs, preset: presetName)
-
-            // Unstructured on purpose, and therefore NOT cancelled when the render task is: the
-            // sequence would otherwise keep the session alive past the export. Cancelled by hand on
-            // both paths below.
-            let monitor = progressMonitor(session, onProgress: onProgress)
-
-            do {
-                // Cancelling the enclosing Task is what cancels the export: the back-deployed body
-                // installs a withTaskCancellationHandler that calls cancelExport() and then throws
-                // CancellationError, never an AVError. Never call cancelExport() by hand.
-                try await session.export(to: url, as: .mp4)
-                monitor.cancel()
-                // The sequence can end without ever reporting 1. The registry clamps what it emits
-                // to 0.99 and lets the `completed` event take the bar to 100.
-                onProgress(1)
-
-                let result = try await ResultBuilder.describe(url, spec: spec, jobId: spec.jobId,
-                                                              totalMs: built.totalMs)
-                logDeliveredRate(result, spec: spec, preset: presetName, totalMs: built.totalMs)
-                return result
-            } catch {
-                monitor.cancel()
-                if attempt == 1, !Task.isCancelled, !shouldStop(), isRetryable(error) {
-                    log.error("export failed on \(presetName, privacy: .public), retrying once with the fallback preset: \(ErrorMapping.describe(error), privacy: .public)")
-                    continue
-                }
-                throw error
-            }
+            throw error
         }
+    }
+
+    /// The session, configured and not yet started.
+    ///
+    /// `fileLengthLimit` is the host's `output.maxBytes`, and left at its default of none when the
+    /// host sets none. How a session meets it is the session's own affair, seen rather than
+    /// promised. On the simulator it kept every frame of the timeline and lowered its own video
+    /// rate until the file fit: a 1.5 MB render held to 1 MB came back 0.99 MB and just as long.
+    /// The other way to meet a limit is to stop writing at it and hand back a file cut short, which
+    /// no simulator run did and no device run has been made to rule out; `Exporter` fails such a
+    /// file `too_large`, since the limit is what cut it. Apple promises only that the file "should
+    /// not exceed" the limit and may "slightly exceed" it, and it was seen doing more than that at
+    /// a limit too small for the sound alone - 177 KB against 100 KB, of which 136 KB was audio the
+    /// session leaves at its own rate. That is why `Exporter` still checks the finished file. The
+    /// session is not also watched as it writes, as the writer is: whichever way it meets its limit
+    /// it ends on its own, and what it overshoots by - the sound's share - is small by then and
+    /// found in the finished file all the same.
+    static func session(for built: BuiltComposition, spec: ComposeSpec, tmpDir: URL) throws -> AVAssetExportSession {
+        let presetName = preset(width: spec.output.width, height: spec.output.height)
+        guard let session = AVAssetExportSession(asset: built.composition, presetName: presetName) else {
+            throw ExportError.presetUnavailable
+        }
+        // Assigning an outputFileType outside supportedFileTypes raises an ObjC
+        // NSInvalidArgumentException, which Swift cannot catch: it is a crash, not a throw.
+        // export(to:as:) assigns it for us on the way in, so the check has to happen here.
+        guard session.supportedFileTypes.contains(.mp4) else { throw ExportError.fileTypeUnsupported }
+
+        // Both of these are declared `copy`, so the session takes an immutable snapshot and
+        // mutating `built` after this line changes nothing.
+        session.videoComposition = built.videoComposition
+        session.audioMix = built.audioMix
+        session.shouldOptimizeForNetworkUse = true       // moov atom first, the feed streams it
+        session.timeRange = CMTimeRange(start: .zero, duration: ms(built.totalMs))
+        session.directoryForTemporaryFiles = tmpDir
+        if let maxBytes = spec.output.maxBytes { session.fileLengthLimit = maxBytes }
+        // canPerformMultiplePassesOverSourceMediaData stays at its default false: a second pass
+        // doubles an already slow export for quality the ladder never asked for.
+        return session
     }
 
     /// How often the export is asked where it has got to, in seconds, on both of the paths below.
     private static let progressInterval: TimeInterval = 0.25
 
-    /// Progress is the one thing in this file that has no single spelling across the range of iOS
-    /// the package supports. `states(updateInterval:)` is the whole reason a floor above 18 was
-    /// ever written down, and it reports a `Progress` the session keeps up to date; underneath it
-    /// there is only the session's own `progress` property, read on a timer. Both paths deliver the
-    /// same fractions to the same callback, so nothing above this function knows which one ran.
+    /// Progress is the one thing in this engine that has no single spelling across the range of iOS
+    /// the package supports. `states(updateInterval:)` reports a `Progress` the session keeps up to
+    /// date; underneath it there is only the session's own `progress` property, read on a timer.
+    /// Both paths deliver the same fractions to the same callback, so nothing above this function
+    /// knows which one ran.
     private static func progressMonitor(_ session: AVAssetExportSession,
                                         onProgress: @escaping @Sendable (Double) -> Void) -> Task<Void, Never> {
         if #available(iOS 18.0, *) {
@@ -175,57 +312,10 @@ enum Exporter: RenderEngine {
             }
         }
     }
-
-    /// `fileLengthLimit` is a ceiling, not a bitrate control, so a long timeline can come back
-    /// truncated at the limit instead of encoded smaller. The estimate is the one place the session
-    /// will say so BEFORE spending two minutes producing half a video.
-    ///
-    /// An estimate the session declines to make (an indefinite CMTime, or an error) allows the
-    /// export, the same way an unreadable free-space figure allows a job.
-    private static func checkDurationFits(_ session: AVAssetExportSession, totalMs: Int64,
-                                          preset: String) async throws {
-        guard totalMs > 0 else { return }
-        // The `try?` covers the estimate's own failure only; the ExportError below is thrown after
-        // it, where nothing can swallow it.
-        guard let estimate = try? await session.estimatedMaximumDuration, estimate.isNumeric else { return }
-        let seconds = estimate.seconds
-        guard seconds.isFinite else { return }
-        let needed = Double(totalMs) / 1000
-        // One percent of slack: the estimate is an estimate, and refusing a render that would have
-        // fitted is the worse error of the two.
-        guard seconds < needed * 0.99 else { return }
-        let maxMs = Int64((seconds * 1000).rounded())
-        log.error("preset \(preset, privacy: .public) can only carry \(maxMs) ms under a \(fileLengthLimit) byte limit, timeline is \(totalMs) ms")
-        throw ExportError.tooLongForPreset(maxMs: maxMs, neededMs: totalMs)
-    }
-
-    /// Guard G2, and the only measurement that can decide whether the writer engine is worth
-    /// building: the preset picks its own rate, so this is the difference between what the ladder
-    /// asked for and what landed on disk.
-    private static func logDeliveredRate(_ result: ComposeResult, spec: ComposeSpec,
-                                         preset: String, totalMs: Int64) {
-        let seconds = Double(max(totalMs, result.durationMs)) / 1000
-        guard seconds > 0 else { return }
-        let delivered = Int64((Double(result.bytes) * 8 / seconds).rounded())
-        log.info("export \(preset, privacy: .public) \(result.width)x\(result.height) \(result.durationMs) ms \(result.bytes) bytes, delivered \(delivered) bps against a ladder of \(spec.output.videoBitrate + spec.output.audioBitrate) bps")
-    }
-
-    /// Android retries `ENCODER_INIT_FAILED` and `ENCODING_FORMAT_UNSUPPORTED` once with relaxed
-    /// settings. These are the AVFoundation members of that family, plus `.exportFailed`, which is
-    /// the one transient export failure that has been seen to succeed on a second run.
-    private static func isRetryable(_ error: Error) -> Bool {
-        guard let av = error as? AVError else { return false }
-        switch av.code {
-        case .exportFailed, .encoderNotFound, .encoderTemporarilyUnavailable, .unsupportedOutputSettings:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
-/// Reads the finished file back and turns it into the `completed` payload, applying the two guards
-/// that stand in for a bitrate the preset engine cannot set.
+/// Reads the finished file back and turns it into the `completed` payload, after checking that the
+/// file is as long as the timeline it was made from.
 enum ResultBuilder {
 
     private static let log = Logger(subsystem: "net.dotnetdreamer.videokit", category: "Exporter")
@@ -233,14 +323,17 @@ enum ResultBuilder {
     /// `totalMs` is the composition's real duration (`BuiltComposition.totalMs`), which can be less
     /// than `spec.totalOutputMs` when a clip's `outMs` was clamped to its file. It is used for the
     /// truncation guard, and as the duration reported when the finished file cannot be measured.
-    static func describe(_ url: URL, spec: ComposeSpec, jobId: String, totalMs: Int64) async throws -> ComposeResult {
+    ///
+    /// `cutPoster: false` skips the poster alone and reports `posterUri` "", for a pass whose result
+    /// is never delivered (`Exporter.export`'s); everything else is measured exactly as it always is.
+    static func describe(_ url: URL, spec: ComposeSpec, jobId: String, totalMs: Int64,
+                         cutPoster: Bool = true) async throws -> ComposeResult {
         let probed = try? await Thumbnailer.probe(url)
         let bytes = Thumbnailer.fileBytes(url)
         let measured = probed?.durationMs ?? 0
 
-        // Guard G1. Checked before the poster is cut, because a file this size is not going to be
-        // posted whatever its first frame looks like.
-        if bytes > Exporter.hardCapBytes { throw ExportError.overCap(bytes: bytes) }
+        // How big the file is is not checked here: the host's ceiling, when it set one, was checked
+        // by `Exporter` before the file got this far, and without one there is nothing to check.
 
         // The truncation guard, and it only applies when the duration was actually measured: a
         // probe that failed tells us nothing about the file's length, and failing a good render on
@@ -266,8 +359,10 @@ enum ResultBuilder {
         let posterAt = min(spec.posterAtMs, max(0, durationMs - 1))
         // "" and never a black JPEG: JS reads `result.posterUri || undefined` and lets the server
         // cut its own, while a black poster becomes the post's thumbnail forever.
-        let posterUri = await Thumbnailer.poster(from: url, atMs: posterAt, to: posterURL)
-            ? posterURL.absoluteString : ""
+        var posterUri = ""
+        if cutPoster, await Thumbnailer.poster(from: url, atMs: posterAt, to: posterURL) {
+            posterUri = posterURL.absoluteString
+        }
 
         return ComposeResult(jobId: jobId, uri: url.absoluteString, posterUri: posterUri,
                              durationMs: durationMs, width: width, height: height, bytes: bytes)
@@ -291,8 +386,8 @@ enum ErrorMapping {
             case .interrupted:
                 return ComposeFailure(code: .interrupted, message: "did_enter_background")
             case .timeout:
-                // Above the cancelled row on purpose: the wall-clock budget cancels the task, so
-                // the error arriving here is a CancellationError like any other.
+                // Above the cancelled row on purpose: the stall watch cancels the task, so the
+                // error arriving here is a CancellationError like any other.
                 return ComposeFailure(code: .unknown, message: "timeout")
             }
         }
@@ -311,8 +406,7 @@ enum ErrorMapping {
         if let av = error as? AVError {
             // Match on the case, never on the raw value: the number moved between SDKs and the two
             // port sheets disagree about which it is.
-            let message = av.code == .maximumFileSizeReached ? "file_length_limit" : describe(error)
-            return ComposeFailure(code: code(for: av.code), message: message,
+            return ComposeFailure(code: code(for: av.code), message: describe(error),
                                   nativeCode: av.code.rawValue)
         }
         // 6. Our own export guards.
@@ -320,6 +414,56 @@ enum ErrorMapping {
         // 7. Everything else.
         return ComposeFailure(code: .unknown, message: describe(error),
                               nativeCode: (error as NSError).code)
+    }
+
+    /// `failure(for:stopReason:)` for an error the encode threw, with the clip it happened in.
+    ///
+    /// Android attaches `blameClip(job)` to every `ExportException`. Here only an `unreadable_input`
+    /// gets one, because that is the one code whose clip key JS acts on - it offers to pick that clip
+    /// again - and the contract sets the key only "when the failure can be blamed on one clip". A
+    /// decoder giving up can be; an encoder refusing a frame size or a full disk cannot, and naming
+    /// whichever clip happened to be on screen would send the customer to replace a clip that was
+    /// never the problem. A key the error already carries is kept.
+    static func exportFailure(for error: Error, cursor: FrameCursor, spec: ComposeSpec) -> ComposeFailure {
+        var failure = failure(for: error, stopReason: nil)
+        if failure.code == .unreadableInput, failure.clipKey == nil {
+            failure.clipKey = blamedClip(atUs: cursor.us, in: spec)
+        }
+        return failure
+    }
+
+    /// Android's `blameClip`: the last base clip that starts at or before `atUs`, or the first clip
+    /// when no frame has been drawn yet.
+    ///
+    /// The clips are laid out from the spec with `totalOutputMs`'s arithmetic, each one's length
+    /// scaled by its speed and rounded to the millisecond on its own, because that is the sum
+    /// Android's `prefixOutUs` is. It runs long of the built composition only where a clip's trim
+    /// ran past its file, which the editor's own trims never do. Past the base track's end, in a
+    /// post stretched by `durationMs`, it is the last clip, as it is on Android.
+    ///
+    /// The layers are not asked. Android's blame reads the base clips alone, and a failure on a
+    /// layer names the base clip under it on both platforms.
+    ///
+    /// It is a best guess in exactly Android's sense - right when the fault is in the clip being
+    /// drawn - and on this platform it is a guess with a known blind side. AVFoundation reads ahead
+    /// of the frame being drawn, and decodes the SOUND a long way ahead: a clip whose audio data is
+    /// damaged was measured failing the render a tenth of a second in, while the clip before it was
+    /// still on screen, and it is that earlier clip this names. Damaged picture data, in the same
+    /// measurement, was concealed by the decoder and did not fail the render at all.
+    static func blamedClip(atUs: Int64?, in spec: ComposeSpec) -> String? {
+        guard let first = spec.clips.first else { return nil }
+        guard let at = atUs, at > 0 else { return first.key }
+        var blamed = first.key
+        var startUs: Int64 = 0
+        for clip in spec.clips {
+            guard startUs <= at else { break }
+            blamed = clip.key
+            // The same isFinite gate `totalOutputMs` keeps: `Int64(Double.infinity)` traps.
+            let scaled = Double(clip.outMs - clip.inMs) / clip.speed
+            guard scaled.isFinite else { continue }
+            startUs += Int64(scaled.rounded(.toNearestOrAwayFromZero)) * 1000
+        }
+        return blamed
     }
 
     /// The Android column of this table is `ExportException`'s code for the same customer-facing
@@ -339,12 +483,6 @@ enum ErrorMapping {
 
         case .encoderNotFound, .encoderTemporarilyUnavailable, .exportFailed, .encodeFailed,
              .invalidVideoComposition, .videoCompositorFailed, .unsupportedOutputSettings:
-            return .encoder
-
-        // Not a container write failure, whatever the file-size wording suggests: the muxer did its
-        // job and the encoder was handed a budget it could not meet. Seeing this is the strongest
-        // signal there is that the writer engine needs building.
-        case .maximumFileSizeReached:
             return .encoder
 
         case .fileAlreadyExists, .fileTypeDoesNotSupportSampleReferences,

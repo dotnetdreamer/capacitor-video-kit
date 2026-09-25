@@ -20,6 +20,13 @@ The size is an estimate in the honest sense - an encoder allowed to spend less o
 does - and it is worth showing anyway: it is the difference between choosing 4K and understanding
 what choosing 4K means.
 
+A host with an upload limit (`EditorOutputOptions.maxBytes`) has every rung whose estimate is
+over it marked with the limit, and the chosen one explained under the size. Marked and never
+greyed: that same estimate is a rate the encoder may spend less than, a still or dark post often
+comes in well under it, and the render measures the real file and says so if it does not fit. A
+greyed rung would refuse a post that would have gone through; a marked one tells the customer
+before the render rather than after it.
+
 ## Properties
 
 | Property           | Attribute | Description | Type            | Default     |

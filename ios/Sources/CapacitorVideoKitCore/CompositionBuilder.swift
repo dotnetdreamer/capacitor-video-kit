@@ -12,9 +12,11 @@ struct BuiltComposition {
     let audioMix: AVMutableAudioMix?
 
     /// The composition's REAL duration, which can be shorter than `spec.totalOutputMs` when a
-    /// clip's `outMs` ran past the end of its file and the trim was clamped. The exporter must use
-    /// this for `session.timeRange`; the disk estimate and the wall-clock budget may keep using the
-    /// spec's optimistic total, because over-estimating those is the safe direction.
+    /// clip's `outMs` ran past the end of its file and the trim was clamped. The exporter reads
+    /// exactly this much, whichever engine runs: it is the writer engine's `reader.timeRange` and
+    /// the preset fallback's `session.timeRange`, and the length `ResultBuilder` holds the finished
+    /// file to. Only the disk estimate keeps the spec's optimistic total, because over-estimating
+    /// that is the safe direction.
     let totalMs: Int64
 
     /// Held so the decoded overlays outlive the export. The instructions only reference the plan,
@@ -126,13 +128,37 @@ private final class TailTracks {
 
 /// One entry per distinct `uri`. A split or a duplicated clip is two spec entries pointing at the
 /// same file, and loading its tracks again would cost another demux for nothing.
+///
+/// Every clip is loaded through here - base, layer and transition tail alike - which is what makes
+/// it the one place a `uri` is turned into the file actually opened: a picture's still from
+/// `PictureStills`, or an input whose name AVFoundation would refuse, renamed by `RenderInputs`.
+///
+/// It is also where a file is first opened, so the order the builder asks in is the order a post
+/// with two broken inputs fails in: the base clips, then the layers, pictures and videos alike.
+/// That is Android's preflight order - one pass over the base clips, the transition tails and the
+/// layers - on every spec the editor builds, whose tails name the outgoing clip's own file and so
+/// are never the first to open anything.
 private final class SourceCache {
     private var byURI: [String: SourceClip] = [:]
+    /// Writes each picture's still-frame video the first time its `uri` is asked for.
+    private let pictures: PictureStills
+    private let batchId: String
+
+    init(pictures: PictureStills, batchId: String) {
+        self.pictures = pictures
+        self.batchId = batchId
+    }
 
     func source(for clip: ComposeClip) async throws -> SourceClip {
         if let hit = byURI[clip.uri] { return hit }
-        guard let url = JobFolders.fileURL(from: clip.uri) else {
-            throw BuildError.unreadable(clip.key, "unsupported uri")
+        let url: URL
+        if let still = try await pictures.still(for: clip) {
+            url = still
+        } else {
+            guard let file = JobFolders.fileURL(from: clip.uri) else {
+                throw BuildError.unreadable(clip.key, "unsupported uri")
+            }
+            url = RenderInputs.openable(file, batchId: batchId)
         }
         let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         do {
@@ -143,6 +169,11 @@ private final class SourceCache {
             // Both properties in one load, and the audio track's range preloaded here rather than
             // read at the call site: the synchronous `track.timeRange` is deprecated since iOS 16.
             let (transform, videoRange) = try await video.load(.preferredTransform, .timeRange)
+            // A video track with no footage in it is a file nothing can be laid from, whatever the
+            // trim says. Refused here, once, so every clip that is laid can hold its last frame.
+            guard videoRange.duration > .zero else {
+                throw BuildError.unreadable(clip.key, "empty video track")
+            }
             let audioRange = try await audio?.load(.timeRange)
             let source = SourceClip(asset: asset,
                                     videoTrack: video,
@@ -184,6 +215,10 @@ enum CompositionBuilder {
     /// 600,000 segments and stall the build. Real music is seconds long and never comes near this.
     private static let maxMusicSlices = 10_000
 
+    /// Android's and the web's `MIN_CLIP_US` in the milliseconds this builder counts in: the least
+    /// source any clip is planned with, which is what a clip left with no footage at all is given.
+    private static let minClipMs: Int64 = 1
+
     static func build(_ spec: ComposeSpec) async throws -> BuiltComposition {
         guard !spec.clips.isEmpty else { throw BuildError.internalFailure("spec has no clips") }
 
@@ -207,7 +242,7 @@ enum CompositionBuilder {
             ? comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
             : nil
 
-        let cache = SourceCache()
+        let cache = SourceCache(pictures: PictureStills(spec: spec), batchId: spec.batchId)
         let tails = TailTracks()
         var entries: [TimelineEntry] = []
         var windows: [TransitionWindow] = []
@@ -223,12 +258,15 @@ enum CompositionBuilder {
             // compositor cannot fill - so this is the only thing standing between a manifest that
             // over-reaches and a broken render.
             let outMsEff = min(clip.outMs, msOf(src.videoRange.end))
-            guard outMsEff > clip.inMs else { throw BuildError.unreadable(clip.key, "empty range") }
+            // An in-point at or past that end leaves nothing to trim. It is laid all the same, as
+            // the footage's last frame held for the shortest clip Android and the web plan: see
+            // `lastFrame`.
+            let held = outMsEff <= clip.inMs
 
             // Asset-relative, starting at zero, because the editor's filmstrip comes from
             // AVAssetImageGenerator, which works in asset time. A trim must mean the same thing in
             // both places.
-            let srcRange = CMTimeRange(start: ms(clip.inMs), end: ms(outMsEff))
+            let srcRange = held ? lastFrame(of: src) : CMTimeRange(start: ms(clip.inMs), end: ms(outMsEff))
 
             do {
                 try video.insertTimeRange(srcRange, of: src.videoTrack, at: cursor)
@@ -236,7 +274,8 @@ enum CompositionBuilder {
                 throw BuildError.unreadable(clip.key, "insert: \(error)")
             }
 
-            let clipGain = gain(of: clip, spec.audio)
+            // A held clip is silent whatever it asked for: the moment it holds has no sound.
+            let clipGain = held ? 0 : gain(of: clip, spec.audio)
             if let ca = clipAudio, clipGain > 0, let at = src.audioTrack, let aRange = src.audioRange {
                 // Clamped to the audio track's own end. A file whose sound stops before its picture
                 // is common enough - a trimmed screen recording, a clip our recorder wrote with the
@@ -258,16 +297,18 @@ enum CompositionBuilder {
 
             var placed = CMTimeRange(start: cursor, duration: srcRange.duration)
             let speed = min(maxSpeed, max(minSpeed, clip.speed))
-            if speed != 1 {
+            if speed != 1 || held {
                 // Recomputed from the CLAMPED range. Scaling the clamped media onto the duration
                 // the manifest asked for would turn a 2 s overshoot into 2 s of slow motion with
                 // the pitch algorithm dragged along; Android recomputes and lets the total shrink,
-                // which is why `totalMs` can end up below `spec.totalOutputMs`.
+                // which is why `totalMs` can end up below `spec.totalOutputMs`. A held frame counts
+                // as `minClipMs` of source, which is the length Android and the web give it.
                 //
                 // The 1 ms floor is the iOS place for Android's MIN_CLIP_US: a degenerate 1 ms clip
                 // at 4x rounds to zero, and a zero-length scale is illegal while a zero-length
                 // instruction is an instant -11841.
-                let scaledMs = max(1, Int64((Double(outMsEff - clip.inMs) / speed)
+                let sourceMs = held ? minClipMs : outMsEff - clip.inMs
+                let scaledMs = max(1, Int64((Double(sourceMs) / speed)
                     .rounded(.toNearestOrAwayFromZero)))
                 let scaled = ms(scaledMs)
                 // Scaled immediately, before the next clip goes in. `scaleTimeRange` ripples
@@ -276,8 +317,9 @@ enum CompositionBuilder {
                 video.scaleTimeRange(placed, toDuration: scaled)
                 // Safe even when this clip contributed less audio than video: the factor applies to
                 // whatever media is actually in the range, which is what keeps a short audio track
-                // in sync with its picture.
-                clipAudio?.scaleTimeRange(placed, toDuration: scaled)
+                // in sync with its picture. A held clip put none in at all, and its range can lie
+                // past the audio track's end, where there is nothing to scale.
+                if !held { clipAudio?.scaleTimeRange(placed, toDuration: scaled) }
                 placed = CMTimeRange(start: cursor, duration: scaled)
             }
 
@@ -344,9 +386,10 @@ enum CompositionBuilder {
             // default. The clip-audio track is the only scaled one, so it is the only place this
             // choice is audible - music and voice carry it for consistency, not effect.
             p.audioTimePitchAlgorithm = .spectral
-            // A step per clip, including the silent ones. Setting 0 where nothing was inserted is
-            // redundant today and is what stops a previous clip's 1.0 leaking forward if the insert
-            // rule ever changes.
+            // A level per clip, the silent ones included, held from the clip's start to its end
+            // (see `hold`). A silent clip's 0 is redundant while nothing is inserted under it, and
+            // is what keeps the clip before it from carrying its level forward if the insert rule
+            // ever changes.
             //
             // A clip a transition leads into FADES in instead, a straight line from silence to its
             // level across the window, while the outgoing clip's tail fades out on its own track
@@ -356,8 +399,10 @@ enum CompositionBuilder {
             for (index, e) in entries.enumerated() {
                 if let window = windows.first(where: { $0.entry == index }) {
                     p.setVolumeRamp(fromStartVolume: 0, toEndVolume: e.gain, timeRange: window.range)
+                    hold(e.gain, on: p, after: window.range.end, until: e.range.end)
                 } else {
                     p.setVolume(e.gain, at: e.range.start)
+                    hold(e.gain, on: p, after: e.range.start, until: e.range.end)
                 }
             }
             params.append(p)
@@ -392,10 +437,11 @@ enum CompositionBuilder {
         }
 
         if let music = spec.audio.music,
-           let p = try await addMusic(music, to: comp, total: total) {
+           let p = try await addMusic(music, to: comp, total: total, batchId: spec.batchId) {
             params.append(p)
         }
-        if let p = try await addVoiceovers(spec.audio.voiceover, to: comp, totalMs: totalMs) {
+        if let p = try await addVoiceovers(spec.audio.voiceover, to: comp, totalMs: totalMs,
+                                           batchId: spec.batchId) {
             params.append(p)
         }
 
@@ -499,6 +545,26 @@ enum CompositionBuilder {
             return "instructions end at \(edge.seconds)s but the composition ends at \(total.seconds)s"
         }
         return nil
+    }
+
+    /// The source range of a clip whose in-point lies at or past the end of its footage: the last
+    /// frame of it, which the caller then holds for `minClipMs` of source at the clip's speed.
+    ///
+    /// Such a clip is a file that turned out shorter than the manifest believed - re-encoded,
+    /// trimmed, or a clip whose audio runs on past its picture, because the clamp here is to the
+    /// VIDEO track. Refusing it would fail the whole post as `unreadable_input`, and Android and
+    /// the web plan it instead: `planClip` clamps `outMs` to the probed length and then floors it
+    /// at `inUs + MIN_CLIP_US`, so the clip keeps a millisecond of source past its in-point, and
+    /// the web renderer, asked for a moment past the end of a video, draws its last frame.
+    /// AVFoundation cannot be asked for that moment: `insertTimeRange` accepts a range past the end
+    /// of its source without a word and renders it black. The nearest range it CAN be given is the
+    /// one that ends where the footage does, a frame long, scaled onto the planned length - the
+    /// picture the web draws, for as long as Android and the web plan it. A frame at 30 fps, or the
+    /// whole footage when there is less, the same measure the tail at the end of `build` takes.
+    private static func lastFrame(of src: SourceClip) -> CMTimeRange {
+        let footage = src.videoRange
+        let frame = CMTimeMinimum(CMTime(value: 1, timescale: 30), footage.duration)
+        return CMTimeRange(start: footage.end - frame, duration: frame)
     }
 
     /// Lays the outgoing clip's tail - `transition.from` - on the tail track under the incoming clip,
@@ -625,19 +691,22 @@ enum CompositionBuilder {
             // Clamped to the VIDEO TRACK's end for the same reason the base clips are: nothing
             // validates a range against its source, and over-reaching renders a black tail.
             let outMsEff = min(clip.outMs, msOf(src.videoRange.end))
-            guard outMsEff > clip.inMs else { throw BuildError.unreadable(clip.key, "empty range") }
+            // An in-point at or past that end holds the footage's last frame, as a base clip's
+            // does: see `lastFrame`.
+            let held = outMsEff <= clip.inMs
 
             let speed = min(maxSpeed, max(minSpeed, clip.speed))
             // The cut to the base's end is made in SOURCE milliseconds, before the insert, so that
             // the speed change still means what the manifest said and so that nothing is demuxed
-            // that no frame will ever show.
+            // that no frame will ever show. A held frame is `minClipMs` of source and is cut the
+            // same way, which is Android's `cutTo` refusing anything shorter.
             let roomSrcMs = Int64((Double(roomMs) * speed).rounded(.toNearestOrAwayFromZero))
-            let cutMs = min(outMsEff, clip.inMs + roomSrcMs)
+            let cutMs = min(held ? clip.inMs + minClipMs : outMsEff, clip.inMs + roomSrcMs)
             // Out of room rather than out of media, so the layer simply ends here. The clip is not
             // at fault and there is nothing to report.
             guard cutMs > clip.inMs else { break }
 
-            let srcRange = CMTimeRange(start: ms(clip.inMs), end: ms(cutMs))
+            let srcRange = held ? lastFrame(of: src) : CMTimeRange(start: ms(clip.inMs), end: ms(cutMs))
 
             let dest: AVMutableCompositionTrack
             if let existing = videoTrack {
@@ -656,7 +725,7 @@ enum CompositionBuilder {
                 throw BuildError.unreadable(clip.key, "insert: \(error)")
             }
 
-            let clipGain = gain(of: clip, audio)
+            let clipGain = held ? 0 : gain(of: clip, audio)
             if clipGain > 0, let at = src.audioTrack, let aRange = src.audioRange {
                 // Clamped to the audio track's own end, as the base clips' sound is: a file whose
                 // sound stops before its picture is common enough to plan for.
@@ -684,7 +753,7 @@ enum CompositionBuilder {
             }
 
             var placed = CMTimeRange(start: cursor, duration: srcRange.duration)
-            if speed != 1 {
+            if speed != 1 || held {
                 // Clamped to the room left as well as floored at a millisecond: the source cut
                 // above is a rounded number, and a rounding millisecond either way must not push
                 // the layer past the base it was cut to.
@@ -692,7 +761,8 @@ enum CompositionBuilder {
                     .rounded(.toNearestOrAwayFromZero))))
                 let scaled = ms(scaledMs)
                 dest.scaleTimeRange(placed, toDuration: scaled)
-                audioTrack?.scaleTimeRange(placed, toDuration: scaled)
+                // Not for a held clip, which put no sound in, for the base track's reason.
+                if !held { audioTrack?.scaleTimeRange(placed, toDuration: scaled) }
                 placed = CMTimeRange(start: cursor, duration: scaled)
             }
 
@@ -701,8 +771,14 @@ enum CompositionBuilder {
         }
 
         guard let videoTrack else { return nil }
-        // A step per clip, including the silent ones, exactly as the base track's are set.
-        if let p = params { for e in entries { p.setVolume(e.gain, at: e.range.start) } }
+        // A level per clip, including the silent ones, held to the clip's end exactly as the base
+        // track's are: a picture after a video on a layer must not fade the video out.
+        if let p = params {
+            for e in entries {
+                p.setVolume(e.gain, at: e.range.start)
+                hold(e.gain, on: p, after: e.range.start, until: e.range.end)
+            }
+        }
         return (LayerTimeline(trackID: videoTrack.trackID,
                               z: track.z,
                               opacity: track.opacity,
@@ -820,22 +896,55 @@ enum CompositionBuilder {
         return Float(min(1, max(0, clip.volume * audio.originalVolume)))
     }
 
+    /// Sets `gain` again a millisecond before `end`, so that the level a range starts on holds
+    /// until the range is over instead of drifting toward whatever the next range asks for.
+    ///
+    /// `setVolume(_:at:)` reads as a step, but an export does not play it as one: it draws a
+    /// straight line from every volume point to the next, a ramp's two ends included. With a single
+    /// point per clip, a clip at full volume followed by a silent one - a picture, a held frame, a
+    /// clip muted in the editor - faded out across the WHOLE of its length instead of stopping at
+    /// its end, and every clip a transition leads out of faded toward the 0 its successor's fade-in
+    /// starts from. Measured on the simulator in 100 ms windows, the clip before a picture fell from
+    /// 0.16 to 0.01 where the same clip before another video held 0.17. Android and the web set one
+    /// gain per clip, which is a step. With this second point the line between two ranges is a
+    /// millisecond long, which is that step to the ear, and it holds whether an export joins its
+    /// points with lines or with steps.
+    ///
+    /// `last` is the latest point already set for the range - its start, or the end of the fade
+    /// that opened it - and nothing is added unless the new point falls after it: a range a
+    /// millisecond long, or a fade-in that runs to its clip's end, already finishes on its level.
+    ///
+    /// Only ever a POINT, never a flat ramp up to `end`. Where one ramp ends at the instant the next
+    /// begins, an export starts the second from the first one's end volume: measured, a flat ramp
+    /// up to the next clip's fade-in played that fade-in flat.
+    private static func hold(_ gain: Float, on p: AVMutableAudioMixInputParameters,
+                             after last: CMTime, until end: CMTime) {
+        let pin = end - ms(1)
+        if pin > last { p.setVolume(gain, at: pin) }
+    }
+
     /// Lays the music out as explicit repetitions of the trimmed piece, which is what Android does:
     /// a looping sequence would repeat the leading gap, and a non-looping one longer than the video
     /// would extend the whole composition.
     private static func addMusic(_ m: ComposeMusic,
                                  to comp: AVMutableComposition,
-                                 total: CMTime) async throws -> AVMutableAudioMixInputParameters? {
+                                 total: CMTime,
+                                 batchId: String) async throws -> AVMutableAudioMixInputParameters? {
         // Music that starts after the video ends is not an error, it is a manifest whose timeline
         // got shorter after the track was picked. Android's planMusic returns null for it too.
         guard m.startMs < msOf(total) else { return nil }
 
-        let src = try await audioSource(m.uri, key: "music")
+        let src = try await audioSource(m.uri, key: "music", batchId: batchId)
         // The lab deliberately sends `outMs: 600000` against a track of a few seconds, so this
         // clamp carries real traffic. Handing the raw range to `insertTimeRange` is the single
         // most likely way to break the flow.
         let outEffMs = min(m.outMs, src.endMs)
-        guard outEffMs > m.inMs else { throw BuildError.unreadable("music", "range outside file") }
+        // A trim that lies wholly past the end of the file is dropped, not failed: a replaced or
+        // re-extracted sound, or a stale length, leaves the manifest believing in a longer track.
+        // Android's `planMusic` and the web's return null for it and render the post without the
+        // music. A file that will not open at all still fails in `audioSource`, as it does on
+        // Android, where Transformer fails the export on it.
+        guard outEffMs > m.inMs else { return nil }
 
         guard let track = comp.addMutableTrack(withMediaType: .audio,
                                                preferredTrackID: kCMPersistentTrackID_Invalid) else {
@@ -846,6 +955,10 @@ enum CompositionBuilder {
         // Nothing pads the lead gap: the track is empty before the first insert and AVFoundation
         // writes that empty segment itself, which is Android's `addGap(leadGapUs)`.
         var at = ms(m.startMs)
+        // Where the first repetition and the last one landed on the output timeline, which is what
+        // the fades hang off. The same range when the piece plays once.
+        var first: CMTimeRange?
+        var last: CMTimeRange?
         var slices = 0
         repeat {
             let room = total - at
@@ -858,21 +971,20 @@ enum CompositionBuilder {
             } catch {
                 throw BuildError.unreadable("music", "insert: \(error)")
             }
-            at = at + slice.duration
+            let placed = CMTimeRange(start: at, duration: slice.duration)
+            if first == nil { first = placed }
+            last = placed
+            at = placed.end
             slices += 1
         } while m.loop && at < total && slices < maxMusicSlices
 
-        let presence = CMTimeRange(start: ms(m.startMs), end: at)
-        guard presence.duration > .zero else { return nil }
+        guard let first, let last else { return nil }
 
         let p = AVMutableAudioMixInputParameters(track: track)
         p.audioTimePitchAlgorithm = .spectral
-        // Android attaches the fade-in to the first repetition and the fade-out to the last, each
-        // relative to that item's own start. On iOS this is one continuous track, so both windows
-        // hang off the presence range instead - same two times, expressed once, and no fade at a
-        // loop seam.
         Fades.apply(p,
-                    presence: presence,
+                    first: first,
+                    last: last,
                     volume: Float(min(1, max(0, m.volume))),
                     fadeInMs: m.fadeInMs,
                     fadeOutMs: m.fadeOutMs)
@@ -884,7 +996,8 @@ enum CompositionBuilder {
     /// range adds nothing to the composition.
     private static func addVoiceovers(_ takes: [ComposeVoiceover],
                                       to comp: AVMutableComposition,
-                                      totalMs: Int64) async throws -> AVMutableAudioMixInputParameters? {
+                                      totalMs: Int64,
+                                      batchId: String) async throws -> AVMutableAudioMixInputParameters? {
         guard !takes.isEmpty else { return nil }
 
         var track: AVMutableCompositionTrack?
@@ -900,7 +1013,7 @@ enum CompositionBuilder {
             if take.startMs >= totalMs { continue }
             if take.startMs < cursorMs { continue }
 
-            let src = try await audioSource(take.uri, key: "voiceover")
+            let src = try await audioSource(take.uri, key: "voiceover", batchId: batchId)
             // Android's `min(source duration, totalUs - startUs)` with the manifest's own duration
             // folded in, which is what it does one level up in the parser.
             let lenMs = min(min(take.durationMs, src.endMs), totalMs - take.startMs)
@@ -929,7 +1042,13 @@ enum CompositionBuilder {
             } catch {
                 throw BuildError.unreadable("voiceover", "insert: \(error)")
             }
-            params?.setVolume(Float(min(1, max(0, take.volume))), at: ms(take.startMs))
+            // Held to the take's end, or a take at 1 followed by one at 0.3 would drift toward 0.3
+            // across the whole of itself (see `hold`).
+            if let p = params {
+                let level = Float(min(1, max(0, take.volume)))
+                p.setVolume(level, at: ms(take.startMs))
+                hold(level, on: p, after: ms(take.startMs), until: ms(take.startMs + lenMs))
+            }
             cursorMs = take.startMs + lenMs
         }
         return params
@@ -938,10 +1057,14 @@ enum CompositionBuilder {
     /// Opens a music or voiceover file and answers its single audio track plus that track's end in
     /// milliseconds. Every AVFoundation failure becomes `unreadable_input` with `key` as the
     /// `clipKey`, so a failure points at the part of the spec at fault rather than at a clip.
-    private static func audioSource(_ uri: String, key: String) async throws -> AudioSource {
-        guard let url = JobFolders.fileURL(from: uri) else {
+    ///
+    /// Opened through `RenderInputs` as every clip is. Music is the input most often handed over as
+    /// a blob and written out with no extension, which AVFoundation would refuse by its name alone.
+    private static func audioSource(_ uri: String, key: String, batchId: String) async throws -> AudioSource {
+        guard let file = JobFolders.fileURL(from: uri) else {
             throw BuildError.unreadable(key, "unsupported uri")
         }
+        let url = RenderInputs.openable(file, batchId: batchId)
         let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         do {
             guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
@@ -958,33 +1081,72 @@ enum CompositionBuilder {
 }
 
 enum Fades {
-    /// Android's `RampGainProvider` is a multiplicative curve evaluated per sample and linear in
-    /// amplitude: `gain = level * fadeIn(t) * fadeOut(t)`. A `setVolumeRamp` between two scalars is
-    /// that same straight line, so two ramps over the presence range reproduce it exactly.
-    static func apply(_ p: AVMutableAudioMixInputParameters, presence: CMTimeRange,
+    /// Android's `RampGainProvider`, attached where `planMusic` attaches it, and the web's
+    /// `fadeGain` with it: the fade-in belongs to the FIRST repetition and the fade-out to the LAST,
+    /// because a fade belongs to the start of the track and the end of the video and not to every
+    /// loop. Each is linear in amplitude at a fixed slope - `t / fadeIn` up from the first
+    /// repetition's start, `1 - t / fadeOut` down from the point that leaves the fade-out room to
+    /// finish at the last repetition's end - and a `setVolumeRamp` between two scalars is that same
+    /// straight line. When the fade is longer than its repetition, both engines cut the line short
+    /// rather than steepening it: a fade-in stops below the level and the next repetition starts at
+    /// the level, and a fade-out starts at the repetition's start and ends above silence. So this
+    /// does too, which keeps a loop whose last pass is a sliver from sliding to silence across the
+    /// seam before it, as one ramp hung off the end of the music would.
+    ///
+    /// `first` and `last` are where those two repetitions landed, and the same range when the music
+    /// plays once.
+    static func apply(_ p: AVMutableAudioMixInputParameters, first: CMTimeRange, last: CMTimeRange,
                       volume: Float, fadeInMs: Int64, fadeOutMs: Int64) {
         // The plateau. A ramp holds its end volume afterwards, so the fade-in already carries the
         // level across the middle; this step is what sets the level when there is no fade-in at
         // all, because AVFoundation's volume before the first one set is 1.0, not ours. Setting it
-        // at zero rather than at `presence.start` is harmless: the track is silent before then.
+        // at zero rather than at the music's start is harmless: the track is silent before then.
         p.setVolume(volume, at: .zero)
 
-        // Android lets the two windows overlap on a very short item and multiplies them, because it
-        // evaluates a function. AVFoundation cannot - overlapping ramps are undefined - so each
-        // fade gets at most half the presence. With the v1 values (0 or 400 ms) any presence longer
-        // than 800 ms is identical to Android.
-        let halfMs = msOf(presence.duration) / 2
-        let fadeIn = min(max(0, fadeInMs), halfMs)
-        let fadeOut = min(max(0, fadeOutMs), halfMs)
+        let fadeIn = max(0, fadeInMs)
+        let fadeOut = max(0, fadeOutMs)
+        let presence = CMTimeRange(start: first.start, end: last.end)
+        let presenceMs = msOf(presence.duration)
+        let inMs = min(fadeIn, msOf(first.duration))
+        let outMs = min(fadeOut, msOf(last.duration))
 
-        if fadeIn > 0 {
+        // Only music that plays once can hold both fades in one repetition, and only when the two
+        // meet. Android multiplies them there, because it evaluates a function per sample, and the
+        // product of two lines is no line a ramp can draw; overlapping ramps are undefined in
+        // AVFoundation. So each gets at most half of the music, from silence to the level and back,
+        // which is the one place this differs from Android and the web.
+        if inMs > 0 && outMs > 0 && inMs + outMs > presenceMs {
+            let half = presenceMs / 2
             p.setVolumeRamp(fromStartVolume: 0, toEndVolume: volume,
-                            timeRange: CMTimeRange(start: presence.start, duration: ms(fadeIn)))
-        }
-        if fadeOut > 0 {
+                            timeRange: CMTimeRange(start: presence.start, duration: ms(min(fadeIn, half))))
+            let out = ms(min(fadeOut, half))
             p.setVolumeRamp(fromStartVolume: volume, toEndVolume: 0,
-                            timeRange: CMTimeRange(start: presence.end - ms(fadeOut),
-                                                   duration: ms(fadeOut)))
+                            timeRange: CMTimeRange(start: presence.end - out, duration: out))
+            return
+        }
+
+        let outStart = last.end - ms(outMs)
+        if inMs > 0 {
+            // A fade-in cut short by its repetition's end, with another repetition after it, which
+            // starts at the level as Android's does. The ramp then stops a millisecond early, so the
+            // rise back to the level is a line of its own rather than a jump at the instant the
+            // ramp ends: where one ramp ends as the next begins, an export starts the second from
+            // the first one's end volume, measured, and a fade-out starting there would begin at
+            // the cut fade-in's level instead of the full one.
+            let cut = inMs < fadeIn && first.end < presence.end
+            let rampMs = cut ? inMs - 1 : inMs
+            if rampMs > 0 {
+                p.setVolumeRamp(fromStartVolume: 0, toEndVolume: volume * Float(rampMs) / Float(fadeIn),
+                                timeRange: CMTimeRange(start: first.start, duration: ms(rampMs)))
+            }
+            // The fade-out, when it starts right there, starts at the level itself.
+            if cut && first.end < outStart {
+                p.setVolume(volume, at: first.end)
+            }
+        }
+        if outMs > 0 {
+            p.setVolumeRamp(fromStartVolume: volume, toEndVolume: volume * Float(fadeOut - outMs) / Float(fadeOut),
+                            timeRange: CMTimeRange(start: outStart, end: last.end))
         }
     }
 }

@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack } from '../../editor';
+import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack, type TextOverlay } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -113,6 +113,65 @@ async function until(what: string, ready: () => boolean, ms = 2000): Promise<voi
 }
 
 /**
+ * The component behind the element. Through Stencil's own host ref, because in the lazy build the
+ * element and the component are two objects and nothing else hands the component out.
+ *
+ * Not by the host ref's `$lazyInstance$`: `npm test` builds with `--prod`, which renames every
+ * `$...$` field of Stencil's to a letter, so that name is only there in a dev build. What survives
+ * the minifier is the method both ends are given: the instance is the one object on the host ref,
+ * other than the element itself, whose own `__stencil__getHostRef` hands back that same host ref.
+ */
+type WithHostRef = { __stencil__getHostRef?: () => object };
+
+function instanceOf<T>(tl: HTMLElement): T {
+  const hostRef = (tl as HTMLElement & WithHostRef).__stencil__getHostRef?.();
+  const instance =
+    hostRef &&
+    Object.values(hostRef).find(
+      (v): v is T & WithHostRef => typeof v === 'object' && v !== null && v !== tl && (v as WithHostRef).__stencil__getHostRef?.() === hostRef,
+    );
+  if (!instance) throw new Error('no component instance');
+  return instance;
+}
+
+/**
+ * Counts the timeline's renders, from the hook every one of them ends in. Stencil looks
+ * `componentDidRender` up by name on the instance at the end of every render, so a wrapper put on
+ * the instance is the one it calls. A render that changes nothing on the page is exactly what is
+ * being counted, and no DOM observer can see one of those.
+ */
+function countRenders(tl: HTMLElement): () => number {
+  type Instance = { componentDidRender?: () => void };
+  const instance = instanceOf<Instance>(tl);
+  const original = instance.componentDidRender;
+  if (!original) throw new Error('no componentDidRender to count');
+  let count = 0;
+  instance.componentDidRender = function (this: Instance) {
+    count += 1;
+    original.call(this);
+  };
+  return () => count;
+}
+
+/** Waits out whatever the last change set going, until five frames pass without a render. */
+async function settle(renders: () => number): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    const before = renders();
+    await frames(5);
+    if (renders() === before) return;
+  }
+  throw new Error('the timeline never stopped rendering');
+}
+
+/** What the tests below read off the component: the memoised views, by reference. */
+type Views = {
+  trimHandles: { value: unknown };
+  musicLane: { value: unknown };
+  musicHandles: { value: unknown };
+  clipWaves: { value: unknown };
+};
+
+/**
  * A long press on a segment, then the finger carried to `(x, y)`. Leaves the finger DOWN, so a test
  * can look at what the timeline is showing before deciding to let go.
  */
@@ -183,6 +242,141 @@ describe('the rows', () => {
     await frames(2);
 
     expect(panned()).toBeLessThanOrEqual(Math.max(0, room()) + 0.5);
+  });
+
+  /*
+   * Rows at the top have nothing to be clamped into, and measuring how far they COULD pan reads the
+   * lanes' height straight after the patch - a layout forced on every render, every frame of a pinch
+   * zoom among them. Rows that are panned are still clamped, by the test above.
+   */
+  it('does not measure the rows on a render while they are not panned', async () => {
+    const { store, tl } = await mount([layer('vt-1', 1, [{ id: 'seg-x', key: 'clip-x' }])]);
+    const lanes = root(tl).querySelector<HTMLElement>('.tl__lanes')!;
+    expect(lanes.style.transform).toBe('');
+    const renders = countRenders(tl);
+    await settle(renders);
+
+    const measured = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get');
+    try {
+      const before = renders();
+      store.toggleOriginalMuted();
+      await until('a render', () => renders() > before);
+      await frames(1);
+
+      expect(measured.mock.contexts.filter(el => el === lanes)).toHaveLength(0);
+      expect(lanes.style.transform).toBe('');
+    } finally {
+      measured.mockRestore();
+    }
+  });
+});
+
+describe('the playhead', () => {
+  /*
+   * `ve-editor` does not render the timeline at all while a tall sheet or full screen is up, so
+   * closing one makes a new `<ve-timeline>` with the playhead wherever it was left. The effect that
+   * scrolls the lanes to the playhead first runs when the element is connected, before there is a
+   * scroller to scroll, and ran again only when the playhead, the zoom or the width changed - so the
+   * new timeline came up at 00:00 under a clock reading 00:06, and the next Cut or take acted on a
+   * moment the screen was not showing.
+   */
+  it('is under the centre line of a timeline made while it is away from the start', async () => {
+    const { store, tl } = await mount();
+    const scroller = (el: HTMLElement) => root(el).querySelector<HTMLElement>('.tl__scroller')!;
+    const at = (6000 / 1000) * store.pps.value;
+    store.seek(6000);
+    await until('the lanes to follow the seek', () => Math.abs(scroller(tl).scrollLeft - at) < 1);
+
+    // What closing a tall sheet does: the element goes, and a new one is made on the same context.
+    // As wide as the window, as the timeline is on a phone. The width starts out as
+    // `window.innerWidth` and is measured on the first layout, and a narrower column changed it
+    // there, which ran the effect again and hid the bug.
+    const column = tl.parentElement!;
+    column.style.width = `${window.innerWidth}px`;
+    tl.remove();
+    const again = document.createElement('ve-timeline');
+    again.style.height = '100%';
+    Object.assign(again, { ctx: (tl as HTMLElement & { ctx: EditorContext }).ctx });
+    column.append(again);
+    await (again as StencilElement).componentOnReady?.();
+    await frames(2);
+
+    expect(Math.abs(scroller(again).scrollLeft - at)).toBeLessThan(1);
+    // Brought there by the timeline, not by a scroll read back as a seek.
+    expect(store.playheadMs.value).toBe(6000);
+  });
+});
+
+describe('the take being recorded', () => {
+  /*
+   * The bar of a voiceover take grows with the playhead, which is written thirty times a second for
+   * the whole of the take. It used to be drawn by the render, so every tile and lane was drawn again
+   * on each of those writes while the recorder and the preview were fighting for the same thread.
+   * Its width is written onto the bar itself now, and has to come out exactly as it did.
+   */
+  const MIN_ITEM_PX = 28;
+
+  function bar(tl: HTMLElement): HTMLElement | null {
+    return root(tl).querySelector<HTMLElement>('.item--recording');
+  }
+
+  function pad(tl: HTMLElement): number {
+    return root(tl).querySelector<HTMLElement>('.tl__scroller')!.clientWidth / 2;
+  }
+
+  it('grows with the playhead without drawing the timeline again', async () => {
+    const { store, tl } = await mount();
+    const renders = countRenders(tl);
+    const pps = store.pps.value;
+    store.recordingFromMs.value = 1000;
+    await until('the recording bar', () => bar(tl) !== null);
+    // Nothing recorded yet: the playhead is behind where the take starts, and the bar is its least.
+    expect(parseFloat(bar(tl)!.style.width)).toBeCloseTo(MIN_ITEM_PX, 3);
+    expect(parseFloat(bar(tl)!.style.left)).toBeCloseTo(pad(tl) + pps, 3);
+    await settle(renders);
+
+    const before = renders();
+    // All well inside the first half-screen of scroll, so the lanes keep the tiles they have.
+    for (const to of [1200, 1500, 1800, 2100]) {
+      store.playheadMs.value = to;
+      expect(parseFloat(bar(tl)!.style.width)).toBeCloseTo(Math.max(MIN_ITEM_PX, ((to - 1000) / 1000) * pps), 3);
+      await frames(1);
+    }
+    await frames(3);
+
+    expect(renders()).toBe(before);
+    expect(parseFloat(bar(tl)!.style.left)).toBeCloseTo(pad(tl) + pps, 3);
+  });
+
+  it('keeps both ends in step when the timeline is zoomed mid-take', async () => {
+    const { store, tl } = await mount();
+    store.playheadMs.value = 2000;
+    // Made after the playhead had moved on: the bar has its width from the moment it is made.
+    store.recordingFromMs.value = 1000;
+    await until('the recording bar', () => bar(tl) !== null);
+    expect(parseFloat(bar(tl)!.style.width)).toBeCloseTo(store.pps.value, 3);
+
+    const pps = store.pps.value * 2;
+    store.pps.value = pps;
+    await until('the bar to move', () => Math.abs(parseFloat(bar(tl)!.style.left) - (pad(tl) + pps)) < 0.01);
+
+    expect(parseFloat(bar(tl)!.style.width)).toBeCloseTo(pps, 3);
+  });
+
+  it('goes when the take stops, and a new take starts a new bar', async () => {
+    const { store, tl } = await mount();
+    store.recordingFromMs.value = 0;
+    store.playheadMs.value = 1000;
+    await until('the recording bar', () => bar(tl) !== null);
+    expect(parseFloat(bar(tl)!.style.width)).toBeCloseTo(store.pps.value, 3);
+
+    store.recordingFromMs.value = null;
+    await until('the bar to go', () => bar(tl) === null);
+
+    store.recordingFromMs.value = 1000;
+    await until('the new bar', () => bar(tl) !== null);
+    // The new take starts at the playhead, so it is its least - not the width the last one ended on.
+    expect(parseFloat(bar(tl)!.style.width)).toBeCloseTo(MIN_ITEM_PX, 3);
   });
 });
 
@@ -613,6 +807,36 @@ describe('the waveform on an audio bar', () => {
     expect(wave(tl)).toBeNull();
   });
 
+  /*
+   * The sound is a field of the manifest, and a sticker pinched or dragged on the stage writes the
+   * manifest on every frame. The sound bar, its handles and its wave are exactly where they were,
+   * and the whole timeline used to be drawn again around them on each of those frames.
+   */
+  it('draws nothing again while a layer is moved on the stage', async () => {
+    const { store, tl } = await withMusic();
+    await until('the waveform', () => wave(tl) !== null);
+    const sticker = store.addSticker({ emoji: '🔥' })!;
+    store.select({ kind: 'music' });
+    await until('the sound bar handles', () => root(tl).querySelector('[data-hit="music-start"]') !== null);
+    const renders = countRenders(tl);
+    await settle(renders);
+
+    const views = instanceOf<Views>(tl);
+    const lane = views.musicLane.value;
+    const handles = views.musicHandles.value;
+    const before = renders();
+    for (const cx of [0.3, 0.35, 0.4, 0.45, 0.5]) {
+      store.previewOverlay(sticker, { cx });
+      await frames(1);
+    }
+    await frames(3);
+
+    expect(views.musicLane.value).toBe(lane);
+    expect(views.musicHandles.value).toBe(handles);
+    expect(renders()).toBe(before);
+    store.endGesture('Move');
+  });
+
   it('draws a measured silence as a hairline rather than as nothing', async () => {
     const silent: Peaks = { stepMs: 10, peaks: new Uint8Array(2000), durationMs: 20_000, max: 0 };
     const { tl } = await withMusic({}, silent);
@@ -912,6 +1136,68 @@ describe('the transition dots', () => {
 });
 
 /*
+ * The music lane's placeholder, and the one thing it opens. WebKit on iOS aims the click that follows
+ * a tap at whatever is under the finger AFTER the lift, and the Sound sheet comes up where the lane
+ * was: a sheet opened on the pointer's way up took that click, on Extract from video, and opened the
+ * video picker over itself. So nothing may open before the click, and the click is what opens it.
+ */
+describe('the Add sound bar', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function addSound(tl: HTMLElement): HTMLButtonElement {
+    const found = root(tl).querySelector<HTMLButtonElement>('[data-hit="add-sound"]');
+    if (!found) throw new Error('no Add sound');
+    return found;
+  }
+
+  it('opens the Sound sheet on the click that follows a tap, and not a moment before', async () => {
+    const opened = vi.spyOn(EditorMedia.prototype, 'openSound');
+    const { store, tl } = await mount();
+    const target = addSound(tl);
+    const at = centre(target);
+
+    pointer(target, 'pointerdown', at.x, at.y);
+    pointer(target, 'pointerup', at.x, at.y);
+    // Nothing is up yet for the click to land in, wherever the browser aims it.
+    expect(store.panel.value).toBeNull();
+
+    target.click();
+    expect(store.panel.value).toBe('sound');
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens from a bare click as well, which is how a key or a screen reader presses it', async () => {
+    const { store, tl } = await mount();
+
+    addSound(tl).click();
+
+    expect(store.panel.value).toBe('sound');
+  });
+
+  it('opens nothing for the click after a mouse drag that ended over it', async () => {
+    const { store, tl } = await mount();
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    const target = addSound(tl);
+    const at = centre(target);
+    const mouse = (on: Element, type: string, x: number): void => {
+      on.dispatchEvent(new PointerEvent(type, { pointerId: 7, pointerType: 'mouse', button: 0, isPrimary: true, clientX: x, clientY: at.y, bubbles: true, cancelable: true }));
+    };
+
+    // A scrub that starts and ends on the bar, which runs the whole length of the video.
+    mouse(target, 'pointerdown', at.x);
+    mouse(scroller, 'pointermove', at.x - 60);
+    await frames(2);
+    mouse(scroller, 'pointerup', at.x - 60);
+    target.click();
+    await frames(2);
+
+    expect(store.panel.value).toBeNull();
+  });
+});
+
+/*
  * A video's own sound, on its filmstrip - and what turning that sound off does to it.
  */
 describe('the waveform on a video clip', () => {
@@ -976,6 +1262,45 @@ describe('the waveform on a video clip', () => {
 
     store.setVolume({ kind: 'clip', id: 'seg-a' }, 0.6, false);
     await until('the wave to come back', () => waveOf(tl, 'seg-a') !== null);
+  });
+
+  /*
+   * The Volume sheet's slider writes the manifest on every step of the drag, with the segment
+   * selected. The wave's shape is drawn against the file's own loudest peak and never depended on
+   * the level, and the trim handles are where they were - so a drag that only stays heard has
+   * nothing on the timeline to redraw, and used to redraw all of it on every step.
+   */
+  it('draws nothing again while the volume is dragged, until the sound goes', async () => {
+    const { store, tl } = await withClipSound();
+    await until('the clip waveform', () => waveOf(tl, 'seg-a') !== null);
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the trim handles', () => root(tl).querySelector('[data-hit="clip-in"]') !== null);
+    const renders = countRenders(tl);
+    await settle(renders);
+
+    const views = instanceOf<Views>(tl);
+    const handles = views.trimHandles.value;
+    const waves = views.clipWaves.value;
+    const path = waveOf(tl, 'seg-a')!.getAttribute('d');
+    const before = renders();
+    for (const v of [0.9, 0.8, 0.7, 0.6, 0.5]) {
+      store.setVolume({ kind: 'clip', id: 'seg-a' }, v, true);
+      await frames(1);
+    }
+    await frames(3);
+
+    expect(views.trimHandles.value).toBe(handles);
+    expect(views.clipWaves.value).toBe(waves);
+    expect(renders()).toBe(before);
+    expect(waveOf(tl, 'seg-a')!.getAttribute('d')).toBe(path);
+
+    // Down to nothing and back up, still in the same drag: the picture goes and comes back as it always did.
+    store.setVolume({ kind: 'clip', id: 'seg-a' }, 0, true);
+    await until('the wave to go', () => waveOf(tl, 'seg-a') === null);
+    store.setVolume({ kind: 'clip', id: 'seg-a' }, 0.4, true);
+    await until('the wave to come back', () => waveOf(tl, 'seg-a') !== null);
+    expect(waveOf(tl, 'seg-a')!.getAttribute('d')).toBe(path);
+    store.endGesture('Volume');
   });
 
   it('leaves the other segments of the same source alone when one is silenced', async () => {
@@ -1066,5 +1391,102 @@ describe('the zoom row', () => {
 
     store.undo();
     expect(store.manifest.value.zooms[0].endMs).toBe(4000);
+  });
+});
+
+/*
+ * What kind of thing each lane is, read off the glyph at its head: the lanes used to be told apart
+ * by colour alone, and a text lane and an effect lane are two shades of pink.
+ */
+describe('the lane glyphs', () => {
+  function laneEl(tl: HTMLElement, id: string): HTMLElement {
+    const found = root(tl).querySelector<HTMLElement>(`[data-hit="layer"][data-id="${id}"]`);
+    if (!found) throw new Error(`no ${id} lane`);
+    return found;
+  }
+
+  function glyphOf(lane: HTMLElement): HTMLElement | null {
+    return lane.querySelector<HTMLElement>('.item__kind');
+  }
+
+  /** One layer of every kind, from the start of the post to its end. */
+  async function withLayers(caption = 'Full send') {
+    const mountedTl = await mount();
+    const { store } = mountedTl;
+    const text = store.addLayer<TextOverlay>('Text', {
+      kind: 'text',
+      text: caption,
+      styleId: 'classic',
+      color: '#ffffff',
+      effect: 'shadow',
+      align: 'center',
+      cx: 0.5,
+      cy: 0.5,
+      scale: 1,
+      rotationDeg: 0,
+      opacity: 1,
+    })!;
+    const sticker = store.addSticker({ emoji: '🔥' })!;
+    const photo = store.addImage('file:///photo.jpg', 'photo.jpg', 1)!;
+    const effect = store.addEffect('vignette', 'Vignette')!;
+    store.select(null);
+    await until('a lane for every layer', () => root(mountedTl.tl).querySelectorAll('[data-hit="layer"]').length === 4);
+    return { ...mountedTl, ids: { text, sticker, photo, effect } };
+  }
+
+  it('leads every lane with the glyph of what it carries', async () => {
+    const { tl, ids } = await withLayers();
+
+    expect(glyphOf(laneEl(tl, ids.text))?.dataset.glyph).toBe('text');
+    expect(glyphOf(laneEl(tl, ids.sticker))?.dataset.glyph).toBe('happy');
+    expect(glyphOf(laneEl(tl, ids.photo))?.dataset.glyph).toBe('image');
+    expect(glyphOf(laneEl(tl, ids.effect))?.dataset.glyph).toBe('sparkles');
+    // First in the label, before the sticker's own picture or the text's words.
+    for (const id of Object.values(ids)) {
+      expect(laneEl(tl, id).querySelector('.item__label')!.firstElementChild!.classList.contains('item__kind')).toBe(true);
+    }
+  });
+
+  it('shows the words beside the glyph on a lane with room for them', async () => {
+    const { tl, ids } = await withLayers();
+    const lane = laneEl(tl, ids.text);
+    const text = lane.querySelector<HTMLElement>('.item__text')!;
+
+    expect(lane.classList.contains('item--glyph')).toBe(false);
+    expect(text.getBoundingClientRect().width).toBeGreaterThan(40);
+    expect(text.getBoundingClientRect().left).toBeGreaterThan(glyphOf(lane)!.getBoundingClientRect().right);
+  });
+
+  it('draws a lane too short for a label as its glyph alone, centred', async () => {
+    const { store, tl, ids } = await withLayers();
+    // Twelve seconds at 6 px a second is a 72 px bar.
+    store.pps.value = 6;
+    const lane = () => laneEl(tl, ids.text);
+    await until('the short lane', () => lane().classList.contains('item--glyph'));
+
+    const bar = lane().getBoundingClientRect();
+    const glyph = glyphOf(lane())!.getBoundingClientRect();
+    expect(glyph.left + glyph.width / 2).toBeCloseTo(bar.left + bar.width / 2, 0);
+    expect(lane().querySelector('.item__text')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
+    // Out of sight, and still what a screen reader finds the layer by.
+    expect(lane().textContent).toContain('Full send');
+
+    store.pps.value = 64;
+    await until('the label back', () => !lane().classList.contains('item--glyph'));
+  });
+
+  it('never lets the label push the glyph out of a lane', async () => {
+    const { store, tl, ids } = await withLayers('A caption far too long to fit on any lane at all');
+    // 12 s at 8 px a second is 96 px: room for the glyph and a few letters, not the whole line.
+    store.pps.value = 8;
+    await frames(3);
+    const lane = laneEl(tl, ids.text);
+    const bar = lane.getBoundingClientRect();
+    const glyph = glyphOf(lane)!.getBoundingClientRect();
+
+    expect(lane.classList.contains('item--glyph')).toBe(false);
+    expect(glyph.width).toBe(24);
+    expect(glyph.left).toBeGreaterThanOrEqual(bar.left);
+    expect(glyph.right).toBeLessThanOrEqual(bar.right);
   });
 });

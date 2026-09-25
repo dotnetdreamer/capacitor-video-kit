@@ -124,6 +124,41 @@ class ComposeSpecParserTest {
         assertEquals(1280, spec.output.height)
     }
 
+    private fun withMaxBytes(value: Any): JSONObject =
+        minimalJson().apply { getJSONObject("output").put("maxBytes", value) }
+
+    @Test
+    fun `an output with no maxBytes has no size ceiling, exactly as before the field`() {
+        assertNull(ComposeSpecParser.parse(minimalJson()).output.maxBytes)
+    }
+
+    @Test
+    fun `a positive maxBytes is the ceiling, in whole bytes`() {
+        fun ceiling(value: Any): Long? =
+            ComposeSpecParser.parse(withMaxBytes(value)).output.maxBytes
+        assertEquals(100_000_000L, ceiling(100_000_000))
+        assertEquals(104_857_600L, ceiling(104_857_600L))
+        // Rounded down, which decides nothing differently: a whole number of bytes is past 1234.9
+        // exactly when it is past 1234.
+        assertEquals(1234L, ceiling(1234.9))
+        // Too large for a Long is the largest ceiling there is, which no file reaches.
+        assertEquals(Long.MAX_VALUE, ceiling(1e300))
+    }
+
+    @Test
+    fun `a maxBytes that does not round down to at least one byte is no ceiling, and no refusal either`() {
+        // The contract: absent, or anything that does not round down to at least one byte, means no
+        // ceiling. A string that spells a number is not a number, and neither is a boolean. 0.5 is
+        // the one the rule is written on the rounded number for, as on iOS and the web: tested
+        // before rounding it would be a ceiling of 0 that fails every render.
+        val notNumbers = listOf<Any>("100000000", true, JSONObject.NULL, JSONObject())
+        for (value in listOf<Any>(0, 0.0, 0.5, 0.999, -1, -100_000_000L) + notNumbers) {
+            val spec = ComposeSpecParser.parse(withMaxBytes(value))
+            assertNull("$value", spec.output.maxBytes)
+            assertEquals(720, spec.output.width)
+        }
+    }
+
     @Test
     fun `speed volume and opacity are clamped rather than rejected`() {
         val json = minimalJson().apply {

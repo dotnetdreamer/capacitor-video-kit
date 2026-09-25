@@ -97,10 +97,18 @@ export async function pictureThumbnail(url: string, maxHeight: number): Promise<
 /**
  * The picture's upright size, or null when it will not decode. The cheap question a probe asks: is
  * this file still there, and is it a picture at all.
+ *
+ * Answered at `onload`, without the `decode()` the drawing paths wait for. The answer does not
+ * depend on it: the size is known, EXIF-upright, as soon as the image has loaded, and a `decode()`
+ * that fails has always counted as loaded (see [loadImage]). What skipping it saves is a
+ * full-resolution decode per picture - a 12 MP photo is ~48 MB of pixels - that was thrown away the
+ * moment the size was read, on the path an editor opening a draft of photos waits on, once per
+ * photo and all at once. (The one case it answers differently is a decode still running after
+ * [DECODE_TIMEOUT_MS]: that picture was called unreadable, and is now the size it is.)
  */
 export async function measurePicture(url: string): Promise<{ width: number; height: number } | null> {
   try {
-    const image = await loadImage(url);
+    const image = await loadImage(url, { decode: false });
     const size = { width: image.naturalWidth, height: image.naturalHeight };
     image.removeAttribute('src');
     return size.width > 0 && size.height > 0 ? size : null;
@@ -117,7 +125,7 @@ export async function measurePicture(url: string): Promise<{ width: number; heig
  * a render cannot read back. A picture from this page's own origin - a blob, the host's own file
  * server - is asked for plainly, because there is nothing for CORS to protect there.
  */
-function loadImage(url: string): Promise<HTMLImageElement> {
+function loadImage(url: string, { decode = true }: { decode?: boolean } = {}): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     if (!url) {
       reject(new Error('there is no file behind this picture'));
@@ -139,7 +147,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
     image.onload = () => {
       // `onload` says the bytes are in; `decode()` says the pixels are, so the first draw does not
       // stall on a decode of its own. An engine without it has decoded by `onload` anyway.
-      if (typeof image.decode === 'function') {
+      if (decode && typeof image.decode === 'function') {
         image.decode().then(
           () => finish(null),
           () => finish(null),

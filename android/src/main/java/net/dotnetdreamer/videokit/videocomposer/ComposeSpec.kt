@@ -255,6 +255,14 @@ data class Output(
     val fps: Int,
     val videoBitrate: Int,
     val audioBitrate: Int,
+    /**
+     * The most bytes the finished file may have - `ComposeOutput.maxBytes`, the host's upload
+     * ceiling - in whole bytes, or null for no ceiling at all. Null is what every spec written
+     * before the field says, and what a host that keeps its videos on the phone goes on saying: a
+     * 4K render there may be as large as it comes out. See [SizeCeiling] for how a render is held
+     * to one.
+     */
+    val maxBytes: Long? = null,
 )
 
 /**
@@ -362,6 +370,18 @@ data class ComposeSpec(
      */
     val camera: CameraTrack? = null,
 )
+
+/**
+ * The same spec with every overlay's PNG data URL emptied, for the copy a job keeps.
+ *
+ * The data URLs are read exactly once, when the pre-flight decodes them into bitmaps; a relaxed
+ * retry reuses those bitmaps and nothing else ever looks at the text again. But a job's plan lives
+ * in the process-wide registry for as long as the job does - through the export and up to a day
+ * after - and a full-frame image overlay is megabytes of base64, so the plan a job keeps is built
+ * from this. Every other field, the overlays' placements and times included, is untouched.
+ */
+internal fun ComposeSpec.withoutOverlayPixels(): ComposeSpec =
+    if (overlays.isEmpty()) this else copy(overlays = overlays.map { it.copy(png = "") })
 
 /** What a `MediaMetadataRetriever` pass told us about one input file. */
 data class ProbedInput(

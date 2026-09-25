@@ -201,7 +201,8 @@ const IDENTITY_GL = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 const ZERO_OFFSET = new Float32Array([0, 0, 0]);
 
 export class Painter {
-  private readonly output: Frame;
+  /** Not readonly only for [resize]. */
+  private output: Frame;
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private gl: WebGL2RenderingContext | null = null;
@@ -262,6 +263,39 @@ export class Painter {
   /** Whether frames go through the shader, which is the path that agrees with the native engines. */
   get usesGpu(): boolean {
     return this.gl !== null;
+  }
+
+  /**
+   * Assembles frames at a new size from now on, keeping everything a size does not touch: the GL
+   * context, the layer program, every source's texture and the transition programs. Building a new
+   * painter instead costs a context, a program compile and - on the first transition after - two
+   * more programs linked, which is a visible hitch on the paused frame the customer is looking at
+   * every time a sheet or the keyboard resizes the preview. Nothing a paint draws with depends on
+   * what the painter was built at: the viewport, `u_frame` and every other uniform are set on every
+   * paint, so a resized painter draws exactly what a new one of that size would.
+   *
+   * Assigning a size clears both canvases, exactly as building a new painter onto the same canvas
+   * did. The transitions' frame targets are sized from the frame, so they go and are made again at
+   * the new size the first time each is asked for.
+   *
+   * False, with nothing changed, when there is no live GPU context to keep: a painter that has
+   * fallen back to 2D, or whose context was lost while nothing was painting. The caller builds a new
+   * painter then, which is what brings the GPU back - and it is exactly what a resize did before.
+   */
+  resize(output: Frame): boolean {
+    const gl = this.gl;
+    const glCanvas = this.glCanvas;
+    if (!gl || !glCanvas || gl.isContextLost()) return false;
+    this.output = output;
+    this.canvas.width = output.width;
+    this.canvas.height = output.height;
+    glCanvas.width = output.width;
+    glCanvas.height = output.height;
+    this.transitionGl?.resize(output);
+    // Never built while the GPU path is up, but its frames are sized from the output if it were.
+    this.transition2d?.dispose();
+    this.transition2d = null;
+    return true;
   }
 
   /** The finished frame, for the encoder and for the poster. */

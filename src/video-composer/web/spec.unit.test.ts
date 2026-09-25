@@ -44,6 +44,14 @@ function spec(over: Partial<ComposeSpec> = {}): ComposeSpec {
 }
 
 describe('refusals', () => {
+  /* The ids that name no job folder of their own on a phone, refused here as `ComposeSpecParser` does. */
+  it('refuses a batch id that is empty, a dot or two dots, and takes any other', () => {
+    for (const batchId of ['', '.', '..', undefined]) {
+      expect(() => validateSpec(spec({ batchId: batchId as string })), String(batchId)).toThrow('invalid_spec:batchId');
+    }
+    for (const batchId of ['../x', '...', '.x', '__']) expect(validateSpec(spec({ batchId })).batchId).toBe(batchId);
+  });
+
   it('names the path that broke', () => {
     expect(() => validateSpec(spec({ jobId: '' }))).toThrow(SpecError);
     try {
@@ -208,6 +216,22 @@ describe('clamps', () => {
     const first = original.clips[0];
     if (first) first.speed = 0.5;
     expect(checked.clips[0]?.speed).toBe(1);
+  });
+
+  /*
+   * A size ceiling is the host's upload limit, and anything that is not a positive number of bytes
+   * is no ceiling: read as a zero instead, it would fail every render the host ever asked for.
+   */
+  it('keeps a size ceiling in whole bytes, and leaves off one that is not a positive number', () => {
+    const output = spec().output;
+    expect(validateSpec(spec({ output: { ...output, maxBytes: 104_857_600 } })).output.maxBytes).toBe(104_857_600);
+    expect(validateSpec(spec({ output: { ...output, maxBytes: 1000.9 } })).output.maxBytes).toBe(1000);
+
+    expect(validateSpec(spec()).output).not.toHaveProperty('maxBytes');
+    // A fraction under one byte is positive, but a ceiling of 0 once it is rounded down.
+    for (const none of [0, -5, 0.5, Number.NaN, Number.POSITIVE_INFINITY, '100', null]) {
+      expect(validateSpec(spec({ output: { ...output, maxBytes: none as number } })).output).not.toHaveProperty('maxBytes');
+    }
   });
 });
 

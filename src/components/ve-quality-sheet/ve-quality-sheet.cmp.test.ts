@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { defaultClipEdit, emptyManifest, outputFor } from '../../editor';
+import { defaultClipEdit, emptyManifest, estimatedBytes, outputFor } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import type { EditorEncodeSupport, VideoEditorHost } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
@@ -131,6 +131,70 @@ describe('ve-quality-sheet', () => {
     expect(chips(sheet, 'Shape')).toEqual([]);
     expect(chips(sheet, 'Frame rate')).toEqual([]);
     expect(chips(sheet, 'Resolution').length).toBeGreaterThan(0);
+  });
+
+  /*
+   * A host's upload limit, against this five second post. It is set between what 720P and 1080P
+   * are estimated to come to, so every rung above the first is over it, and so is 720P at 60fps,
+   * which is twice the rate. Marked, and never greyed: the estimate is a rate the encoder may spend
+   * less than, and the render is what measures the real file.
+   */
+  describe('under a host\'s size ceiling', () => {
+    const at720 = estimatedBytes(5000, outputFor('9:16', '720p', 30));
+    const at1080 = estimatedBytes(5000, outputFor('9:16', '1080p', 30));
+    const maxBytes = Math.round((at720 + at1080) / 2);
+
+    function everyRung(): VideoEditorHost {
+      return {
+        media: hostRefusing4K().media,
+        output: { maxBytes },
+      };
+    }
+
+    function marked(chip: HTMLButtonElement): boolean {
+      return chip.querySelector('.qs__hint--over') !== null;
+    }
+
+    it('marks only the rungs whose estimate is over the ceiling, and leaves every one of them choosable', async () => {
+      const { sheet } = await mount(everyRung());
+      await frames(4);
+
+      const resolution = chips(sheet, 'Resolution');
+      expect(resolution.map(marked)).toEqual([false, true, true, true]);
+      expect(resolution.every((chip) => !chip.disabled)).toBe(true);
+      expect(resolution[1].textContent).toContain('Over');
+      expect(chips(sheet, 'Frame rate').map(marked)).toEqual([false, true]);
+      // The chosen frame is under, so there is nothing to explain yet.
+      expect(sheet.shadowRoot?.textContent).not.toContain('too big to post');
+    });
+
+    it('takes a rung over the ceiling when it is chosen, and says under the size what that may mean', async () => {
+      const { store, sheet } = await mount(everyRung());
+      await frames(4);
+
+      chips(sheet, 'Resolution')[1].click();
+      await frames(2);
+
+      expect(store.output.value).toEqual(outputFor('9:16', '1080p', 30));
+      expect(sheet.shadowRoot?.querySelector('.qs__note--over')?.textContent).toContain('May be too big to post.');
+    });
+
+    it('marks nothing for a host that set no ceiling', async () => {
+      const { sheet } = await mount({ media: hostRefusing4K().media });
+      await frames(4);
+
+      expect([...chips(sheet, 'Resolution'), ...chips(sheet, 'Frame rate')].some(marked)).toBe(false);
+      expect(sheet.shadowRoot?.querySelector('.qs__note--over')).toBeNull();
+    });
+
+    /* Rounded down it is a ceiling of 0, which every rung is over: a typo's worth of fraction. */
+    it('marks nothing for a ceiling under one byte, which is no ceiling', async () => {
+      const { sheet } = await mount({ media: hostRefusing4K().media, output: { maxBytes: 0.5 } });
+      await frames(4);
+
+      expect([...chips(sheet, 'Resolution'), ...chips(sheet, 'Frame rate')].some(marked)).toBe(false);
+      expect(sheet.shadowRoot?.querySelector('.qs__note--over')).toBeNull();
+    });
   });
 
   it('offers the whole ladder to a host that has no answer about it', async () => {

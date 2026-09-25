@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { reducePeaks } from './waveform';
+import { extractPeaks, reducePeaks } from './waveform';
 
 /*
  * The measuring half only. Decoding needs Web Audio, which the mock DOM these run in does not
@@ -105,5 +105,65 @@ describe('reducePeaks', () => {
     expect(reducePeaks([new Float32Array(0)], RATE, STEP)).toEqual({ peaks: new Uint8Array(0), max: 0 });
     expect(reducePeaks([samples(10, () => 1)], 0, STEP)).toEqual({ peaks: new Uint8Array(0), max: 0 });
     expect(reducePeaks([samples(10, () => 1)], RATE, 0)).toEqual({ peaks: new Uint8Array(0), max: 0 });
+  });
+});
+
+/*
+ * How often `extractPeaks` reads a source that is not read by range - a `blob:`, a stored file, an
+ * iOS clip's `capacitor:` URL - when the streamed pass cannot use it and the whole-file pass is
+ * asked. Bytes no demuxer recognises stand in for a video whose audio this WebView cannot decode,
+ * and the whole-file decoder is stood in for, because Web Audio is not in the mock DOM.
+ */
+describe('extractPeaks', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function serve(bytes: number): ReturnType<typeof vi.fn> {
+    const read = vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob([new Uint8Array(bytes)]) }));
+    vi.stubGlobal('fetch', read);
+    return read;
+  }
+
+  function decodeTo(channel: Float32Array, sampleRate: number): ReturnType<typeof vi.fn> {
+    const decode = vi.fn(async () => ({ length: channel.length, numberOfChannels: 1, sampleRate, duration: channel.length / sampleRate, getChannelData: () => channel }));
+    vi.stubGlobal(
+      'OfflineAudioContext',
+      class {
+        decodeAudioData = decode;
+      },
+    );
+    return decode;
+  }
+
+  /* The size check refused it anyway: the second read was a whole video through the WebView for nothing. */
+  it('reads a source too big for the whole-file decoder once, not once per pass', async () => {
+    const read = serve(12 * 1024 * 1024 + 1);
+    const decode = decodeTo(new Float32Array(10), 1000);
+
+    expect(await extractPeaks('capacitor://localhost/_capacitor_file_/clip.mp4')).toBeNull();
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it('hands the whole-file decoder the bytes the streamed pass was given, without reading them again', async () => {
+    const read = serve(64);
+    const decode = decodeTo(new Float32Array(30).fill(0.6), 1000);
+
+    const peaks = await extractPeaks('blob:app/sound', 10);
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(peaks).toMatchObject({ stepMs: 10, durationMs: 30, max: 153 });
+    expect([...(peaks?.peaks ?? [])]).toEqual([153, 153, 153]);
+  });
+
+  it('answers null for a source that will not read, without trying either pass', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))));
+    const decode = decodeTo(new Float32Array(10), 1000);
+
+    expect(await extractPeaks('blob:app/revoked')).toBeNull();
+    expect(decode).not.toHaveBeenCalled();
   });
 });

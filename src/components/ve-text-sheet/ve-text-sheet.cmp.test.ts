@@ -169,12 +169,16 @@ afterEach(() => {
 });
 
 describe('ve-text-sheet', () => {
-  it('brings its own head: one tick, beside the field rather than in the frame', async () => {
+  it('brings its own head: a cross and one tick, either side of the field rather than in the frame', async () => {
     const { sheet } = await mount();
 
     expect(frame(sheet)?.shadowRoot?.querySelector('.sheet__head')).toBe(null);
     expect(frame(sheet)?.shadowRoot?.querySelectorAll('[aria-label="Done"]')).toHaveLength(0);
     expect(sheet.shadowRoot?.querySelectorAll('[aria-label="Done"]')).toHaveLength(1);
+    const row = [...sheet.shadowRoot!.querySelector('.ts__input-row')!.children];
+    expect(row[0]).toBe(button(sheet, 'Cancel'));
+    expect(row[1]).toBe(field(sheet));
+    expect(row[row.length - 1]).toBe(button(sheet, 'Done'));
     expect(field(sheet).getAttribute('aria-label')).toBe('Text');
     expect(field(sheet).maxLength).toBe(MAX_TEXT_LENGTH);
     // Nothing to style yet, so no panel has taken the keyboard's place.
@@ -213,6 +217,40 @@ describe('ve-text-sheet', () => {
     // Not an "Add text" step that undoes nothing: the snapshot is put back instead.
     expect(store.canUndo.value).toBe(false);
     expect(store.dirty.value).toBe(false);
+    expect(store.panel.value).toBe(null);
+  });
+
+  /*
+   * The cross is the one way to abandon a text on iOS, which has no back button, and it is the
+   * shell's back in every respect: the same `cancelText()`, so nothing lands on the undo stack.
+   */
+  it('throws a new text away from the cross, and leaves nothing to undo', async () => {
+    const { store, sheet } = await mount();
+    type(sheet, 'abandon me');
+
+    button(sheet, 'Cancel').click();
+
+    expect(store.manifest.value.overlays).toHaveLength(0);
+    expect(store.canUndo.value).toBe(false);
+    expect(store.dirty.value).toBe(false);
+    expect(store.selection.value).toBe(null);
+    expect(store.textEdit.value).toBe(null);
+    expect(store.panel.value).toBe(null);
+  });
+
+  it('puts an existing layer back as it was from the cross, and keeps it selected', async () => {
+    const { store, sheet } = await mount(textLayer('text-1', 'Best pizza'));
+    type(sheet, 'Worst pizza');
+    button(sheet, 'Font').click();
+    await until('the font panel', () => sheet.shadowRoot?.querySelector('.ts__font-grid') !== null);
+    sheet.shadowRoot!.querySelector<HTMLButtonElement>('[aria-label="Neon"]')!.click();
+
+    button(sheet, 'Cancel').click();
+
+    expect(layer(store).text).toBe('Best pizza');
+    expect(layer(store).styleId).toBe('classic');
+    expect(store.canUndo.value).toBe(false);
+    expect(store.selection.value).toEqual({ kind: 'overlay', id: 'text-1' });
     expect(store.panel.value).toBe(null);
   });
 
@@ -357,6 +395,7 @@ describe('ve-text-sheet', () => {
     await until('the font panel', () => sheet.shadowRoot?.querySelector('.ts__font-grid') !== null);
 
     const buttons = [
+      button(sheet, 'Cancel'),
       button(sheet, 'Done'),
       button(sheet, 'Font'),
       button(sheet, 'Colour'),

@@ -11,8 +11,9 @@ import type {
   FilterOp,
 } from '../definitions';
 
-import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, placementRange } from '../../editor';
+import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
 import { normaliseCamera } from '../../editor/camera';
+import { batchIdRefusal } from '../batch-id';
 
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
 
@@ -112,7 +113,10 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
   if (!spec || typeof spec !== 'object') throw new SpecError('spec');
 
   const jobId = nonEmpty(spec.jobId, 'jobId');
-  const batchId = nonEmpty(spec.batchId, 'batchId');
+  // Empty, `.` or `..`: an id that names no job folder of its own on a phone ([batchIdRefusal]).
+  // Nothing climbs out of an IndexedDB key, but a spec a phone refuses is refused here too.
+  if (batchIdRefusal(spec.batchId) !== null) throw new SpecError('batchId');
+  const batchId = spec.batchId as string;
 
   if (!Array.isArray(spec.clips) || spec.clips.length === 0) throw new SpecError('clips');
   const clips = spec.clips.map((clip, i) => {
@@ -195,6 +199,10 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
 
   const durationMs = Math.max(0, Math.round(finite(spec.durationMs, 0)));
 
+  // Whole bytes, since a file has no fraction of one and the failure's message prints the number.
+  // No ceiling leaves the key off, as it came, rather than writing a zero that fails every render.
+  const maxBytes = byteCeiling(output.maxBytes);
+
   const audio = spec.audio ?? {
     originalMuted: false,
     originalVolume: 1,
@@ -222,6 +230,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
       fps: Math.max(1, Math.round(finite(output.fps, 30))),
       videoBitrate: Math.max(100_000, Math.round(finite(output.videoBitrate, 6_000_000))),
       audioBitrate: Math.max(32_000, Math.round(finite(output.audioBitrate, 128_000))),
+      ...(maxBytes !== null ? { maxBytes } : {}),
     },
     filter,
     overlays,

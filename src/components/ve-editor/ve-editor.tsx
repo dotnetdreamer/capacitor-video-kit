@@ -758,6 +758,7 @@ export class VeEditor {
       // change, where the effect that draws has not had its turn yet.
       await this.bitmaps.ensureFresh();
       if (abandoned()) return;
+      const maxBytes = this.store.host.output.maxBytes;
       const stitched = await render.render({
         manifest,
         sources,
@@ -765,6 +766,12 @@ export class VeEditor {
           if (!abandoned()) this.renderProgress = progress;
         },
         signal: abort.signal,
+        ...(maxBytes !== null ? { maxBytes } : {}),
+        // Made here, for the frame this post renders at, from the factory the preview's bitmaps come
+        // out of: the host's render cannot build one that agrees with them (see RenderRequest.raster).
+        // It also carries those bitmaps, so a layer the preview has already drawn for this exact
+        // frame is placed rather than drawn a second time (see OverlayBitmaps.renderContext).
+        raster: this.bitmaps.renderContext(manifest.output),
       });
       if (abandoned()) return;
       this.finish({ sources, manifest, stitched });
@@ -825,7 +832,8 @@ export class VeEditor {
       const manifest = this.store.manifest.value;
       this.finish({ sources: this.postedSources(manifest), manifest });
     }
-    // Dismissed is the third answer: stay in the editor with the edit exactly as it was.
+    // Dismissed is the third answer, and Keep editing after a video too big to post is the same one:
+    // stay in the editor with the edit exactly as it was.
   }
 
   private finish(result: VideoEditorResult): void {
@@ -1177,30 +1185,29 @@ function withPictureKinds(sources: EditorSource[], manifest: EditManifest | unde
   return sources.map(source => (!source.kind && pictures.has(source.key) ? { ...source, kind: 'image' } : source));
 }
 
-/** The three the editor has a sentence for; anything else is the blank apology. */
-const RENDER_FAILURE_CODES: readonly RenderFailureCode[] = ['no_space', 'unreadable_input', 'unknown'];
+/** The codes the editor has a sentence for; anything else is the blank apology. */
+const RENDER_FAILURE_CODES: readonly RenderFailureCode[] = ['no_space', 'unreadable_input', 'too_large', 'unknown'];
 
 /**
  * The failure's own code, or `unknown` for anything that does not carry one.
  *
- * `instanceof` cannot be the only test, though [RenderFailedError] was written on the assumption
- * that it would be ("the one test that survives a host wrapping the rejection"). It does not
- * survive the bundling. The editor is loaded as its own lazy chunk and the HOST is bundled by the
- * application, so the two hold separate copies of the class: the host throws its copy, this file
- * tests against its own, and the answer is false for an error that is exactly what it says it is.
+ * The page holds more than one copy of [RenderFailedError]. The editor is loaded as its own chunk
+ * and the HOST is bundled by the application, from whichever door of this package it took the class
+ * - the root, where `composerRenderHost` throws its copy, `/ui`, or another build of the editor. By
+ * the prototype chain alone the host's copy is not this file's, and when `instanceof` was the only
+ * test, every failure a host reported arrived here as `unknown` and got the blank apology, which is
+ * precisely what a code and a sentence for each failure exist to avoid: the customer was told "your
+ * edited video could not be built" for a full disk and an unreadable clip alike.
  *
- * So every failure a host reported arrived here as `unknown` and every one of them got the blank
- * apology - which is precisely what three codes and three sentences exist to avoid. A host could
- * name a full disk or an unreadable clip all it liked and the customer was told "your edited video
- * could not be built" either way.
- *
- * The NAME survives the copy, and so does the code, so those are what is read; the code is checked
- * against the union rather than trusted, because it arrives from outside this package. `instanceof`
- * is kept first for the host that does share this bundle, where it is the cheaper answer.
+ * So the NAME is read, which survives the copy, and has been since. `instanceof` now answers across
+ * the copies as well, by the brand every instance carries (see [RenderFailedError]), which also
+ * covers an error whose name something rewrote. The name stays for an error that says what it is
+ * without the brand: one built as a plain `Error` with a name and a code, as a test does, or one
+ * that crossed a boundary that copies only an error's plain fields. Either way the code is checked
+ * against the union rather than trusted, because it arrives from outside this bundle.
  */
 function renderFailureCode(error: unknown): RenderFailureCode {
-  if (error instanceof RenderFailedError) return error.code;
   const thrown = error as { name?: unknown; code?: unknown } | null | undefined;
-  if (thrown?.name !== 'RenderFailedError') return 'unknown';
-  return RENDER_FAILURE_CODES.includes(thrown.code as RenderFailureCode) ? (thrown.code as RenderFailureCode) : 'unknown';
+  if (!(error instanceof RenderFailedError) && thrown?.name !== 'RenderFailedError') return 'unknown';
+  return RENDER_FAILURE_CODES.includes(thrown?.code as RenderFailureCode) ? (thrown?.code as RenderFailureCode) : 'unknown';
 }

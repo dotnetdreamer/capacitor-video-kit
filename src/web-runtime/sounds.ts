@@ -62,9 +62,11 @@ export async function extractAudio(src: string): Promise<{ blob: Blob; durationM
   const context = new Context();
   let decoded: AudioBuffer;
   try {
-    // A copy, because a successful decode DETACHES the buffer it was given and a retry would then
-    // be handed zero bytes.
-    decoded = await context.decodeAudioData(bytes.slice(0));
+    // Handed straight in, not copied, for the reason `waveform.ts` gives: a successful decode
+    // DETACHES this buffer, but nothing here or in either caller retries, and for a whole video a
+    // copy is one more of the largest allocation in the function, alive for as long as the decode
+    // runs.
+    decoded = await context.decodeAudioData(bytes);
   } catch (error) {
     // A video with no audio track decodes to nothing rather than throwing on some browsers and
     // throws on others, so both answers have to mean the same thing here.

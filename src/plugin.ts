@@ -24,6 +24,44 @@
 export { VideoComposer } from './video-composer';
 export { BackgroundPublisher } from './background-publisher';
 
+// Here rather than beside the definitions because they call the plugin, which the editor's entry
+// point must never reach. They are the glue a native host with drafts needs between a pick, the
+// editor and a render, and README's **Native hosts** shows them in place.
+export { currentMediaUri } from './video-composer/current-media';
+export { gallerySource, retainPickedFile } from './video-composer/native-sources';
+export type { PickedFileNames, RetainedPick } from './video-composer/native-sources';
+export { RenderInputError, withNativeRenderInputs } from './video-composer/render-inputs';
+
+// The editor's render host over the composer, which is why it is here and not beside the editor's
+// other host defaults in `capacitor-video-kit/ui`: that entry must never reach `@capacitor/core`.
+// `RenderFailedError` comes with it, for a `toSource` hook that fails in a way of its own; this
+// copy of the class and the editor's are one to `instanceof`, through the brand each instance carries.
+// `readRenderFile` and `containerOf` are for such a hook too: the render read into a `File`, and
+// the extension that says whether it is the MP4 every native engine writes or a browser's WebM.
+export { composerRenderHost, containerOf, readRenderFile } from './video-composer/render-host';
+export type {
+  ComposedRender,
+  ComposerRenderHost,
+  ComposerRenderHostOptions,
+  DiscardPreviousRenders,
+} from './video-composer/render-host';
+export { RenderFailedError } from './host/host.types';
+
+// The editor's media host over the composer - the browser defaults with the probe, the filmstrip,
+// the microphone and, when asked, the sound library answered natively - here beside the render host
+// for the same reason: it calls the plugin, and `capacitor-video-kit/ui` must never reach
+// `@capacitor/core`. `probeMediaDuration` is its probe for a host's own pickers, on a file that is
+// not a source yet. The helpers those pickers want that call no plugin - `readFileBlob`,
+// `readVoiceTake`, `filePickerCancelled` - are in `capacitor-video-kit/ui`.
+export { composerMediaHost, probeMediaDuration } from './video-composer/media-host';
+export type { ComposerMediaHostOptions, ComposerMediaPickers } from './video-composer/media-host';
+
+// The URL the WebView loads a device file by, which the editor's `/ui` defaults use as its
+// `platform.fileUrl` and a Capacitor host wants for everything else it shows: a done screen's
+// render, a poster. It reads Capacitor's global rather than importing it, so it lives beside those
+// defaults, and is exported here because it is Capacitor glue.
+export { webViewUrl } from './host/web-view-url';
+
 export * from './video-composer/definitions';
 export * from './video-composer/plugin';
 export * from './background-publisher/definitions';

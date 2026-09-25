@@ -40,7 +40,7 @@ describe('replaceClipSource', () => {
 
   /* A segment somebody has already trimmed is that trim's length, not the source's. */
   it('keeps a trimmed length rather than the length of the file', () => {
-    const trimmed = trimClip(post(), 'b', 1000, 2500);
+    const trimmed = trimClip(post(), 'b', 1000, 2500, 4000);
     const next = replaceClipSource(trimmed, 'b', 'new', TEN_S);
 
     expect(clipOf(next, 'b')).toMatchObject({ inMs: 0, outMs: 1500 });
@@ -75,7 +75,7 @@ describe('replaceClipSource, for a host that does not want the length kept', () 
   });
 
   it('takes the whole of it even where the segment had been trimmed', () => {
-    const trimmed = trimClip(post(), 'b', 1000, 2500);
+    const trimmed = trimClip(post(), 'b', 1000, 2500, 4000);
     const next = replaceClipSource(trimmed, 'b', 'new', TEN_S, false);
 
     expect(clipOf(next, 'b')).toMatchObject({ inMs: 0, outMs: TEN_S });

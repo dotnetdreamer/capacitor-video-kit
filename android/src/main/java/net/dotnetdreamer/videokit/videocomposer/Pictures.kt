@@ -16,9 +16,9 @@ import java.io.IOException
  * pixels, so a post of ten photos is checked in milliseconds.
  *
  * The type comes off the bytes rather than the name because the name may not have one: a picture
- * handed over as a blob is copied to a render input with no extension, and Media3 decides whether an
- * item is an image by its MIME type. Asked of the content resolver as a fallback, for a decoder that
- * reads the size but names no type.
+ * handed over as a blob that states no type is staged as a render input with no extension (see
+ * [StagedRenderInputs]), and Media3 decides whether an item is an image by its MIME type. Asked of
+ * the content resolver as a fallback, for a decoder that reads the size but names no type.
  */
 object Pictures {
 

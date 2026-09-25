@@ -816,11 +816,8 @@
   box-sizing: border-box;
   max-width: 100%;
   height: 100%;
-  /*
-   * The gutters shrink with the item - a percentage resolves against the item's own width - so a
-   * window only a few hundred milliseconds long still shows its glyph instead of two fat margins.
-   */
-  padding: 0 clamp(0px, 12%, 10px);
+  /* The same air beside the glyph's tile as a 40 px lane leaves above and below it. */
+  padding: 0 8px;
   overflow: hidden;
   white-space: nowrap;
   pointer-events: none;
@@ -829,6 +826,62 @@
 .item__label ve-icon {
   flex: 0 0 auto;
   font-size: 16px;
+}
+
+/*
+ * What kind of thing the lane is, at its head, on a tile of its own so it reads as the row's badge
+ * rather than as the first word of its label. It never shrinks: the label beside it is what gives
+ * way, and past `LANE_GLYPH_ONLY_PX` the label goes altogether.
+ */
+.item__kind {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--ve-lane-glyph, rgba(0, 0, 0, 0.16));
+}
+
+/*
+ * A bar too short for a readable label is its glyph alone, centred, and the bar itself is the tile.
+ * The rest is hidden from sight but not from the accessibility tree, so a short layer is still
+ * found by its words.
+ */
+.item--glyph .item__label {
+  justify-content: center;
+  width: 100%;
+  padding: 0;
+}
+
+.item--glyph .item__kind {
+  background: none;
+}
+
+.item--glyph .item__label > :not(.item__kind) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/*
+ * On a bar with a wave the tile is solid - the bar's own colour, a shade darker - short bar or not,
+ * because a translucent one lets the wave through and the glyph is lost in it. After the rule above
+ * so it wins at the same specificity.
+ */
+.item--music .item__kind {
+  background:
+    linear-gradient(var(--ve-lane-glyph, rgba(0, 0, 0, 0.16)), var(--ve-lane-glyph, rgba(0, 0, 0, 0.16))),
+    var(--ve-lane-music, #0b8e87);
+}
+
+.item--voice .item__kind {
+  background:
+    linear-gradient(var(--ve-lane-glyph, rgba(0, 0, 0, 0.16)), var(--ve-lane-glyph, rgba(0, 0, 0, 0.16))),
+    var(--ve-lane-voice, #ff9f5a);
 }
 
 .item__text {

@@ -117,6 +117,23 @@ function sameFraming(a: PreviewVideoLayer | null, b: PreviewVideoLayer | null): 
   return a?.clipId === b?.clipId && a?.crop === b?.crop && a?.rect === b?.rect && a?.fit === b?.fit && a?.opacity === b?.opacity;
 }
 
+/**
+ * Whether two stacks of layers would be DRAWN the same: the same tracks, in the same order, each
+ * showing the same segment of the same source with the same framing. `sourceMs` is left out for the
+ * reason [sameFraming] gives, and it matters more here: the store rebuilds its list on every
+ * playhead write, so without this every reader of the stack - the selection box among them - would
+ * hand the component a new value, and a full re-render, thirty times a second. `clipKey` and `z` are
+ * in although nothing reads them today, because a replaced source keeps its segment id and a stack
+ * that says it has not changed when its source has is a trap for whoever reads it next.
+ */
+function sameLayerStack(a: readonly PreviewVideoLayer[], b: readonly PreviewVideoLayer[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((one, i) => {
+    const other = b[i];
+    return one.trackId === other.trackId && one.clipKey === other.clipKey && one.z === other.z && sameFraming(one, other);
+  });
+}
+
 /** The base track's layer: the one the preview has drawn all along. */
 function baseLayerOf(layers: readonly PreviewVideoLayer[]): PreviewVideoLayer | null {
   return layers.find(layer => layer.trackId === null) ?? null;
@@ -555,8 +572,15 @@ export class VePreview implements EditorPlayer {
    * many that is. Each gets an element of its own, which costs a decoder each; a post that stacks
    * more layers than the device can decode is a post the customer built, and showing them all of it
    * is the only honest thing to do with it.
+   *
+   * Compared by [sameLayerStack], so it holds its value while only `sourceMs` has moved: none of its
+   * readers look at where a layer has got to in its file, and the player's elements, which do, read
+   * the store's own list.
    */
-  private readonly shownExtras = computed<readonly PreviewVideoLayer[]>(() => this.ctx.store.previewLayers.value.filter(layer => layer.trackId !== null));
+  private readonly shownExtras = computedWith<readonly PreviewVideoLayer[]>(
+    () => this.ctx.store.previewLayers.value.filter(layer => layer.trackId !== null),
+    sameLayerStack,
+  );
 
   /**
    * Every extra track, bottom to top: which of its layers is under the playhead and where that

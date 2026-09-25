@@ -23,8 +23,11 @@ public class BackgroundPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
         session.queue.addOperation { [weak self] in
             guard let self else { return }
             session.attach(emitter: self)
-            // A WebView reload builds a fresh plugin instance, so this replay is real rather than
-            // theoretical, and `acked` is the only thing that stops it repeating forever.
+            // Capacitor loads this plugin once per bridge, not on a web view reload (see
+            // `VideoComposerPlugin.load`). A publish can end while no page is listening - in the
+            // background, or after the process has gone, since the upload session outlives it - so
+            // this replay at the next load is real rather than theoretical, and `acked` is the only
+            // thing that stops it repeating at every launch after.
             session.replayUnacked()
         }
     }
@@ -112,12 +115,16 @@ public class BackgroundPublisherPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /* ======================================================================================== */
 
-    /// Rejects and answers nil when the id is missing, so every caller is one `guard` long. The
-    /// message is Android's, and `publish` does not use it: its id check comes out of the parser,
-    /// which reports the path (`invalid_request:batchId`) like every other field.
+    /// Rejects and answers nil when the id is missing, `.` or `..`, so every caller is one `guard`
+    /// long. The ids and the words are `JobFolders.batchIdRefusal`'s, which `PublishModels.parse`
+    /// gives the reason for: `.` and `..` are filed under other batches' names, and `clear` of one
+    /// would delete another publish's bodies. Android's `BackgroundPublisherPlugin.batchIdOf` says
+    /// the same. `publish` does not use it: its id check comes out of the parser, which reports the
+    /// path (`invalid_request:batchId`) like every other field.
     private func required(_ call: CAPPluginCall) -> String? {
-        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
-            call.reject("batchId is required", Reject.invalidRequest)
+        let batchId = call.getString("batchId") ?? ""
+        if let refusal = JobFolders.batchIdRefusal(batchId) {
+            call.reject(refusal, Reject.invalidRequest)
             return nil
         }
         return batchId

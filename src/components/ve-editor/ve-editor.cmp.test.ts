@@ -57,14 +57,14 @@ function manifest(): EditManifest {
   };
 }
 
-async function mount(host: VideoEditorHost = HOST, screen = SCREEN): Promise<{ editor: HTMLElement; window: DOMRect }> {
+async function mount(host: VideoEditorHost = HOST, screen = SCREEN, post: EditManifest = manifest()): Promise<{ editor: HTMLElement; window: DOMRect }> {
   /* The WebView's own window, which is what the editor is told to be the height of. */
   const column = document.createElement('div');
   column.style.cssText = `width: ${screen.width}px; height: ${screen.height}px`;
   document.body.append(column);
 
   const editor = document.createElement('ve-editor');
-  Object.assign(editor, { sources: SOURCES, manifest: manifest(), host });
+  Object.assign(editor, { sources: SOURCES, manifest: post, host });
   column.append(editor);
 
   mounted.push(column);
@@ -158,18 +158,22 @@ describe('ve-editor with nothing to render on', () => {
  */
 function heldRender() {
   let request: RenderRequest | null = null;
+  let renders = 0;
   let settle: { resolve: (video: EditorSource) => void; reject: (error: unknown) => void } | null = null;
   const render: EditorRenderHost = {
     isSupported: async () => true,
     render: received =>
       new Promise<EditorSource>((resolve, reject) => {
         request = received;
+        renders++;
         settle = { resolve, reject };
       }),
   };
   return {
     host: { ...HOST, render } as VideoEditorHost,
     started: () => request !== null,
+    request: () => request,
+    renders: () => renders,
     report: (progress: number) => request!.onProgress(progress),
     aborted: () => request!.signal.aborted,
     finish: (video: EditorSource) => settle!.resolve(video),
@@ -253,6 +257,78 @@ describe('ve-editor while the video is built', () => {
     await until('the editor to finish', () => done.length > 0);
 
     expect(done[0].detail.stitched).toBe(RENDERED);
+  });
+
+  it('asks for no size ceiling on behalf of a host that set none', async () => {
+    const { held } = await exporting();
+
+    expect(held.request()).not.toHaveProperty('maxBytes');
+  });
+});
+
+/*
+ * A host's upload limit. The editor hands it to the render, which is what holds the file to it, and
+ * a render that passes it comes back `too_large` - which the customer is told as a video too big to
+ * post, with the edit itself as the way out, because trying again builds the same file.
+ */
+describe('ve-editor under a host\'s size ceiling', () => {
+  const MAX_BYTES = 100 * 1024 * 1024;
+
+  async function exportingUnderCeiling() {
+    const held = heldRender();
+    const { editor } = await mount({ ...held.host, output: { maxBytes: MAX_BYTES } });
+    inside<HTMLButtonElement>(editor, '.ve__round--next')!.click();
+    await until('the render to start', held.started);
+    return { editor, held };
+  }
+
+  it('hands the host\'s ceiling to the render, for the spec it builds', async () => {
+    const { held } = await exportingUnderCeiling();
+
+    expect(held.request()?.maxBytes).toBe(MAX_BYTES);
+  });
+
+  it('says a video past the ceiling is too big to post, and goes back to the edit rather than retry', async () => {
+    const { editor, held } = await exportingUnderCeiling();
+
+    // As a host's own copy of the class arrives: another bundle's error, of which only the name and
+    // the code survive.
+    held.fail(Object.assign(new Error(`too_large max=${MAX_BYTES} bytes=${MAX_BYTES + 1}`), { name: 'RenderFailedError', code: 'too_large' }));
+    await until('the question about the file', () => !!inside(editor, 've-alert'));
+
+    const alert = inside(editor, 've-alert') as HTMLElement & { message: string };
+    expect(alert.getAttribute('message') ?? alert.message).toContain('This video is too big to post.');
+
+    const buttons = [...(alert.shadowRoot?.querySelectorAll('button') ?? [])];
+    buttons.find(button => button.textContent?.includes('Keep editing'))!.click();
+    await until('the question to go', () => !inside(editor, 've-alert'));
+
+    expect(held.renders()).toBe(1);
+    expect(inside(editor, '.ve__export')).toBeNull();
+    expect(inside(editor, 've-toolbar')).not.toBeNull();
+  });
+});
+
+/*
+ * What the render draws its layers with. Only the editor's bundle can make it - the sticker URLs in
+ * it resolve against the Stencil runtime the editor was loaded with, which the render host at the
+ * package root has none of - so the editor hands it over, and a render passes it on as it comes.
+ * A context on the wrong frame draws every layer at the wrong pixel size: a 1080p post's caption
+ * drawn for 720p and burned in soft.
+ */
+describe('ve-editor hands its render the raster context', () => {
+  it('makes it for the frame the post renders at, with the host\'s own fileUrl', async () => {
+    const held = heldRender();
+    const fileUrl = (uri: string) => `https://localhost/_capacitor_file_${uri}`;
+    const output = { width: 1080, height: 1920, fps: 30 };
+    const { editor } = await mount({ ...held.host, platform: { ...HOST.platform, fileUrl } }, SCREEN, { ...manifest(), output });
+    inside<HTMLButtonElement>(editor, '.ve__round--next')!.click();
+    await until('the render to start', held.started);
+
+    const { manifest: rendered, raster } = held.request()!;
+    expect(rendered.output).toEqual(output);
+    expect(raster.output).toEqual(output);
+    expect(raster.fileUrl).toBe(fileUrl);
   });
 });
 

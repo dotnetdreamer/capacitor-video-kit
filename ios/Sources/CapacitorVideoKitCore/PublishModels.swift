@@ -49,19 +49,47 @@ struct RemoteId: Codable, Sendable, Equatable {
     let isNumber: Bool
 
     /// The id as a JSON value, ready to splice into the body.
+    ///
+    /// A string is escaped the way `JSON.stringify` escapes one: the quote, the backslash, and every
+    /// control character below U+0020, which JSON does not allow raw inside a string. Android's
+    /// `JSONObject.quote` escapes the same set and also writes `/` as `\/`, so its text can differ
+    /// from this for an id such as `uploads/a.mp4`, while every parser reads the two back as the
+    /// same string. Missing a control character is not cosmetic. The filled body is parsed before
+    /// it goes out, so an id with a tab in it would fail the batch as a bad template, on iOS alone,
+    /// over a body the caller wrote correctly.
     var jsonLiteral: String {
         guard !isNumber else { return value }
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\r")
-            .replacingOccurrences(of: "\t", with: "\t")
-        return "\"\(escaped)\""
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case "\u{08}": out += "\\b"
+            case "\u{0C}": out += "\\f"
+            // Lower-case hex, as both of the other engines write it.
+            case _ where scalar.value < 0x20: out += String(format: "\\u%04x", scalar.value)
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out + "\""
     }
 
     /// What goes in the record, and in the state the caller reads.
-    var jsonValue: Any { isNumber ? (Int(value) ?? value as Any) : value }
+    ///
+    /// A number crosses the bridge as a number, whole or not: `remoteId` is `string | number` in the
+    /// contract, and an id of `1.5` read back as the string `"1.5"` is the flattening the type
+    /// exists to prevent. The web engine keeps it a number too. Android answers `toLongOrNull()`
+    /// and so still hands back the text for a fraction. Nothing here depends on that difference,
+    /// because the finalize body is built from `jsonLiteral` either way.
+    var jsonValue: Any {
+        guard isNumber else { return value }
+        if let whole = Int64(value) { return NSNumber(value: whole) }
+        if let fraction = Double(value) { return NSNumber(value: fraction) }
+        return value
+    }
 
     static func of(_ raw: Any?) -> RemoteId? {
         switch raw {
@@ -125,7 +153,13 @@ enum PublishModels {
     /// empty coding path, so it cannot say `invalid_request:uploads[1].path`, which is the whole
     /// value of these messages.
     static func parse(_ call: CAPPluginCall) throws -> PublishRequest {
-        guard let batchId = call.getString("batchId"), !batchId.isEmpty else {
+        // Empty, `.` or `..` (`JobFolders.batchIdRefusal`) as well as missing. The publisher files a
+        // batch under names made from its id - its bodies folder (`PublishStore.bodiesDir`) and its
+        // job folder's done marker (`JobFolders.doneMarker`) - and both rename `.` and `..` to `_`
+        // and `__`, which are other batches' names: `clear` of `..` would delete the live bodies of
+        // a publish called `__`, and a `..` publish that finished would mark `__`'s job folder done
+        // for the sweep. Refused, as the composer's `prepareJob` refuses them, rather than renamed.
+        guard let batchId = call.getString("batchId"), JobFolders.batchIdRefusal(batchId) == nil else {
             throw PublishRequestError(message: "invalid_request:batchId")
         }
 
@@ -206,34 +240,72 @@ enum PublishModels {
     }
 
     /// Android's `fileFor`: a `file:` scheme takes the URI's path, a null scheme takes the string
-    /// as given. The percent-decode fallback matters because a picked file can carry spaces or a
-    /// `#`, either of which defeats `URL(string:)` outright.
+    /// as given.
+    ///
+    /// `URL(string:)` is asked only when it cannot get the answer wrong. A host that builds the
+    /// URI itself can leave a space, a `#` or a `?` unencoded, as a picked file's name often
+    /// carries one. On iOS 16 a raw space makes `URL(string:)` return nil. A raw `#` or `?` is
+    /// worse on every version: it parses as a fragment or a query, and the path comes back cut
+    /// short, naming a different file or none. So a URI with no escape in it is taken as the path
+    /// it already is, one with a `#` or a `?` is decoded by hand, and only a cleanly encoded one,
+    /// such as every URI the kit itself hands out, is parsed.
+    ///
+    /// That is a deliberate difference from Android, whose `Uri.getPath` cuts at a raw `#` or `?`
+    /// the way the parser here would. There `file:///x/My Clip #1.mp4` names `/x/My Clip ` and
+    /// fails as missing, and `file:///x/a.mp4?v=2` names `/x/a.mp4`. Here the first is the file
+    /// its name says, and the second is a file whose name ends in `?v=2`. A `#` in a picked file's
+    /// name is ordinary, while a query on a `file:` URI is nothing the kit ever writes, so the name
+    /// is read whole.
     static func fileURL(_ path: String) -> URL? {
         if path.hasPrefix("file://") {
-            if let u = URL(string: path), u.isFileURL { return URL(fileURLWithPath: u.path) }
-            let rest = String(path.dropFirst("file://".count))
-            return URL(fileURLWithPath: rest.removingPercentEncoding ?? rest)
+            let rest = path.dropFirst("file://".count)
+            // Whatever comes before the first `/` is the authority, `localhost` when there is one
+            // at all. It names this machine, not a folder, and Android's `getPath` drops it the
+            // same way. With no `/` there is no path, and resolving the remainder against the
+            // working directory would name a file nobody meant.
+            guard let slash = rest.firstIndex(of: "/") else { return nil }
+            let raw = String(rest[slash...])
+            if !raw.contains("%") { return URL(fileURLWithPath: raw) }
+            if !rest.contains("#"), !rest.contains("?"), let u = URL(string: path), u.isFileURL {
+                return URL(fileURLWithPath: u.path)
+            }
+            return URL(fileURLWithPath: raw.removingPercentEncoding ?? raw)
         }
         if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
         // A content:// style URI has no meaning on iOS, and guessing would upload the wrong bytes.
         return nil
     }
 
+    /// The file an upload sends, followed through any symbolic link, or nil when there is nothing
+    /// to send: no such file, a directory, or an empty file.
+    ///
+    /// Empty counts as missing on every engine. Android's `UploadWorker` checks `length() == 0L`
+    /// and the web runner `blob.size === 0`, because a render cut short, or one being redone over
+    /// the same path, leaves exactly that behind, and a presigned `PUT` would store it without
+    /// complaint. The link is followed first because a size read through one is the link's own, a
+    /// few dozen bytes whatever it points at.
+    static func sourceFile(_ path: String) -> URL? {
+        guard let url = fileURL(path)?.resolvingSymlinksInPath(), Thumbnailer.fileBytes(url) > 0 else { return nil }
+        return url
+    }
+
     /// `<uploadId>.<ext>`, unless the caller named the file itself - Android's `fileNameFor`.
     ///
-    /// `URL.pathExtension` is not a substitute, because it neither strips a query nor applies the
-    /// 8 character sanity cap that keeps a path like `a.thisisnotanextension` from becoming the
-    /// stored extension.
+    /// `URL.pathExtension` is not a substitute, because it does not apply the 8 character sanity
+    /// cap that keeps a path like `a.thisisnotanextension` from becoming the stored extension.
     static func fileName(_ upload: PublishUpload) -> String {
         if let named = upload.fileName, !named.isEmpty { return named }
         return fileName(id: upload.uploadId, path: upload.path)
     }
 
+    /// The extension is read from the file `fileURL` resolves, not from the text of the path.
+    /// Android's `fileNameFor` cuts the path at a `?` first, which agrees with its own `fileFor`.
+    /// Here `fileURL` keeps a raw `?` as part of the name, so cutting there would send
+    /// `file:///x/clip?1.mov` as `<id>.mp4` and put the wrong extension in a presigned URL's
+    /// `{fileName}`. A path that names no file gets the default, as one without an extension does.
     static func fileName(id: String, path: String) -> String {
-        let noQuery = String(path.prefix(while: { $0 != "?" }))
-        let lastSegment = noQuery.split(separator: "/", omittingEmptySubsequences: false)
-            .last.map(String.init) ?? noQuery
-        guard let dot = lastSegment.lastIndex(of: "."),
+        guard let lastSegment = fileURL(path)?.lastPathComponent,
+              let dot = lastSegment.lastIndex(of: "."),
               dot != lastSegment.index(before: lastSegment.endIndex) else {
             return "\(id).mp4"
         }

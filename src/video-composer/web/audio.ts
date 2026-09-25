@@ -57,7 +57,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
   const channels = Array.from({ length: MIX_CHANNELS }, () => new Float32Array(length));
   const mix: MixedAudio = { sampleRate: MIX_SAMPLE_RATE, channels, length };
 
-  const decoder = new SourceDecoder();
+  const decoder = new SourceDecoder(sourceUses(plan));
   let anything = false;
 
   // How long each base clip fades in for: the length of the transition bringing it in, if any.
@@ -74,6 +74,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
       if (!clip || clip.removeAudio) continue;
       const fadeIn = fadeInUs.get(i);
       anything = (await placeClip(mix, clip, plan.prefixOutUs[i] ?? 0, decoder, fadeIn ? { fadeInUs: fadeIn } : undefined)) || anything;
+      decoder.done(clip.clip.uri);
     }
 
     // ...then every transition's tail: the outgoing clip's sound carrying on UNDER the incoming
@@ -84,6 +85,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
       throwIfAborted(signal);
       if (transition.tail.removeAudio) continue;
       anything = (await placeClip(mix, transition.tail, transition.startUs, decoder, { roomUs: transition.durUs, fadeOutWhole: true })) || anything;
+      decoder.done(transition.tail.clip.uri);
     }
 
     // ...then every extra layer's clips, which contribute sound exactly as base clips do.
@@ -94,6 +96,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
         const placement = track.placements[i];
         if (!clip || !placement || clip.removeAudio) continue;
         anything = (await placeClip(mix, clip, placement.startUs, decoder)) || anything;
+        decoder.done(clip.clip.uri);
       }
     }
 
@@ -105,11 +108,13 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
           anything = placeMusic(mix, source, item, plan.music.volume) || anything;
         }
       }
+      decoder.done(plan.music.uri);
     }
 
     for (const take of plan.voice) {
       throwIfAborted(signal);
       const source = await decoder.get(take.uri);
+      decoder.done(take.uri);
       if (!source) continue;
       anything = placeVoice(mix, source, take) || anything;
     }
@@ -268,15 +273,48 @@ function throwIfAborted(signal: AbortSignal): void {
 /* -------------------------------------------------------------------------------------------- */
 
 /**
- * Decodes each source once and remembers it.
+ * How many times [mixdown] will ask [SourceDecoder] for each source, counted with exactly the skip
+ * rules its loops use: a base clip, a transition's tail and an extra layer's clip unless its audio
+ * was removed (and, for a layer, only with a placement), the music once, and every voiceover take.
+ * A change to which placements those loops ask for has to be made here too. Counting one too few
+ * would only decode that file a second time, into the same samples; one too many keeps it until the
+ * mix is done, which is what every source did before the count existed.
+ *
+ * Exported for the unit tests, which pin it against the loops it has to match.
+ */
+export function sourceUses(plan: RenderPlan): Map<string, number> {
+  const uses = new Map<string, number>();
+  const use = (uri: string): void => void uses.set(uri, (uses.get(uri) ?? 0) + 1);
+  for (const clip of plan.clips) if (clip && !clip.removeAudio) use(clip.clip.uri);
+  for (const transition of plan.transitions) if (!transition.tail.removeAudio) use(transition.tail.clip.uri);
+  for (const track of plan.tracks) {
+    track.clips.forEach((clip, i) => {
+      if (clip && track.placements[i] && !clip.removeAudio) use(clip.clip.uri);
+    });
+  }
+  if (plan.music) use(plan.music.uri);
+  for (const take of plan.voice) use(take.uri);
+  return uses;
+}
+
+/**
+ * Decodes each source once, and remembers it until its last placement.
  *
  * A clip split into six segments is six entries in the plan and one file, and decoding it six times
  * would be six full decodes of a minute of audio. A source that will not decode is remembered as a
  * miss so it is not tried again either - which is the normal case for a video with no audio track.
+ *
+ * Remembered only until [done] has been called once for every ask [sourceUses] counted, and then let
+ * go. Every placement copies what it needs into the mix and keeps nothing, so a source past its last
+ * placement is about 23 MB a minute of stereo holding nothing up; holding every one to the end made
+ * the peak the sum of every distinct file in the post rather than the few in use at once. When a
+ * source is let go changes nothing about what is mixed, or in which order.
  */
 class SourceDecoder {
   private readonly cache = new Map<string, DecodedSource | null>();
   private context: BaseAudioContext | null = null;
+
+  constructor(private readonly uses: Map<string, number>) {}
 
   async get(uri: string): Promise<DecodedSource | null> {
     const cached = this.cache.get(uri);
@@ -284,6 +322,21 @@ class SourceDecoder {
     const decoded = await this.decode(uri);
     this.cache.set(uri, decoded);
     return decoded;
+  }
+
+  /**
+   * One counted ask for `uri` has been placed. The last lets go of the source, a miss included, so
+   * nothing asks for it again to find it missing. A uri that was never counted is kept, as before.
+   */
+  done(uri: string): void {
+    const left = this.uses.get(uri);
+    if (left === undefined) return;
+    if (left > 1) {
+      this.uses.set(uri, left - 1);
+      return;
+    }
+    this.uses.delete(uri);
+    this.cache.delete(uri);
   }
 
   close(): void {
