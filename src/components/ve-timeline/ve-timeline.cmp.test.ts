@@ -991,3 +991,80 @@ describe('the waveform on a video clip', () => {
     expect(waveOf(tl, 'seg-b')).not.toBeNull();
   });
 });
+
+/*
+ * The zoom row: one bar per zoom on a fixed row under the filmstrip, named with its level and its
+ * state, and retimed by the same handles a layer has. At 64 px a second, as above.
+ */
+describe('the zoom row', () => {
+  /** A 3 s zoom from 1 s, added the way the tool row adds one, then let go of. */
+  async function withZoom(): Promise<{ store: EditorStore; tl: HTMLElement; id: string }> {
+    const { store, tl } = await mount();
+    store.seek(1000);
+    store.addZoomAtPlayhead();
+    const id = store.manifest.value.zooms[0].id;
+    store.closePanel();
+    store.select(null);
+    await until('the zoom row', () => !!root(tl).querySelector('[data-row="zoom"] .item--zoom'));
+    return { store, tl, id };
+  }
+
+  function bar(tl: HTMLElement): HTMLElement {
+    return root(tl).querySelector<HTMLElement>('[data-row="zoom"] .item--zoom')!;
+  }
+
+  it('is not there without a zoom', async () => {
+    const { tl } = await mount();
+    expect(root(tl).querySelector('[data-row="zoom"]')).toBeNull();
+  });
+
+  it('draws the zoom over its window, named with its level and never aria-pressed', async () => {
+    const { tl } = await withZoom();
+    const el = bar(tl);
+    expect(el.getAttribute('aria-label')).toBe('Zoom 2.0x');
+    expect(el.hasAttribute('aria-pressed')).toBe(false);
+    // 3 s at 64 px a second.
+    expect(el.getBoundingClientRect().width).toBeCloseTo(192, 0);
+    // Not a video row, so a dropped segment never takes it for one.
+    expect(root(tl).querySelector('[data-row="zoom"]')!.hasAttribute('data-vrow')).toBe(false);
+  });
+
+  it('opens the zoom on a tap and names it selected, with its two handles', async () => {
+    const { store, tl, id } = await withZoom();
+    const at = centre(bar(tl));
+    pointer(bar(tl), 'pointerdown', at.x, at.y);
+    pointer(bar(tl), 'pointerup', at.x, at.y);
+
+    expect(store.selection.value).toEqual({ kind: 'zoom', id });
+    expect(store.panel.value).toBe('zoom');
+    await until('the name to follow', () => bar(tl).getAttribute('aria-label') === 'Zoom 2.0x, selected');
+    expect(root(tl).querySelectorAll('[data-row="zoom"] .handle').length).toBe(2);
+  });
+
+  it('retimes the end by its handle as one undo step', async () => {
+    const { store, tl, id } = await withZoom();
+    // The end brought in from the right side of the viewport, where a drag would start scrolling
+    // the timeline under itself.
+    store.seek(3000);
+    await frames(3);
+    store.select({ kind: 'zoom', id });
+    await until('the handles', () => !!root(tl).querySelector('[data-row="zoom"] .handle--out'));
+    const handle = root(tl).querySelector<HTMLElement>('[data-row="zoom"] .handle--out')!;
+    const rect = handle.getBoundingClientRect();
+    const from = { x: rect.left + 20, y: rect.top + rect.height / 2 };
+    const scroller = root(tl).querySelector('.tl__scroller')!;
+    pointer(handle, 'pointerdown', from.x, from.y);
+    pointer(scroller, 'pointermove', from.x + 32, from.y);
+    await frames(3);
+    pointer(scroller, 'pointerup', from.x + 32, from.y);
+    await frames(2);
+
+    // Half a second at 64 px a second.
+    const zoom = store.manifest.value.zooms[0];
+    expect(zoom.startMs).toBe(1000);
+    expect(zoom.endMs).toBeCloseTo(4500, -2);
+
+    store.undo();
+    expect(store.manifest.value.zooms[0].endMs).toBe(4000);
+  });
+});

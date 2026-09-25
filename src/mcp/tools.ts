@@ -46,6 +46,12 @@ import {
   MAX_VIDEO_TRACKS,
   MIN_CLIP_MS,
   MIN_LAYER_MS,
+  MAX_ZOOMS,
+  MAX_ZOOM_RAMP_MS,
+  MAX_ZOOM_SCALE,
+  MIN_ZOOM_MS,
+  MIN_ZOOM_SCALE,
+  ZOOM_CHAIN_GAP_MS,
   OUTPUT_FPS,
   OUTPUT_QUALITIES,
   defaultClipEdit,
@@ -255,6 +261,16 @@ export const OP_REFERENCE: Record<string, string> = {
   patchVoiceover: 'id, volume.',
   moveVoiceover: 'id, startMs - held clear of the takes either side.',
   removeVoiceover: 'id.',
+
+  /* zooms */
+  addZoom:
+    'id, startMs, endMs? (default startMs + 3000), cx?, cy? (centre of the area, 0..1 of the frame), scale? (1.1..4, default 2), ' +
+    'rampMs? (0..2000, the move in and again out, inside the window; 0 is a cut), ease? ("smooth" | "snappy" | "steady") - ' +
+    'the camera closes in on that area of the VIDEO (text and stickers stay put). Zooms never overlap; shortened to fit before the next one.',
+  updateZoom: 'id, and any of cx, cy, scale, rampMs, ease.',
+  setZoomWindow: 'id, startMs, endMs - held between the zooms either side and the end. Zooms under 1s apart pan from one area to the next.',
+  duplicateZoom: 'id, newId - a copy straight after the original.',
+  deleteZoom: 'id.',
 
   /* the whole post */
   setFilter: 'filterId, intensity? (0..1) - see the "filters" section.',
@@ -595,6 +611,11 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
         minLayerMs: MIN_LAYER_MS,
         clipSpeed: { min: 0.25, max: 4 },
         transitionMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS },
+        maxZooms: MAX_ZOOMS,
+        minZoomMs: MIN_ZOOM_MS,
+        zoomScale: { min: MIN_ZOOM_SCALE, max: MAX_ZOOM_SCALE },
+        zoomRampMs: { min: 0, max: MAX_ZOOM_RAMP_MS },
+        zoomChainGapMs: ZOOM_CHAIN_GAP_MS,
       };
       return {
         data,
@@ -604,7 +625,9 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
           `  at most ${MAX_LAYERS} layers, and ${MAX_VIDEO_TRACKS} video tracks with the base counted\n` +
           `  a post runs at most ${MAX_POST_MS}ms; a clip at least ${MIN_CLIP_MS}ms and a layer at least ${MIN_LAYER_MS}ms\n` +
           '  clip speed is 0.25x to 4x, with pitch preserved\n' +
-          `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins`,
+          `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins\n` +
+          `  at most ${MAX_ZOOMS} zooms, each at least ${MIN_ZOOM_MS}ms, ${MIN_ZOOM_SCALE}x to ${MAX_ZOOM_SCALE}x, ramps 0 to ${MAX_ZOOM_RAMP_MS}ms; ` +
+          `zooms under ${ZOOM_CHAIN_GAP_MS}ms apart pan from one to the next`,
       };
     }
   }

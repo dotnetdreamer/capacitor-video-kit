@@ -463,6 +463,80 @@
   border-top: 0;
 }
 
+/* ----------------------------------------------------------------------------------------- zoom */
+
+/*
+ * The zoom area: the part of the unzoomed frame the selected zoom will fill the screen with. Dimmed
+ * outside like the crop window - the shadow's spread reaches the frame's edges, where `overflow:
+ * hidden` stops it - and outlined in the accent rather than white, so a zoom box is never mistaken
+ * for a crop window. Drawn only: `OverlayGestures` works out body or corner from the zoom itself.
+ */
+.pv__zoom {
+  position: absolute;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45);
+  outline: 2px solid var(--ve-accent, #a6ff2e);
+  pointer-events: none;
+}
+
+/* The playhead is outside the zoom's window: still editable, dashed to say this frame is not zoomed. */
+.pv__zoom--ghost {
+  outline-style: dashed;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.3);
+}
+
+.pv__zoom-corner {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 3px solid var(--ve-accent, #a6ff2e);
+  pointer-events: none;
+}
+
+.pv__zoom-corner--tl {
+  top: -3px;
+  left: -3px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.pv__zoom-corner--tr {
+  top: -3px;
+  right: -3px;
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.pv__zoom-corner--bl {
+  bottom: -3px;
+  left: -3px;
+  border-right: 0;
+  border-top: 0;
+}
+
+.pv__zoom-corner--br {
+  bottom: -3px;
+  right: -3px;
+  border-left: 0;
+  border-top: 0;
+}
+
+/* The level, inside the box's top-left so it never leaves the frame however the box is placed. */
+.pv__zoom-level {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* --------------------------------------------------------------------------------------- guides */
 
 .pv__guide {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { TRANSITIONS, compileTransition } from '../../editor/transitions';
-import type { ComposeClip, ComposeSpec } from '../definitions';
+import { MAX_CAMERA_KEYS, MAX_CAMERA_SCALE, type ComposeClip, type ComposeSpec } from '../definitions';
 
 import { MAX_VIDEO_TRACKS, SpecError, validateSpec } from './spec';
 
@@ -456,5 +456,71 @@ describe('a transition into a base clip', () => {
     const checked = validateSpec(withTransition(transition({ curves: { alpha } })));
     alpha[20] = 99;
     expect(checked.clips[1]?.transitionIn?.curves.alpha?.[20]).toBeCloseTo(0.5);
+  });
+});
+
+describe('camera', () => {
+  const cam = (over: Partial<Record<'atMs' | 'scale' | 'cx' | 'cy', unknown>> = {}) =>
+    ({ atMs: [0, 500, 1000], scale: [1, 2, 2], cx: [0.5, 0.25, 0.25], cy: [0.5, 0.25, 0.25], ...over }) as unknown as ComposeSpec['camera'];
+  const pathOf = (input: ComposeSpec): string | undefined => {
+    try {
+      validateSpec(input);
+      return undefined;
+    } catch (error) {
+      return (error as SpecError).path;
+    }
+  };
+
+  it('leaves the key off for no camera, null, empty arrays and a camera that never zooms', () => {
+    expect('camera' in validateSpec(spec())).toBe(false);
+    expect('camera' in validateSpec(spec({ camera: null as unknown as undefined }))).toBe(false);
+    expect('camera' in validateSpec(spec({ camera: cam({ atMs: [], scale: [], cx: [], cy: [] }) }))).toBe(false);
+    expect('camera' in validateSpec(spec({ camera: cam({ scale: [1, 1, 0.5] }) }))).toBe(false);
+  });
+
+  it('keeps a camera that zooms, copied rather than aliased', () => {
+    const camera = cam();
+    const checked = validateSpec(spec({ camera }));
+    expect(checked.camera).toEqual({ atMs: [0, 500, 1000], scale: [1, 2, 2], cx: [0.5, 0.25, 0.25], cy: [0.5, 0.25, 0.25] });
+    camera!.scale[1] = 7;
+    camera!.atMs[2] = 9999;
+    expect(checked.camera?.scale[1]).toBe(2);
+    expect(checked.camera?.atMs[2]).toBe(1000);
+  });
+
+  it('clamps scale to 1..MAX and the centre so the area stays on the frame', () => {
+    const checked = validateSpec(spec({ camera: cam({ atMs: [0, 1, 2], scale: [0.5, 99, 2], cx: [0.1, 0, 1], cy: [0.9, 1, 0] }) })).camera!;
+    expect(checked.scale).toEqual([1, MAX_CAMERA_SCALE, 2]);
+    // Scale 1 shows the whole frame, so its centre can only be the middle.
+    expect(checked.cx[0]).toBe(0.5);
+    expect(checked.cy[0]).toBe(0.5);
+    expect(checked.cx[1]).toBeCloseTo(0.5 / MAX_CAMERA_SCALE);
+    expect(checked.cy[1]).toBeCloseTo(1 - 0.5 / MAX_CAMERA_SCALE);
+    expect(checked.cx[2]).toBeCloseTo(0.75);
+    expect(checked.cy[2]).toBeCloseTo(0.25);
+  });
+
+  it('refuses a camera of the wrong shape, naming the path', () => {
+    expect(pathOf(spec({ camera: [1, 2] as unknown as ComposeSpec['camera'] }))).toBe('camera');
+    expect(pathOf(spec({ camera: 'zoom' as unknown as ComposeSpec['camera'] }))).toBe('camera');
+    expect(pathOf(spec({ camera: cam({ atMs: undefined }) }))).toBe('camera.atMs');
+    expect(pathOf(spec({ camera: cam({ scale: 2 }) }))).toBe('camera.scale');
+    expect(pathOf(spec({ camera: cam({ cy: {} }) }))).toBe('camera.cy');
+    // The fields are checked in order, so two broken ones name the first.
+    expect(pathOf(spec({ camera: cam({ cx: null, scale: 'x' }) }))).toBe('camera.scale');
+  });
+
+  it('refuses arrays of different lengths, too many keys, and times that are not numbers or go back', () => {
+    expect(pathOf(spec({ camera: cam({ cx: [0.5, 0.5] }) }))).toBe('camera');
+    const many = Array.from({ length: MAX_CAMERA_KEYS + 1 }, (_, i) => i);
+    expect(pathOf(spec({ camera: cam({ atMs: many, scale: many.map(() => 2), cx: many.map(() => 0.5), cy: many.map(() => 0.5) }) }))).toBe('camera');
+    expect(pathOf(spec({ camera: cam({ atMs: [0, Number.NaN, 1000] }) }))).toBe('camera.atMs[1]');
+    expect(pathOf(spec({ camera: cam({ atMs: [0, 500, 400] }) }))).toBe('camera.atMs[2]');
+    // Equal times are a step, not a refusal.
+    expect(validateSpec(spec({ camera: cam({ atMs: [0, 500, 500] }) })).camera?.atMs).toEqual([0, 500, 500]);
+  });
+
+  it('is read after the overlays', () => {
+    expect(pathOf(spec({ overlays: 'x' as unknown as ComposeSpec['overlays'], camera: cam({ atMs: 'x' }) }))).toBe('overlays');
   });
 });

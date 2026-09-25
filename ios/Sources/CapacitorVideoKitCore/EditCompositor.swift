@@ -17,6 +17,15 @@ final class RenderPlan: @unchecked Sendable {
     let colorMatrix: ColorMatrix
     let overlays: [PlacedOverlay]
 
+    /// The camera moving over every video layer, or nil for a post with no zoom - decided HERE,
+    /// once, and never per frame, so a spec without a camera reaches `render` with nothing to
+    /// evaluate and nothing to test but a nil, and draws every frame on the arithmetic it always has.
+    ///
+    /// Plan-level, like the overlays, and read per frame from the same output-timeline clock they
+    /// are: the camera is a function of output time alone, so it needs no instruction cuts and
+    /// `CompositionBuilder` does not know it exists.
+    let camera: CameraTrack?
+
     /// Decodes every overlay ONCE, here, on the thread that builds the composition. Decoding inside
     /// the compositor would put a PNG decode on the render path thirty times a second.
     /// Throws `BuildError.invalidOverlay` when a PNG will not decode.
@@ -24,6 +33,7 @@ final class RenderPlan: @unchecked Sendable {
         let size = CGSize(width: spec.output.width, height: spec.output.height)
         renderSize = size
         colorMatrix = ColorMatrix.fold(spec.filter)
+        camera = CameraTrack(spec.camera)
         // compactMap, because a fully transparent overlay decodes to nil rather than to an
         // invisible image the compositor would blend for nothing.
         overlays = try spec.overlays.compactMap { try OverlayBitmap.decode($0, render: size) }
@@ -280,6 +290,15 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         let tUs = CMTimeConvertScale(request.compositionTime,
                                      timescale: 1_000_000, method: .roundTowardZero).value
 
+        // The camera, ONCE per frame and never per layer: every video layer and both sides of a
+        // transition see the same camera, because it is a function of output time alone. nil for a
+        // post with no zoom, and nil for every frame of a zoomed post where the camera is at rest
+        // (`CameraMath.pose` answers nil there), so those frames are the old frames to the pixel.
+        // Milliseconds as a Double, the unit the keys are in, rather than the keys in microseconds.
+        let camera: CGAffineTransform? = instr.plan.camera
+            .flatMap { CameraMath.pose($0, atMs: Double(tUs) / 1000) }
+            .map { CameraMath.transform($0, in: rect) }
+
         // Black under every layer. With one layer it is the same black `Placement` used to hold
         // behind its picture, and the frame a source that arrived nil has always produced; with two
         // it is what shows wherever neither layer reaches.
@@ -291,11 +310,18 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // and tinted by where the transition has got to, and blended. That frame takes the place of
         // the black and the first layer; every other layer is then drawn over it as it always is,
         // so a sticker or a picture-in-picture sits still while the base changes under it.
+        //
+        // The camera acts INSIDE each side, not over the finished blend: each whole frame is its
+        // clip seen through the camera, so the source is sampled once and stays sharp, and the
+        // transition's own blur, pixelate, split, mask and move then act in output pixels exactly
+        // as they do without a zoom rather than being magnified by it.
         if let transition = instr.transition, let incoming = layers.first {
             let p = TransitionMath.progress(tUs: tUs, startUs: transition.startUs,
                                             durationUs: transition.durationUs)
-            image = TransitionRender.frame(from: wholeFrame(transition.tail, request, plan: instr.plan, rect: rect),
-                                           to: wholeFrame(incoming, request, plan: instr.plan, rect: rect),
+            image = TransitionRender.frame(from: wholeFrame(transition.tail, request, plan: instr.plan,
+                                                            rect: rect, camera: camera),
+                                           to: wholeFrame(incoming, request, plan: instr.plan,
+                                                          rect: rect, camera: camera),
                                            look: TransitionMath.look(transition.curves, p),
                                            transition: transition,
                                            rect: rect)
@@ -306,11 +332,15 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             // nil for a track that has no frame at this instant. The layer is skipped and the frame
             // is still rendered: a hole in one layer is not a reason to fail an export.
             guard let src = request.sourceFrame(byTrackID: layer.trackID),
-                  let picture = placedPicture(of: layer, from: src, plan: instr.plan, rect: rect)
+                  let picture = placedPicture(of: layer, from: src, plan: instr.plan, rect: rect,
+                                              camera: camera)
             else { continue }
             image = Alpha.scaled(picture, by: layer.opacity).composited(over: image)
         }
 
+        // Overlays are NOT seen through the camera: a caption, a sticker and a full-frame effect
+        // stay where the customer put them while the video zooms under them. That is the contract,
+        // and it is also simply where this loop already sits - after every video layer.
         for ov in instr.plan.overlays where ov.startUs <= tUs && tUs < ov.endUs {
             image = ov.image.composited(over: image)   // spec order is drawing order, later on top
         }
@@ -325,8 +355,12 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     /// One layer's picture, oriented, graded and placed, TRANSPARENT everywhere it does not reach -
     /// exactly what every layer of every frame has always been drawn as - or nil when there is no
     /// picture to place at all.
+    ///
+    /// `camera` is this frame's camera, or nil when there is none; it is folded into the placement
+    /// itself (see `Placement.placed`) rather than applied to the finished frame, so the SOURCE is
+    /// what gets magnified and a zoom into a sharp recording stays sharp.
     private func placedPicture(of layer: EditLayer, from src: CVPixelBuffer, plan: RenderPlan,
-                               rect: CGRect) -> CIImage? {
+                               rect: CGRect, camera: CGAffineTransform?) -> CIImage? {
         var pic = CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
             .oriented(layer.orientation)
         // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
@@ -348,7 +382,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // this feature; the absence was decided when the instruction was built, and all that is
         // left here is the coalesce.
         return Placement.placed(pic, crop: layer.crop, into: layer.dst ?? rect,
-                                fit: layer.fit, spin: layer.spin)
+                                fit: layer.fit, spin: layer.spin, camera: camera)
     }
 
     /// One side of a transition: the layer's WHOLE output frame, black with its picture drawn on it
@@ -357,11 +391,16 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     /// nil only when the track has no frame at this instant, which `TransitionRender.frame` answers
     /// by drawing the other side alone. A clip whose picture places to nothing is not that: it is a
     /// clip that contributes nothing, and its whole frame is black.
+    ///
+    /// With a `camera`, the whole frame is the clip SEEN THROUGH it over black: the picture is
+    /// placed through the camera and the black is not moved, which is all the camera's view of a
+    /// frame whose bars are black can be. The transition then works on that frame in output pixels.
     private func wholeFrame(_ layer: EditLayer, _ request: AVAsynchronousVideoCompositionRequest,
-                            plan: RenderPlan, rect: CGRect) -> CIImage? {
+                            plan: RenderPlan, rect: CGRect, camera: CGAffineTransform?) -> CIImage? {
         guard let src = request.sourceFrame(byTrackID: layer.trackID) else { return nil }
         let black = CIImage(color: .black).cropped(to: rect)
-        guard let picture = placedPicture(of: layer, from: src, plan: plan, rect: rect) else { return black }
+        guard let picture = placedPicture(of: layer, from: src, plan: plan, rect: rect,
+                                          camera: camera) else { return black }
         // Cropped to the render: a picture placed half off the frame hangs past it, and the frame the
         // contract moves and blurs is the render rectangle and nothing more.
         return Alpha.scaled(picture, by: layer.opacity).composited(over: black).cropped(to: rect)
@@ -441,8 +480,22 @@ enum Placement {
     /// spins it. It is also why the clip to `dst` happens before the turn rather than after, so
     /// `cover` still overflows into the rectangle's own edges and is cut there, and the cut travels
     /// with the picture.
+    ///
+    /// `camera` is the frame's camera as `CameraMath.transform` builds it, or nil, and it is the
+    /// very LAST thing to happen: after the crop, the fit, the clip to `dst` and the turn, as the
+    /// contract orders it. It is a uniform scale plus a translate, so it is FOLDED into a transform
+    /// this function already makes rather than added as one more: an upright picture still gets one
+    /// transform and one crop, a turned one still gets transform, crop, transform, and Core Image
+    /// fuses each chain into a single resample of the SOURCE pixels. That is the whole point - a
+    /// 1920x1080 recording contained into a 1280x720 output and zoomed 2x is sampled at 1.33x from
+    /// its own pixels, where magnifying the finished 720p frame would be 2x and visibly soft. No
+    /// `insertingIntermediate` belongs anywhere on this path: it would force exactly that second
+    /// resample back in.
+    ///
+    /// nil is the path every frame took before cameras existed, verbatim, and it is what every
+    /// frame of a post without a zoom and every at-rest frame of a post with one still takes.
     static func placed(_ frame: CIImage, crop: ComposeRect?, into dst: CGRect,
-                       fit: Fit, spin: CGFloat?) -> CIImage? {
+                       fit: Fit, spin: CGFloat?, camera: CGAffineTransform? = nil) -> CIImage? {
         // CROP FIRST, against the frame's own extent, and with the same y flip `destination` does
         // and for the same reason: `crop.y` is measured from the TOP of the picture while
         // `extent.minY` is its bottom. Cropping rather than transforming keeps the source pixels
@@ -469,25 +522,45 @@ enum Placement {
         let tx = dst.minX + (dst.width - src.width * s) / 2
         let ty = dst.minY + (dst.height - src.height * s) / 2
 
-        let upright = picture
-            .transformed(by: normalise
-                .concatenating(CGAffineTransform(scaleX: s, y: s))
-                .concatenating(CGAffineTransform(translationX: tx, y: ty)))
-            // Clipped to the DESTINATION and not to the whole frame. `cover` overflows on purpose,
-            // and a picture placed on half the frame must not spill over the other half. With no
-            // rect the destination IS the whole frame and this is the line that was always here.
-            .cropped(to: dst)
+        let place = normalise
+            .concatenating(CGAffineTransform(scaleX: s, y: s))
+            .concatenating(CGAffineTransform(translationX: tx, y: ty))
 
-        // Every clip that is not turned leaves by this line, with the transform it has always had.
-        guard let spin else { return upright }
+        guard let spin else {
+            // Every clip that is not turned and not under a camera leaves by this line, with the
+            // transform it has always had.
+            guard let camera else {
+                // Clipped to the DESTINATION and not to the whole frame. `cover` overflows on
+                // purpose, and a picture placed on half the frame must not spill over the other
+                // half. With no rect the destination IS the whole frame and this is the line that
+                // was always here.
+                return picture.transformed(by: place).cropped(to: dst)
+            }
+            // The camera folded into the one placement transform, and the clip moved with it.
+            // Cropping to the camera's image of `dst` after the combined transform is exactly
+            // cropping to `dst` and then transforming, because a uniform scale plus a translate
+            // maps an axis-aligned rectangle onto an axis-aligned rectangle - and it keeps the
+            // source to a single resample. The clip may now hang far past the output frame; the
+            // render bounds cut it, as they cut any picture placed off the edge.
+            return picture.transformed(by: place.concatenating(camera)).cropped(to: dst.applying(camera))
+        }
+
+        let upright = picture.transformed(by: place).cropped(to: dst)
 
         // About the rectangle's CENTRE: to the origin, turn, and back. Concatenation is A-then-B, so
         // this reads top to bottom as it happens, exactly as `OverlayBitmap` builds its own. The
         // corners may now hang outside the output frame, and that is correct - the frame crops them,
         // which is why nothing clamps the angle against the room left.
-        return upright.transformed(by: CGAffineTransform(translationX: -dst.midX, y: -dst.midY)
+        let turn = CGAffineTransform(translationX: -dst.midX, y: -dst.midY)
             .concatenating(CGAffineTransform(rotationAngle: spin))
-            .concatenating(CGAffineTransform(translationX: dst.midX, y: dst.midY)))
+            .concatenating(CGAffineTransform(translationX: dst.midX, y: dst.midY))
+
+        // Under a camera the turned picture is then seen through it: one more factor on the SAME
+        // transform, so the node count is today's. Turn first and camera second is the contract's
+        // order, and it is the natural one: the camera sees the frame as the customer laid it out,
+        // turned rectangles and all.
+        guard let camera else { return upright.transformed(by: turn) }
+        return upright.transformed(by: turn.concatenating(camera))
     }
 }
 

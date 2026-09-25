@@ -29,6 +29,15 @@ import {
 } from '../../state/clip-framing';
 import type { EditorStore } from '../../state/editor-store';
 import type { OverlayBitmap } from '../../state/editor.types';
+import {
+  ZOOM_CORNER_CURSORS,
+  moveZoomArea,
+  pinchZoomArea,
+  resizeZoomArea,
+  zoomCornerAt,
+  type ZoomAreaView,
+  type ZoomCorner,
+} from './zoom-area';
 
 /** Further than this and a press is a drag, not a tap. */
 const TAP_SLOP_PX = 8;
@@ -281,7 +290,40 @@ type TransformPatch = Partial<Record<'cx' | 'cy' | 'scale' | 'rotationDeg', numb
 /** A change waiting for the next frame, and who it belongs to. */
 type Pending =
   | { kind: 'overlay'; id: string; patch: TransformPatch }
-  | { kind: 'clip'; id: string; patch: ClipFramingPatch };
+  | { kind: 'clip'; id: string; patch: ClipFramingPatch }
+  /** `key` folds every write of one touch into one undo step; see [ZoomGesture]. */
+  | { kind: 'zoom'; id: string; patch: ZoomAreaView; key: string };
+
+/**
+ * What the fingers are doing to a zoom's AREA while the zoom sheet is open on it.
+ *
+ * Kept apart from [Gesture] on purpose. The zoom tool owns the whole frame the way the crop sheet
+ * does - nothing under the box can be picked up while it is open - and none of the layer machinery
+ * (the bin, the handles, the tap that plays, the snap to centre) means anything to it, so a state of
+ * its own is shorter and cannot leak a layer's rule into it.
+ *
+ * Like every other gesture it is measured from where it STARTED: `view0` is the zoom as the fingers
+ * landed and every frame is `view0` plus how far they have come, so a long drag cannot accumulate
+ * rounding. `key` is the store's coalesce key for this touch - one per touch, so a drag and the pinch
+ * it turns into are one undo step, and the NEXT drag is a step of its own.
+ */
+type ZoomGesture =
+  /** One finger: the box's body moves the area, a corner resizes it with the opposite corner held. */
+  | {
+      kind: 'one';
+      pointerId: number;
+      id: string;
+      key: string;
+      x0: number;
+      y0: number;
+      view0: ZoomAreaView;
+      corner: ZoomCorner | null;
+      moved: boolean;
+    }
+  /** Two fingers anywhere on the frame: the box grows and shrinks with them. */
+  | { kind: 'pinch'; id: string; key: string; view0: ZoomAreaView; dist0: number }
+  /** Finished, or given up on, while fingers are still down. */
+  | { kind: 'spent' };
 
 /**
  * What a clip gesture is doing. `rect` moves and sizes the video's rectangle ON the frame; `crop`
@@ -394,6 +436,10 @@ export class OverlayGestures {
    */
   private buttonPointer: { id: number; point: Point } | null = null;
   private gesture: Gesture | null = null;
+  /** The zoom tool's gesture, while it has one; see [ZoomGesture]. Never set alongside [gesture]. */
+  private zoomGesture: ZoomGesture | null = null;
+  /** Counts zoom touches, for each one's own coalesce key. */
+  private zoomTouches = 0;
   private pending: Pending | null = null;
   private frameRequest = 0;
   /** Set when a press on a handle was taken back by the layer under it; see [handleAt]. */
@@ -453,6 +499,8 @@ export class OverlayGestures {
       this.flush();
       this.store.endGesture(gestureLabel(gesture));
     }
+    if (this.zoomGesture) this.flush();
+    this.zoomGesture = null;
     if (this.frameRequest) cancelAnimationFrame(this.frameRequest);
     this.gesture = null;
   }
@@ -467,6 +515,11 @@ export class OverlayGestures {
     if (this.destroyed || this.store.textEdit.value) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     this.swallowClick = false;
+    // The zoom sheet's area editor owns the frame, before any handle or layer is asked; see [zoomDown].
+    if (this.zoomGesture || this.zoomTool()) {
+      this.zoomDown(e);
+      return;
+    }
     const handle = this.handleAt(e);
     // The delete and edit handles are buttons, and a tap on one is their own click's business. Only
     // a FIRST finger, though: the handles sit on the layer's corners, right where the fingers go to
@@ -503,6 +556,10 @@ export class OverlayGestures {
   }
 
   private onMove(e: PointerEvent): void {
+    if (this.zoomGesture) {
+      this.zoomMove(e);
+      return;
+    }
     if (this.buttonPointer?.id === e.pointerId) {
       this.buttonPointer.point = { x: e.clientX, y: e.clientY };
       return;
@@ -555,6 +612,10 @@ export class OverlayGestures {
   }
 
   private onUp(e: PointerEvent): void {
+    if (this.zoomGesture) {
+      this.zoomUp(e);
+      return;
+    }
     if (this.buttonPointer?.id === e.pointerId) this.buttonPointer = null;
     if (!this.pointers.delete(e.pointerId)) return;
     const cancelled = e.type === 'pointercancel';
@@ -934,6 +995,148 @@ export class OverlayGestures {
     }
   }
 
+  /* ========================================================================================= */
+  /* The zoom area                                                                             */
+  /* ========================================================================================= */
+
+  /**
+   * The zoom being edited, when the zoom sheet is open on one: the frame then belongs to its area
+   * box. Null otherwise, which is almost always, and then nothing here runs.
+   */
+  private zoomTool(): (ZoomAreaView & { id: string }) | null {
+    if (this.store.panel.value !== 'zoom') return null;
+    return this.store.selectedZoom.value ?? null;
+  }
+
+  /**
+   * A finger landing while the area editor owns the frame.
+   *
+   * While the camera is LIVE the box is not on screen - playing, or paused on the zoomed result after
+   * a scrub (see [EditorStore.zoomView]) - so the first touch only pauses and brings the unzoomed
+   * frame and the box back, and is used up: a finger must never edit a box the customer could not see
+   * where it landed.
+   */
+  private zoomDown(e: PointerEvent): void {
+    e.preventDefault();
+    // A layer gesture still open when the sheet took the frame (its up event lost) is ended properly -
+    // its undo step closed - before the fingers are counted again for the box.
+    if (this.gesture) this.abandon();
+    if (e.isPrimary && this.pointers.size > 0) this.endZoomTouch();
+    try {
+      this.stage.setPointerCapture(e.pointerId);
+    } catch {
+      // A pointer that is already gone cannot be captured; its up event still arrives.
+    }
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const zoom = this.zoomTool();
+    if (!zoom || this.store.cameraLive.value) {
+      if (this.store.playing.value) this.pausePlayback();
+      this.store.showZoomArea();
+      this.zoomGesture = { kind: 'spent' };
+      return;
+    }
+    const previous = this.zoomGesture;
+    const key = previous && previous.kind !== 'spent' ? previous.key : `zoom-area:${++this.zoomTouches}`;
+    if (this.pointers.size === 1) {
+      const rect = this.stage.getBoundingClientRect();
+      const view0 = { cx: zoom.cx, cy: zoom.cy, scale: zoom.scale };
+      this.zoomGesture = {
+        kind: 'one',
+        pointerId: e.pointerId,
+        id: zoom.id,
+        key,
+        x0: e.clientX,
+        y0: e.clientY,
+        view0,
+        corner: zoomCornerAt(view0, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height),
+        moved: false,
+      };
+      return;
+    }
+    const pair = this.firstTwo();
+    if (this.pointers.size === 2 && pair) {
+      // A drag turning into a pinch lands its last position first, so the pinch starts from the box
+      // the customer is looking at rather than jumping back to where the drag began.
+      this.flush();
+      const now = this.zoomTool() ?? zoom;
+      this.zoomGesture = {
+        kind: 'pinch',
+        id: now.id,
+        key,
+        view0: { cx: now.cx, cy: now.cy, scale: now.scale },
+        dist0: Math.max(1, distance(pair[0], pair[1])),
+      };
+      return;
+    }
+    // A third finger means nothing to a box.
+    this.flush();
+    this.zoomGesture = { kind: 'spent' };
+  }
+
+  private zoomMove(e: PointerEvent): void {
+    const point = this.pointers.get(e.pointerId);
+    const gesture = this.zoomGesture;
+    if (!point || !gesture) return;
+    point.x = e.clientX;
+    point.y = e.clientY;
+    if (gesture.kind === 'one') {
+      if (gesture.pointerId !== e.pointerId) return;
+      if (!gesture.moved && distance(point, { x: gesture.x0, y: gesture.y0 }) <= TAP_SLOP_PX) return;
+      gesture.moved = true;
+      const rect = this.stage.getBoundingClientRect();
+      if (!(rect.width > 0) || !(rect.height > 0)) return;
+      // Plain frame fractions: the camera is off while the area is being edited, so a pixel on the
+      // stage is a pixel of the unzoomed frame the box is drawn on.
+      const dx = (e.clientX - gesture.x0) / rect.width;
+      const dy = (e.clientY - gesture.y0) / rect.height;
+      const view = gesture.corner
+        ? resizeZoomArea(gesture.view0, gesture.corner, dx, dy)
+        : moveZoomArea(gesture.view0, dx, dy);
+      this.queue({ kind: 'zoom', id: gesture.id, patch: view, key: gesture.key });
+      return;
+    }
+    if (gesture.kind === 'pinch') {
+      const pair = this.firstTwo();
+      if (!pair) return;
+      const view = pinchZoomArea(gesture.view0, distance(pair[0], pair[1]) / gesture.dist0);
+      this.queue({ kind: 'zoom', id: gesture.id, patch: view, key: gesture.key });
+    }
+  }
+
+  private zoomUp(e: PointerEvent): void {
+    if (!this.pointers.delete(e.pointerId)) return;
+    const gesture = this.zoomGesture;
+    // A pinch that loses a finger is over: carried on by the one left, the box would jump to wherever
+    // that finger is relative to where the DRAG would have started.
+    if (gesture?.kind === 'pinch' || (gesture?.kind === 'one' && gesture.pointerId === e.pointerId)) {
+      this.flush();
+      this.zoomGesture = { kind: 'spent' };
+    }
+    if (this.pointers.size === 0) this.endZoomTouch();
+  }
+
+  /** Lands whatever is waiting and forgets the touch, the fingers' bookkeeping with it. */
+  private endZoomTouch(): void {
+    this.flush();
+    this.pointers.clear();
+    this.zoomGesture = null;
+  }
+
+  /** The mouse's cursor while the area editor owns the frame, or null when it does not. */
+  private zoomCursor(e: PointerEvent): string | null {
+    const gesture = this.zoomGesture;
+    if (gesture) {
+      if (gesture.kind === 'one') return gesture.corner ? ZOOM_CORNER_CURSORS[gesture.corner] : 'move';
+      return gesture.kind === 'pinch' ? 'move' : '';
+    }
+    const zoom = this.zoomTool();
+    if (!zoom) return null;
+    if (this.store.playing.value) return '';
+    const rect = this.stage.getBoundingClientRect();
+    const corner = zoomCornerAt(zoom, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+    return corner ? ZOOM_CORNER_CURSORS[corner] : 'move';
+  }
+
   private abandon(): void {
     const gesture = this.gesture;
     if (gesture?.kind === 'drag') this.endDrag(gesture, true);
@@ -981,6 +1184,8 @@ export class OverlayGestures {
   }
 
   private cursorFor(e: PointerEvent): string {
+    const zoomCursor = this.zoomCursor(e);
+    if (zoomCursor !== null) return zoomCursor;
     const gesture = this.gesture;
     if (gesture) {
       // The corner handle scales and turns, so it keeps the resize arrows for the whole drag rather
@@ -1210,6 +1415,7 @@ export class OverlayGestures {
     this.pending = null;
     if (!pending) return;
     if (pending.kind === 'overlay') this.store.previewOverlay(pending.id, pending.patch);
+    else if (pending.kind === 'zoom') this.store.updateZoom(pending.id, pending.patch, { coalesce: pending.key });
     else this.store.previewClipFraming(pending.id, pending.patch);
   }
 

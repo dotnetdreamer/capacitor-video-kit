@@ -475,6 +475,7 @@ export class PreviewPlayer implements EditorPlayer {
     const slot = slots[index];
     const showing = this.deckShowing(slots, slot);
     const shot: BaseShot = {
+      atMs: at,
       layer: this.baseLayer(slot.clip, sourceMsAt(slot, at)),
       video: this.presentable(showing, slot.clip.clipKey),
       lost: !!showing?.failed,
@@ -492,6 +493,18 @@ export class PreviewPlayer implements EditorPlayer {
       };
     }
     return shot;
+  }
+
+  /**
+   * The output instant the preview is showing, for everything that moves with time but is not the
+   * base track's own picture - the zoom camera, in particular. Inside the base track it is the very
+   * reading [baseShot] takes; in the tail past it, where there is no base shot, it is the tail's
+   * wall clock. Never the playhead signal while playing: that is written every 33 ms, and a camera
+   * read off it would move in visible 30 Hz steps against 60 fps video.
+   */
+  instantMs(): number {
+    if (this.destroyed) return this.store.playheadMs.value;
+    return this.tail ? this.tailMs() : this.clockMs();
   }
 
   /**

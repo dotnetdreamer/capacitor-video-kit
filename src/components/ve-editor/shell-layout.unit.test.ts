@@ -11,11 +11,11 @@ import { PANEL_LAYOUT, formatClock, shellLayout } from './shell-layout';
  */
 
 describe('PANEL_LAYOUT', () => {
-  it('leaves the video, the transport and a slim timeline on screen for eleven of the fourteen', () => {
+  it('leaves the video, the transport and a slim timeline on screen for twelve of the fifteen', () => {
     const compact = Object.entries(PANEL_LAYOUT)
       .filter(([, kind]) => kind === 'compact')
       .map(([panel]) => panel);
-    expect(compact.sort()).toEqual(['adjust', 'crop', 'effects', 'filters', 'layout', 'opacity', 'quality', 'speed', 'transition', 'voiceover', 'volume'].sort());
+    expect(compact.sort()).toEqual(['adjust', 'crop', 'effects', 'filters', 'layout', 'opacity', 'quality', 'speed', 'transition', 'voiceover', 'volume', 'zoom'].sort());
   });
 
   it('gives the screen to the two with a keyboard or a scrolling grid in them', () => {

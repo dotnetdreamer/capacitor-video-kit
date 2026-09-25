@@ -351,6 +351,16 @@ data class ComposeSpec(
      * the spec-level [Audio.originalMuted] and [Audio.originalVolume].
      */
     val tracks: List<Track> = emptyList(),
+    /**
+     * The zoom camera over the output timeline - see [CameraTrack]. Null, which is what every spec
+     * written before zooms existed says and what the parser makes of a camera that never magnifies,
+     * is the old path in full: [RenderPlan] marks no clip zoomed and the builder adds nothing.
+     *
+     * It moves every VIDEO layer - base clips, every extra track's clips, both sides of a transition
+     * - and nothing else: overlays are composition effects drawn after all of that, so a caption and
+     * a sticker stay where the customer put them.
+     */
+    val camera: CameraTrack? = null,
 )
 
 /** What a `MediaMetadataRetriever` pass told us about one input file. */

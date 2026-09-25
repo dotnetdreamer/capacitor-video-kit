@@ -23,7 +23,7 @@ type StencilElement = HTMLElement & { componentOnReady?: () => Promise<unknown> 
 
 /**
  * Two segments over two sources, a second video on a layer of its own, a text layer under a
- * sticker, a music bed and one voiceover: the smallest edit that has all six rows in it.
+ * sticker, a music bed, one voiceover and one zoom: the smallest edit that has all seven rows in it.
  */
 function fixture(): EditManifest {
   return {
@@ -85,6 +85,7 @@ function fixture(): EditManifest {
       fadeOutMs: 0,
     },
     voiceovers: [{ id: 'vo-1', uri: 'take.webm', startMs: 500, durationMs: 1200, volume: 1 }],
+    zooms: [{ id: 'zm-1', startMs: 1000, endMs: 4000, cx: 0.5, cy: 0.5, scale: 2, rampMs: 700, ease: 'smooth' }],
   };
 }
 
@@ -248,7 +249,7 @@ describe('ve-toolbar', () => {
     const { store, bar } = await mount();
 
     expect(label(bar)).toBe('Editing tools');
-    expect(ids(bar)).toEqual(['edit', 'crop', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
     // Nothing to step back out to, so no chevron at all.
     expect(root(bar).querySelector('.tile--collapse')).toBe(null);
 
@@ -536,7 +537,7 @@ describe('ve-toolbar', () => {
     await frames(3);
 
     tile(bar, 'edit').focus();
-    for (const id of ['crop', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
+    for (const id of ['crop', 'zoom', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
       press(toolbar, 'ArrowRight');
       expect(root(bar).activeElement).toBe(tile(bar, id));
       await frames(1);
@@ -545,5 +546,38 @@ describe('ve-toolbar', () => {
       expect(box.right).toBeLessThanOrEqual(edge.right - 32 + 0.5);
       expect(box.left).toBeGreaterThanOrEqual(edge.left);
     }
+  });
+
+  it('gives a selected zoom its own row, whose tiles act on that zoom', async () => {
+    const { store, bar } = await mount();
+
+    store.select({ kind: 'zoom', id: 'zm-1' });
+    await until('the zoom row', () => label(bar) === 'Zoom tools');
+    expect(ids(bar)).toEqual(['edit', 'duplicate', 'delete']);
+    expect(root(bar).querySelector('.tile--collapse')!.getAttribute('aria-label')).toBe('Close zoom tools');
+
+    tile(bar, 'edit').click();
+    expect(store.panel.value).toBe('zoom');
+    expect(store.selection.value).toEqual({ kind: 'zoom', id: 'zm-1' });
+    store.closePanel();
+
+    store.select({ kind: 'zoom', id: 'zm-1' });
+    await until('the zoom row again', () => label(bar) === 'Zoom tools');
+    tile(bar, 'delete').click();
+    expect(store.manifest.value.zooms).toEqual([]);
+    await until('the root row', () => label(bar) === 'Editing tools');
+  });
+
+  it('adds a zoom at the playhead from the root row', async () => {
+    const { store, bar } = await mount();
+    store.select(null);
+    await until('the root row', () => label(bar) === 'Editing tools');
+    const before = store.manifest.value.zooms.length;
+    store.seek(6000);
+
+    tile(bar, 'zoom').click();
+    expect(store.manifest.value.zooms.length).toBe(before + 1);
+    expect(store.panel.value).toBe('zoom');
+    expect(store.selection.value?.kind).toBe('zoom');
   });
 });

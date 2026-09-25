@@ -13,6 +13,15 @@ import type { TransitionDraw } from './painter';
  * file does happens after it, to a finished frame, which is exactly what the contract describes - a
  * side is its clip's output frame, bars and all, moved and softened and tinted as one piece.
  *
+ * A ZOOM (`ComposeCamera`) needs nothing here, and that is by design rather than by omission. The
+ * contract puts the camera INSIDE each side - a side is its clip's whole frame as seen through the
+ * camera - and the painter's layer program already draws each side through the layer's own camera,
+ * from the source, into the side's target. So the frames this receives are the zoomed ones, sharp,
+ * and a slide still crosses the whole screen, a circle still opens from the screen's centre and a
+ * blur's sigma is still a fraction of the screen, exactly as with no zoom. The other order - the
+ * camera over the finished mix - would have to magnify these output-size frames, which is soft, or
+ * draw them s x s times larger, which a phone cannot afford.
+ *
  * Two programs, and neither of them knows which transition it is drawing:
  *
  *  - BLUR, a separable Gaussian run as two passes, across then down, and before them as many plain

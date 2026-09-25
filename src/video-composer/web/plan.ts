@@ -1,4 +1,6 @@
+import { normaliseCamera } from '../../editor/camera';
 import type {
+  ComposeCamera,
   ComposeClip,
   ComposeMusic,
   ComposeOutput,
@@ -178,6 +180,19 @@ export interface RenderPlan {
   transitions: PlannedTransition[];
   /** The extra video layers, bottom to top, and only the ones that show something. */
   tracks: PlannedTrack[];
+  /**
+   * The camera - the post's zooms, compiled - in output-timeline MILLISECONDS, or null for none.
+   *
+   * Null for every post with no zoom, which is every spec written before zooms existed, and the
+   * render asks this once, before its first frame, as it asks [transitions]: such a post never
+   * evaluates a camera and never puts one on a layer, so it is drawn by exactly the loop it always
+   * was. Kept in milliseconds rather than the plan's microseconds so the ONE evaluator,
+   * `cameraAt`, is shared verbatim with the preview, which runs in milliseconds; the render reads
+   * it at `atUs / 1000`.
+   */
+  camera: ComposeCamera | null;
+  /** The most the camera ever magnifies, 1 with none: how much sharper a still has to be decoded. */
+  cameraMaxScale: number;
   /** Null when `filter` was empty or folded to identity. */
   colorMatrix: ColorMatrix | null;
   overlays: OverlayPlacement[];
@@ -233,6 +248,11 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
   const music = planMusic(spec.audio.music, probes, totalUs);
   const voice = planVoice(spec.audio.voiceover, probes, totalUs);
 
+  // The parser has already clamped the camera and dropped one that never zooms; this is the plan
+  // holding the same line on its own, as it does for the first clip's transition, with the SAME
+  // rules rather than a second copy of them.
+  const camera = normaliseCamera(spec.camera);
+
   return {
     spec,
     clips,
@@ -240,6 +260,8 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     totalUs,
     transitions,
     tracks,
+    camera,
+    cameraMaxScale: camera ? camera.scale.reduce((most, scale) => Math.max(most, scale), 1) : 1,
     colorMatrix,
     overlays: spec.overlays.map(overlay => ({
       id: overlay.id,

@@ -13,6 +13,8 @@ export * from './compose';
 export * from './overlay-raster';
 export * from './effects';
 export * from './transitions';
+export * from './zoom';
+export * from './camera';
 
 /**
  * `toComposeSpec` returns a `ComposeSpec` and `resolveFilterOps` returns `FilterOp[]`, and both
@@ -21,4 +23,4 @@ export * from './transitions';
  * emit declarations that would need one, so the two names travel with the contract that returns
  * them.
  */
-export type { ComposeSpec, FilterOp } from '../video-composer/definitions';
+export type { ComposeCamera, ComposeSpec, FilterOp } from '../video-composer/definitions';

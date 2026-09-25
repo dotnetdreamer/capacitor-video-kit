@@ -53,6 +53,12 @@ class RenderPlan private constructor(
     val music: MusicPlan?,
     val voice: VoicePlan?,
     val posterAtUs: Long,
+    /**
+     * The zoom camera, or null for the old path - decided HERE, once, like [tracks] and [tails]: a
+     * spec with no camera, or one that never magnifies, plans no zoomed clip and no supersampled
+     * layer, and the builder then adds nothing to any chain. See [CameraTrack].
+     */
+    val camera: CameraTrack? = null,
 ) {
 
     data class PlannedClip(
@@ -103,6 +109,16 @@ class RenderPlan private constructor(
          * a video, and for a picture no probe was made for.
          */
         val imageMimeType: String? = null,
+        /**
+         * True when the zoom camera magnifies anywhere in this clip's piece of the output timeline,
+         * widened by a frame interval either side for the stamp drift [TransitionFrame.at] explains.
+         * Only a base clip or a transition tail can be zoomed this way - its picture is the whole
+         * output frame, so the camera is one more matrix after its geometry. A layer clip never is:
+         * its picture is its rectangle, and the compositor zooms the rectangle (see
+         * [LayerPlacement.zoomed]). False for every clip of a spec with no camera, which is what
+         * keeps their effect chains the ones they always were.
+         */
+        val zoomed: Boolean = false,
     )
 
     /**
@@ -178,6 +194,20 @@ class RenderPlan private constructor(
          * fitted into the rectangle when the layer was drawn, and what turns is the finished result.
          */
         val rotationGlDeg: Float,
+        /**
+         * True when the zoom camera magnifies anywhere in this clip's window (a frame's margin
+         * included). The compositor then moves and scales the layer per frame - anchor `k (a - f)`,
+         * size times `k` - instead of handing back the one settings object it worked out up front.
+         */
+        val zoomed: Boolean = false,
+        /**
+         * What the compositor scales the layer's texture by to put it back at its rectangle's size:
+         * 1 unless the clip was SUPERSAMPLED, drawn into a frame larger than its rectangle so that a
+         * zoom magnifies real source pixels rather than the rectangle-sized picture. Then it is the
+         * rectangle's pixels over the frame's, per axis, about `1 / S` - see [layerSupersample].
+         */
+        val drawScaleX: Float = 1f,
+        val drawScaleY: Float = 1f,
     )
 
     /**
@@ -374,6 +404,32 @@ class RenderPlan private constructor(
                 )
             }
 
+            // Null for a camera that never magnifies. The parser already drops one, and this is the
+            // same rule again for a caller that built its spec by hand.
+            val camera = spec.camera?.takeIf {
+                it.zoomsBetween(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
+            }
+            val marginUs = frameIntervalUs(spec.output)
+            if (camera != null) {
+                for (i in planned.indices) {
+                    val zoomed = camera.zoomsBetween(
+                        (prefix[i] - marginUs) / 1000.0,
+                        (prefix[i] + planned[i].outDurUs + marginUs) / 1000.0,
+                    )
+                    if (zoomed) planned[i] = planned[i].copy(zoomed = true)
+                }
+            }
+            // A tail is the outgoing clip carried on, a whole-frame picture like a base clip's, so it
+            // takes the camera the same way: after its geometry and BEFORE its transition side, which
+            // is the contract's "each side is its clip's whole frame as seen through the camera".
+            val tails = planTails(spec, planned, prefix, probes).map { tail ->
+                val zoomed = camera?.zoomsBetween(
+                    (tail.itemStartUs - marginUs) / 1000.0,
+                    (tail.itemEndUs + marginUs) / 1000.0,
+                ) == true
+                if (zoomed) tail.copy(clip = tail.clip.copy(zoomed = true)) else tail
+            }
+
             return RenderPlan(
                 spec = spec,
                 clips = planned,
@@ -387,15 +443,32 @@ class RenderPlan private constructor(
                 // anywhere and is dropped here, exactly as iOS declines to add its track: an empty
                 // layer is a sequence, a decoder and a compositor input for a picture nobody sees.
                 tracks = spec.tracks.sortedBy { it.z }
-                    .map { planTrack(it, spec, probes, totalUs) }
+                    .map { planTrack(it, spec, probes, totalUs, camera, marginUs) }
                     .filter { it.clips.isNotEmpty() },
-                tails = planTails(spec, planned, prefix, probes),
+                tails = tails,
                 colorMatrix = colorMatrix,
                 overlays = overlays,
                 music = planMusic(spec.audio.music, probes, totalUs),
                 voice = planVoice(spec.audio.voiceover, probes, totalUs),
                 posterAtUs = min(spec.posterAtMs * 1000L, max(0L, totalUs - 1L)),
+                camera = camera,
             )
+        }
+
+        /** One frame at the post's rate, in microseconds: the margin a zoom decision is widened by. */
+        private fun frameIntervalUs(output: Output): Long = 1_000_000L / max(1, output.fps)
+
+        /**
+         * How many times larger than its rectangle a layer clip is drawn, so a zoom into it still
+         * samples its source rather than magnifying a rectangle-sized picture: the most the camera
+         * magnifies over the clip's window, held to [MAX_LAYER_SUPERSAMPLE] and to what keeps the
+         * texture inside the [MAX_TEXTURE_PX] every GL implementation guarantees. 1 - the frame it
+         * has always been drawn into - for a clip the camera never zooms.
+         */
+        fun layerSupersample(maxScale: Double, rectWPx: Int, rectHPx: Int): Float {
+            val longest = max(rectWPx, rectHPx).coerceAtLeast(1)
+            val cap = min(MAX_LAYER_SUPERSAMPLE.toDouble(), MAX_TEXTURE_PX.toDouble() / longest)
+            return min(maxScale, cap).coerceAtLeast(1.0).toFloat()
         }
 
         /**
@@ -475,6 +548,8 @@ class RenderPlan private constructor(
             spec: ComposeSpec,
             probes: Map<String, ProbedInput>,
             totalUs: Long,
+            camera: CameraTrack? = null,
+            marginUs: Long = 0L,
         ): PlannedTrack {
             val clips = ArrayList<PlannedClip>(track.clips.size)
             val placements = ArrayList<LayerPlacement>(track.clips.size)
@@ -502,6 +577,29 @@ class RenderPlan private constructor(
                 // why a layer that runs even a millisecond past the base lengthens the whole post.
                 val roomUs = totalUs - cursorUs
                 if (item.outDurUs > roomUs) item = item.cutTo(roomUs) ?: break
+                // Under a zoom the layer is drawn LARGER than its rectangle and scaled back down by
+                // the compositor, so the camera's magnification lands on source pixels. Settled off
+                // the clip's own window, so a webcam bubble that is never under a zoom keeps the
+                // rectangle-sized texture - and a spec with no camera never gets past the null.
+                val maxScale = camera?.maxScaleBetween(
+                    (cursorUs - marginUs) / 1000.0,
+                    (cursorUs + item.outDurUs + marginUs) / 1000.0,
+                ) ?: 1.0
+                val zoomed = maxScale > 1.0 + CameraView.IDENTITY_EPSILON
+                var drawScaleX = 1f
+                var drawScaleY = 1f
+                if (zoomed) {
+                    val s = layerSupersample(maxScale, frame.width, frame.height)
+                    if (s > 1f) {
+                        val big = frame.copy(
+                            width = (frame.width * s).roundToInt().coerceAtLeast(MIN_LAYER_PX),
+                            height = (frame.height * s).roundToInt().coerceAtLeast(MIN_LAYER_PX),
+                        )
+                        drawScaleX = frame.width.toFloat() / big.width
+                        drawScaleY = frame.height.toFloat() / big.height
+                        item = item.copy(frame = big)
+                    }
+                }
                 clips += item
                 placements += LayerPlacement(
                     startUs = cursorUs,
@@ -509,6 +607,9 @@ class RenderPlan private constructor(
                     anchorX = centreNdcX(rect),
                     anchorY = centreNdcY(rect),
                     rotationGlDeg = rotationGlDegOf(clip.rect),
+                    zoomed = zoomed,
+                    drawScaleX = drawScaleX,
+                    drawScaleY = drawScaleY,
                 )
                 cursorUs += item.outDurUs
             }
@@ -950,5 +1051,14 @@ class RenderPlan private constructor(
 
         /** Two pixels: the same kind of floor as [MIN_CLIP_US], for a layer's own frame. */
         private const val MIN_LAYER_PX = 2
+
+        /**
+         * The most a layer clip is supersampled under a zoom. Four is a webcam bubble a quarter of
+         * the frame wide drawn at the frame's own width, which is about all its source has to give.
+         */
+        const val MAX_LAYER_SUPERSAMPLE = 4f
+
+        /** The texture side every GL ES implementation this plugin runs on guarantees. */
+        const val MAX_TEXTURE_PX = 4096
     }
 }

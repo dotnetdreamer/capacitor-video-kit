@@ -1,0 +1,144 @@
+/*
+ * The Zoom sheet: the level, the curve and the ramp, and one line about the box on the picture.
+ *
+ * Budgeted against the compact sheet like the transition sheet: the 53px head, two 52px slider rows,
+ * a 48px row of curves, a 36px hint and 6px of air come to 247px - under the 259px that sheet is held
+ * to - so the picture the area is picked on keeps as much of the screen as it can. The sheet's
+ * browser test holds the figure.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+.zs {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 2px 0 6px;
+}
+
+/*
+ * The word, the control and the number, in the transition sheet's duration row's measurements, so
+ * the bottom rows of the two sheets are the same row.
+ */
+.zs__row {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+}
+
+.zs__row--eases {
+  height: 48px;
+}
+
+/* One width for the three words, so the three controls start at the same x. */
+.zs__word {
+  flex: 0 0 76px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.zs__value {
+  flex: 0 0 38px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* `Instant` is wider than any `0.7s`. */
+.zs__value--wide {
+  flex-basis: 50px;
+}
+
+/*
+ * The slider's own gutter is taken away, because this row already has one: the knob's overhang at
+ * either end lands in the gaps beside the word and the number.
+ */
+.zs__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+/* ------------------------------------------------------------------------------------ curves */
+
+.zs__chips {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+/*
+ * The button is the 44px touch target; the pill inside is what shows - the speed sheet's chips.
+ * `font-family` is named because a form control inside a shadow root inherits nothing from the page.
+ */
+.zs__chip {
+  display: grid;
+  flex: 1 1 0;
+  place-items: center;
+  min-width: 0;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  cursor: pointer;
+  outline-offset: -2px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.zs__pill {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 32px;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.zs__chip:active .zs__pill {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.zs__chip--on .zs__pill,
+.zs__chip--on:active .zs__pill {
+  background: #fff;
+  color: #000;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .zs__chip:not(.zs__chip--on):hover .zs__pill {
+    background: var(--ve-raised-2, #3a3a3c);
+  }
+}
+
+/* -------------------------------------------------------------------------------------- hint */
+
+.zs__hint {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  text-align: center;
+}

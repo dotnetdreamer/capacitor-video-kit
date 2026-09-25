@@ -4,7 +4,9 @@ import {
   MAX_SCALE,
   MAX_SPEED,
   MAX_VIDEO_TRACKS,
+  MAX_ZOOMS,
   MIN_CLIP_MS,
+  MIN_ZOOM_MS,
   MIN_LAYER_MS,
   MIN_SCALE,
   MIN_SPEED,
@@ -14,6 +16,7 @@ import {
   defaultPictureEdit,
   isFullFrameRect,
   normalisePlacement,
+  normaliseZoom,
   normaliseRect,
   sameRect,
   totalDurationMs,
@@ -28,6 +31,7 @@ import {
   type EditTransition,
   type EditVideoTrack,
   type EditVoiceover,
+  type EditZoom,
 } from './edit-manifest';
 import { normaliseTransition, transitionSpans } from './transitions';
 
@@ -564,7 +568,11 @@ export function setPostDuration(manifest: EditManifest, durationMs: number): Edi
  *    [overlayEndMs] clamps it on the way out, so it follows the new end for free;
  *  - a voiceover is treated as an overlay with a length: dropped, or shortened to reach the cut;
  *  - music is dropped only if it began after the cut. A bed that started before it still plays,
- *    and every engine already stops it with the picture.
+ *    and every engine already stops it with the picture;
+ *  - a zoom is treated like a voiceover: dropped, or shortened to reach the cut and dropped if that
+ *    leaves less than [MIN_ZOOM_MS]. Its ramps are squeezed when it is read, so a shortened zoom
+ *    still eases back out before the new end. Left in place, a zoom past the cut would come back
+ *    into the black tail the next time the end was pulled out.
  *
  * `durationMs` is floored at [MIN_CLIP_MS], because a post with nothing left in it is not an edit,
  * and ceilinged at the content, so asking for more than there is falls through to the tail.
@@ -590,7 +598,17 @@ export function cutPostTo(manifest: EditManifest, durationMs: number): EditManif
     overlays: manifest.overlays.filter(overlay => overlay.startMs < end).map(overlay => (overlay.endMs > end ? { ...overlay, endMs: end } : overlay)),
     music: manifest.music && manifest.music.startMs < end ? manifest.music : null,
     voiceovers,
+    zooms: cutZooms(manifest.zooms, end),
   };
+}
+
+function cutZooms(zooms: EditZoom[], end: number): EditZoom[] {
+  const cut = zooms
+    .filter(zoom => zoom.startMs < end)
+    .map(zoom => (zoom.endMs > end ? { ...zoom, endMs: end } : zoom))
+    .filter(zoom => zoom.endMs - zoom.startMs >= MIN_ZOOM_MS);
+  // The same array when the cut missed every zoom, so a caller comparing by identity sees no change.
+  return cut.length === zooms.length && cut.every((zoom, i) => zoom === zooms[i]) ? zooms : cut;
 }
 
 /**
@@ -983,6 +1001,140 @@ function normaliseLayer<T extends EditOverlay>(overlay: T): T {
     startMs: Math.max(0, Math.round(overlay.startMs)),
     endMs: Math.max(0, Math.round(overlay.endMs)),
   };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Zooms                                                                                          */
+/* -------------------------------------------------------------------------------------------- */
+
+/*
+ * Zooms are one lane with one camera, so these keep the list the way [EditManifest.zooms] promises
+ * it - sorted, never overlapping - rather than leaving that to a normalise on the way back in. A
+ * window that could overlap would make the camera two functions of time, and the preview and three
+ * engines could each pick a different one.
+ *
+ * They sit on the OUTPUT timeline, like overlays: no clip or track op moves them, and only
+ * [cutPostTo] cuts them.
+ */
+
+export function findZoom(manifest: EditManifest, id: string): EditZoom | null {
+  return manifest.zooms.find(zoom => zoom.id === id) ?? null;
+}
+
+/** The zoom whose window holds `outputMs` - there is at most one. */
+export function zoomAt(manifest: EditManifest, outputMs: number): EditZoom | null {
+  return manifest.zooms.find(zoom => outputMs >= zoom.startMs && outputMs < zoom.endMs) ?? null;
+}
+
+/**
+ * How long a zoom starting at `startMs` may run before it would reach the next zoom or the end of the
+ * post. 0 when `startMs` is inside a zoom. The [voiceRoomAt] rule, for the same one-lane reason.
+ */
+export function zoomRoomAt(manifest: EditManifest, startMs: number, totalMs: number, ignoreId?: string): number {
+  const zooms = manifest.zooms.filter(zoom => zoom.id !== ignoreId);
+  if (zooms.some(zoom => startMs >= zoom.startMs && startMs < zoom.endMs)) return 0;
+  const next = zooms.filter(zoom => zoom.startMs >= startMs).sort((a, b) => a.startMs - b.startMs)[0];
+  return Math.max(0, Math.min(next ? next.startMs : totalMs, totalMs) - startMs);
+}
+
+/**
+ * Adds a zoom, SHORTENED to the room it has before the next zoom and the end of the post - a zoom
+ * dropped just before another is still the zoom the customer meant, only shorter. Null at
+ * [MAX_ZOOMS], for an id already in use, and when less than [MIN_ZOOM_MS] fits.
+ */
+export function addZoom(manifest: EditManifest, zoom: EditZoom, totalMs: number): EditManifest | null {
+  if (manifest.zooms.length >= MAX_ZOOMS || findZoom(manifest, zoom.id)) return null;
+  const startMs = Math.max(0, Math.round(zoom.startMs));
+  const room = zoomRoomAt(manifest, startMs, totalMs);
+  if (room < MIN_ZOOM_MS) return null;
+  const length = clamp(Math.round(zoom.endMs - zoom.startMs), MIN_ZOOM_MS, room);
+  const placed = normaliseZoom({ ...zoom, startMs, endMs: startMs + length });
+  return { ...manifest, zooms: sortedZooms([...manifest.zooms, placed]) };
+}
+
+/** The parts of a zoom that are not its window. Timing has one owner, [setZoomWindow], which keeps the lane apart. */
+export type ZoomPatch = Partial<Pick<EditZoom, 'cx' | 'cy' | 'scale' | 'rampMs' | 'ease'>>;
+
+/**
+ * Changes a zoom's area, level, ramp or ease, held to what the editor offers ([normaliseZoom]). The
+ * same manifest when nothing changed, so a slider let go where it started records no undo step.
+ */
+export function updateZoom(manifest: EditManifest, id: string, patch: ZoomPatch): EditManifest {
+  const current = findZoom(manifest, id);
+  if (!current) return manifest;
+  const picked: ZoomPatch = {};
+  if (patch.cx !== undefined) picked.cx = patch.cx;
+  if (patch.cy !== undefined) picked.cy = patch.cy;
+  if (patch.scale !== undefined) picked.scale = patch.scale;
+  if (patch.rampMs !== undefined) picked.rampMs = patch.rampMs;
+  if (patch.ease !== undefined) picked.ease = patch.ease;
+  const next = normaliseZoom({ ...current, ...picked });
+  if (sameFields(current, next)) return manifest;
+  return { ...manifest, zooms: manifest.zooms.map(zoom => (zoom.id === id ? next : zoom)) };
+}
+
+/**
+ * Sets when a zoom runs, keeping it at least [MIN_ZOOM_MS] long and between its neighbours and the
+ * end of the post. The neighbours are found from where the zoom IS, not where it is being dragged,
+ * so a drag stops at the next zoom instead of jumping over it (the [moveVoiceover] rule). A whole
+ * window dragged keeps its length. No room at all is the same manifest.
+ */
+export function setZoomWindow(manifest: EditManifest, id: string, startMs: number, endMs: number, totalMs: number): EditManifest {
+  const zoom = findZoom(manifest, id);
+  if (!zoom) return manifest;
+  const others = manifest.zooms.filter(other => other.id !== id);
+  const before = others.filter(other => other.endMs <= zoom.startMs).sort((a, b) => b.endMs - a.endMs)[0];
+  const after = others.filter(other => other.startMs >= zoom.endMs).sort((a, b) => a.startMs - b.startMs)[0];
+  const lo = before ? before.endMs : 0;
+  const hi = after ? after.startMs : Math.max(totalMs, lo);
+  if (hi - lo < MIN_ZOOM_MS) return manifest;
+  const [start, end] = clampSpan(startMs, endMs, lo, hi, zoom.startMs, zoom.endMs, MIN_ZOOM_MS);
+  if (start === zoom.startMs && end === zoom.endMs) return manifest;
+  return { ...manifest, zooms: sortedZooms(manifest.zooms.map(other => (other.id === id ? { ...zoom, startMs: start, endMs: end } : other))) };
+}
+
+/**
+ * A copy placed straight after the original, as long as the original where there is room and
+ * shortened where there is less. The two touch, so the camera holds the area across both rather than
+ * zooming out and back in. Null when less than [MIN_ZOOM_MS] fits there, or at [MAX_ZOOMS].
+ */
+export function duplicateZoom(manifest: EditManifest, id: string, newId: string, totalMs: number): EditManifest | null {
+  const zoom = findZoom(manifest, id);
+  if (!zoom) return null;
+  return addZoom(manifest, { ...zoom, id: newId, startMs: zoom.endMs, endMs: zoom.endMs + (zoom.endMs - zoom.startMs) }, totalMs);
+}
+
+export function deleteZoom(manifest: EditManifest, id: string): EditManifest {
+  if (!findZoom(manifest, id)) return manifest;
+  return { ...manifest, zooms: manifest.zooms.filter(zoom => zoom.id !== id) };
+}
+
+function sortedZooms(zooms: EditZoom[]): EditZoom[] {
+  return [...zooms].sort((a, b) => a.startMs - b.startMs);
+}
+
+/**
+ * [clampWindow] between `lo` and `hi` instead of the whole post, and with its own floor: the edge
+ * that moved gives way, and a window dragged whole stops at the bounds with its length intact.
+ */
+function clampSpan(startMs: number, endMs: number, lo: number, hi: number, prevStart: number, prevEnd: number, min: number): [number, number] {
+  const prevLen = prevEnd - prevStart;
+  if (startMs !== prevStart && endMs !== prevEnd && Math.abs(endMs - startMs - prevLen) <= 1) {
+    const len = clamp(prevLen, min, hi - lo);
+    const shifted = Math.round(clamp(startMs, lo, hi - len));
+    return [shifted, shifted + len];
+  }
+  let start = Math.round(clamp(startMs, lo, hi - min));
+  let end = Math.round(clamp(endMs, lo + min, hi));
+  const movedStart = start !== prevStart;
+  const movedEnd = end !== prevEnd;
+  if (end - start < min) {
+    if (movedStart && !movedEnd) start = end - min;
+    else end = start + min;
+  }
+  start = Math.max(lo, start);
+  end = Math.min(hi, Math.max(end, start + min));
+  return [start, end];
 }
 
 /* -------------------------------------------------------------------------------------------- */

@@ -121,6 +121,21 @@ export function summariseManifest(manifest: EditManifest): string {
   }
   lines.push(...sound);
 
+  /* ---- zooms ---- */
+
+  lines.push('');
+  if (manifest.zooms.length === 0) {
+    lines.push('Zooms: none');
+  } else {
+    lines.push(`Zooms: ${count(manifest.zooms.length, 'zoom')}`);
+    for (const zoom of manifest.zooms) {
+      lines.push(
+        `  "${zoom.id}" ${time(zoom.startMs)}..${time(zoom.endMs)}, ${zoom.scale}x on (${zoom.cx}, ${zoom.cy}), ` +
+          `${zoom.rampMs > 0 ? `${time(zoom.rampMs)} ${zoom.ease} ramps` : 'instant'}`,
+      );
+    }
+  }
+
   /* ---- the look ---- */
 
   lines.push('');

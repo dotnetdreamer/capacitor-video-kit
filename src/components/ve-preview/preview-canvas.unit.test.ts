@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { compileTransition, lookAt } from '../../editor';
 import type { PreviewVideoLayer } from '../../state/editor-store';
-import type { TransitionDraw } from '../../video-composer/web/painter';
-import { baseDraw, layerDraw, orderedLayers, type BaseShot } from './preview-canvas';
+import type { CameraView } from '../../editor/camera';
+import type { ComposeCamera } from '../../video-composer/definitions';
+import type { LayerDraw, TransitionDraw } from '../../video-composer/web/painter';
+import { baseDraw, cameraDraws, layerDraw, orderedLayers, previewCamera, type BaseShot } from './preview-canvas';
 
 /**
  * What the preview hands its compositor, which is the one thing that has to agree with `render.ts`
@@ -178,5 +180,68 @@ describe('the base track in a transition', () => {
   it('is a plain layer outside a transition', () => {
     const plain: BaseShot = { ...shot(), transition: null };
     expect(baseDraw(plain, 9 / 16, false, null).draw).toEqual(layerDraw(plain.layer, incoming, 9 / 16));
+  });
+});
+
+describe('the zoom camera in the preview', () => {
+  /*
+   * The camera rides on each VIDEO draw as the painter's own `camera` field, so the painter samples
+   * the source through it. Overlays are not in this list at all - in the preview they are DOM over
+   * the canvas - which is the contract's "overlays are not moved", held by construction.
+   */
+  type Camerad = LayerDraw & { camera?: CameraView | null };
+  const view: CameraView = { scale: 2, cx: 0.25, cy: 0.75 };
+  const incoming = { videoWidth: 1920, videoHeight: 1080 } as HTMLVideoElement;
+  const outgoing = { videoWidth: 1080, videoHeight: 1920 } as HTMLVideoElement;
+  const track: ComposeCamera = { atMs: [0, 1000, 2000], scale: [1, 2, 2], cx: [0.5, 0.25, 0.25], cy: [0.5, 0.75, 0.75] };
+
+  function frame(): (LayerDraw | TransitionDraw)[] {
+    const base = baseDraw(
+      {
+        atMs: 1500,
+        layer: layer({ clipId: 'in' }),
+        video: incoming,
+        lost: false,
+        transition: { layer: layer({ clipId: 'out' }), video: outgoing, lost: false, progress: 0.5, compiled: compileTransition('dissolve')! },
+      },
+      9 / 16,
+      false,
+      null,
+    ).draw!;
+    const pip = layerDraw(layer({ trackId: 'pip', clipId: 'p', rect: { x: 0.6, y: 0.6, w: 0.3, h: 0.3 } }), incoming, 9 / 16);
+    return [base, pip];
+  }
+
+  it('reaches every video layer and both sides of a transition, and moves nothing else', () => {
+    const draws = frame();
+    const seen = cameraDraws(draws, view);
+    const transition = seen[0] as TransitionDraw;
+    expect((transition.from as Camerad).camera).toEqual(view);
+    expect((transition.to as Camerad).camera).toEqual(view);
+    expect((seen[1] as Camerad).camera).toEqual(view);
+    // The look acts in output pixels after the camera, so it is untouched; so is every placement:
+    // the painter applies the camera, this only hands it over.
+    const before = draws[0] as TransitionDraw;
+    expect(transition.look).toBe(before.look);
+    expect(transition.transition).toBe(before.transition);
+    expect({ ...(transition.to as Camerad), camera: undefined }).toEqual({ ...before.to, camera: undefined });
+    expect((seen[1] as LayerDraw).dest).toEqual((draws[1] as LayerDraw).dest);
+    // Not written into the frame it was handed: the same draws may be reused unzoomed.
+    expect((before.to as Camerad).camera).toBeUndefined();
+  });
+
+  it('hands back the very same frame when there is no camera, which is the old path exactly', () => {
+    const draws = frame();
+    expect(cameraDraws(draws, null)).toBe(draws);
+  });
+
+  it('is read off the compiled track at the instant, and switched off while the camera is not live', () => {
+    expect(previewCamera(true, track, 1500)).toEqual({ scale: 2, cx: 0.25, cy: 0.75 });
+    expect(previewCamera(true, track, 500)).toEqual({ scale: 1.5, cx: 0.375, cy: 0.625 });
+    // Crop sheet open, or a zoom being edited paused: the whole frame, whatever the track says.
+    expect(previewCamera(false, track, 1500)).toBeNull();
+    // Before the zoom starts the track holds identity, which is the null path too.
+    expect(previewCamera(true, track, 0)).toBeNull();
+    expect(previewCamera(true, null, 1500)).toBeNull();
   });
 });

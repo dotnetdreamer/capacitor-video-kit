@@ -1056,3 +1056,65 @@ describe('the painter', () => {
     }
   });
 });
+
+describe('a zoom, end to end', () => {
+  /** A picture in four coloured quarters - TL red, TR green, BL blue, BR white - at the output's shape. */
+  async function quartered(width: number, height: number): Promise<Blob> {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no canvas');
+    for (const [x, y, colour] of [
+      [0, 0, '#f00'],
+      [0.5, 0, '#0f0'],
+      [0, 0.5, '#00f'],
+      [0.5, 0.5, '#fff'],
+    ] as const) {
+      ctx.fillStyle = colour;
+      ctx.fillRect(x * width, y * height, width / 2, height / 2);
+    }
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('no picture');
+    return blob;
+  }
+
+  it(
+    'magnifies the area the camera is on from the moment it starts, and not before',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const uri = URL.createObjectURL(await quartered(160, 284));
+      try {
+        const picture: ComposeClip = { key: 'p', uri, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: true, fit: 'cover', image: true };
+        // The whole frame until half a second, then - a step - 2x on the top-left quarter.
+        const camera = { atMs: [0, 500, 500], scale: [1, 1, 2], cx: [0.5, 0.5, 0.25], cy: [0.5, 0.5, 0.25] };
+        const outcome = await renderSpec(spec(uri, { jobId: 'job-zoom', clips: [picture], camera }), {
+          signal: new AbortController().signal,
+          onProgress: () => undefined,
+        });
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const before = await pixelOfVideo(url, 0.25, 120, 213);
+          const after = await pixelOfVideo(url, 0.75, 120, 213);
+          expect(before).not.toBeNull();
+          expect(after).not.toBeNull();
+          // Unzoomed, the bottom right is the white quarter.
+          expect(Math.min(...before!)).toBeGreaterThan(180);
+          // Zoomed on the top-left quarter, the bottom right of the frame is red.
+          expect(after![0]).toBeGreaterThan(150);
+          expect(after![1]).toBeLessThan(90);
+          expect(after![2]).toBeLessThan(90);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } finally {
+        URL.revokeObjectURL(uri);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});

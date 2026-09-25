@@ -276,6 +276,58 @@ export interface ComposeTrack {
   opacity?: number;
 }
 
+/**
+ * The zooms of a post, LOWERED to a camera track so no engine does any easing of its own - the
+ * transitions precedent: JS compiles every ramp, ease and pan between neighbouring zooms into keys,
+ * and an engine only interpolates between them.
+ *
+ * WHAT IT MOVES. Every video layer - the base track, every [ComposeTrack], and each side of a
+ * transition - and nothing else. Overlays are drawn over the result exactly as they are over any
+ * frame, unmoved: a caption, a sticker and a full-frame effect stay where the customer put them.
+ *
+ * READING IT, at output time `t` (ms): the keys are in [atMs] order, non-decreasing. Before the first
+ * key and after the last the end key HOLDS. Between key `i` and `i + 1` every field is read by
+ * straight-line interpolation, `f = f[i] + (f[i + 1] - f[i]) * (t - atMs[i]) / (atMs[i + 1] - atMs[i])`;
+ * two keys at the same time are a STEP, the later one taking effect at that time. The four arrays
+ * have the same length, 1 to [MAX_CAMERA_KEYS].
+ *
+ * DRAWING IT. `scale` >= 1 is the magnification and (`cx`, `cy`) is the point of the unzoomed frame,
+ * in the 0..1 top-left fractions of the output every other field uses, that is brought to the
+ * frame's centre. A point `p` of a video layer as it would be drawn with no camera is drawn at
+ *
+ *   p' = (0.5, 0.5) + (p - (cx, cy)) * scale
+ *
+ * per axis in FRACTIONS - which is a uniform scale in output pixels, because the visible area has
+ * the output's own aspect. Being a uniform scale about a point, it commutes with a layer's turn: an
+ * engine may apply it after a layer's placement, crop, fit and rotation as one more similarity, and
+ * must sample the SOURCE through it rather than magnify an output-size picture, so a zoom into a
+ * sharp recording stays sharp. For a TRANSITION the camera acts inside each side: each side is its
+ * clip's whole frame as seen through the camera, and the transition's own offsets, scale, blur and
+ * mask then act in output pixels as they always have.
+ *
+ * Each parser CLAMPS every key - `scale` to 1..[MAX_CAMERA_SCALE] and each centre to
+ * `0.5 / scale .. 1 - 0.5 / scale` - so the visible area is inside the frame. That set is convex, so
+ * interpolating between clamped keys never shows anything outside the frame, and no engine needs a
+ * second clip for it. A camera whose every key has `scale` at 1 is dropped by the parser, which is
+ * the absent path.
+ */
+export interface ComposeCamera {
+  /** Output-timeline milliseconds, non-decreasing. */
+  atMs: number[];
+  /** Magnification, 1 (the whole frame) .. [MAX_CAMERA_SCALE]. */
+  scale: number[];
+  /** The point brought to the centre, 0..1 of the output width, left to right. */
+  cx: number[];
+  /** The same, 0..1 of the output height, top to bottom. */
+  cy: number[];
+}
+
+/** The most a camera may magnify. The editor offers less; a parser clamps to this. */
+export const MAX_CAMERA_SCALE = 8;
+
+/** The most keys a [ComposeCamera] may carry. A spec with more is rejected rather than truncated. */
+export const MAX_CAMERA_KEYS = 20000;
+
 export interface ComposeOutput {
   /** Rounded down to an even number natively - H.264 encoders refuse odd dimensions. */
   width: number;
@@ -401,6 +453,13 @@ export interface ComposeSpec {
    * `volume`/`muted` and the spec-level `originalMuted`/`originalVolume`.
    */
   tracks?: ComposeTrack[];
+  /**
+   * A camera moving over the VIDEO picture: the zooms a customer placed on the timeline, compiled.
+   * Absent is no camera at all, which is every spec written before this key, and every engine is
+   * expected to decide that ONCE when it builds its plan - the discipline `crop`, `rect` and `tracks`
+   * already ask for - so a post with no zoom renders byte for byte as it always has.
+   */
+  camera?: ComposeCamera;
   output: ComposeOutput;
   /** Ordered; empty means "no colour work at all". */
   filter: FilterOp[];

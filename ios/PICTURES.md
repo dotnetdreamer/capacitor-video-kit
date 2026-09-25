@@ -89,7 +89,10 @@ whole job folder, so these files go with it.
   `kCGImageSourceCreateThumbnailWithTransform: true`,
   `kCGImageSourceCreateThumbnailFromImageAlways: true`, and
   `kCGImageSourceThumbnailMaxPixelSize` about `min(4096, 2 * output long side)`). That turns the
-  image upright by EXIF and never holds a 48 MP image in memory. ImageIO reads the file's content,
+  image upright by EXIF and never holds a 48 MP image in memory. Under a zoom (`ComposeSpec.camera`)
+  the compositor samples the SOURCE through the camera, so the still's size is the ceiling on how
+  sharp a zoomed picture can be: consider `min(4096, ComposeSpecParser.maxCameraScale * output long
+  side)` there, weighing the extra encode time against it. ImageIO reads the file's content,
   not its extension: `prepareJob` names an input with no extension `.mp4`
   (`JobFolders.defaultExtension`), and a picture must still decode then.
 - **Keep the picture's own shape.** Do not letterbox or crop it: the compositor measures fit and

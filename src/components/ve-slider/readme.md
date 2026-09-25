@@ -81,6 +81,7 @@ What it promises, which is what six sheets are written against:
  - [ve-speed-sheet](../ve-speed-sheet)
  - [ve-transition-sheet](../ve-transition-sheet)
  - [ve-volume-sheet](../ve-volume-sheet)
+ - [ve-zoom-sheet](../ve-zoom-sheet)
 
 ### Graph
 ```mermaid
@@ -92,6 +93,7 @@ graph TD;
   ve-speed-sheet --> ve-slider
   ve-transition-sheet --> ve-slider
   ve-volume-sheet --> ve-slider
+  ve-zoom-sheet --> ve-slider
   style ve-slider fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

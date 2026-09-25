@@ -92,7 +92,7 @@ including the `overflow: hidden` ones, which drags the whole editor column off i
 | Name       | Type                              | Description |
 | ---------- | --------------------------------- | ----------- |
 | `top`      | `number`                          |             |
-| `behavior` | `"auto" \| "instant" \| "smooth"` |             |
+| `behavior` | `"smooth" \| "auto" \| "instant"` |             |
 
 #### Returns
 
@@ -126,6 +126,7 @@ Type: `Promise<void>`
  - [ve-transition-sheet](../ve-transition-sheet)
  - [ve-voiceover-sheet](../ve-voiceover-sheet)
  - [ve-volume-sheet](../ve-volume-sheet)
+ - [ve-zoom-sheet](../ve-zoom-sheet)
 
 ### Depends on
 
@@ -149,6 +150,7 @@ graph TD;
   ve-transition-sheet --> ve-sheet
   ve-voiceover-sheet --> ve-sheet
   ve-volume-sheet --> ve-sheet
+  ve-zoom-sheet --> ve-sheet
   style ve-sheet fill:#f9f,stroke:#333,stroke-width:4px
 ```
 

@@ -20,6 +20,7 @@ import { overlayEndMs } from './edit-ops';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
 import { compileTransition, transitionSpans } from './transitions';
+import { compileCamera } from './zoom';
 
 export interface ComposeSpecIds {
   jobId: string;
@@ -163,6 +164,13 @@ export async function toComposeSpec(manifest: EditManifest, uriByKey: ReadonlyMa
   // produced, byte for byte, and every engine keeps the path it takes for one.
   const baseMs = Math.round(clipsDurationMs(manifest.clips));
   if (totalMs > baseMs) spec.durationMs = totalMs;
+
+  // Only when a zoom is visible, for the reason `tracks` is: a post with no zoom is the spec this
+  // package has always produced, byte for byte, and every engine decides once, when it builds its
+  // plan, that there is no camera to apply. [compileCamera] answers `null` by the same test
+  // [isUntouched] makes, so the fast path and the wire can never disagree.
+  const camera = compileCamera(manifest.zooms ?? [], totalMs);
+  if (camera) spec.camera = camera;
 
   return spec;
 }

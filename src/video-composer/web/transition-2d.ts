@@ -14,6 +14,11 @@ import type { LayerDraw, TransitionDraw } from './painter';
  * and the finished frame is then placed on the output by the canvas's own transform, the outgoing
  * side over black and the incoming side over that through the mask.
  *
+ * A zoom needs nothing here either: the painter's `drawLayer2d`, which `drawSide` is, draws a side
+ * through its layer's camera onto the side's surface, so each side arrives as its clip's frame seen
+ * through the camera - the order `ComposeCamera` asks for - and everything below acts on it in
+ * output pixels as it always did.
+ *
  * What it gets exactly right: the move, scale and turn (a canvas transform IS the forward mapping
  * the contract inverts), the gain (repeated additive draws, each clamped at white exactly as
  * `min(rgb * gain, 1)` clamps), the tint (a fill at the tint's alpha is `mix`), and the mask, which

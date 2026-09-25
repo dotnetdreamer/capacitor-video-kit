@@ -30,7 +30,11 @@ enum TransitionRender {
     /// The base of one frame inside a window: the outgoing side over black, and the incoming side
     /// over that at `alpha` times the mask.
     ///
-    /// `from` and `to` are the two sides' WHOLE frames, opaque over `rect`. When one of them has no
+    /// `from` and `to` are the two sides' WHOLE frames, opaque over `rect`, and under a zoom each
+    /// arrives ALREADY seen through the camera (`EditCompositor.wholeFrame`): nothing in this file
+    /// knows the camera exists, and every step here - blur, split, pixelate, mask, move - acts in
+    /// output pixels exactly as it does without one, so a zoom never magnifies a blur radius, a
+    /// pixelate cell or a mask edge. When one of them has no
     /// frame at this instant - a source that has not delivered one at the very edge of a segment -
     /// the other is drawn ALONE, as it plays without the transition. That is a cut for a frame
     /// rather than a flash of black, which is what the contract's recipe would give for a side that

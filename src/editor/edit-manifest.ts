@@ -15,7 +15,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 9;
+export const MANIFEST_VERSION = 10;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -269,6 +269,97 @@ export interface EditVoiceover {
   volume: number;
 }
 
+/**
+ * How a zoom's camera moves between the whole frame and its area. Each is an easing curve over the
+ * ramp; how LONG the ramp takes is [EditZoom.rampMs], and a ramp of 0 is an instant cut.
+ *  - `smooth`: eases out of rest and into the area (ease-in-out) - the default, the Screen Studio feel.
+ *  - `snappy`: leaves at once and settles gently, like a critically damped spring.
+ *  - `steady`: one constant speed.
+ */
+export type ZoomEase = 'smooth' | 'snappy' | 'steady';
+
+/**
+ * A zoom: for `startMs..endMs` of the OUTPUT timeline the camera closes in on an area of the frame and
+ * comes back out. The camera moves the VIDEO picture only - text, stickers, photos and effects stay
+ * where they were put (see [ComposeCamera]).
+ *
+ * The area is not stored as a rectangle: it always has the output's own aspect, so it is exactly a
+ * centre and a magnification - `scale` 2 shows half the width and half the height of the frame,
+ * centred on (`cx`, `cy`). That keeps it right when the output changes shape, and a centre too near
+ * an edge is held so the area stays on the frame.
+ *
+ * The ramps run INSIDE the window: the camera starts moving in at `startMs`, reaches the area
+ * `rampMs` later, holds, and is back to the whole frame at `endMs`. `rampMs` is what the customer
+ * ASKED for; a window too short for two ramps squeezes them when it is read (the transition
+ * precedent), so a zoom trimmed short and dragged back gets its ramps back as they were.
+ *
+ * Zooms never overlap - there is one camera. Two that touch or nearly touch PAN from one area to the
+ * next rather than zooming out and in again.
+ */
+export interface EditZoom {
+  id: string;
+  /** Output-timeline window. */
+  startMs: number;
+  endMs: number;
+  /** Centre of the area, 0..1 of the output frame, top-left origin. */
+  cx: number;
+  cy: number;
+  /** Magnification, [MIN_ZOOM_SCALE]..[MAX_ZOOM_SCALE]. */
+  scale: number;
+  /** How long the camera takes to move in, and again to move out. 0 is instant. */
+  rampMs: number;
+  ease: ZoomEase;
+}
+
+/** Every [ZoomEase], in the order a picker offers them; the first is the default. */
+export const ZOOM_EASES: readonly ZoomEase[] = ['smooth', 'snappy', 'steady'];
+
+/**
+ * The least a zoom magnifies. Below about a tenth the move reads as a wobble rather than a zoom, and
+ * a zoom at exactly 1 would be a window on the timeline that does nothing a customer can see.
+ */
+export const MIN_ZOOM_SCALE = 1.1;
+/**
+ * The most the editor offers. A 1080p screen recording at 4x is already showing a quarter of its
+ * pixels at full size; past that a recording goes soft however sharply it is sampled. The wire
+ * allows more ([MAX_CAMERA_SCALE]) so a later editor can offer it without a new spec.
+ */
+export const MAX_ZOOM_SCALE = 4;
+export const DEFAULT_ZOOM_SCALE = 2;
+/** The shortest zoom window: time for a ramp in and out that the eye can follow. */
+export const MIN_ZOOM_MS = 500;
+/** How long a zoom added at the playhead lasts - long enough to read what it closes in on. */
+export const DEFAULT_ZOOM_MS = 3000;
+export const DEFAULT_ZOOM_RAMP_MS = 700;
+export const MAX_ZOOM_RAMP_MS = 2000;
+/**
+ * A ceiling on absurdity rather than a memory cap: a zoom costs no bitmap, so it does NOT count
+ * toward [MAX_LAYERS]. It also bounds the compiled camera well under [MAX_CAMERA_KEYS].
+ */
+export const MAX_ZOOMS = 50;
+/**
+ * Two zooms closer than this PAN from one area to the next instead of zooming out and straight back
+ * in. Zooming out for half a second only to zoom in again is the seasick move every screen-recording
+ * tool learned to avoid; a gap this short is almost always one thought, split.
+ */
+export const ZOOM_CHAIN_GAP_MS = 1000;
+
+/**
+ * The part of a zoom's window the post actually plays, or `null` when none of it does - a zoom past
+ * the post's end, or one that magnifies nothing. Zooms are KEPT when the post is shortened beneath
+ * them and hidden here, the overlay rule, so pulling the end back out (or an undo) brings them back.
+ *
+ * The ONE predicate behind whether a zoom is visible: [isUntouched], the compiled camera and the
+ * timeline all read it, so the fast path can never post a raw file whose zoom the render would show.
+ */
+export function zoomWindow(zoom: EditZoom, totalMs: number): { startMs: number; endMs: number } | null {
+  if (!(zoom.scale > 1)) return null;
+  const startMs = Math.max(0, zoom.startMs);
+  const endMs = Math.min(zoom.endMs, totalMs);
+  if (!(startMs < totalMs - 1) || !(endMs > startMs)) return null;
+  return { startMs, endMs };
+}
+
 /** Each -1..1 with 0 as "untouched", except `fade` which is 0..1. */
 export interface EditAdjust {
   brightness: number;
@@ -329,6 +420,16 @@ export interface EditManifest {
   music: EditMusic | null;
   /** Sorted by `startMs`, never overlapping. */
   voiceovers: EditVoiceover[];
+  /**
+   * Where the camera closes in on part of the picture, on the OUTPUT timeline like the overlays - a
+   * clip trimmed earlier in the post slides its footage under a zoom exactly as it does under text.
+   * Sorted by `startMs` and never overlapping, because there is one camera; two may touch, and then
+   * the camera pans between them.
+   *
+   * Always present, like [videoTracks]. Empty is every manifest written before version 10, and empty
+   * is what [toComposeSpec] turns back into a spec with no `camera` key at all.
+   */
+  zooms: EditZoom[];
   /**
    * The frame the post is rendered at, and the frame every fraction here is a fraction OF.
    *
@@ -1223,6 +1324,7 @@ export function emptyManifest(): EditManifest {
     overlays: [],
     music: null,
     voiceovers: [],
+    zooms: [],
     output: { ...DEFAULT_OUTPUT },
   };
 }
@@ -1257,6 +1359,12 @@ export function emptyManifest(): EditManifest {
  * Version 8 to version 9 adds pictures on the timeline, and again nothing is written into an older
  * manifest: a version-8 manifest has no `image` on any segment, and absent is a video, which is all
  * a segment could be before.
+ *
+ * Version 9 to version 10 adds zooms, and nothing is written into an older manifest: a version-9
+ * manifest has no `zooms`, which reads as `[]`, and an empty list is what [toComposeSpec] turns into a
+ * spec with no `camera` key - byte for byte the spec version 9 produced. The bump itself matters: this
+ * function rebuilds only the keys it knows, so an OLDER build reading a version-10 draft drops its
+ * zooms, and the version is the only thing that says so.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1383,6 +1491,7 @@ export function normaliseManifest(input: unknown): EditManifest {
     overlays,
     music,
     voiceovers: voiceovers.sort((a, b) => a.startMs - b.startMs),
+    zooms: normaliseZooms(raw['zooms']),
     // Absent is [DEFAULT_OUTPUT], which is the frame every manifest written before version 7 was
     // rendered at - so one of those reopens at the size it was always going to be, and its
     // fractions go on meaning what they meant.
@@ -1557,6 +1666,10 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   if (manifest.fit === 'cover' && !fillsFrame(sourceAspect, manifest.output)) return false;
   if (manifest.overlays.length > 0) return false;
   if (manifest.music || manifest.voiceovers.length > 0) return false;
+  // [zoomWindow] is the same test the compiled camera makes, so a zoom the render would show is
+  // never lost by posting the file as it is - and one parked past the end costs no re-encode.
+  const totalMs = totalDurationMs(manifest);
+  if ((manifest.zooms ?? []).some((zoom) => zoomWindow(zoom, totalMs))) return false;
   return manifest.clips.every((clip) => {
     const source = durations.get(clip.clipKey) ?? 0;
     const untrimmed = clip.inMs === 0 && (source === 0 || Math.abs(clip.outMs - source) <= 100);
@@ -1591,6 +1704,67 @@ export function round4(value: number): number {
 
 function num(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * One zoom's look held to what the editor offers: the scale FIRST, because the range the centre may
+ * take depends on it (`0.5 / scale .. 1 - 0.5 / scale`, the area kept on the frame), then the centre
+ * slid back in rather than squashed, the ramp to 0..[MAX_ZOOM_RAMP_MS] and an unknown ease to the
+ * default - falling back keeps the customer's area, dropping the zoom would throw it away.
+ *
+ * Rounded BEFORE the clamp, and clamped to bounds themselves rounded INWARD to the same four decimals,
+ * so the result is both on the frame and a fixed point: normalising it again changes nothing. A bound
+ * like `1 - 0.5 / 3` is not a four-decimal number, and clamping to it exactly made the next pass round
+ * the centre again - a patch that changed nothing came back as a change, and an undo step with it.
+ * The window is left as it is: where a zoom may sit depends on its neighbours, which only the list knows.
+ */
+export function normaliseZoom(zoom: EditZoom): EditZoom {
+  const scale = clamp(round4(num(zoom.scale, DEFAULT_ZOOM_SCALE)), MIN_ZOOM_SCALE, MAX_ZOOM_SCALE);
+  const lo = Math.ceil((0.5 / scale) * 10_000 - 1e-6) / 10_000;
+  const hi = 1 - lo;
+  return {
+    id: zoom.id,
+    startMs: Math.max(0, Math.round(num(zoom.startMs, 0))),
+    endMs: Math.max(0, Math.round(num(zoom.endMs, 0))),
+    cx: round4(clamp(round4(num(zoom.cx, 0.5)), lo, hi)),
+    cy: round4(clamp(round4(num(zoom.cy, 0.5)), lo, hi)),
+    scale,
+    rampMs: Math.round(clamp(num(zoom.rampMs, DEFAULT_ZOOM_RAMP_MS), 0, MAX_ZOOM_RAMP_MS)),
+    ease: ZOOM_EASES.includes(zoom.ease) ? zoom.ease : ZOOM_EASES[0],
+  };
+}
+
+/**
+ * Stored zooms made into the list [EditManifest.zooms] promises: sorted, one camera's worth. Anything
+ * that is not an object is dropped, ids are made unique (the clip `~` idiom), and an overlap is
+ * resolved by starting the later zoom where the earlier one ends - dropping it if what is left is
+ * under [MIN_ZOOM_MS]. Voiceovers are only sorted; zooms go further because two engines reading two
+ * overlapping cameras could disagree about which one wins, and the camera must be one function of
+ * time. Not cut to the post's length, for the reason `durationMs` is not: a zoom past the end is
+ * hidden when read ([zoomWindow]) and comes back when the end does.
+ */
+function normaliseZooms(value: unknown): EditZoom[] {
+  if (!Array.isArray(value)) return [];
+  const used = new Set<string>();
+  const read: EditZoom[] = [];
+  value.forEach((raw: any, i: number) => {
+    if (!raw || typeof raw !== 'object') return;
+    if (!Number.isFinite(raw.startMs) || !Number.isFinite(raw.endMs)) return;
+    let id = typeof raw.id === 'string' && raw.id ? raw.id : `zoom-${i}`;
+    while (used.has(id)) id = `${id}~`;
+    used.add(id);
+    read.push(normaliseZoom({ ...raw, id }));
+  });
+  read.sort((a, b) => a.startMs - b.startMs);
+  const out: EditZoom[] = [];
+  for (const zoom of read) {
+    const prev = out[out.length - 1];
+    const startMs = prev ? Math.max(zoom.startMs, prev.endMs) : zoom.startMs;
+    if (zoom.endMs - startMs < MIN_ZOOM_MS) continue;
+    out.push(startMs === zoom.startMs ? zoom : { ...zoom, startMs });
+    if (out.length === MAX_ZOOMS) break;
+  }
+  return out;
 }
 
 /** A stored fit, or `undefined` for anything else - including the absence that means "the post's". */

@@ -13,6 +13,7 @@ import { ClipMedia } from './clip-media';
 import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPlayer } from './preview-player';
+import { zoomArea, zoomLevelLabel } from './zoom-area';
 
 /** One layer as the render places it. Positions and sizes are percentages of the frame. */
 interface LayerView {
@@ -64,6 +65,14 @@ interface BoxView {
   top: number;
   width: number;
   height: number;
+}
+
+/** The zoom area box as the page draws it; see [VePreview.zoomWindow]. */
+interface ZoomWindowView {
+  box: BoxView;
+  /** The playhead is outside the zoom's window: the box is still editable, and drawn dashed to say so. */
+  ghost: boolean;
+  level: string;
 }
 
 function sameBox(a: BoxView, b: BoxView): boolean {
@@ -591,6 +600,33 @@ export class VePreview implements EditorPlayer {
     (a, b) => (a === null || b === null ? a === b : sameBox(a, b)),
   );
 
+  /**
+   * The zoom AREA drawn over the frame while the zoom sheet is open on a zoom and the camera is off:
+   * the part of the unzoomed frame the zoom will fill the screen with, `1/scale` of the frame each
+   * way, centred on the zoom's (cx, cy). See [zoomArea].
+   *
+   * Only while the camera is NOT live - the store's rule, which is paused with the sheet open - so
+   * the box is always drawn over the whole frame it is chosen from. While playing the canvas shows
+   * the zoom itself and a box over a zoomed picture would be a box around the wrong pixels. Ghosted
+   * while the playhead is outside the zoom's window: the area does not depend on time, so it can be
+   * edited from anywhere, but the frame under it is not one the zoom will be magnifying.
+   */
+  private readonly zoomWindow = computedWith<ZoomWindowView | null>(
+    () => {
+      const store = this.ctx.store;
+      if (store.panel.value !== 'zoom' || store.cameraLive.value) return null;
+      const zoom = store.selectedZoom.value;
+      if (!zoom) return null;
+      const at = store.playheadMs.value;
+      return {
+        box: percent(zoomArea(zoom)),
+        ghost: at < zoom.startMs || at >= zoom.endMs,
+        level: zoomLevelLabel(zoom.scale),
+      };
+    },
+    (a, b) => (a === null || b === null ? a === b : sameBox(a.box, b.box) && a.ghost === b.ghost && a.level === b.level),
+  );
+
   /* ========================================================================================= */
   /* Lifecycle                                                                                 */
   /* ========================================================================================= */
@@ -681,7 +717,14 @@ export class VePreview implements EditorPlayer {
     });
     // The base track is drawn from the player's own reading of its two elements, one reading a
     // frame, so a swap between them can never pair one clip's framing with the other's picture.
-    this.canvas.attachBase(() => this.player?.baseShot() ?? null, [baseMedia, partnerMedia]);
+    // The clock is the player's too, for the zoom camera on frames that have no base shot to read
+    // the instant off - the tail past the base track - so a zoom never falls back to the playhead
+    // signal's 30 Hz steps while playing.
+    this.canvas.attachBase(
+      () => this.player?.baseShot() ?? null,
+      [baseMedia, partnerMedia],
+      () => this.player?.instantMs() ?? store.playheadMs.value,
+    );
     store.attachPlayer(this);
     this.player.start();
 
@@ -722,7 +765,16 @@ export class VePreview implements EditorPlayer {
      */
     this.disposers.push(
       deferredEffect(
-        () => [store.previewLayers.value, store.filterOps.value, store.frameAspect.value] as const,
+        // The zoom camera redraws a paused frame too: a zoom edited, and the camera switching on
+        // and off as the zoom sheet opens, closes and plays.
+        () =>
+          [
+            store.previewLayers.value,
+            store.filterOps.value,
+            store.frameAspect.value,
+            store.camera.value,
+            store.cameraLive.value,
+          ] as const,
         () => this.canvas?.request(),
       ),
     );
@@ -922,6 +974,7 @@ export class VePreview implements EditorPlayer {
       const selection = this.selectionBox.value;
       const ph = this.placeholder.value;
       const crop = this.cropWindow.value;
+      const zoom = this.zoomWindow.value;
 
       return (
         <Host>
@@ -1051,6 +1104,29 @@ export class VePreview implements EditorPlayer {
                   <span class="pv__crop-edge pv__crop-edge--r"></span>
                   <span class="pv__crop-edge pv__crop-edge--b"></span>
                   <span class="pv__crop-edge pv__crop-edge--l"></span>
+                </div>
+              )}
+
+              {/*
+                The zoom area: the part of the frame the selected zoom fills the screen with. The
+                dimming is its own shadow, as the crop window's is. Drawn only - every pointer on the
+                frame is `OverlayGestures`'s, which works out body or corner from the zoom itself (see
+                [zoomCornerAt]) - and deliberately NOT aria-hidden, so an e2e driver can find the box
+                by its name and read the level off it.
+              */}
+              {zoom && (
+                <div
+                  key="zoom"
+                  class={{ 'pv__zoom': true, 'pv__zoom--ghost': zoom.ghost }}
+                  role="img"
+                  aria-label="Zoom area"
+                  style={boxStyle(zoom.box)}
+                >
+                  <span class="pv__zoom-corner pv__zoom-corner--tl"></span>
+                  <span class="pv__zoom-corner pv__zoom-corner--tr"></span>
+                  <span class="pv__zoom-corner pv__zoom-corner--bl"></span>
+                  <span class="pv__zoom-corner pv__zoom-corner--br"></span>
+                  <span class="pv__zoom-level">{zoom.level}</span>
                 </div>
               )}
 

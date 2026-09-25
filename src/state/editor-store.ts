@@ -7,7 +7,20 @@ import {
   type EditOutput,
   MAX_LAYERS,
   MAX_VIDEO_TRACKS,
+  MAX_ZOOMS,
   MIN_LAYER_MS,
+  DEFAULT_ZOOM_MS,
+  DEFAULT_ZOOM_RAMP_MS,
+  DEFAULT_ZOOM_SCALE,
+  addZoom as addZoomOp,
+  compileCamera,
+  deleteZoom as deleteZoomOp,
+  duplicateZoom as duplicateZoomOp,
+  findZoom,
+  setZoomWindow as setZoomWindowOp,
+  updateZoom as updateZoomOp,
+  type EditZoom,
+  type ZoomPatch,
   addOverlay,
   addVideoTrack,
   addVoiceover,
@@ -694,6 +707,8 @@ export class EditorStore {
    * entry of its own above it and undo keeps to the order things were done in.
    */
   private pushHistory(manifest: EditManifest, label: string, grouped = false): void {
+    // Any step recorded here ends a coalesced run ([commitCoalesced] restarts one after it).
+    this.coalesced = null;
     const group = this.historyGroup;
     // Folded into the group's entry when that entry is still the newest step: the manifest it holds
     // is the one from before the group began, which is exactly what one undo of the whole group has
@@ -749,9 +764,15 @@ export class EditorStore {
       (sel.kind === 'clip' && !!findClip(m, sel.id)) ||
       (sel.kind === 'overlay' && !!findOverlay(m, sel.id)) ||
       (sel.kind === 'voice' && !!findVoiceover(m, sel.id)) ||
+      (sel.kind === 'zoom' && !!findZoom(m, sel.id)) ||
       (sel.kind === 'music' && !!m.music);
     if (!stillThere) this.select(null);
     if (this.historyGroup) this.historyGroup.entry = -1;
+    // A slider dragged after an undo starts a step of its own rather than folding into one that is
+    // now on the redo stack.
+    this.coalesced = null;
+    // The zoom the sheet is on can be undone out of existence, like the transition sheet's boundary.
+    if (this.panel.value === 'zoom' && !this.selectedZoom.value) this.closePanel();
     // The boundary the transition sheet is on can be undone out of existence - an undo that takes
     // back the clip it was in front of.
     if (this.panel.value === 'transition' && !this.targetBoundary.value) this.closePanel();
@@ -768,7 +789,7 @@ export class EditorStore {
     if (selection) this.toolbarMode.value = 'root';
     // A sheet that was about the old selection makes no sense for the new one.
     const panel = this.panel.value;
-    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition') this.closePanel();
+    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition' || panel === 'zoom') this.closePanel();
   }
 
   isSelected(selection: EditorSelection): boolean {
@@ -1013,11 +1034,17 @@ export class EditorStore {
 
   seek(outputMs: number): void {
     const ms = Math.max(0, Math.min(this.totalMs.value, outputMs));
+    // Moving the playhead with the zoom sheet open is looking at what the zoom does there; see
+    // [zoomView]. Only the customer seeks through the store - the player moves its own playhead.
+    if (this.panel.value === 'zoom') this.zoomView.value = 'result';
     if (this.player) this.player.seek(ms);
     else this.playheadMs.value = ms;
   }
 
   play(): void {
+    // Played in the zoom sheet, the move stays on screen where it is paused, rather than the frame
+    // dropping back to the area box the moment the customer stops it to look.
+    if (this.panel.value === 'zoom') this.zoomView.value = 'result';
     this.player?.play();
   }
 
@@ -1679,6 +1706,175 @@ export class EditorStore {
   }
 
   /* ========================================================================================= */
+  /* Zooms                                                                                     */
+  /* ========================================================================================= */
+
+  /** Every zoom on the post, in time order. */
+  readonly zooms = computed(() => this.manifest.value.zooms ?? []);
+  readonly selectedZoom = computed(() => {
+    const sel = this.selection.value;
+    return sel?.kind === 'zoom' ? findZoom(this.manifest.value, sel.id) : null;
+  });
+  /**
+   * The zooms compiled to the camera track the render gets - the one the preview samples, exactly as
+   * it samples [compileTransition] for a transition, so what is on screen is what is exported. Only
+   * recomputed when the manifest changes, never per frame; the preview reads it through [cameraAt].
+   */
+  readonly camera = computed(() => compileCamera(this.zooms.value, this.totalMs.value));
+  /**
+   * What the stage shows while the zoom sheet is open and paused: the whole frame with the area box
+   * on it (`area`), or the zoomed picture at the playhead (`result`).
+   *
+   * The last thing the customer did decides it, because each of the two things they do in that sheet
+   * needs the other picture. Opening the sheet, or touching the video, is choosing WHERE to zoom, and
+   * that wants the whole frame to choose it on. Dragging the timeline, or pressing play, is looking at
+   * WHAT the zoom does, and a whole frame there answers a question nobody asked: the move could only be
+   * seen by playing it, never by scrubbing through it to the moment in question. Outside the sheet the
+   * camera is always on, so this says nothing there.
+   */
+  readonly zoomView = signal<'area' | 'result'>('area');
+
+  /**
+   * Whether the preview applies [camera] at all right now.
+   *
+   * Off in the crop sheet, which frames the SOURCE and has to show all of it. In the zoom sheet it is
+   * on while playing and, paused, when [zoomView] is `result`; off while the area is being drawn, which
+   * needs the whole frame the way the crop sheet needs the whole source.
+   */
+  readonly cameraLive = computed(() => {
+    const panel = this.panel.value;
+    if (panel === 'crop') return false;
+    if (panel === 'zoom') return this.playing.value || this.zoomView.value === 'result';
+    return true;
+  });
+
+  /** Back to drawing the area: the whole frame and its box. The preview calls it on a touch. */
+  showZoomArea(): void {
+    this.zoomView.value = 'area';
+  }
+
+  /** The coalesce key of the last zoom step, and the history entry it made; see [commitCoalesced]. */
+  private coalesced: { key: string; entry: number } | null = null;
+
+  /**
+   * Adds a zoom at the playhead - [DEFAULT_ZOOM_MS] on the middle of the frame at
+   * [DEFAULT_ZOOM_SCALE] - shortened to fit before the next zoom and the end of the post, then opens
+   * the zoom sheet on it so the area can be drawn straight away. Paused first, because the sheet
+   * shows the whole frame only while paused.
+   */
+  addZoomAtPlayhead(): void {
+    if (this.manifest.value.zooms.length >= MAX_ZOOMS) {
+      this.showToast(`You can add up to ${MAX_ZOOMS} zooms`);
+      this.haptic('warning');
+      return;
+    }
+    const total = this.totalMs.value;
+    const at = Math.round(this.playheadMs.value);
+    const id = this.newId('zoom');
+    const zoom: EditZoom = {
+      id,
+      startMs: at,
+      endMs: at + DEFAULT_ZOOM_MS,
+      cx: 0.5,
+      cy: 0.5,
+      scale: DEFAULT_ZOOM_SCALE,
+      rampMs: DEFAULT_ZOOM_RAMP_MS,
+      ease: 'smooth',
+    };
+    if (!this.commit('Add zoom', m => addZoomOp(m, zoom, total))) {
+      this.showToast('No room for a zoom here');
+      this.haptic('warning');
+      return;
+    }
+    this.openZoom(id);
+    this.haptic('light');
+  }
+
+  /**
+   * Selects a zoom and opens its sheet, paused and on the area view (see [zoomView]), so the whole
+   * frame is there to draw the area on.
+   */
+  openZoom(id: string): void {
+    if (!findZoom(this.manifest.value, id)) return;
+    this.pause();
+    this.select({ kind: 'zoom', id });
+    this.openPanel('zoom');
+    this.zoomView.value = 'area';
+  }
+
+  /**
+   * Changes a zoom's area, level, ramp or ease. One undo step labelled 'Zoom'; a slider or a drag
+   * passes a `coalesce` key and every call with the same key, one after another, folds into that one
+   * step, so a drag across the frame is one undo and not sixty.
+   */
+  updateZoom(id: string, patch: ZoomPatch, opts?: { coalesce?: string }): void {
+    this.commitCoalesced('Zoom', m => updateZoomOp(m, id, patch), opts?.coalesce);
+  }
+
+  /**
+   * Moves a zoom's window, stopping at its neighbours and the end of the post and never shorter
+   * than [MIN_ZOOM_MS]. Coalesces as [updateZoom] does, for the timeline's edge drags.
+   */
+  setZoomWindow(id: string, startMs: number, endMs: number, opts?: { coalesce?: string }): void {
+    const total = this.totalMs.value;
+    this.commitCoalesced('Zoom', m => setZoomWindowOp(m, id, startMs, endMs, total), opts?.coalesce);
+  }
+
+  /** A copy straight after the original, selected. Says so when there is no room there. */
+  duplicateZoom(id: string): void {
+    if (this.manifest.value.zooms.length >= MAX_ZOOMS) {
+      this.showToast(`You can add up to ${MAX_ZOOMS} zooms`);
+      this.haptic('warning');
+      return;
+    }
+    const newId = this.newId('zoom');
+    const total = this.totalMs.value;
+    if (!this.commit('Duplicate', m => duplicateZoomOp(m, id, newId, total))) {
+      this.showToast('No room for a copy after this zoom');
+      this.haptic('warning');
+      return;
+    }
+    if (this.panel.value === 'zoom') this.openZoom(newId);
+    else this.select({ kind: 'zoom', id: newId });
+    this.haptic('light');
+  }
+
+  /** Deletes a zoom; its sheet closes with it when it was the one open. */
+  deleteZoom(id: string): void {
+    if (!this.commit('Delete', m => deleteZoomOp(m, id))) return;
+    if (this.isSelected({ kind: 'zoom', id })) this.select(null);
+    if (this.panel.value === 'zoom' && !this.selectedZoom.value) this.closePanel();
+    this.haptic('light');
+  }
+
+  /**
+   * [commit], except that a step carrying the same `key` as the step just before it folds into it:
+   * the manifest moves and the revision counts (a host filing drafts sees every change), but no new
+   * undo entry is made, so one undo puts back what was there before the first of them.
+   *
+   * Only while that step is still the newest entry and nothing is waiting to be redone. Anything else
+   * recorded in between, an undo, or a redo ends the run, and the next call starts an entry of its
+   * own - the history group's rule, for one control rather than one sheet.
+   */
+  private commitCoalesced(label: string, fn: (m: EditManifest) => EditManifest | null, key?: string): boolean {
+    if (!key) return this.commit(label, fn);
+    this.flushGesture();
+    const before = this.manifest.value;
+    const after = fn(before);
+    if (!after || after === before) return false;
+    const run = this.coalesced;
+    if (run && run.key === key && run.entry >= 0 && run.entry === this.past.value.length - 1 && this.future.value.length === 0) {
+      this.revision.value++;
+      this.manifest.value = after;
+      return true;
+    }
+    this.pushHistory(before, label);
+    this.manifest.value = after;
+    this.coalesced = { key, entry: this.past.value.length - 1 };
+    return true;
+  }
+
+  /* ========================================================================================= */
   /* Delete / duplicate, whatever is selected                                                  */
   /* ========================================================================================= */
 
@@ -1688,6 +1884,8 @@ export class EditorStore {
     if (sel.kind === 'clip') this.deleteSelectedClip();
     else if (sel.kind === 'overlay') this.deleteSelectedOverlay();
     else if (sel.kind === 'music') this.removeMusic();
+    // Before the voice catch-all below, or Delete with a zoom selected would silently do nothing.
+    else if (sel.kind === 'zoom') this.deleteZoom(sel.id);
     else this.removeSelectedVoice();
   }
 

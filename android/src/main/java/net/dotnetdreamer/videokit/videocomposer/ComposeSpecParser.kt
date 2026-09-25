@@ -95,6 +95,10 @@ object ComposeSpecParser {
 
         val audio = parseAudio(json.optJSONObject("audio"))
 
+        // Read last, after everything that was already read before it existed, so a spec that is
+        // broken somewhere else reports the same first failure it always did.
+        val camera = parseCamera(json.opt("camera"))
+
         return ComposeSpec(
             jobId = jobId,
             batchId = batchId,
@@ -106,7 +110,66 @@ object ComposeSpecParser {
             posterAtMs = json.optLong("posterAtMs", 0L).coerceAtLeast(0L),
             durationMs = json.optLong("durationMs", 0L).coerceAtLeast(0L),
             tracks = tracks,
+            camera = camera,
         )
+    }
+
+    /**
+     * The zoom camera, by the rules `normaliseCamera` in `src/editor/camera.ts` states for every
+     * engine, so the web export, iOS and this one draw the same track or refuse the same one.
+     *
+     * REFUSED, as shape errors: a camera that is not an object, arrays of different lengths, a time
+     * that is not a finite number or goes back in time, and more than [CameraView.MAX_CAMERA_KEYS]
+     * keys - refused rather than truncated, because a post quietly missing the end of its zoom is
+     * not the post the customer made. CLAMPED, as values: the scale to 1..8 and each centre so the
+     * view stays on the frame, which is not tidiness but what makes folding the camera into each
+     * layer separately equal to one camera over the whole picture (see [CameraView.clamp]). A scale
+     * or centre that is not a number falls back to the whole frame, as `clampView` does.
+     *
+     * ABSENT, which is null: no key, JSON null, no keys at all, and a camera whose every key leaves
+     * the frame whole. That last one is the rule that keeps a post with a zoom deleted from paying
+     * for it - the plan sees null and builds exactly what it built before zooms existed.
+     */
+    private fun parseCamera(value: Any?): CameraTrack? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException("camera")
+        val atJson = o.opt("atMs")
+        if (atJson == null || atJson == JSONObject.NULL) return null
+        val at = atJson as? JSONArray ?: throw SpecException("camera.atMs")
+        val n = at.length()
+        if (n == 0) return null
+        val scale = o.opt("scale") as? JSONArray
+        val cx = o.opt("cx") as? JSONArray
+        val cy = o.opt("cy") as? JSONArray
+        if (scale?.length() != n || cx?.length() != n || cy?.length() != n) {
+            throw SpecException(
+                "camera",
+                "invalid_spec:camera atMs, scale, cx and cy must all have the same length",
+            )
+        }
+        if (n > CameraView.MAX_CAMERA_KEYS) {
+            throw SpecException("camera", "invalid_spec:camera at most ${CameraView.MAX_CAMERA_KEYS} keys")
+        }
+        val atMs = DoubleArray(n)
+        val scales = DoubleArray(n)
+        val xs = DoubleArray(n)
+        val ys = DoubleArray(n)
+        var moves = false
+        for (i in 0 until n) {
+            val t = finiteNumber(at.opt(i)) ?: throw SpecException("camera.atMs[$i]")
+            if (i > 0 && t < atMs[i - 1]) throw SpecException("camera.atMs[$i]")
+            val view = CameraView.clamp(
+                finiteNumber(scale.opt(i)) ?: Double.NaN,
+                finiteNumber(cx.opt(i)) ?: Double.NaN,
+                finiteNumber(cy.opt(i)) ?: Double.NaN,
+            )
+            if (!CameraView.isIdentity(view)) moves = true
+            atMs[i] = t
+            scales[i] = view.scale
+            xs[i] = view.cx
+            ys[i] = view.cy
+        }
+        return if (moves) CameraTrack(atMs, scales, xs, ys) else null
     }
 
     /**

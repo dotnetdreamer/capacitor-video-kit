@@ -1,4 +1,5 @@
 import type {
+  ComposeCamera,
   ComposeFit,
   ComposePlacement,
   ComposeRect,
@@ -11,6 +12,7 @@ import type {
 } from '../definitions';
 
 import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, placementRange } from '../../editor';
+import { normaliseCamera } from '../../editor/camera';
 
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
 
@@ -188,6 +190,9 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     };
   });
 
+  // After the overlays, in the fixed order the native parsers read the top level in.
+  const camera = readCamera(spec.camera);
+
   const durationMs = Math.max(0, Math.round(finite(spec.durationMs, 0)));
 
   const audio = spec.audio ?? {
@@ -208,6 +213,9 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     // read back as a number the plan would have to compare against the clips a second time.
     ...(durationMs > 0 ? { durationMs } : {}),
     ...(tracks.length > 0 ? { tracks } : {}),
+    // Left off for a camera that moves nothing, for the same reason as the two above: absent is
+    // what the plan tests to take the path every post without a zoom has always taken.
+    ...(camera ? { camera } : {}),
     output: {
       width,
       height,
@@ -249,6 +257,41 @@ export function pngPayload(dataUrl: string): string {
 }
 
 /* -------------------------------------------------------------------------------------------- */
+
+const CAMERA_FIELDS = ['atMs', 'scale', 'cx', 'cy'] as const;
+
+/**
+ * The camera track, checked and clamped - or null for none, which is also what a track that never
+ * magnifies comes back as.
+ *
+ * The rules themselves are `normaliseCamera`'s, shared with the editor and the tests, and NOT
+ * written again here: a clamp copied into two files is a clamp that drifts, and a camera clamped one
+ * way in the export and another in the preview puts the zoom in two different places. What this adds
+ * is the parser's side of it - the SHAPE (an object of four arrays), and the refusal turned into a
+ * [SpecError] naming the path that broke, as every other refusal in this file does. A key out of
+ * range is clamped, not refused; a track no engine could honour - arrays of different lengths, more
+ * than `MAX_CAMERA_KEYS` keys, a time that is not a number or goes backwards - is refused.
+ *
+ * `null` reads as absent, as it does for `crop` and `rect`. The arrays that come back are new ones,
+ * so a caller still editing its own spec cannot move the camera under a render already running.
+ */
+function readCamera(value: unknown): ComposeCamera | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new SpecError('camera');
+  const raw = value as Record<string, unknown>;
+  for (const field of CAMERA_FIELDS) {
+    if (!Array.isArray(raw[field])) throw new SpecError(`camera.${field}`);
+  }
+  try {
+    return normaliseCamera(raw as unknown as ComposeCamera);
+  } catch (error) {
+    // The one refusal that names a key names it by its time, which is what went wrong with it.
+    const message = error instanceof Error ? error.message : String(error);
+    const key = /atMs\[(\d+)\]/.exec(message);
+    if (key) throw new SpecError(`camera.atMs[${key[1]}]`);
+    throw new SpecError('camera', `invalid_spec:${message}`);
+  }
+}
 
 /**
  * One segment, read the same way for the base track and every extra layer - a clip on the second

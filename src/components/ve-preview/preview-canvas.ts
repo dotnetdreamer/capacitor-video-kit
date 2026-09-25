@@ -1,3 +1,5 @@
+import { cameraAt, type CameraView } from '../../editor/camera';
+import type { ComposeCamera } from '../../video-composer/definitions';
 import { compileTransition, lookAt, transitionPreset, type CompiledTransition } from '../../editor/transitions';
 import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
@@ -90,6 +92,13 @@ interface Source {
  * cut the two elements exist to make seamless.
  */
 export interface BaseShot {
+  /**
+   * The output instant the shot was read at: the clock's, not the playhead's. The zoom camera is
+   * read at this same instant, so the picture and the camera over it come from ONE reading and a
+   * zoom cannot run a tick ahead of, or behind, the frame it magnifies. Absent in a hand-built shot,
+   * which is what the unit tests make; the canvas then falls back to the attached clock.
+   */
+  atMs?: number;
   /** The base clip under the playhead - inside a transition, the INCOMING one - as a layer. */
   layer: PreviewVideoLayer;
   /** The element showing it, or null while that element has no frame to give. */
@@ -138,6 +147,12 @@ export class PreviewCanvas {
    */
   private baseFeed: (() => BaseShot | null) | null = null;
   private baseElements: PreviewSource[] = [];
+  /**
+   * The output instant for a frame with no base shot to read it off - the tail past the base track,
+   * a post with no clips - so the camera keeps running off the player's clock there too. See
+   * [PreviewPlayer.instantMs]. Null only on a canvas built without a player, and then the playhead.
+   */
+  private clock: (() => number) | null = null;
 
   private rafId = 0;
   private pending = false;
@@ -187,9 +202,10 @@ export class PreviewCanvas {
    * name, which are listened to exactly as a track's element is. Once, from the component's set-up;
    * the elements live as long as the component does.
    */
-  attachBase(feed: () => BaseShot | null, elements: readonly PreviewSource[]): void {
+  attachBase(feed: () => BaseShot | null, elements: readonly PreviewSource[], clock?: () => number): void {
     for (const video of this.baseElements) this.release(video);
     this.baseFeed = feed;
+    this.clock = clock ?? null;
     this.baseElements = [...elements];
     for (const video of this.baseElements) this.listenTo(video);
     this.request();
@@ -362,10 +378,19 @@ export class PreviewCanvas {
       this.waitingSince = 0;
     }
 
+    // The zoom camera, read at the SAME instant the base picture was: the shot's own reading, or the
+    // player's clock where there is no shot. Off - the whole frame - whenever the store says the
+    // camera is not live: the crop sheet's tool view, and a zoom's area being drawn in its sheet, whose
+    // box is drawn over the unzoomed frame it is chosen from. A scrub in that sheet turns it back on
+    // (see [EditorStore.zoomView]). See [cameraDraws].
+    const camera = previewCamera(this.store.cameraLive.value, this.store.camera.value, shot?.atMs ?? this.clock?.() ?? this.store.playheadMs.value);
+
     painter.setColour(this.colour(), this.store.previewCss.value);
+    // Warmed with the picture unzoomed: a warm-up frame is thrown away, and it only has to build the
+    // transition's programs and targets, which a camera does not change.
     const side = draws[0] ? warmSide(draws[0]) : null;
     if (side) this.warmUp(painter, side);
-    painter.paintLayers(draws);
+    painter.paintLayers(cameraDraws(draws, camera));
   }
 
   /**
@@ -402,10 +427,13 @@ export class PreviewCanvas {
   /** One redraw, `ms` from now, for a wait that no element event may come to end. */
   private retryIn(ms: number): void {
     if (this.retryTimer || this.playing) return;
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null;
-      this.request();
-    }, Math.ceil(ms) + 5);
+    this.retryTimer = setTimeout(
+      () => {
+        this.retryTimer = null;
+        this.request();
+      },
+      Math.ceil(ms) + 5,
+    );
   }
 
   /** The post's colour as the shader wants it, folded once per filter rather than once per frame. */
@@ -523,6 +551,41 @@ function drawableOf(video: PreviewSource): LayerSource {
   return video instanceof ClipMedia ? (video.drawable ?? video.element) : video;
 }
 
+/**
+ * The camera the preview draws a frame through: the compiled track read at `atMs`, or null - the
+ * whole frame, the old path - whenever the store says the camera is not `live`. It is not live while
+ * the crop sheet is open, whose stage and window are worked out on the unzoomed frame, nor while a
+ * zoom is being edited paused, whose area box is drawn over the unzoomed frame it is chosen from.
+ * Everywhere else - playing, scrubbing, paused with nothing zoom-related open - it is, so what the
+ * customer sees is what the export will draw.
+ */
+export function previewCamera(live: boolean, camera: ComposeCamera | null | undefined, atMs: number): CameraView | null {
+  return live ? cameraAt(camera, atMs) : null;
+}
+
+/**
+ * Every VIDEO layer of a frame seen through the zoom camera: the base, each extra track, and both
+ * sides of a transition, each side's whole frame through the camera before the transition's look
+ * acts on it in output pixels - the order [ComposeCamera] fixes for every engine.
+ *
+ * The camera rides on each draw as the painter's own `camera` field rather than being folded into
+ * `dest` here, so the painter samples the SOURCE through it and a 3x zoom is drawn from the source's
+ * pixels, not from an upscaled frame. Overlays never pass through here: in the preview they are DOM
+ * over the canvas and stay put by construction, which is the contract's "overlays are not moved".
+ *
+ * A null camera hands back the very same array, so a post with no zooms - and every moment between
+ * zooms - takes the old path exactly, allocation and all.
+ */
+export function cameraDraws(draws: (LayerDraw | TransitionDraw)[], camera: CameraView | null): (LayerDraw | TransitionDraw)[] {
+  if (!camera) return draws;
+  return draws.map(draw => {
+    if ('kind' in draw && draw.kind === 'transition') {
+      return { ...draw, from: draw.from && { ...draw.from, camera }, to: draw.to && { ...draw.to, camera } };
+    }
+    return { ...(draw as LayerDraw), camera };
+  });
+}
+
 /** A real picture to warm a transition up with: the base layer, or either side of a transition. */
 function warmSide(draw: LayerDraw | TransitionDraw): LayerDraw | null {
   const layer = 'kind' in draw && draw.kind === 'transition' ? (draw.to ?? draw.from) : (draw as LayerDraw);
@@ -552,12 +615,7 @@ function warmSide(draw: LayerDraw | TransitionDraw): LayerDraw | null {
  * the caller holds for a moment rather than paints; see [TAIL_WAIT_MS]. `cropOpen` draws the base
  * alone whatever the shot says, as the crop tool needs it.
  */
-export function baseDraw(
-  shot: BaseShot,
-  frameAspect: number,
-  cropOpen: boolean,
-  cropping: string | null,
-): { draw: LayerDraw | TransitionDraw | null; tailComing: boolean } {
+export function baseDraw(shot: BaseShot, frameAspect: number, cropOpen: boolean, cropping: string | null): { draw: LayerDraw | TransitionDraw | null; tailComing: boolean } {
   const to = shot.video ? layerDraw(shot.layer, shot.video, frameAspect, cropping === shot.layer.clipId) : null;
   const transition = cropOpen ? null : shot.transition;
   if (!transition) return { draw: to, tailComing: false };

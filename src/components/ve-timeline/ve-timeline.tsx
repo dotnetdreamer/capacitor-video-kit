@@ -8,6 +8,7 @@ import {
   MAX_POST_MS,
   MIN_CLIP_MS,
   MIN_LAYER_MS,
+  MIN_ZOOM_MS,
   clamp,
   effectPreset,
   findClip,
@@ -22,6 +23,7 @@ import {
   totalDurationMs,
   trackIdOfClip,
   transitionPreset,
+  zoomSlots,
   type ClipDropTarget,
   type EditOverlay,
   type OverlayKind,
@@ -31,6 +33,7 @@ import { clipWaveKey, type EditorSelection } from '../../state/editor.types';
 import {
   musicEndTrim,
   musicStartTrim,
+  zoomDragWindow,
   type ClipReorderDrag,
   type DragBase,
   type EndDrag,
@@ -45,6 +48,7 @@ import {
   type TimelineDrag,
   type TrimDrag,
   type VoiceDrag,
+  type ZoomDrag,
 } from './timeline-drags';
 import {
   LANE_PITCH,
@@ -67,6 +71,10 @@ import {
   rulerStepMs,
   segmentTiles,
   touchDistance,
+  zoomBar,
+  zoomBarLabel,
+  zoomNeighbours,
+  zoomSnapTargets,
   type DropRow,
   type FilmTile,
 } from './timeline-geometry';
@@ -236,6 +244,23 @@ interface MusicLaneView {
   canTrimEnd: boolean;
 }
 
+/**
+ * A zoom's bar. No centre in it: dragging the zoom's box on the preview rewrites the centre on every
+ * frame, and a view that carried it would repaint the whole timeline for a change it does not draw.
+ */
+interface ZoomBarView {
+  id: string;
+  x: number;
+  w: number;
+  rampInPx: number;
+  rampOutPx: number;
+  selected: boolean;
+  /** `2.0x`, on the bar. */
+  text: string;
+  /** `Zoom 2.0x`, or `Zoom 2.0x, selected`. */
+  label: string;
+}
+
 interface VoiceLaneView {
   id: string;
   x: number;
@@ -285,6 +310,13 @@ interface PinchState {
  * Every cut of the base track carries LightCut's white dot, and a tap on one opens the transition
  * sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
  * that happens to start on one is still the timeline's scroll.
+ *
+ * Under the filmstrip, in the same fixed column, is the ZOOM row when the post has zooms: one bar per
+ * zoom (the camera closing in on an area of the picture - nothing to do with this timeline's own
+ * pinch zoom), its ramps drawn as a fade at each end from the same slots the camera compiler plays.
+ * A tap opens the zoom's sheet; the selected bar is dragged to move it and its handles retime it,
+ * stopping at the zooms either side, because there is one camera. It stays in the slim timeline
+ * over the zoom sheet, where the lanes are hidden.
  *
  * Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  *  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
@@ -980,6 +1012,49 @@ export class VeTimeline {
   });
 
   private readonly showLanes = computed(() => !this.compactSig.value || this.showVoiceLane.value);
+
+  /**
+   * The zooms' bars, from the slots the camera compiler plays, so the ramps drawn are the ramps
+   * rendered. Compared element by element: the store's `zooms` is a new array on every frame of a
+   * box drag on the preview, and only what the bar draws may wake the render.
+   */
+  private readonly zoomBars = computedWith<ZoomBarView[]>(
+    () => {
+      const store = this.ctx.store;
+      const zooms = store.zooms.value;
+      if (!zooms.length) return [];
+      const pps = store.pps.value;
+      const pad = this.pad.value;
+      const selection = store.selection.value;
+      const scales = new Map(zooms.map(zoom => [zoom.id, zoom.scale]));
+      return zoomSlots(zooms, store.totalMs.value).map(slot => {
+        const selected = selection?.kind === 'zoom' && selection.id === slot.id;
+        const scale = scales.get(slot.id) ?? 1;
+        return { id: slot.id, ...zoomBar(slot, pps, pad), selected, text: `${scale.toFixed(1)}x`, label: zoomBarLabel(scale, selected) };
+      });
+    },
+    (a, b) =>
+      sameList(
+        a,
+        b,
+        (x, y) =>
+          x.id === y.id && x.x === y.x && x.w === y.w && x.rampInPx === y.rampInPx && x.rampOutPx === y.rampOutPx && x.selected === y.selected && x.label === y.label,
+      ),
+  );
+
+  /** The selected zoom's two edge handles. */
+  private readonly zoomHandles = computed<TrimHandlesView | null>(() => {
+    const bar = this.zoomBars.value.find(b => b.selected);
+    return bar ? { id: bar.id, ...edgeHandles(bar.x, bar.w) } : null;
+  });
+
+  /**
+   * The zoom row sits in the FIXED column with the base track, under the filmstrip - not among the
+   * lanes, which scroll and which compact mode hides - so it is still on screen while the zoom's own
+   * sheet is open. In compact mode it is shown only for that sheet: the slim timeline over any other
+   * sheet has no height to spare for it.
+   */
+  private readonly showZoomRow = computed(() => this.zoomBars.value.length > 0 && (!this.compactSig.value || this.ctx.store.panel.value === 'zoom'));
 
   /**
    * The speaker's state on its own, rather than read off the manifest in the render. The render is
@@ -1695,6 +1770,10 @@ export class VeTimeline {
       if (id) this.startLayerDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), id, kind === 'layer-start' ? 'start' : 'end');
       return;
     }
+    if (kind === 'zoom-start' || kind === 'zoom-end') {
+      if (id) this.startZoomDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), id, kind === 'zoom-start' ? 'start' : 'end');
+      return;
+    }
     if (kind === 'music-start' || kind === 'music-end') {
       this.startMusicDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), kind === 'music-start' ? 'start' : 'end');
       return;
@@ -1825,6 +1904,9 @@ export class VeTimeline {
       case 'voice':
         if (id) this.toggleSelection({ kind: 'voice', id });
         return;
+      case 'zoom':
+        if (id) this.tapZoom(id);
+        return;
       case 'transition':
         // A tap and only a tap: a swipe that began on the dot was the browser's scroll, which ended
         // the press with a pointercancel before it could get here. A finger HELD on the dot is not a
@@ -1874,6 +1956,35 @@ export class VeTimeline {
     if (id) this.ctx.store.openTransition(id);
   };
 
+  /**
+   * A zoom tapped opens its sheet, selected; the selected one tapped again lets it go. The same
+   * toggle every bar here has, except that the way in is the sheet rather than only the tool row,
+   * because a zoom has nothing to do on the timeline beyond its window.
+   */
+  private tapZoom(id: string): void {
+    const store = this.ctx.store;
+    if (store.isSelected({ kind: 'zoom', id })) store.select(null);
+    else store.openZoom(id);
+    store.haptic('light');
+  }
+
+  /** Enter and Space on a focused zoom bar; see [onDotKey], which this copies. */
+  private readonly onZoomKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+    const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
+    if (!id) return;
+    event.preventDefault();
+    this.pressEndedAt = performance.now();
+    if (!event.repeat) this.tapZoom(id);
+  };
+
+  /** A bare click on a zoom bar - a screen reader's, or switch access; see [onDotClick]. */
+  private readonly onZoomClick = (event: MouseEvent): void => {
+    if (performance.now() - this.pressEndedAt < CLICK_ECHO_MS) return;
+    const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
+    if (id) this.tapZoom(id);
+  };
+
   private toggleSelection(selection: EditorSelection): void {
     const store = this.ctx.store;
     store.select(store.isSelected(selection) ? null : selection);
@@ -1902,6 +2013,10 @@ export class VeTimeline {
         return store.musicSelected.value;
       case 'voice':
         return !!press.id && store.isSelected({ kind: 'voice', id: press.id });
+      // Mandatory rather than a nicety: a selected bar is `touch-action: none`, so without a body
+      // drag a sideways finger on it would be neither a scroll nor a move.
+      case 'zoom':
+        return !!press.id && store.isSelected({ kind: 'zoom', id: press.id });
       default:
         return false;
     }
@@ -2062,6 +2177,35 @@ export class VeTimeline {
     });
   }
 
+  /**
+   * A zoom's window, moved or retimed. No store gesture: every frame goes through `setZoomWindow`
+   * with a coalesce key of the drag's own (`zoom-window:<n>`), which folds the whole drag into one
+   * undo step and keeps the next drag out of it; the op itself stops at the neighbours and the end of
+   * the post as this does.
+   */
+  private zoomDrags = 0;
+
+  private startZoomDrag(base: DragBase, id: string, mode: ZoomDrag['mode']): void {
+    const store = this.ctx.store;
+    const zooms = store.zooms.value;
+    const zoom = zooms.find(z => z.id === id);
+    if (!zoom) return;
+    const total = store.totalMs.value;
+    const { lo, hi } = zoomNeighbours(zooms, id, total);
+    this.beginDrag({
+      ...base,
+      kind: 'zoom',
+      mode,
+      id,
+      start0: Math.min(zoom.startMs, total),
+      end0: Math.min(zoom.endMs, total),
+      lo,
+      hi,
+      coalesce: `zoom-window:${++this.zoomDrags}`,
+      targets: [...this.snapTargets(), ...zoomSnapTargets(zooms, id)],
+    });
+  }
+
   private startMusicDrag(base: DragBase, mode: MusicDrag['mode']): void {
     const store = this.ctx.store;
     const music = store.manifest.value.music;
@@ -2083,6 +2227,8 @@ export class VeTimeline {
     const base = { ...this.dragBase(press.pointerId, press.x0, press.y0), x: press.x, y: press.y, moved: true };
     if (press.kind === 'layer' && press.id) {
       this.startLayerDrag(base, press.id, 'move');
+    } else if (press.kind === 'zoom' && press.id) {
+      this.startZoomDrag(base, press.id, 'move');
     } else if (press.kind === 'track-clip' && press.id) {
       this.startTrackDrag(base, press.id);
     } else if (press.kind === 'music') {
@@ -2278,6 +2424,7 @@ export class VeTimeline {
       case 'track':
       case 'end':
       case 'layer':
+      case 'zoom':
       case 'music':
       case 'voice': {
         if (!drag.moved) return false;
@@ -2286,6 +2433,7 @@ export class VeTimeline {
         else if (drag.kind === 'track') this.applyTrack(drag);
         else if (drag.kind === 'end') this.applyEnd(drag);
         else if (drag.kind === 'layer') this.applyLayer(drag);
+        else if (drag.kind === 'zoom') this.applyZoom(drag);
         else if (drag.kind === 'music') this.applyMusic(drag);
         else this.applyVoice(drag);
         return scrolling;
@@ -2432,6 +2580,26 @@ export class VeTimeline {
       this.noteSnap(drag, hit?.target ?? null);
       store.previewOverlayWindow(drag.id, drag.start0 + shift, drag.end0 + shift);
     }
+  }
+
+  /** One frame of a zoom's window: snapped like a layer's, then held between its neighbours. */
+  private applyZoom(drag: ZoomDrag): void {
+    const pps = this.ctx.store.pps.value;
+    const deltaMs = this.dragDeltaMs(drag, pps);
+    const targets = [...drag.targets, this.centreMs(pps)];
+    let edge: number;
+    if (drag.mode === 'start') edge = this.snapEdge(drag, drag.start0 + deltaMs, targets, pps);
+    else if (drag.mode === 'end') edge = this.snapEdge(drag, drag.end0 + deltaMs, targets, pps);
+    else {
+      // The whole window moves, keeping its length; whichever edge comes near something sticks.
+      let start = drag.start0 + deltaMs;
+      const hit = nearestSnap([start, start + (drag.end0 - drag.start0)], targets, pps);
+      if (hit) start += hit.shiftMs;
+      this.noteSnap(drag, hit?.target ?? null);
+      edge = start;
+    }
+    const next = zoomDragWindow(drag.mode, drag.start0, drag.end0, edge, drag.lo, drag.hi, MIN_ZOOM_MS);
+    this.ctx.store.setZoomWindow(drag.id, next.startMs, next.endMs, { coalesce: drag.coalesce });
   }
 
   private applyMusic(drag: MusicDrag): void {
@@ -2613,7 +2781,14 @@ export class VeTimeline {
       // The finger's last position may not have been applied yet.
       if (
         !cancelled &&
-        (drag.kind === 'trim' || drag.kind === 'track' || drag.kind === 'end' || drag.kind === 'layer' || drag.kind === 'music' || drag.kind === 'voice' || drag.kind === 'scrub')
+        (drag.kind === 'trim' ||
+          drag.kind === 'track' ||
+          drag.kind === 'end' ||
+          drag.kind === 'layer' ||
+          drag.kind === 'zoom' ||
+          drag.kind === 'music' ||
+          drag.kind === 'voice' ||
+          drag.kind === 'scrub')
       ) {
         this.applyDrag(drag, false);
       }
@@ -2659,6 +2834,9 @@ export class VeTimeline {
         break;
       case 'music':
         store.endGesture('Sound');
+        break;
+      case 'zoom':
+        // Nothing to close: every frame was already a coalesced step (see [startZoomDrag]).
         break;
       case 'voice':
         store.endGesture('Move voiceover');
@@ -2728,6 +2906,9 @@ export class VeTimeline {
         return lanes.querySelector<HTMLElement>('[data-row="music"]');
       case 'voice':
         return lanes.querySelector<HTMLElement>('[data-row="voice"]');
+      // On the fixed row under the filmstrip, which is always in view.
+      case 'zoom':
+        return null;
       case 'clip': {
         // A segment on the base track is on the fixed row above the lanes, which is always in view.
         const trackId = this.ctx.store.selectedClipTrackId.value;
@@ -2927,6 +3108,8 @@ export class VeTimeline {
                     : null}
                 </div>
 
+                {this.showZoomRow.value ? this.zoomRow() : null}
+
                 {this.showLanes.value ? this.lanes(compact, pad, rows, marks, reorder) : null}
               </div>
             </div>
@@ -2939,6 +3122,48 @@ export class VeTimeline {
         </Host>
       );
     });
+  }
+
+  /**
+   * The zoom row: one bar per zoom, its ramps drawn as a fade at either end so the bar reads as the
+   * camera going in, holding and coming back out, and the selected one's two handles.
+   *
+   * The bars are buttons, named with their state (`Zoom 2.0x, selected`) and never `aria-pressed`,
+   * for the reason the dots give. No `touch-action` of their own until selected: a swipe that starts
+   * on an unselected bar is the timeline's scroll. Keyed, as every row in this column is.
+   */
+  private zoomRow() {
+    const handles = this.zoomHandles.value;
+    return (
+      <div class="tl__zoom" key="zoom-row" data-row="zoom">
+        {this.zoomBars.value.map(bar => (
+          <button
+            type="button"
+            key={`zoom-${bar.id}`}
+            class={{ 'item': true, 'item--zoom': true, 'item--selected': bar.selected }}
+            data-hit="zoom"
+            data-id={bar.id}
+            aria-label={bar.label}
+            style={{ 'left': `${bar.x}px`, 'width': `${bar.w}px`, '--ramp-in': `${bar.rampInPx}px`, '--ramp-out': `${bar.rampOutPx}px` }}
+            onKeyDown={this.onZoomKey}
+            onClick={this.onZoomClick}
+          >
+            <span class="item__ramp item__ramp--in" aria-hidden="true"></span>
+            <span class="item__ramp item__ramp--out" aria-hidden="true"></span>
+            <span class="item__label" aria-hidden="true">
+              <ve-icon name="search-outline"></ve-icon>
+              <span class="item__text">{bar.text}</span>
+            </span>
+          </button>
+        ))}
+        {handles
+          ? [
+              <span class="handle handle--in" key="zoom-in" data-hit="zoom-start" data-id={handles.id} style={{ left: `${handles.inX}px` }}></span>,
+              <span class="handle handle--out" key="zoom-out" data-hit="zoom-end" data-id={handles.id} style={{ left: `${handles.outX}px` }}></span>,
+            ]
+          : null}
+      </div>
+    );
   }
 
   /**
@@ -3326,7 +3551,7 @@ type DragCursor = 'move' | 'resize' | null;
 function dragCursor(drag: TimelineDrag): DragCursor {
   if (drag.kind === 'trim' || drag.kind === 'end') return 'resize';
   // A layer's and a sound's two edge modes trim; the third moves the whole window.
-  if ((drag.kind === 'layer' || drag.kind === 'music') && drag.mode !== 'move') return 'resize';
+  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'music') && drag.mode !== 'move') return 'resize';
   return 'move';
 }
 

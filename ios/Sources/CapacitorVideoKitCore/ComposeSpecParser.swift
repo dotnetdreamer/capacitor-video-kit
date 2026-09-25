@@ -14,7 +14,8 @@ import Foundation
 /// wrong in two places has to name the same field on both platforms. Android's order is: `jobId`,
 /// `batchId`, the `clips` array, each clip (and, from the second clip on, straight after that clip's
 /// own fields, its `transitionIn`), the `tracks` count, each track and its own clips, `output`, each
-/// filter op, the `overlays` count, each overlay, `audio.music`, each voiceover, `posterAtMs`.
+/// filter op, the `overlays` count, each overlay, `audio.music`, each voiceover, `camera`,
+/// `posterAtMs`.
 /// `output` sitting in the middle of that is why `OutputDTO` decodes leniently and why everything
 /// after it holds its first error instead of throwing it (see `heldError`).
 ///
@@ -26,6 +27,11 @@ import Foundation
 /// SEVERAL unknown keys: see `firstUnknownKey`.
 enum ComposeSpecParser {
     static let maxOverlays = 30
+    /// `MAX_CAMERA_KEYS` and `MAX_CAMERA_SCALE` from `definitions.ts`. A camera with more keys is
+    /// REFUSED rather than truncated - a truncated camera would hold its last surviving key for the
+    /// rest of the post - and a key magnifying more is clamped, as every other out-of-range value is.
+    static let maxCameraKeys = 20000
+    static let maxCameraScale: Double = 8
     /// Every curve of a transition has the same number of samples, and this many at the least and
     /// at the most. Two is a straight line from start to end; 121 is three times what the editor
     /// sends, room for a finer catalogue without letting a spec carry a curve of any length at all.
@@ -148,7 +154,30 @@ enum ComposeSpecParser {
                            filter: d.filter,
                            overlays: overlays,
                            audio: audio,
-                           posterAtMs: d.posterAtMs)
+                           posterAtMs: d.posterAtMs,
+                           camera: d.camera.flatMap(cameraKeys))
+    }
+
+    /// A decoded camera with `normaliseCamera`'s clamps applied, key by key - or nil when it moves
+    /// nothing at all, which is the absent path. Every shape rule (lengths, the key cap, finite and
+    /// non-decreasing times) was already enforced by `CameraDTO`, where an error can still be held
+    /// behind `output`'s; all that is left here is the clamping, which cannot fail.
+    ///
+    /// Dropping a camera that never magnifies is the contract's rule, not a shortcut: it is what
+    /// makes a spec whose zooms were all deleted take exactly the path a spec with no `camera` key
+    /// takes, on this engine and on the other two.
+    private static func cameraKeys(_ c: CameraDTO) -> [ComposeCameraKey]? {
+        let n = c.atMs.count
+        guard n > 0 else { return nil }
+        var keys: [ComposeCameraKey] = []
+        keys.reserveCapacity(n)
+        var moves = false
+        for i in 0..<n {
+            let pose = CameraMath.clamped(scale: c.scale[i], cx: c.cx[i], cy: c.cy[i])
+            if !CameraMath.isIdentity(pose) { moves = true }
+            keys.append(ComposeCameraKey(atMs: c.atMs[i], scale: pose.scale, cx: pose.cx, cy: pose.cy))
+        }
+        return moves ? keys : nil
     }
 
     /// One decoded clip with its clamps applied. Shared by the base track and every extra layer,
@@ -481,13 +510,17 @@ private struct ComposeSpecDTO: Decodable {
     /// and every spec a post nobody has stretched still sends.
     let durationMs: Int64
 
-    /// The first error found in `filter`, `overlays` or `audio`, held rather than thrown so that
-    /// `validate` can run the `output` checks in front of it. Decoding stops at that first error,
+    /// nil for a spec with no `camera` key, or an explicit null. Shape-checked but NOT yet clamped:
+    /// `validate` clamps it, and drops it when it never magnifies.
+    let camera: CameraDTO?
+
+    /// The first error found in `filter`, `overlays`, `audio` or `camera`, held rather than thrown
+    /// so that `validate` can run the `output` checks in front of it. Decoding stops at that first error,
     /// which is what makes "the first one held" and "the first one Android reports" the same error.
     let heldError: SpecError?
 
     private enum K: String, CodingKey {
-        case jobId, batchId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs
+        case jobId, batchId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs, camera
     }
 
     init(from decoder: Decoder) throws {
@@ -630,9 +663,125 @@ private struct ComposeSpecDTO: Decodable {
         }
         audio = decodedAudio
 
+        // Last, after the voiceovers, where Android's `parseCamera` reads it, and HELD like
+        // everything else past `output`, so a spec that is wrong in both `output` and `camera` names
+        // `output` on both platforms. Absent, or null, is no camera. Present but not an object fails
+        // as `camera` - the transitions' rule and not the rectangles' - because a mangled camera
+        // means nothing, and rendering the post unzoomed in its place would ship a video nobody
+        // asked for without a word.
+        //
+        // Decoded directly rather than through `object`: `CameraDTO` throws Android's two custom
+        // messages, and `object` rebuilds every error from its path alone, which would drop them.
+        var decodedCamera: CameraDTO?
+        if held == nil && c.has(.camera) {
+            do {
+                decodedCamera = try c.decode(CameraDTO.self, forKey: .camera)
+            } catch let e as SpecError {
+                held = e
+            } catch {
+                // Capacitor's decoder throws a `DecodingError` when the value is not an object.
+                held = SpecError("camera")
+            }
+        }
+        camera = decodedCamera
+
         heldError = held
         posterAtMs = max(0, c.long(.posterAtMs, 0))
         durationMs = max(0, c.long(.durationMs, 0))
+    }
+}
+
+/// `camera`: four PARALLEL arrays, `atMs`, `scale`, `cx` and `cy`, exactly as `ComposeCamera` puts
+/// them on the wire. `normaliseCamera` in `src/editor/camera.ts` is the rule book; Android's
+/// `parseCamera` is the order and the wording, and this is its shape half, check for check.
+/// `ComposeSpecParser.cameraKeys` is its clamping half.
+///
+/// - `atMs` absent or null: no camera. `atMs` present but not an array: `camera.atMs`.
+/// - `atMs` empty: no camera.
+/// - `scale`, `cx` or `cy` not an array exactly as long as `atMs`: `camera`, with Android's message.
+/// - more than `maxCameraKeys` keys: `camera`, with Android's message - refused, never truncated.
+///   Checked AFTER the lengths, as Android does, and before a single element is read.
+/// - a time that is not a finite number, or that is less than the one before it:
+///   `camera.atMs[i]`. Equal times are legal - they are a step.
+/// - a `scale`, `cx` or `cy` element that is not a finite number is NOT refused: it is carried as
+///   NaN, and `CameraMath.clamped` reads NaN as the whole frame, which is what `clampView` does.
+///
+/// Full paths are thrown from here, not leaf paths: there is exactly one camera, so nothing above
+/// has an index to splice in.
+private struct CameraDTO: Decodable {
+    let atMs: [Double]
+    let scale: [Double]
+    let cx: [Double]
+    let cy: [Double]
+
+    private enum K: String, CodingKey {
+        case atMs, scale, cx, cy
+    }
+
+    init(from decoder: Decoder) throws {
+        // Not an object throws a DecodingError here, which the caller reports as `camera`.
+        let c = try decoder.container(keyedBy: K.self)
+        guard c.has(.atMs) else {
+            atMs = []
+            scale = []
+            cx = []
+            cy = []
+            return
+        }
+        guard var timeList = try? c.nestedUnkeyedContainer(forKey: .atMs),
+              let n = timeList.count else { throw SpecError("camera.atMs") }
+        guard n > 0 else {
+            atMs = []
+            scale = []
+            cx = []
+            cy = []
+            return
+        }
+        // Every length before any element, so a camera that is wrong in both its lengths and its
+        // key count reports the lengths, as Android does.
+        guard var scaleList = CameraDTO.list(c, .scale), scaleList.count == n,
+              var cxList = CameraDTO.list(c, .cx), cxList.count == n,
+              var cyList = CameraDTO.list(c, .cy), cyList.count == n else {
+            throw SpecError("camera", "invalid_spec:camera atMs, scale, cx and cy must all have the same length")
+        }
+        if n > ComposeSpecParser.maxCameraKeys {
+            throw SpecError("camera", "invalid_spec:camera at most \(ComposeSpecParser.maxCameraKeys) keys")
+        }
+        let times = CameraDTO.numbers(&timeList, n)
+        for i in 0..<n {
+            // NaN fails `isFinite`, so a time that was not a number at all stops here too.
+            guard times[i].isFinite else { throw SpecError("camera.atMs[\(i)]") }
+            if i > 0 && times[i] < times[i - 1] { throw SpecError("camera.atMs[\(i)]") }
+        }
+        atMs = times
+        scale = CameraDTO.numbers(&scaleList, n)
+        cx = CameraDTO.numbers(&cxList, n)
+        cy = CameraDTO.numbers(&cyList, n)
+    }
+
+    /// The array under `key`, not yet read, or nil when it is absent, null or not an array.
+    private static func list(_ c: KeyedDecodingContainer<K>, _ key: K) -> UnkeyedDecodingContainer? {
+        guard c.has(key) else { return nil }
+        return try? c.nestedUnkeyedContainer(forKey: key)
+    }
+
+    /// Exactly `n` numbers out of `list`, each a finite Double or NaN for anything else - a null,
+    /// a string, an object, or an element missing off the end.
+    ///
+    /// The loop is bounded by `n` and not by `isAtEnd`: the elements are read with `try?`, and a
+    /// container that failed to step past a bad element must not spin here for ever, nor hand back
+    /// fewer numbers than the other three arrays and send an index out of range downstream.
+    private static func numbers(_ list: inout UnkeyedDecodingContainer, _ n: Int) -> [Double] {
+        var out: [Double] = []
+        out.reserveCapacity(n)
+        for _ in 0..<n {
+            if !list.isAtEnd, let v = try? list.decode(Double.self), v.isFinite {
+                out.append(v)
+            } else {
+                out.append(Double.nan)
+            }
+        }
+        return out
     }
 }
 

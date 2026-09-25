@@ -473,3 +473,31 @@ describe('transitions', () => {
     });
   });
 });
+
+describe('camera', () => {
+  const camera = { atMs: [0, 500, 1000], scale: [1, 3, 1], cx: [0.5, 0.3, 0.5], cy: [0.5, 0.7, 0.5] };
+
+  it('is null for a post with no camera, and for one that never zooms', () => {
+    const none = buildPlan(spec(), new Map());
+    expect(none.camera).toBeNull();
+    expect(none.cameraMaxScale).toBe(1);
+    const flat = buildPlan(spec({ camera: { atMs: [0, 1000], scale: [1, 1], cx: [0.2, 0.8], cy: [0.5, 0.5] } }), new Map());
+    expect(flat.camera).toBeNull();
+  });
+
+  it('keeps the keys in milliseconds and knows the most it magnifies', () => {
+    const plan = buildPlan(spec({ camera }), new Map());
+    expect(plan.camera).toEqual(camera);
+    expect(plan.cameraMaxScale).toBe(3);
+  });
+
+  it('changes nothing else about the layout', () => {
+    const clips = [clip({ outMs: 1000 }), clip({ key: 'c2', outMs: 800 })];
+    const without = buildPlan(spec({ clips }), new Map());
+    const withCamera = buildPlan(spec({ clips, camera }), new Map());
+    expect(withCamera.totalUs).toBe(without.totalUs);
+    expect(withCamera.prefixOutUs).toEqual(without.prefixOutUs);
+    expect(withCamera.transitions).toEqual(without.transitions);
+    expect(withCamera.overlays).toEqual(without.overlays);
+  });
+});

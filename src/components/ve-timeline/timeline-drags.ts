@@ -36,7 +36,14 @@ export type HitKind =
    * thing it answers: it never lifts and is never a body to drag, so a swipe that starts on it is
    * the timeline's own scroll like a swipe anywhere else on the filmstrip.
    */
-  | 'transition';
+  | 'transition'
+  /**
+   * A zoom's bar on the zoom row (the camera closing in on an area of the picture - not the
+   * timeline's own pinch zoom), and the two handles that retime the selected one.
+   */
+  | 'zoom'
+  | 'zoom-start'
+  | 'zoom-end';
 
 /** A finger that is down but not yet a drag: it may still become a tap, a long press or a scroll. */
 export interface Press {
@@ -160,6 +167,28 @@ export interface LayerDrag extends DragBase {
   targets: number[];
 }
 
+/**
+ * A zoom's window being moved or retimed. Zooms share ONE camera, so unlike a layer's window this
+ * one stops at its neighbours: `lo` is where the zoom before it ends (or 0) and `hi` where the one
+ * after it starts (or the end of the post), both taken when the finger went down.
+ */
+export interface ZoomDrag extends DragBase {
+  kind: 'zoom';
+  mode: 'start' | 'end' | 'move';
+  id: string;
+  start0: number;
+  end0: number;
+  lo: number;
+  hi: number;
+  /**
+   * The store's coalesce key for this drag's steps, new for every drag: every frame of one drag folds
+   * into one undo step, and the next drag is a step of its own rather than folding into this one.
+   */
+  coalesce: string;
+  /** 0, the end, every segment boundary and the other zooms' edges. The centre line is added per frame. */
+  targets: number[];
+}
+
 export interface MusicDrag extends DragBase {
   kind: 'music';
   mode: 'start' | 'end' | 'move';
@@ -252,6 +281,7 @@ export type TimelineDrag =
   | TrackDrag
   | EndDrag
   | LayerDrag
+  | ZoomDrag
   | MusicDrag
   | VoiceDrag
   | ClipReorderDrag
@@ -285,4 +315,36 @@ export function musicEndTrim(music0: EditMusic, newEndMs: number, totalMs: numbe
   const maxLength = music0.sourceDurationMs > 0 ? music0.sourceDurationMs - music0.inMs : Number.POSITIVE_INFINITY;
   const length = clamp(Math.min(newEndMs, totalMs) - music0.startMs, MIN_LAYER_MS, Math.max(MIN_LAYER_MS, maxLength));
   return { outMs: Math.round(music0.inMs + length) };
+}
+
+/**
+ * A zoom's window for one frame of a drag, from the window it STARTED as: the start handle moves the
+ * start and keeps the end, the end handle the other way round, and a move keeps the length. Every
+ * answer stays inside `lo..hi` and at least `minMs` long (or the whole room, when there is less), and
+ * is whole milliseconds. The store clamps again; this is what keeps the bar under the finger against
+ * a neighbour instead of sliding off it.
+ */
+export function zoomDragWindow(
+  mode: ZoomDrag['mode'],
+  start0: number,
+  end0: number,
+  edgeMs: number,
+  lo: number,
+  hi: number,
+  minMs: number,
+): { startMs: number; endMs: number } {
+  const room = Math.max(0, hi - lo);
+  const min = Math.min(minMs, room);
+  if (mode === 'start') {
+    const end = clamp(end0, lo + min, hi);
+    return { startMs: Math.round(clamp(edgeMs, lo, end - min)), endMs: Math.round(end) };
+  }
+  if (mode === 'end') {
+    const start = clamp(start0, lo, hi - min);
+    return { startMs: Math.round(start), endMs: Math.round(clamp(edgeMs, start + min, hi)) };
+  }
+  // `edgeMs` is the new START for a move.
+  const length = clamp(end0 - start0, min, room);
+  const start = Math.round(clamp(edgeMs, lo, hi - length));
+  return { startMs: start, endMs: Math.round(start + length) };
 }

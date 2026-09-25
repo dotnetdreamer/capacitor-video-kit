@@ -1,9 +1,11 @@
+import { cameraAt } from '../../editor/camera';
 import { cssFor } from '../../editor/edit-manifest';
 import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
 import type { ComposeClip, ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
 
 import { mixdown } from './audio';
+import { throughCamera } from './camera-draw';
 import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
 import { pictureDest } from './geometry';
@@ -100,8 +102,11 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   painter.setColour(plan.colorMatrix, cssFor(spec.filter));
   // Each element closed is one the painter will never be handed again, so its texture goes with it.
   // A picture is decoded at twice the output's long side, so a crop can zoom into it before it
-  // softens, and never past 4096, the largest texture every GL implementation guarantees.
-  const pictureEdge = Math.min(4096, 2 * Math.max(plan.output.width, plan.output.height));
+  // softens, and never past 4096, the largest texture every GL implementation guarantees. A camera
+  // that magnifies more than that asks for as much more as it magnifies, so a still under a 3x zoom
+  // is not a 2x still stretched; a post with no camera has a `cameraMaxScale` of 1 and decodes at
+  // exactly the size it always did.
+  const pictureEdge = Math.min(4096, Math.ceil(Math.max(2, plan.cameraMaxScale) * Math.max(plan.output.width, plan.output.height)));
   const layers = new LayerReaders(source => painter.forget(source), pictureEdge);
   const overlays = new OverlayBitmaps();
   // Opened last, and immediately before the loop: the recorder engine starts recording the moment
@@ -167,6 +172,9 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
   // Where the last window closes. The windows run in timeline order, so from there on no tail is
   // drawn again and its decoder can go back for the rest of the render rather than sit idle.
   let tailsUntilUs = hasTransitions ? Math.max(...plan.transitions.map(transition => transition.startUs + transition.durUs)) : 0;
+  // Asked once as well: a post with no zoom never evaluates a camera, and its draws go to the painter
+  // exactly as they always did.
+  const camera = plan.camera;
 
   for (let index = 0; index < frames; index++) {
     throwIfAborted(options.signal);
@@ -234,7 +242,12 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
       if (draw) draws.push(draw);
     }
 
-    painter.paintLayers(draws);
+    // Every VIDEO layer through the camera at this instant - the base, both sides of a transition,
+    // every extra layer - by the one helper the preview calls too, so the zoom a customer checked
+    // in the editor is the zoom in the file. Read at the frame's own unrounded time, on the same
+    // milliseconds the preview reads it on. `cameraAt` is null outside every zoom, and the array
+    // then goes through untouched. The overlays below never see it: they stay where they were put.
+    painter.paintLayers(camera ? throughCamera(draws, cameraAt(camera, atUs / 1000)) : draws);
 
     // Manifest order is drawing order, which the plan preserved.
     for (const overlay of plan.overlays) {

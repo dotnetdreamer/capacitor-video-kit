@@ -341,3 +341,71 @@ export function touchDistance(touches: readonly Touch[]): number {
 function pad2(value: number): string {
   return String(value).padStart(2, '0');
 }
+
+/** A zoom's bar on the zoom row, in content px, with its two ramps drawn inside it. */
+export interface ZoomBarGeometry {
+  x: number;
+  w: number;
+  rampInPx: number;
+  rampOutPx: number;
+}
+
+/**
+ * Where a zoom's bar is drawn, from the slot the camera compiler PLAYS (`zoomSlots`) rather than from
+ * the stored zoom, so the ramps on the bar are the ramps in the render: squeezed when the window is
+ * short, none at all when it is instant.
+ *
+ * The bar is floored at [MIN_ITEM_PX] like every item on the timeline, and the ramps are scaled down
+ * with it so the two of them never draw past each other.
+ */
+export function zoomBar(
+  slot: { startMs: number; endMs: number; rampInMs: number; rampOutMs: number },
+  pps: number,
+  pad: number,
+): ZoomBarGeometry {
+  const x = pad + (slot.startMs / 1000) * pps;
+  const drawn = ((slot.endMs - slot.startMs) / 1000) * pps;
+  const w = Math.max(MIN_ITEM_PX, drawn);
+  let rampInPx = (Math.max(0, slot.rampInMs) / 1000) * pps;
+  let rampOutPx = (Math.max(0, slot.rampOutMs) / 1000) * pps;
+  const both = rampInPx + rampOutPx;
+  if (both > w) {
+    rampInPx *= w / both;
+    rampOutPx *= w / both;
+  }
+  return { x, w, rampInPx: Math.round(rampInPx * 10) / 10, rampOutPx: Math.round(rampOutPx * 10) / 10 };
+}
+
+/**
+ * How far a zoom may move: from the end of the zoom before it (or 0) to the start of the one after it
+ * (or the end of the post). There is one camera, so two zooms can never share a moment.
+ */
+export function zoomNeighbours(zooms: readonly { id: string; startMs: number; endMs: number }[], id: string, totalMs: number): { lo: number; hi: number } {
+  const self = zooms.find(z => z.id === id);
+  let lo = 0;
+  let hi = totalMs;
+  if (!self) return { lo, hi };
+  for (const z of zooms) {
+    if (z.id === id) continue;
+    if (z.endMs <= self.startMs) lo = Math.max(lo, z.endMs);
+    else if (z.startMs >= self.endMs) hi = Math.min(hi, z.startMs);
+  }
+  return { lo, hi: Math.max(lo, hi) };
+}
+
+/** The other zooms' edges, which a zoom being dragged sticks to so two can be butted together. */
+export function zoomSnapTargets(zooms: readonly { id: string; startMs: number; endMs: number }[], exceptId: string): number[] {
+  const out: number[] = [];
+  for (const z of zooms) if (z.id !== exceptId) out.push(z.startMs, z.endMs);
+  return out;
+}
+
+/**
+ * A zoom bar's accessible name, `Zoom 2.0x`, with `, selected` on the selected one. The state is in
+ * the NAME and never in `aria-pressed`: the A13's WebView turns a labelled button with `aria-pressed`
+ * into a ToggleButton with no text, and loses a change to `aria-pressed` inside a shadow root.
+ */
+export function zoomBarLabel(scale: number, selected: boolean): string {
+  const name = `Zoom ${scale.toFixed(1)}x`;
+  return selected ? `${name}, selected` : name;
+}

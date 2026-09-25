@@ -22,6 +22,13 @@ Every cut of the base track carries LightCut's white dot, and a tap on one opens
 sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
 that happens to start on one is still the timeline's scroll.
 
+Under the filmstrip, in the same fixed column, is the ZOOM row when the post has zooms: one bar per
+zoom (the camera closing in on an area of the picture - nothing to do with this timeline's own
+pinch zoom), its ramps drawn as a fade at each end from the same slots the camera compiler plays.
+A tap opens the zoom's sheet; the selected bar is dragged to move it and its handles retime it,
+stopping at the zooms either side, because there is one camera. It stays in the slim timeline
+over the zoom sheet, where the lanes are hidden.
+
 Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
  - everything else - playback, undo, a split, a sheet - moves the store's playhead, which scrolls

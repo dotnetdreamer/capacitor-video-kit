@@ -571,6 +571,78 @@
   visibility: hidden;
 }
 
+/* ------------------------------------------------------------------------------------ zooms */
+
+/*
+ * The zoom row, fixed under the filmstrip with the base track rather than among the lanes: the
+ * camera moves the video, so its row sits with the video, and the lanes are hidden in compact mode -
+ * exactly while the zoom's own sheet is open. Shorter than a lane, because a zoom only ever has a
+ * window and a level to show, and the compact timeline has 96px for everything.
+ *
+ * No `data-vrow`, so dropping a segment never takes it for a video layer.
+ */
+.tl__zoom {
+  --zoom-h: 28px;
+
+  position: relative;
+  flex: 0 0 var(--zoom-h);
+  margin-top: 4px;
+}
+
+.tl--compact .tl__zoom {
+  --zoom-h: 24px;
+}
+
+/*
+ * White ink on a blue of its own, clear of the effect lane's violet and the overlay lane's sky. No
+ * `touch-action` until selected (`.item--selected` sets it): an unselected bar inherits the
+ * content's `pan-x`, so a swipe that starts on it scrolls the timeline like a swipe anywhere else.
+ */
+.item--zoom {
+  background: var(--ve-lane-zoom, #5e8bff);
+  color: #fff;
+  cursor: pointer;
+}
+
+/*
+ * The ramps: the bar fades in over the time the camera takes to reach the area and out over the
+ * time it takes to come back, so an instant zoom is a hard-edged block and a slow one a soft one.
+ */
+.item__ramp {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.item__ramp--in {
+  left: 0;
+  border-radius: 8px 0 0 8px;
+  width: var(--ramp-in, 0px);
+  background: linear-gradient(to right, rgba(28, 28, 30, 0.55), rgba(28, 28, 30, 0));
+}
+
+.item__ramp--out {
+  right: 0;
+  border-radius: 0 8px 8px 0;
+  width: var(--ramp-out, 0px);
+  background: linear-gradient(to left, rgba(28, 28, 30, 0.55), rgba(28, 28, 30, 0));
+}
+
+.item--zoom .item__label {
+  font-size: 12px;
+}
+
+.item--zoom .item__label ve-icon {
+  font-size: 14px;
+}
+
+.item--zoom:focus-visible {
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    0 0 0 2px #1c1c1e;
+}
+
 /* ----------------------------------------------------------------------------------- lanes */
 
 /*

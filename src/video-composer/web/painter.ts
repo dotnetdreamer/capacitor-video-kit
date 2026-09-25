@@ -1,6 +1,8 @@
+import { isIdentityView, type CameraView } from '../../editor/camera';
 import type { TransitionLook } from '../../editor/transitions';
 import type { ComposeRect, ComposeTransition } from '../definitions';
 
+import { cameraAffine } from './camera-draw';
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
 import { Transition2d } from './transition-2d';
@@ -91,6 +93,25 @@ export interface LayerDraw {
    * existed: no transform on the 2D canvas, an identity turn in the shader.
    */
   rotationDeg?: number;
+  /**
+   * The CAMERA at this frame - the zoom a customer put on the timeline, `cameraAt(camera, t)` - or
+   * absent for none. See `ComposeCamera` for the contract and `camera-draw.ts` for why it rides on
+   * each layer rather than on the painter.
+   *
+   * Applied LAST, after the layer's placement, fit, crop and turn, as one uniform scale about a
+   * point in OUTPUT PIXELS ([cameraAffine]). Because it is a similarity it commutes with the turn,
+   * so nothing the layer's layout computes - its source window, its bounds, its pivot, the integer
+   * rounding of its frame - changes under a zoom, and the SOURCE is still what is sampled: a 1080p
+   * recording zoomed 2x into a 720p post reads real source pixels, not an enlarged 720p frame.
+   *
+   * On a transition side it acts INSIDE the side, which is exactly where this puts it: the side's
+   * frame is drawn through it, and the transition then moves and mixes that frame as it always did.
+   *
+   * Absent, null, or a view that moves nothing is no camera, and takes exactly the path this layer
+   * took before the field existed: an identity camera uniform in the shader (`x * 1.0 + 0.0` is exact
+   * in IEEE arithmetic, so the frame is the same to the bit) and no transform on the 2D canvas.
+   */
+  camera?: CameraView | null;
 }
 
 export interface OverlayDraw {
@@ -114,6 +135,9 @@ uniform vec2 u_frame;
 uniform vec2 u_pivot;
 // cos and sin of the layer's angle, so the shader takes no trigonometry per vertex. (1, 0) is upright.
 uniform vec2 u_turn;
+// The camera as (scale, tx, ty) in output pixels: a pixel p of the layer as placed lands at
+// p * scale + (tx, ty). (1, 0, 0) is no camera.
+uniform vec3 u_camera;
 out vec2 v_uv;
 out vec2 v_out;
 void main() {
@@ -131,6 +155,12 @@ void main() {
   // y is DOWN here, as it is on a canvas, so this is the clockwise turn rotationDeg means with no
   // sign to flip - the same rotation paintOverlay gets from ctx.rotate().
   px = u_pivot + vec2(d.x * u_turn.x - d.y * u_turn.y, d.x * u_turn.y + d.y * u_turn.x);
+  // The camera, AFTER the turn: a uniform scale about a point commutes with a turn about the pivot,
+  // so this is the turned layer seen through the camera. v_out and v_uv above are left as they were,
+  // which keeps the cover clip in the layer's own frame and the crop test in the source's - and
+  // since every corner of the quad goes through it, the texture is still read straight from the
+  // SOURCE, which is what keeps a zoom sharp.
+  px = px * u_camera.x + u_camera.yz;
   vec2 ndc = px / u_frame;
   gl_Position = vec4(ndc.x * 2.0 - 1.0, 1.0 - ndc.y * 2.0, 0.0, 1.0);
   v_uv = u_window.xy + a_pos * u_window.zw;
@@ -420,6 +450,10 @@ export class Painter {
     gl.uniform2f(this.uniforms['u_frame'] ?? null, this.output.width, this.output.height);
     gl.uniform2f(this.uniforms['u_pivot'] ?? null, pivot.x, pivot.y);
     gl.uniform2f(this.uniforms['u_turn'] ?? null, Math.cos(radians), Math.sin(radians));
+    // Set on EVERY layer, identity included: the program's uniforms outlive the draw, so a layer
+    // with no camera drawn after one with a zoom would otherwise inherit it.
+    const camera = layer.camera && !isIdentityView(layer.camera) ? cameraAffine(layer.camera, this.output) : null;
+    gl.uniform3f(this.uniforms['u_camera'] ?? null, camera ? camera.scale : 1, camera ? camera.tx : 0, camera ? camera.ty : 0);
     gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     return true;
@@ -534,6 +568,17 @@ export class Painter {
     const clipH = Math.max(1, bounds.h * this.output.height);
 
     ctx.save();
+    // The camera goes on FIRST, so it acts last: a canvas applies the transforms composed onto it in
+    // reverse, which makes this `camera * turn` - the layer turned and then seen through the camera,
+    // the shader's order. `transform` and not `setTransform`, because a transition side is drawn
+    // here onto a surface of its own and the camera composes with whatever that surface holds.
+    // Everything below - the clip, the black, the picture, the tints - goes through it, and
+    // `drawImage` samples the SOURCE through the whole transform, so the fallback stays sharp too.
+    // No camera, no transform: the fallback's old path exactly.
+    if (layer.camera && !isIdentityView(layer.camera)) {
+      const camera = cameraAffine(layer.camera, this.output);
+      ctx.transform(camera.scale, 0, 0, camera.scale, camera.tx, camera.ty);
+    }
     // Before the clip and before the draw, so the rectangle is cut in the layer's OWN turned
     // frame - which is what `cover` clipping to a turned rectangle means, and what the GL path
     // gets for free by turning the quad it samples through.
@@ -692,6 +737,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
       u_clip: gl.getUniformLocation(program, 'u_clip'),
       u_kept: gl.getUniformLocation(program, 'u_kept'),
       u_turn: gl.getUniformLocation(program, 'u_turn'),
+      u_camera: gl.getUniformLocation(program, 'u_camera'),
       u_matrix: gl.getUniformLocation(program, 'u_matrix'),
       u_offset: gl.getUniformLocation(program, 'u_offset'),
       u_opacity: gl.getUniformLocation(program, 'u_opacity'),

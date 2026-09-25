@@ -25,8 +25,14 @@
  * the editor would have computed differently.
  */
 import {
+  DEFAULT_ZOOM_MS,
+  DEFAULT_ZOOM_RAMP_MS,
+  DEFAULT_ZOOM_SCALE,
   MAX_LAYERS,
   MAX_VIDEO_TRACKS,
+  MAX_ZOOMS,
+  MIN_ZOOM_MS,
+  ZOOM_EASES,
   aspectOf,
   defaultClipEdit,
   normaliseOutput,
@@ -43,6 +49,7 @@ import {
   type EditRect,
   type EditTransition,
   type EditVoiceover,
+  type EditZoom,
   type OutputAspect,
   type TextAlign,
   type TextEffect,
@@ -91,8 +98,15 @@ import {
   splitOverlayAt,
   swapTrackZ,
   trimClip,
+  addZoom,
+  deleteZoom,
+  duplicateZoom,
+  findZoom,
+  setZoomWindow,
+  updateZoom,
   type ClipDropTarget,
   type LayerMove,
+  type ZoomPatch,
 } from '../editor/edit-ops';
 import { applyLayoutPreset, layoutPresets, type LayoutPresetId } from '../editor/layout-presets';
 
@@ -290,6 +304,33 @@ function requireFreeClipId(manifest: EditManifest, id: string): void {
 
 function requireFreeLayerId(manifest: EditManifest, id: string): void {
   if (manifest.overlays.some((overlay) => overlay.id === id)) throw new Error(`layer id "${id}" is already on this post`);
+}
+
+function requireZoom(manifest: EditManifest, id: string): EditZoom {
+  const zoom = findZoom(manifest, id);
+  const ids = manifest.zooms.map((z) => z.id);
+  if (!zoom) throw new Error(`no zoom "${id}" - zooms on this post: ${ids.join(', ') || 'none'}`);
+  return zoom;
+}
+
+function requireFreeZoomId(manifest: EditManifest, id: string): void {
+  if (findZoom(manifest, id)) throw new Error(`zoom id "${id}" is already on this post`);
+}
+
+/** What [addZoom] and [duplicateZoom] answer `null` with at the cap, said before they are called. */
+function requireZoomRoom(manifest: EditManifest): void {
+  if (manifest.zooms.length >= MAX_ZOOMS) throw new Error(`this post already has the maximum of ${MAX_ZOOMS} zooms`);
+}
+
+/** The look fields a zoom op may carry, each optional; the window goes through setZoomWindow. */
+function zoomPatchOf(op: Record<string, unknown>): ZoomPatch {
+  const patch: ZoomPatch = {};
+  if (op['cx'] !== undefined) patch.cx = num(op, 'cx');
+  if (op['cy'] !== undefined) patch.cy = num(op, 'cy');
+  if (op['scale'] !== undefined) patch.scale = num(op, 'scale');
+  if (op['rampMs'] !== undefined) patch.rampMs = num(op, 'rampMs');
+  if (op['ease'] !== undefined) patch.ease = oneOf(op, 'ease', ZOOM_EASES);
+  return patch;
 }
 
 /** What [addOverlay] and [splitOverlayAt] answer `null` with, said before they are called. */
@@ -709,6 +750,58 @@ const OPS: Record<string, Apply> = {
     const id = str(op, 'id');
     requireVoiceover(manifest, id);
     return removeVoiceover(manifest, id);
+  },
+
+  /* ---- zooms ---- */
+
+  addZoom: (manifest, op) => {
+    const id = str(op, 'id');
+    requireFreeZoomId(manifest, id);
+    requireZoomRoom(manifest);
+    const startMs = num(op, 'startMs');
+    const zoom: EditZoom = {
+      id,
+      startMs,
+      endMs: optionalNum(op, 'endMs', startMs + DEFAULT_ZOOM_MS),
+      cx: 0.5,
+      cy: 0.5,
+      scale: DEFAULT_ZOOM_SCALE,
+      rampMs: DEFAULT_ZOOM_RAMP_MS,
+      ease: 'smooth',
+      ...zoomPatchOf(op),
+    };
+    const next = addZoom(manifest, zoom, totalDurationMs(manifest));
+    if (!next) throw new Error(`there is no room for a zoom at ${startMs}ms - zooms never overlap, and a zoom runs at least ${MIN_ZOOM_MS}ms before the next one and the end`);
+    return next;
+  },
+
+  updateZoom: (manifest, op) => {
+    const id = str(op, 'id');
+    requireZoom(manifest, id);
+    return updateZoom(manifest, id, zoomPatchOf(op));
+  },
+
+  setZoomWindow: (manifest, op) => {
+    const id = str(op, 'id');
+    requireZoom(manifest, id);
+    return setZoomWindow(manifest, id, num(op, 'startMs'), num(op, 'endMs'), totalDurationMs(manifest));
+  },
+
+  duplicateZoom: (manifest, op) => {
+    const id = str(op, 'id');
+    const newId = str(op, 'newId');
+    requireZoom(manifest, id);
+    requireFreeZoomId(manifest, newId);
+    requireZoomRoom(manifest);
+    const next = duplicateZoom(manifest, id, newId, totalDurationMs(manifest));
+    if (!next) throw new Error(`there is no room for a copy right after zoom "${id}" - it needs ${MIN_ZOOM_MS}ms before the next zoom and the end`);
+    return next;
+  },
+
+  deleteZoom: (manifest, op) => {
+    const id = str(op, 'id');
+    requireZoom(manifest, id);
+    return deleteZoom(manifest, id);
   },
 
   /* ---- the look of the whole post ---- */

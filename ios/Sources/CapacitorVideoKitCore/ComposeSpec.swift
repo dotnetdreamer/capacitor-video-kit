@@ -287,6 +287,23 @@ struct ComposeAudio: Sendable {
     let voiceover: [ComposeVoiceover]
 }
 
+/// One key of a camera track, as the parser leaves it: ALREADY CLAMPED, `scale` to
+/// 1...`ComposeSpecParser.maxCameraScale` and `cx`/`cy` to `0.5 / scale ... 1 - 0.5 / scale`, so at
+/// scale 1 the centre is exactly 0.5 and the visible area is always inside the frame. `atMs` is
+/// output-timeline milliseconds, finite and never less than the key before it.
+///
+/// A Double and not an Int64 of microseconds on purpose: nothing downstream needs a `CMTime`, and a
+/// hand-built time multiplied into microseconds could overflow where a Double comparison cannot.
+struct ComposeCameraKey: Sendable {
+    let atMs: Double
+    let scale: Double
+    /// The point brought to the frame's centre, 0..1 of the output width, left to right.
+    let cx: Double
+    /// The same, 0..1 of the output height, TOP to bottom - the wire's y-down, flipped only where
+    /// the camera becomes a Core Image transform (`CameraMath.transform`).
+    let cy: Double
+}
+
 struct ComposeSpec: Sendable {
     let jobId: String
     let batchId: String
@@ -318,6 +335,17 @@ struct ComposeSpec: Sendable {
     let overlays: [ComposeOverlay]
     let audio: ComposeAudio
     let posterAtMs: Int64
+    /// The zooms of the post, compiled by JS into a camera moving over every VIDEO layer - see
+    /// `ComposeCamera` in `definitions.ts`, which is the contract - one entry per key, in time order.
+    ///
+    /// nil is a spec with no `camera` key, which is every spec written before zoom existed, and ALSO
+    /// a camera that never magnifies: the parser drops that one, because a camera held at the whole
+    /// frame is the same picture as no camera, and keeping it would put every frame of the post onto
+    /// the camera's arithmetic for nothing. It stays an optional rather than an empty array for the
+    /// reason `tracks` does: `RenderPlan` asks it ONCE whether there is a camera at all.
+    ///
+    /// Declared LAST, so the memberwise initialiser gains it as its last argument.
+    let camera: [ComposeCameraKey]?
 
     /// Output-timeline length in ms, rounded PER CLIP exactly as Android's RenderPlan does. Rounding
     /// once at the end instead would drift from the Android number by up to half a millisecond per

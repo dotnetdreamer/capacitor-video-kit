@@ -135,6 +135,7 @@ object CompositionBuilder {
             output,
             plan.colorMatrix,
             plan.tails.associateBy { it.index },
+            plan.camera,
         )
         // The tails go RIGHT AFTER the base, which by the order above draws them UNDER it - the
         // contract's "outgoing side over black, incoming side over that". Registered after it, they
@@ -142,7 +143,7 @@ object CompositionBuilder {
         // layers and the base when there are none, so the output keeps the cadence it has today
         // and never takes on the 30 fps of the blank frames that fill the tails' gaps.
         if (plan.tails.isNotEmpty()) {
-            sequences += tailSequence(plan.tails, plan.totalUs, output, plan.colorMatrix)
+            sequences += tailSequence(plan.tails, plan.totalUs, output, plan.colorMatrix, plan.camera)
         }
         plan.music?.let { sequences += musicSequence(it) }
         plan.voice?.let { sequences += voiceSequence(it) }
@@ -176,7 +177,7 @@ object CompositionBuilder {
         // per frame is cheaper than reasoning about them every time the base learns to be
         // transparent somewhere new.
         if (layers.isNotEmpty() || plan.tails.isNotEmpty()) {
-            builder.setVideoCompositorSettings(LayerCompositor(output, layers, plan.tails))
+            builder.setVideoCompositorSettings(LayerCompositor(output, layers, plan.tails, plan.camera))
         }
         if (Build.VERSION.SDK_INT >= 29) {
             // Gallery picks from newer phones are frequently HLG or PQ; without this the export
@@ -248,11 +249,12 @@ object CompositionBuilder {
         output: Output,
         colorMatrix: ColorMatrix?,
         transitionsInto: Map<Int, RenderPlan.PlannedTail>,
+        camera: CameraTrack? = null,
     ): EditedMediaItemSequence {
         val items = clips.mapIndexed { i, planned ->
             val tail = transitionsInto[i]
             if (tail == null) {
-                editedClip(planned, output, colorMatrix)
+                editedClip(planned, output, colorMatrix, camera = camera)
             } else {
                 editedClip(
                     planned,
@@ -260,6 +262,7 @@ object CompositionBuilder {
                     colorMatrix,
                     transition = TransitionEffect(TransitionRole.TO, tail.transition, tail.startUs, tail.durUs),
                     fadeInUs = tail.durUs,
+                    camera = camera,
                 )
             }
         }
@@ -382,6 +385,7 @@ object CompositionBuilder {
         totalUs: Long,
         output: Output,
         colorMatrix: ColorMatrix?,
+        camera: CameraTrack? = null,
     ): EditedMediaItemSequence {
         val trackTypes = if (tails.any { !it.clip.removeAudio }) {
             setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO)
@@ -406,6 +410,7 @@ object CompositionBuilder {
                     // stopping on a click at a tenth of the level.
                     fadeOutUs = tail.itemEndUs - tail.startUs,
                     silentUs = tail.leadUs,
+                    camera = camera,
                 ),
             )
             cursorUs = tail.itemEndUs
@@ -432,6 +437,7 @@ object CompositionBuilder {
         fadeInUs: Long = 0L,
         fadeOutUs: Long = 0L,
         silentUs: Long = 0L,
+        camera: CameraTrack? = null,
     ): EditedMediaItem {
         val clip = planned.clip
         val mediaItem = if (clip.image) pictureItem(planned) else MediaItem.Builder()
@@ -509,9 +515,19 @@ object CompositionBuilder {
         // output frame - picture and bars together - which is what the contract moves, blurs and
         // tints as one piece. Before the geometry it would move the picture inside bars that stood
         // still.
+        //
+        // The zoom camera goes straight after the geometry, and that position is the whole of why a
+        // zoom stays sharp. Two `MatrixTransformation`s in a row are merged by Media3 into ONE
+        // shader pass that draws the source-resolution texture through the product of the two
+        // matrices, so a 2x zoom into a 1080p recording posted at 720p samples the recording, not a
+        // 720p picture of it blown up. And it goes BEFORE the transition's side, because the
+        // contract has each side be its clip's whole frame as seen through the camera, with the
+        // transition's move, blur and mask then acting in output pixels as they always have. A
+        // clip the plan did not mark zoomed - every clip of a post with no camera - gets nothing.
         val videoEffects: List<Effect> = listOfNotNull(
             colorMatrix?.let { ColorMatrixEffect(it, progressTap = null) },
             geometry,
+            camera?.takeIf { planned.zoomed }?.let { CameraTransformation(it) },
             transition,
         )
 
@@ -714,6 +730,35 @@ object CompositionBuilder {
     }
 
     /**
+     * The zoom camera as one more vertex-shader matrix over a whole-frame picture - a base clip or a
+     * transition tail - read at the frame's own presentation time.
+     *
+     * That time IS the output timeline's: in Media3 1.11.1 each item of a sequence is stamped from
+     * the sum of the post-speed lengths of the items ahead of it, so nothing here converts a clip's
+     * local time. [CameraTrack.atUs] is the same reading of the keys `cameraAt` does in the
+     * preview; null is the whole frame and hands back the identity.
+     *
+     * The matrix is `k (p - f)` in NDC - the contract's `p' = 0.5 + (p - c) * scale` - so a
+     * point of the finished frame is scaled about the focus onto the frame's centre. GL clips what
+     * the geometry pushed off the frame BEFORE this matrix, and this one pushes the rest of the frame
+     * outside the view, which is exactly a camera over the frame: the parser holds every view inside
+     * it, so nothing past an edge can come back in.
+     *
+     * One `Matrix` per instance, reused every frame as [Reframe] reuses its own: Media3 copies it
+     * into a float array before drawing, on the one GL thread that asks.
+     */
+    private class CameraTransformation(private val camera: CameraTrack) : MatrixTransformation {
+
+        private val matrix = Matrix()
+
+        override fun getMatrix(presentationTimeUs: Long): Matrix {
+            val view = camera.atUs(presentationTimeUs)
+            if (view == null) matrix.reset() else matrix.setValues(view.ndcMatrix())
+            return matrix
+        }
+    }
+
+    /**
      * Where each video layer is drawn, per input and per frame.
      *
      * Media3 treats every input of its compositor as an overlay on the output frame and asks this
@@ -742,10 +787,15 @@ object CompositionBuilder {
         tracks: List<RenderPlan.PlannedTrack>,
         /** The plan's tails, in timeline order; empty when the post has no transition. */
         private val tails: List<RenderPlan.PlannedTail>,
+        /**
+         * The zoom camera, for the layers only: the base and the tails are whole-frame pictures that
+         * took the camera in their own effect chains, and come through here unmoved.
+         */
+        camera: CameraTrack? = null,
     ) : VideoCompositorSettings {
 
         private val size = Size(output.width, output.height)
-        private val layers: List<Layer> = tracks.map { Layer(it) }
+        private val layers: List<Layer> = tracks.map { Layer(it, camera) }
 
         /**
          * The tails' input: registered straight after the base, which is registered straight after
@@ -781,12 +831,19 @@ object CompositionBuilder {
          * input, so nothing here allocates: the only thing that changes over a layer's life is
          * which of its clips is on screen, and there are a handful of those.
          */
-        private class Layer(private val track: RenderPlan.PlannedTrack) {
+        private class Layer(
+            private val track: RenderPlan.PlannedTrack,
+            private val camera: CameraTrack?,
+        ) {
 
             private val hidden: OverlaySettings =
                 StaticOverlaySettings.Builder().setAlphaScale(0f).build()
             private val placed: List<OverlaySettings> = track.placements.map {
-                StaticOverlaySettings.Builder()
+                val builder = StaticOverlaySettings.Builder()
+                // Only a supersampled clip is scaled, back down to its rectangle's size; every other
+                // layer is built exactly as it was before zooms existed.
+                if (it.drawScaleX != 1f || it.drawScaleY != 1f) builder.setScale(it.drawScaleX, it.drawScaleY)
+                builder
                     .setBackgroundFrameAnchor(it.anchorX, it.anchorY)
                     // The turn, in the one place that can make it: the layer's picture is already
                     // drawn at its rectangle's size, and this is where that rectangle is put on the
@@ -818,7 +875,28 @@ object CompositionBuilder {
              */
             fun settingsAt(timeUs: Long): OverlaySettings {
                 val i = track.visibleIndexAt(timeUs)
-                return if (i == RenderPlan.PlannedTrack.HIDDEN) hidden else placed[i]
+                if (i == RenderPlan.PlannedTrack.HIDDEN) return hidden
+                val placement = track.placements[i]
+                if (camera == null || !placement.zoomed) return placed[i]
+                val view = camera.atUs(timeUs) ?: return placed[i]
+                // A NEW object for every zoomed frame, and that is not waste: Media3 asks at QUEUE
+                // time and keeps the answer with the frame, so one shared object moved to a later
+                // frame's camera would draw an earlier frame there. Under the camera the layer's
+                // centre goes where the camera sends it and the layer grows by `k`, about its own
+                // centre - the scale comes first in the compositor's matrix - which with the turn
+                // left alone is the camera over the placed layer exactly.
+                return StaticOverlaySettings.Builder()
+                    .setBackgroundFrameAnchor(
+                        view.viewNdcX(placement.anchorX.toDouble()).toFloat(),
+                        view.viewNdcY(placement.anchorY.toDouble()).toFloat(),
+                    )
+                    .setScale(
+                        (view.scale * placement.drawScaleX).toFloat(),
+                        (view.scale * placement.drawScaleY).toFloat(),
+                    )
+                    .setRotationDegrees(placement.rotationGlDeg)
+                    .setAlphaScale(track.opacity)
+                    .build()
             }
         }
 

@@ -8,7 +8,7 @@ import type { EditorIconName } from '../../icons/icons';
 import type { EditorPanel } from '../../state/editor.types';
 
 /** Which set of tools the bottom row is showing. */
-export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'music' | 'voice';
+export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'zoom' | 'music' | 'voice';
 
 /** One tile in the row. Built fresh whenever what the row depends on changes. */
 export interface ToolTile {
@@ -98,6 +98,11 @@ export class VeToolbar {
   private readonly clipSelected = computed(() => !!this.ctx.store.selectedClip.value);
   private readonly layerKind = computed(() => this.ctx.store.selectedOverlay.value?.kind ?? null);
   private readonly voiceSelected = computed(() => !!this.ctx.store.selectedVoice.value);
+  /**
+   * A boolean, never the zoom itself: dragging the zoom's box on the preview rewrites the zoom on
+   * every frame, and a row that read the object would be rebuilt sixty times a second for it.
+   */
+  private readonly zoomSelected = computed(() => !!this.ctx.store.selectedZoom.value);
   private readonly lastClip = computed(() => this.ctx.store.manifest.value.clips.length <= 1);
   /** The SELECTED segment's fit, or the post's when nothing is selected - what a tap will change. */
   private readonly fitContain = computed(() => this.ctx.store.clipFit(this.ctx.store.selectedClip.value) === 'contain');
@@ -118,6 +123,7 @@ export class VeToolbar {
   private readonly rowKind = computed<ToolbarRowKind>(() => {
     if (this.clipSelected.value) return 'clip';
     if (this.layerKind.value) return 'layer';
+    if (this.zoomSelected.value) return 'zoom';
     if (this.ctx.store.musicSelected.value) return 'music';
     if (this.voiceSelected.value) return 'voice';
     return this.ctx.store.toolbarMode.value === 'text' ? 'text' : 'root';
@@ -374,6 +380,8 @@ export class VeToolbar {
         return this.clipRow();
       case 'layer':
         return this.layerRow();
+      case 'zoom':
+        return this.zoomRow();
       case 'music':
         return this.musicRow();
       case 'voice':
@@ -394,6 +402,9 @@ export class VeToolbar {
         // Crop is the one tool a customer hunts for by name, so it is on the root row as well as on
         // the clip row. It selects the segment under the playhead itself, exactly as Edit does.
         { id: 'crop', label: 'Crop', icon: 'crop-outline', run: () => store.openCrop() },
+        // Beside Crop, the other tool about framing. It adds a zoom at the playhead and opens its
+        // sheet; the store says so when there is no room for one, or when the post is at its cap.
+        { id: 'zoom', label: 'Zoom', icon: 'search-outline', run: () => store.addZoomAtPlayhead() },
         {
           id: 'layout',
           label: 'Layout',
@@ -708,6 +719,29 @@ export class VeToolbar {
 
     const label = kind === 'text' ? 'Text layer tools' : kind === 'sticker' ? 'Sticker tools' : kind === 'image' ? 'Overlay tools' : 'Effect tools';
     return { kind: 'layer', label, collapse: this.deselect(`Close ${label.toLowerCase()}`), tiles };
+  }
+
+  /**
+   * The tools for a selected zoom. Short on purpose: its window is set by dragging its bar on the
+   * timeline, and its level, curve and ramp in the sheet Edit opens. The zoom's id is read at tap
+   * time, not from the row, for the reason [zoomSelected] gives.
+   */
+  private zoomRow(): ToolRow {
+    const store = this.ctx.store;
+    const withZoom = (act: (id: string) => void) => () => {
+      const zoom = store.selectedZoom.value;
+      if (zoom) act(zoom.id);
+    };
+    return {
+      kind: 'zoom',
+      label: 'Zoom tools',
+      collapse: this.deselect('Close zoom tools'),
+      tiles: [
+        { id: 'edit', label: 'Edit', icon: 'create-outline', run: withZoom(id => store.openZoom(id)) },
+        { id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withZoom(id => store.duplicateZoom(id)) },
+        { id: 'delete', label: 'Delete', icon: 'trash-outline', run: withZoom(id => store.deleteZoom(id)) },
+      ],
+    };
   }
 
   private musicRow(): ToolRow {
