@@ -26,6 +26,7 @@ import {
   type EditOverlay,
   type OverlayKind,
 } from '../../editor';
+import type { EditorIconName } from '../../icons/icons';
 import { computedWith } from '../../state/computed-with';
 import { clipWaveKey, type EditorSelection } from '../../state/editor.types';
 import {
@@ -111,6 +112,30 @@ const REORDER_RAIL_PX = 6;
  *  end of the video it follows. Its width is the usual 44px finger target. */
 const ADD_SIZE_PX = 44;
 const ADD_GAP_PX = 12;
+
+/**
+ * What kind of thing a layer's lane is, as the glyph at its head. The lanes are told apart by this
+ * before anything else: a colour alone left a text lane and an effect lane two shades of pink, and a
+ * short lane's label was a letter and an ellipsis that named nothing.
+ *
+ * The pictures of the tools that make them, drawn solid because the lane draws them a dozen pixels
+ * across, where an outline's stroke is a smudge (the transition dot is solid for the same reason).
+ * The one exception is a photo, whose tool is Overlay's stacked squares: what its lane has to say is
+ * that it is a picture.
+ */
+const LAYER_GLYPHS: Readonly<Record<OverlayKind, EditorIconName>> = {
+  text: 'text',
+  sticker: 'happy',
+  image: 'image',
+  effect: 'sparkles',
+};
+
+/**
+ * Below this width a lane is its glyph alone, centred, with the bar itself as the glyph's tile. Any
+ * narrower and the label beside the glyph gets under five letters, which says less than the glyph
+ * does and pushes it against the bar's edge. The label stays in the accessibility tree either way.
+ */
+const LANE_GLYPH_ONLY_PX = 88;
 
 /*
  * The mouse's three numbers.
@@ -3242,7 +3267,7 @@ export class VeTimeline {
                     style={shift ? { transform: shift } : undefined}
                   >
                     <div
-                      class={{ 'item': true, 'item--selected': lane.selected }}
+                      class={{ 'item': true, 'item--selected': lane.selected, 'item--glyph': lane.w < LANE_GLYPH_ONLY_PX }}
                       data-hit="layer"
                       data-id={lane.id}
                       data-kind={lane.kind}
@@ -3267,10 +3292,17 @@ export class VeTimeline {
     );
   }
 
+  /** A lane's glyph first, then which one it is: a sticker's picture, a photo's thumbnail, its words. */
   private laneLabel(lane: LayerLaneView) {
+    const text = (
+      <span class="item__text" key="text">
+        {lane.label}
+      </span>
+    );
     switch (lane.kind) {
       case 'sticker':
         return [
+          laneGlyph(LAYER_GLYPHS.sticker),
           lane.emoji ? (
             <span class="item__emoji" key="emoji">
               {lane.emoji}
@@ -3278,30 +3310,12 @@ export class VeTimeline {
           ) : lane.image ? (
             <img class="item__sticker" key="sticker" src={lane.image} alt="" draggable={false} />
           ) : null,
-          <span class="item__text" key="text">
-            {lane.label}
-          </span>,
+          text,
         ];
       case 'image':
-        return [
-          lane.image ? <img class="item__thumb" key="thumb" src={lane.image} alt="" draggable={false} decoding="async" /> : null,
-          <span class="item__text" key="text">
-            {lane.label}
-          </span>,
-        ];
-      case 'effect':
-        return [
-          <ve-icon name="sparkles" key="icon"></ve-icon>,
-          <span class="item__text" key="text">
-            {lane.label}
-          </span>,
-        ];
+        return [laneGlyph(LAYER_GLYPHS.image), lane.image ? <img class="item__thumb" key="thumb" src={lane.image} alt="" draggable={false} decoding="async" /> : null, text];
       default:
-        return (
-          <span class="item__text" key="text">
-            {lane.label}
-          </span>
-        );
+        return [laneGlyph(LAYER_GLYPHS[lane.kind]), text];
     }
   }
 
@@ -3342,15 +3356,17 @@ export class VeTimeline {
         {music ? (
           [
             <div
-              class={{ 'item': true, 'item--music': true, 'item--selected': music.selected }}
+              class={{ 'item': true, 'item--music': true, 'item--selected': music.selected, 'item--glyph': music.w < LANE_GLYPH_ONLY_PX }}
               key="music"
               data-hit="music"
               style={{ left: `${music.x}px`, width: `${music.w}px` }}
             >
               {this.waveSvg(this.musicWave.value)}
               <span class="item__label">
-                <ve-icon name="musical-note"></ve-icon>
-                <span class="item__text">{music.label}</span>
+                {laneGlyph('musical-note')}
+                <span class="item__text" key="text">
+                  {music.label}
+                </span>
               </span>
             </div>,
             handles ? <span class="handle handle--in" key="music-in" data-hit="music-start" style={{ left: `${handles.inX}px` }}></span> : null,
@@ -3383,7 +3399,7 @@ export class VeTimeline {
       <div class="lane" key="voice-lane" data-row="voice">
         {this.voiceLane.value.map(take => (
           <div
-            class={{ 'item': true, 'item--voice': true, 'item--selected': take.selected }}
+            class={{ 'item': true, 'item--voice': true, 'item--selected': take.selected, 'item--glyph': take.w < LANE_GLYPH_ONLY_PX }}
             key={take.id}
             data-hit="voice"
             data-id={take.id}
@@ -3391,16 +3407,12 @@ export class VeTimeline {
             aria-label="Voiceover"
           >
             {this.waveSvg(waves.get(take.id) ?? null)}
-            <span class="item__label">
-              <ve-icon name="mic"></ve-icon>
-            </span>
+            <span class="item__label">{laneGlyph('mic')}</span>
           </div>
         ))}
         {recordingX !== null ? (
           <div class="item item--recording" key="recording" ref={this.keepRecording} style={{ left: `${recordingX}px` }}>
-            <span class="item__label">
-              <ve-icon name="mic"></ve-icon>
-            </span>
+            <span class="item__label">{laneGlyph('mic')}</span>
           </div>
         ) : null}
       </div>
@@ -3480,6 +3492,15 @@ function sameDrop(a: ClipDropTarget | null, b: ClipDropTarget | null): boolean {
   if (a.kind === 'track' && b.kind === 'track') return a.trackId === b.trackId;
   if (a.kind === 'new' && b.kind === 'new') return a.index === b.index;
   return true;
+}
+
+/** The tile at the head of a lane that says what kind of thing it carries (see [LAYER_GLYPHS]). */
+function laneGlyph(name: EditorIconName) {
+  return (
+    <span class="item__kind" key="kind" data-glyph={name}>
+      <ve-icon name={name}></ve-icon>
+    </span>
+  );
 }
 
 /** Places the two edge handles of an item spanning `x` to `x + w` in content px. */

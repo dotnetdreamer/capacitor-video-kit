@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack } from '../../editor';
+import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack, type TextOverlay } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -1314,5 +1314,102 @@ describe('the waveform on a video clip', () => {
     await until('the first to go', () => waveOf(tl, 'seg-a') === null);
 
     expect(waveOf(tl, 'seg-b')).not.toBeNull();
+  });
+});
+
+/*
+ * What kind of thing each lane is, read off the glyph at its head: the lanes used to be told apart
+ * by colour alone, and a text lane and an effect lane are two shades of pink.
+ */
+describe('the lane glyphs', () => {
+  function laneEl(tl: HTMLElement, id: string): HTMLElement {
+    const found = root(tl).querySelector<HTMLElement>(`[data-hit="layer"][data-id="${id}"]`);
+    if (!found) throw new Error(`no ${id} lane`);
+    return found;
+  }
+
+  function glyphOf(lane: HTMLElement): HTMLElement | null {
+    return lane.querySelector<HTMLElement>('.item__kind');
+  }
+
+  /** One layer of every kind, from the start of the post to its end. */
+  async function withLayers(caption = 'Full send') {
+    const mountedTl = await mount();
+    const { store } = mountedTl;
+    const text = store.addLayer<TextOverlay>('Text', {
+      kind: 'text',
+      text: caption,
+      styleId: 'classic',
+      color: '#ffffff',
+      effect: 'shadow',
+      align: 'center',
+      cx: 0.5,
+      cy: 0.5,
+      scale: 1,
+      rotationDeg: 0,
+      opacity: 1,
+    })!;
+    const sticker = store.addSticker({ emoji: '🔥' })!;
+    const photo = store.addImage('file:///photo.jpg', 'photo.jpg', 1)!;
+    const effect = store.addEffect('vignette', 'Vignette')!;
+    store.select(null);
+    await until('a lane for every layer', () => root(mountedTl.tl).querySelectorAll('[data-hit="layer"]').length === 4);
+    return { ...mountedTl, ids: { text, sticker, photo, effect } };
+  }
+
+  it('leads every lane with the glyph of what it carries', async () => {
+    const { tl, ids } = await withLayers();
+
+    expect(glyphOf(laneEl(tl, ids.text))?.dataset.glyph).toBe('text');
+    expect(glyphOf(laneEl(tl, ids.sticker))?.dataset.glyph).toBe('happy');
+    expect(glyphOf(laneEl(tl, ids.photo))?.dataset.glyph).toBe('image');
+    expect(glyphOf(laneEl(tl, ids.effect))?.dataset.glyph).toBe('sparkles');
+    // First in the label, before the sticker's own picture or the text's words.
+    for (const id of Object.values(ids)) {
+      expect(laneEl(tl, id).querySelector('.item__label')!.firstElementChild!.classList.contains('item__kind')).toBe(true);
+    }
+  });
+
+  it('shows the words beside the glyph on a lane with room for them', async () => {
+    const { tl, ids } = await withLayers();
+    const lane = laneEl(tl, ids.text);
+    const text = lane.querySelector<HTMLElement>('.item__text')!;
+
+    expect(lane.classList.contains('item--glyph')).toBe(false);
+    expect(text.getBoundingClientRect().width).toBeGreaterThan(40);
+    expect(text.getBoundingClientRect().left).toBeGreaterThan(glyphOf(lane)!.getBoundingClientRect().right);
+  });
+
+  it('draws a lane too short for a label as its glyph alone, centred', async () => {
+    const { store, tl, ids } = await withLayers();
+    // Twelve seconds at 6 px a second is a 72 px bar.
+    store.pps.value = 6;
+    const lane = () => laneEl(tl, ids.text);
+    await until('the short lane', () => lane().classList.contains('item--glyph'));
+
+    const bar = lane().getBoundingClientRect();
+    const glyph = glyphOf(lane())!.getBoundingClientRect();
+    expect(glyph.left + glyph.width / 2).toBeCloseTo(bar.left + bar.width / 2, 0);
+    expect(lane().querySelector('.item__text')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
+    // Out of sight, and still what a screen reader finds the layer by.
+    expect(lane().textContent).toContain('Full send');
+
+    store.pps.value = 64;
+    await until('the label back', () => !lane().classList.contains('item--glyph'));
+  });
+
+  it('never lets the label push the glyph out of a lane', async () => {
+    const { store, tl, ids } = await withLayers('A caption far too long to fit on any lane at all');
+    // 12 s at 8 px a second is 96 px: room for the glyph and a few letters, not the whole line.
+    store.pps.value = 8;
+    await frames(3);
+    const lane = laneEl(tl, ids.text);
+    const bar = lane.getBoundingClientRect();
+    const glyph = glyphOf(lane)!.getBoundingClientRect();
+
+    expect(lane.classList.contains('item--glyph')).toBe(false);
+    expect(glyph.width).toBe(24);
+    expect(glyph.left).toBeGreaterThanOrEqual(bar.left);
+    expect(glyph.right).toBeLessThanOrEqual(bar.right);
   });
 });
