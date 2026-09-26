@@ -27,14 +27,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  * chain and hands the rest of the chain a frame at every output instant instead; what each instant
  * is and how far it lies between its neighbours is [SlowMotionCadence], and the protocol that feeds
  * Media3 is [SlowMotionPump]. What an in-between frame LOOKS like is [FrameInterpolator], and nothing
- * else here knows: phase 1 blends, and motion-compensated interpolation replaces the blend by
- * replacing that one step.
+ * else here knows: [FlowInterpolator] follows the motion between the two frames (optical flow, the
+ * same passes the web engine runs), and falls back to [BlendInterpolator]'s cross-fade where it
+ * cannot.
  *
  * WHERE IT SITS - see `CompositionBuilder.editedClip` for the whole list. After the speed change,
  * which is not an effect at all but the source's own timestamps, so every frame arriving here is
  * already stamped on the output timeline. After the grade, so the grade runs once per SOURCE frame
- * rather than once per output frame; a colour matrix and a blend commute but for the clamp, which a
- * blend of two clamped colours cannot leave. And BEFORE the geometry, the camera and the transition's
+ * rather than once per output frame: a colour matrix and the weighted mix of two frames an in-between
+ * frame is made of commute but for the clamp, which a mix of two clamped colours cannot leave. The
+ * motion between the two is then found in the GRADED picture - and the web engine, which grades after
+ * its mix, hands its flow the graded picture too (the luma pass of `optical-flow.ts`), so the two
+ * engines estimate the same motion from the same pixels. And BEFORE the geometry, the camera and the transition's
  * side, because all three are functions of the frame's timestamp and have to be read at every
  * synthesised instant: the camera after the geometry is also what keeps a zoom sharp (Media3 folds
  * the two matrices into one pass over the source-resolution picture), and a pass of ours between
@@ -54,8 +58,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * last out to the end, and nothing is ever stamped outside it.
  *
  * GPU MEMORY: two textures at the picture's decoded size per slowed item being drawn - the held
- * frame and the one output - on each sequence that is drawing one. A sequence's chain for an item is
- * released when the next item's is built, so a post with ten slowed clips still holds two at a time.
+ * frame and the one output - on each sequence that is drawing one, and the flow's small half-float
+ * textures (see [FlowInterpolator]). A sequence's chain for an item is released when the next item's
+ * is built, so a post with ten slowed clips still holds one item's worth at a time.
  */
 @OptIn(UnstableApi::class)
 class SlowMotionEffect(
@@ -64,10 +69,10 @@ class SlowMotionEffect(
     /** The spec's output frame rate: what the clip is brought up to. */
     val fps: Int,
     /**
-     * The in-between step, made on the GL thread when Media3 builds the chain. The one thing phase 2
-     * changes: a motion-compensated interpolator here, and the rest of this file stands as it is.
+     * The in-between step, made on the GL thread when Media3 builds the chain: [FlowInterpolator],
+     * motion-compensated, which is [BlendInterpolator]'s cross-fade on a GPU that cannot run the flow.
      */
-    private val interpolator: () -> FrameInterpolator = { BlendInterpolator() },
+    private val interpolator: () -> FrameInterpolator = { FlowInterpolator() },
 ) : GlEffect {
 
     private val loggedFirstFrame = AtomicBoolean(false)
@@ -106,11 +111,11 @@ class SlowMotionEffect(
  * around it - which instants, which neighbours, the textures, Media3's protocol - is
  * [SlowMotionEffect]'s and stays the same whatever this does.
  *
- * Phase 1 is [BlendInterpolator], a cross-fade. Phase 2 is motion-compensated interpolation: estimate
- * the motion between the two frames once, in [prepare], then warp both frames towards the instant
- * and blend what they agree on in [draw]. [prepare] is there for that alone - a pair of neighbours is
- * drawn at every instant between them, which is up to four draws at 0.25x, and the motion between
- * them is the same for every one.
+ * [BlendInterpolator] is phase 1's, a cross-fade. [FlowInterpolator] is phase 2's, motion-compensated:
+ * it estimates the motion between the two frames once, in [prepare], then warps both frames towards
+ * the instant and weighs what each can see in [draw]. [prepare] is there for that alone - a pair of
+ * neighbours is drawn at every instant between them, which is up to four draws at 0.25x, and the
+ * motion between them is the same for every one.
  *
  * Every call is made on the GL thread with the render engine's context current. Both frames are
  * plain 2D textures of the same size, the upright pictures as the source has them after the grade,

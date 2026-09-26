@@ -3,6 +3,7 @@ import type { ComposeCamera } from '../../video-composer/definitions';
 import { compileTransition, lookAt, transitionPreset, type CompiledTransition } from '../../editor/transitions';
 import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
+import { PREVIEW_INTERPOLATION } from '../../video-composer/web/frame-interpolation';
 import { pictureDest } from '../../video-composer/web/geometry';
 import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from '../../video-composer/web/painter';
 import { findClip } from '../../editor';
@@ -39,7 +40,9 @@ import { PresentedFrames } from './presented-frames';
  * shows: while it plays, its layer is drawn between the frame its element showed last and the one it
  * shows now, so slow motion glides at the screen's rate the way the export draws it rather than
  * stepping at the footage's rate times the speed. See [PresentedFrames] for how, and for the one
- * source frame it runs behind to do it.
+ * source frame it runs behind to do it. The in-between frame is the CROSS-FADE here, where the export
+ * follows the motion: the flow costs a phone's GPU more per pair of frames than the preview has per
+ * displayed frame - see [PREVIEW_INTERPOLATION] for the measurement.
  */
 
 /** The most device pixels a preview is worth. A 4K post composited at 4K for a 400px box is waste. */
@@ -270,7 +273,7 @@ export class PreviewCanvas {
     // openings use up every context the page is allowed.
     if (!this.painter?.resize({ width, height })) {
       this.painter?.dispose();
-      this.painter = new Painter({ width, height }, this.canvas);
+      this.painter = new Painter({ width, height }, this.canvas, { interpolation: PREVIEW_INTERPOLATION });
     }
     // Cold again either way. The programs survive a resize but the transitions' frame targets do
     // not, and warming is what makes them at the new size on a paused frame rather than on the first

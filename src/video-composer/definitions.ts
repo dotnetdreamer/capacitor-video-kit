@@ -384,12 +384,17 @@ export interface ComposeOutput {
    * SLOW MOTION IS THE EXCEPTION, on Android and the web (iOS does not yet). A video clip whose
    * `speed` is below 1 would otherwise run at its source rate times its speed - 30 fps footage at
    * 0.3x is nine pictures a second - so both engines SYNTHESISE the frames in between at this rate:
-   * each output frame of a slowed clip is its two neighbouring source frames mixed by where the
-   * frame falls between them (Android's `SlowMotionEffect`, the web's `slow-motion.ts` and
-   * `frame-interpolation.ts`). Only frames inside the clip's own trim are used, its first frame is
-   * held from the clip's start and its last to its end, and nothing is mixed across a cut. A clip at
-   * 1x or faster, and a picture, is drawn exactly as described above. Nothing on the wire asks for
-   * it: `speed` below 1 is the whole of the signal, so a spec from any version of the editor gets it.
+   * each output frame of a slowed clip is made from its two neighbouring source frames, at where the
+   * frame falls between them (`slow-motion.ts`, Android's `SlowMotionCadence`). An EXPORT follows the
+   * motion between the two - optical flow, one algorithm with the same passes and constants in both
+   * engines (`optical-flow.ts`, `OpticalFlow.kt`), each pixel taken from each frame part of the way
+   * along its path - and falls back to cross-fading the two wherever the flow cannot be trusted (a cut,
+   * a flash, motion faster than it can follow, a GPU without half-float targets). The live PREVIEW
+   * cross-fades (`frame-interpolation.ts` says why). Only frames inside the clip's own trim are used,
+   * its first frame is held from the clip's start and its last to its end, and nothing is mixed
+   * across a cut. A clip at 1x or faster, and a picture, is drawn exactly as described above.
+   * Nothing on the wire asks for it: `speed` below 1 is the whole of the signal, so a spec from any
+   * version of the editor gets it.
    */
   fps: number;
   /**

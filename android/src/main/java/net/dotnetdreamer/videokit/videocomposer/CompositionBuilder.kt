@@ -586,8 +586,10 @@ object CompositionBuilder {
         // handed every synthesised instant to move on every one. It cannot sit between the geometry
         // and the camera, because that would split the one pass the zoom's sharpness depends on (the
         // paragraph above). And after the grade rather than before it, so the grade is drawn once per
-        // SOURCE frame instead of once per output frame; a colour matrix and a cross-fade commute but
-        // for the clamp, which a blend of two clamped colours never leaves. A clip at 1x or faster, and
+        // SOURCE frame instead of once per output frame; a colour matrix and the weighted mix of two
+        // frames commute but for the clamp, which a mix of two clamped colours never leaves, and the
+        // motion between them is found in the graded picture, as the web engine finds it (see
+        // SlowMotionEffect). A clip at 1x or faster, and
         // every picture, gets nothing, and its list is the one it always had.
         val videoEffects: List<Effect> = listOfNotNull(
             grade,

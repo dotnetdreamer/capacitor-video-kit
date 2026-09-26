@@ -7,6 +7,7 @@ import { cameraAffine } from './camera-draw';
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
 import { INTERPOLATE_FRAMES_GLSL, interpolateFrames2d } from './frame-interpolation';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
+import { FlowEstimator, type FlowResult } from './optical-flow-gl';
 import { Transition2d } from './transition-2d';
 import { TransitionGl } from './transition-gl';
 
@@ -47,7 +48,39 @@ import { TransitionGl } from './transition-gl';
  * layer's ordinary path, so the synthesised frame is cropped, fitted, placed, turned, graded and seen
  * through the camera exactly as a recorded one, on either side of a transition as well as on its
  * own. A layer with one frame - every clip at 1x or faster, every picture - never touches any of it.
+ *
+ * On the GPU that step follows the MOTION between the two frames, which `optical-flow-gl.ts` works out
+ * once per pair and the painter keeps for as long as frames are drawn from that pair: before a frame
+ * with a slowed layer in it is drawn, every pair it needs that has no flow yet gets one (see
+ * [PainterOptions.interpolation]). Only a pair of two held pictures - bitmaps, which cannot change -
+ * has its flow kept; a pair whose B is a playing `<video>` is drawn as the cross-fade.
  */
+
+/** How the painter is to draw. */
+export interface PainterOptions {
+  /**
+   * How a slowed clip's missing frames are made on the GPU: `flow`, motion-compensated (see
+   * `frame-interpolation.ts`), or `blend`, phase 1's cross-fade. Absent is `flow`, which is what every
+   * export draws; the preview says which it can afford. A GPU that cannot run the flow - no half-float
+   * render targets - draws the blend whatever this says, and the 2D fallback always does.
+   */
+  interpolation?: 'flow' | 'blend';
+}
+
+/**
+ * How many pairs' flows are kept at once. A pair is let go of as soon as either of its frames is
+ * (see [Painter.forget]), so this is only a backstop against a caller that never says: the export
+ * draws at most a base clip, a transition's tail and a few layers slowed at once, and each is on one
+ * pair at a time.
+ */
+const MAX_KEPT_FLOWS = 8;
+
+/** A pair's flow, kept while frames are drawn from it. */
+interface KeptFlow {
+  a: LayerSource;
+  b: LayerSource;
+  result: FlowResult;
+}
 
 /**
  * One transition, in the base track's place in [Painter.paintLayers]: the outgoing and incoming base
@@ -130,7 +163,8 @@ export interface LayerDraw {
    * The two are mixed where the SOURCE is sampled - before the colour matrix, and through the very
    * crop, fit, rectangle, turn and camera the layer would be drawn with from A alone - so a
    * synthesised frame is placed and graded exactly as a recorded one. B has to be a frame of the
-   * same picture as A, at the same size: it is sampled at the coordinates A is.
+   * same picture as A, at the same size: the two are read in the one texture coordinate space, A a
+   * step back along the pair's motion and B a step forward (at A's own coordinate, for the cross-fade).
    *
    * Absent, null, or a weight of 0 is no second frame, and takes exactly the path every layer took
    * before this field existed - the one texture read, the same bits. Every clip at 1x or faster and
@@ -269,6 +303,11 @@ export class Painter {
   private transition2d: Transition2d | null = null;
   /** Where the 2D fallback makes a synthesised frame; built the first time it needs one. */
   private tweenSurface: HTMLCanvasElement | null = null;
+  private readonly interpolation: 'flow' | 'blend';
+  /** Built the first time a pair needs a flow; null once this context has been found unable to run one. */
+  private flowEstimator: FlowEstimator | null | undefined = undefined;
+  /** The pairs whose flow is kept, oldest first. */
+  private readonly flows: KeptFlow[] = [];
   private matrix: ColorMatrix | null = null;
   /** The CSS filter the 2D fallback draws with; `none` when there is no colour work. */
   private cssFilter = 'none';
@@ -279,9 +318,11 @@ export class Painter {
    *   preview. The render passes none and gets one of its own, which it hands to the encoder; the
    *   preview passes the element in its own DOM, so the finished frame IS the picture the customer
    *   is looking at rather than something copied onto it thirty times a second.
+   * @param options see [PainterOptions].
    */
-  constructor(output: Frame, onto?: HTMLCanvasElement) {
+  constructor(output: Frame, onto?: HTMLCanvasElement, options: PainterOptions = {}) {
     this.output = output;
+    this.interpolation = options.interpolation ?? 'flow';
     this.canvas = onto ?? createCanvas(output.width, output.height);
     this.canvas.width = output.width;
     this.canvas.height = output.height;
@@ -362,6 +403,9 @@ export class Painter {
    * fallback path; both come from the same ordered op list, so the two cannot drift.
    */
   setColour(matrix: ColorMatrix | null, css: { filter: string; tints: string[] }): void {
+    // The flows kept were found in the picture as graded (see `optical-flow.ts`, the luma pass), so a
+    // new grade makes them flows of another picture.
+    if (matrix !== this.matrix) this.dropFlows();
     this.matrix = matrix;
     this.cssFilter = css.filter;
     this.cssTints = css.tints;
@@ -452,6 +496,13 @@ export class Painter {
    * that has been lost or given back has already taken every texture with it.
    */
   forget(source: LayerSource): void {
+    // A pair with this frame in it will not be drawn again either, and its flow goes with it.
+    for (let i = this.flows.length - 1; i >= 0; i--) {
+      const kept = this.flows[i]!;
+      if (kept.a !== source && kept.b !== source) continue;
+      this.flows.splice(i, 1);
+      this.flowEstimator?.release(kept.result);
+    }
     const texture = this.textures.get(source);
     if (!texture) return;
     this.textures.delete(source);
@@ -482,6 +533,9 @@ export class Painter {
     this.textures.clear();
     this.transitionGl?.dispose();
     this.transitionGl = null;
+    this.flowEstimator?.dispose();
+    this.flowEstimator = undefined;
+    this.flows.length = 0;
     gl.getExtension('WEBGL_lose_context')?.loseContext();
     this.dropGl();
   }
@@ -494,12 +548,18 @@ export class Painter {
     this.uniforms = {};
     this.textures.clear();
     this.transitionGl = null;
+    // Its textures went with the context; the 2D path draws the cross-fade and needs none of it.
+    this.flowEstimator = undefined;
+    this.flows.length = 0;
   }
 
   /* ------------------------------------------------------------------------------------------ */
 
   /** Returns false when this browser would not let the shader have a frame; see the catch below. */
   private paintLayersGl(gl: WebGL2RenderingContext, layers: ReadonlyArray<LayerDraw | TransitionDraw>): boolean {
+    // Before anything is drawn, because the flow passes draw into targets of their own and leave the
+    // viewport, the program and the framebuffer to be set again below.
+    this.prepareFlows(gl, layers);
     gl.viewport(0, 0, this.output.width, this.output.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -558,6 +618,16 @@ export class Painter {
         return false;
       }
     }
+    // The pair's motion on units 2 and 3, where only the interpolation reads it - worked out before the
+    // frame began (see prepareFlows). A pair without it is drawn as the cross-fade.
+    const flow = tween ? this.keptFlow(layer.source, tween.source) : null;
+    if (flow) {
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, flow.flow);
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, flow.visibility);
+      gl.activeTexture(gl.TEXTURE0);
+    }
 
     const bounds = boundsOf(layer);
     const kept = layer.framing.crop ?? FULL_FRAME;
@@ -578,13 +648,71 @@ export class Painter {
     // Set on every layer for the camera's reason: a layer with no second frame drawn after one with
     // a second frame would otherwise inherit its weight.
     gl.uniform1f(this.uniforms['u_tween'] ?? null, tween ? tween.weight : 0);
+    gl.uniform1f(this.uniforms['u_flowOn'] ?? null, flow ? 1 : 0);
+    if (flow) gl.uniform2f(this.uniforms['u_flowSize'] ?? null, flow.width, flow.height);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (tween) {
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, null);
+      // Unbound again for unit 1's reason: nothing a later draw renders into may be left bound.
+      for (const unit of flow ? [gl.TEXTURE3, gl.TEXTURE2, gl.TEXTURE1] : [gl.TEXTURE1]) {
+        gl.activeTexture(unit);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+      }
       gl.activeTexture(gl.TEXTURE0);
     }
     return true;
+  }
+
+  /**
+   * Works out the motion of every pair this frame draws from that has none yet - a slowed layer, or a
+   * transition side, whose two frames are both held pictures - so that [drawLayerGl] finds it waiting.
+   * A pair is worked out once and then kept (see [forget]), so at 0.3x this runs on one output frame in
+   * three or four.
+   *
+   * Nothing is done for a painter told to blend, for a pair whose B is a `<video>` still standing in
+   * for its copy (the preview's first moments on a new frame: the element's picture is about to move
+   * on, and a flow of it would be of the wrong frame), or on a GPU found unable to run the flow.
+   */
+  private prepareFlows(gl: WebGL2RenderingContext, layers: ReadonlyArray<LayerDraw | TransitionDraw>): void {
+    if (this.interpolation !== 'flow' || this.flowEstimator === null) return;
+    for (const draw of layers) {
+      // An incoming side at no alpha is not drawn (see paintTransitionGl), so it needs no flow yet.
+      for (const layer of isTransitionDraw(draw) ? [draw.from, draw.look.alpha > 0 ? draw.to : null] : [draw]) {
+        const tween = layer ? activeTween(layer) : null;
+        if (!layer || !tween) continue;
+        const a = layer.source;
+        const b = tween.source;
+        if (!isHeldPicture(a) || !isHeldPicture(b) || a.width !== b.width || a.height !== b.height) continue;
+        if (this.keptFlow(a, b)) continue;
+        const estimator = this.flowEstimator ?? (this.flowEstimator = FlowEstimator.create(gl, this.position));
+        if (!estimator) return;
+        // Uploaded here rather than in the draw, which finds them already uploaded: a held picture is
+        // uploaded once.
+        const uploadedA = this.upload(gl, a);
+        const uploadedB = uploadedA && this.upload(gl, b);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        const textureA = this.textures.get(a);
+        const textureB = this.textures.get(b);
+        if (!uploadedB || !textureA || !textureB) continue;
+        const matrix = this.matrix;
+        const grade = { matrix: matrix ? toGlColumnMajor(matrix) : IDENTITY_GL, offset: matrix ? offsetVector(matrix) : ZERO_OFFSET };
+        const result = estimator.estimate(textureA, textureB, a.width, a.height, grade);
+        if (!result) continue;
+        this.flows.push({ a, b, result });
+        while (this.flows.length > MAX_KEPT_FLOWS) estimator.release(this.flows.shift()!.result);
+      }
+    }
+  }
+
+  /** Lets go of every kept flow. */
+  private dropFlows(): void {
+    for (const kept of this.flows) this.flowEstimator?.release(kept.result);
+    this.flows.length = 0;
+  }
+
+  /** The kept flow of the pair `a` to `b`, if it has one. */
+  private keptFlow(a: LayerSource, b: LayerSource): FlowResult | null {
+    for (const kept of this.flows) if (kept.a === a && kept.b === b) return kept.result;
+    return null;
   }
 
   /**
@@ -825,6 +953,14 @@ export class Painter {
         this.textures.delete(source);
       }
     }
+    // And the flow of any pair with a closed frame in it, which can never be drawn again.
+    const closed = (source: LayerSource) => source instanceof ImageBitmap && source.width === 0 && source.height === 0;
+    for (let i = this.flows.length - 1; i >= 0; i--) {
+      const kept = this.flows[i]!;
+      if (!closed(kept.a) && !closed(kept.b)) continue;
+      this.flows.splice(i, 1);
+      this.flowEstimator?.release(kept.result);
+    }
   }
 }
 
@@ -874,6 +1010,14 @@ function hasPicture(layer: LayerDraw | null): layer is LayerDraw {
   return layer !== null && layer.sourceWidth > 0 && layer.sourceHeight > 0;
 }
 
+/**
+ * Whether a source is a picture that cannot change - a bitmap, not yet closed - and so one whose flow
+ * can be worked out once and kept. A closed bitmap reports a size of nothing.
+ */
+function isHeldPicture(source: LayerSource): source is ImageBitmap {
+  return typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap && source.width > 0 && source.height > 0;
+}
+
 function createCanvas(width: number, height: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -912,6 +1056,9 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
   gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
   gl.uniform1i(gl.getUniformLocation(program, 'u_tex'), 0);
   gl.uniform1i(gl.getUniformLocation(program, 'u_texNext'), 1);
+  // A slowed pair's motion, from `optical-flow-gl.ts`: see INTERPOLATE_FRAMES_GLSL.
+  gl.uniform1i(gl.getUniformLocation(program, 'u_flow'), 2);
+  gl.uniform1i(gl.getUniformLocation(program, 'u_visibility'), 3);
   gl.activeTexture(gl.TEXTURE0);
 
   return {
@@ -930,6 +1077,8 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
       u_offset: gl.getUniformLocation(program, 'u_offset'),
       u_opacity: gl.getUniformLocation(program, 'u_opacity'),
       u_tween: gl.getUniformLocation(program, 'u_tween'),
+      u_flowOn: gl.getUniformLocation(program, 'u_flowOn'),
+      u_flowSize: gl.getUniformLocation(program, 'u_flowSize'),
     },
   };
 }
