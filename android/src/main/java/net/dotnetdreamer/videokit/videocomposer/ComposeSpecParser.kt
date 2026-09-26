@@ -616,7 +616,62 @@ object ComposeSpecParser {
             startMs = startMs,
             endMs = endMs,
             opacity = o.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+            // Last of the layer's fields, so a layer broken somewhere else reports the same first
+            // failure it always did.
+            motion = parseOverlayMotion(o.opt("motion"), "overlays[$i].motion"),
         )
+    }
+
+    /**
+     * A layer's motion, by the rules `normaliseOverlayMotion` in `src/editor/motion.ts` states for
+     * every engine and in its order, so the web export, iOS and this one draw the same moves or
+     * refuse the same spec with the same path.
+     *
+     * REFUSED, as shape errors: a motion that is not an object, `atMs` that is not an array, a
+     * channel that is not an array as long as `atMs` (checked in the contract's order, x, y, scale,
+     * rotation, opacity), a key nobody defined - a channel this engine skipped would be a different
+     * animation from the preview's - more than [OverlayMotion.MAX_KEYS] keys, and a time that is not
+     * a finite number or goes back in time. CLAMPED, as values: every channel to its range, and a
+     * value that is not a finite number read as the channel's neutral one, the camera's rule.
+     *
+     * ABSENT, which is null: no key, JSON null, no `atMs`, an empty one, and a motion in which every
+     * channel sits at its neutral value at every key - and a channel that never leaves it is left
+     * off, so the per-frame reading does no work for it.
+     */
+    private fun parseOverlayMotion(value: Any?, path: String): OverlayMotion? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val timesValue = o.opt("atMs")
+        if (timesValue == null || timesValue == JSONObject.NULL) return null
+        val times = timesValue as? JSONArray ?: throw SpecException("$path.atMs")
+        val n = times.length()
+        if (n == 0) return null
+        val arrays = arrayOfNulls<JSONArray>(MOTION_CHANNELS.size)
+        for ((c, channel) in MOTION_CHANNELS.withIndex()) {
+            val raw = o.opt(channel.name)
+            if (raw == null || raw == JSONObject.NULL) continue
+            val array = raw as? JSONArray ?: throw SpecException("$path.${channel.name}")
+            if (array.length() != n) throw SpecException("$path.${channel.name}")
+            arrays[c] = array
+        }
+        unknownKey(o, MOTION_KEYS)?.let { throw SpecException("$path.$it") }
+        if (n > OverlayMotion.MAX_KEYS) {
+            throw SpecException(path, "invalid_spec:$path at most ${OverlayMotion.MAX_KEYS} keys")
+        }
+        val atMs = DoubleArray(n)
+        for (k in 0 until n) {
+            val t = finiteNumber(times.opt(k)) ?: throw SpecException("$path.atMs[$k]")
+            if (k > 0 && t < atMs[k - 1]) throw SpecException("$path.atMs[$k]")
+            atMs[k] = t
+        }
+        val values = arrayOfNulls<DoubleArray>(MOTION_CHANNELS.size)
+        for ((c, channel) in MOTION_CHANNELS.withIndex()) {
+            val array = arrays[c] ?: continue
+            val read = DoubleArray(n) { k -> finiteNumber(array.opt(k))?.coerceIn(channel.min, channel.max) ?: channel.neutral }
+            if (read.any { it != channel.neutral }) values[c] = read
+        }
+        if (values.all { it == null }) return null
+        return OverlayMotion(atMs, values[0], values[1], values[2], values[3], values[4])
     }
 
     private fun parseAudio(o: JSONObject?): Audio {
@@ -712,6 +767,23 @@ object ComposeSpecParser {
     private const val MAX_FEATHER = 0.5f
 
     private val CURVE_KEYS = setOf("alpha", "reveal", "from", "to")
+
+    /** A motion channel's wire name, the value it holds when absent, and the range it is clamped to. */
+    private class MotionChannel(val name: String, val neutral: Double, val min: Double, val max: Double)
+
+    /**
+     * An overlay motion's channels in the contract's order, which is also the order they are read
+     * and refused in. The ranges are `MOTION_CHANNELS` in motion.ts, the transitions' own bounds.
+     */
+    private val MOTION_CHANNELS = listOf(
+        MotionChannel("x", 0.0, -4.0, 4.0),
+        MotionChannel("y", 0.0, -4.0, 4.0),
+        MotionChannel("scale", 1.0, 0.0, 20.0),
+        MotionChannel("rotation", 0.0, -3600.0, 3600.0),
+        MotionChannel("opacity", 1.0, 0.0, 1.0),
+    )
+
+    private val MOTION_KEYS = setOf("atMs") + MOTION_CHANNELS.map { it.name }
 
     /** A side's channels in the contract's order, which is also the order they are read in. */
     private val SIDE_CHANNELS = linkedSetOf(

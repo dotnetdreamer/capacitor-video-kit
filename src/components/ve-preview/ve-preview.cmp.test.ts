@@ -1822,3 +1822,62 @@ describe('ve-preview with a picture on the timeline', () => {
     PIXEL_TIMEOUT_MS * 2,
   );
 });
+
+describe('ve-preview moving a layer', () => {
+  /*
+   * A layer's motion moves its `<img>` on every frame, and it does it by writing the element's style
+   * rather than by rendering the preview again: a render per frame of the preview is the one thing
+   * the whole component is built to avoid. What is pinned is WHERE the layer is at each playhead - the
+   * numbers the render draws, through the same sampler - and that getting there cost no render.
+   */
+  it('moves the layer with the playhead, straight from the compiled motion, and without a render', async () => {
+    const { store, preview } = await mount(false);
+    const id = store.addSticker({ emoji: '⭐' })!;
+    // At 0, whatever the playhead: a slide in from the right and a pulse, over the whole post.
+    store.commitOverlay(id, { startMs: 0, animation: { in: { id: 'slide-left', durationMs: 1000 }, loop: { id: 'pulse', periodMs: 1000 } } }, 'Animate');
+    store.bitmaps.value = new Map([[id, { png: TRANSPARENT_PNG, wPx: 100, hPx: 100, key: 'k', scale: 1, frameW: 720, frameH: 1280 }]]);
+    store.playheadMs.value = 0;
+    await until('the layer to be drawn', () => layerImg(preview) !== null);
+    await frames(2);
+
+    const img = () => layerImg(preview)!;
+    const leftOf = () => parseFloat(img().style.left);
+    // At the start of the slide it is 12% of the frame to the right of where it was put, and clear.
+    expect(leftOf()).toBeCloseTo(62, 3);
+    expect(parseFloat(img().style.opacity)).toBeCloseTo(0, 6);
+
+    // Whatever the mount still had to draw - the stage's first measurement, the selection box - is
+    // drawn before the playhead starts moving, so what is counted is the move and nothing else.
+    const renders = countRenders(preview);
+    await frames(6);
+    const settled = renders();
+    store.playheadMs.value = 500;
+    await frames(2);
+    const halfway = store.overlayMotions.value.get(id)!;
+    const x = halfway.x![halfway.atMs.findIndex(t => t >= 500)];
+    expect(leftOf()).toBeGreaterThan(50);
+    expect(leftOf()).toBeLessThan(62);
+    expect(Math.abs(leftOf() - (50 + x * 100))).toBeLessThan(0.5);
+
+    // A quarter of the way into the pulse: home, and bigger.
+    store.playheadMs.value = 1250;
+    await frames(2);
+    expect(leftOf()).toBeCloseTo(50, 3);
+    expect(img().style.transform).toMatch(/^translate\(-50%, -50%\) rotate\(0deg\) scale\(1\.0[34]/);
+    expect(renders()).toBe(settled);
+
+    // The motion taken away puts it back at rest, exactly as a still layer is written.
+    store.commitOverlay(id, { animation: undefined }, 'Still');
+    await frames(3);
+    expect(leftOf()).toBeCloseTo(50, 6);
+    expect(img().style.transform).toBe('translate(-50%, -50%) rotate(0deg)');
+    expect(img().style.opacity).toBe('1');
+  });
+});
+
+/** A 1x1 transparent PNG: the layer's picture does not matter here, only where its element is. */
+const TRANSPARENT_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+function layerImg(preview: HTMLElement): HTMLImageElement | null {
+  return preview.querySelector('img.pv__layer');
+}

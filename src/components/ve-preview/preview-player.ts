@@ -18,17 +18,7 @@ import type { EditorPlayer } from '../../state/editor.types';
 import type { ClipMedia } from './clip-media';
 import { FollowerVideo, type FollowerMedia } from './follower-video';
 import type { BaseShot } from './preview-canvas';
-import {
-  BLANK_POSTER,
-  SEEK_EPSILON_S,
-  applyClipAudio,
-  clipsSilenced,
-  onPageShown,
-  posterFor,
-  previewSrc,
-  startPlayback,
-  volumeIsWritable,
-} from './preview-media';
+import { BLANK_POSTER, SEEK_EPSILON_S, applyClipAudio, clipsSilenced, onPageShown, posterFor, previewSrc, startPlayback, volumeIsWritable } from './preview-media';
 import { PreviewMixer, levelsInUse, playableHere } from './preview-mixer';
 import {
   MAX_START_LEAD_MS,
@@ -277,10 +267,7 @@ export class PreviewPlayer implements EditorPlayer {
   private musicUri: string | null = null;
   private voiceUri: string | null = null;
   /** Audio elements started or seeked and not yet checked: where they were put (ms), and how often. */
-  private readonly settling = new Map<
-    HTMLAudioElement,
-    { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number }
-  >();
+  private readonly settling = new Map<HTMLAudioElement, { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number }>();
   /** How long each element's clock stands still after a start and after a seek, as last measured. */
   private readonly audioLeadMs = new Map<HTMLAudioElement, Partial<Record<AudioPut, number>>>();
   /** Base elements started from a standing frame and not yet measured; see [DEFAULT_VIDEO_LEAD_MS]. */
@@ -795,10 +782,7 @@ export class PreviewPlayer implements EditorPlayer {
     this.applyVideoAudio(slot.clip, ms);
 
     const sourceSec = sourceMsAt(slot, ms) / 1000;
-    const tolerance =
-      autoplay && !video.paused && !forceSeek
-        ? (PLAYING_SEEK_TOLERANCE_MS * (slot.clip.speed || 1)) / 1000
-        : SEEK_EPSILON_S;
+    const tolerance = autoplay && !video.paused && !forceSeek ? (PLAYING_SEEK_TOLERANCE_MS * (slot.clip.speed || 1)) / 1000 : SEEK_EPSILON_S;
     if (forceSeek || Math.abs(video.currentTime - sourceSec) > tolerance) {
       this.armSeek();
       this.starts.delete(video);
@@ -1220,7 +1204,7 @@ export class PreviewPlayer implements EditorPlayer {
     }
     this.learnStarts();
     const slots = this.store.slots.value;
-    const index = slots.findIndex((slot) => slot.clip.id === this.segmentId);
+    const index = slots.findIndex(slot => slot.clip.id === this.segmentId);
     if (index < 0) {
       this.goTo(clamp(this.store.playheadMs.value, 0, this.store.totalMs.value), true);
       return;
@@ -1348,7 +1332,7 @@ export class PreviewPlayer implements EditorPlayer {
   private onEnded(): void {
     // A load or a seek in flight re-reads the play state itself when it lands.
     if (this.pendingLoad || this.seekInFlight) return;
-    const index = this.store.slots.value.findIndex((slot) => slot.clip.id === this.segmentId);
+    const index = this.store.slots.value.findIndex(slot => slot.clip.id === this.segmentId);
     if (index >= 0) this.advance(index, true);
     else this.readPlayState();
   }
@@ -1504,10 +1488,7 @@ export class PreviewPlayer implements EditorPlayer {
     const musicLead = music && live ? this.leadWindow(this.musicEl) : 0;
     const heard = music ? musicWindow(music, total) : null;
     const musicAt =
-      music && heard && live
-        ? (musicSourceMsAt(music, ms, total) ??
-          (ms < heard.startMs && heard.startMs - ms <= musicLead ? music.inMs + ms - heard.startMs : null))
-        : null;
+      music && heard && live ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= musicLead ? music.inMs + ms - heard.startMs : null)) : null;
     if (music && heard && musicAt !== null) {
       // The render fades the track out over its last `fadeOutMs`; the preview follows along.
       const fade = music.fadeOutMs > 0 ? clamp((heard.endMs - ms) / music.fadeOutMs, 0, 1) : 1;
@@ -1517,9 +1498,7 @@ export class PreviewPlayer implements EditorPlayer {
     }
 
     const voiceLead = live ? this.leadWindow(this.voiceEl) : 0;
-    const take = live
-      ? manifest.voiceovers.find((t) => ms >= t.startMs - voiceLead && ms < t.startMs + t.durationMs)
-      : undefined;
+    const take = live ? manifest.voiceovers.find(t => ms >= t.startMs - voiceLead && ms < t.startMs + t.durationMs) : undefined;
     if (take) {
       this.setSource('voice', take.uri);
       this.playAt(this.voiceEl, ms - take.startMs, clamp(take.volume, 0, 1), running);
@@ -1679,7 +1658,7 @@ export class PreviewPlayer implements EditorPlayer {
    * ended sitting on the frame.
    */
   private syncFollower(playing: boolean): void {
-    const byTrack = new Map(this.extraLayers().map((layer) => [layer.trackId, layer] as const));
+    const byTrack = new Map(this.extraLayers().map(layer => [layer.trackId, layer] as const));
     for (const [trackId, follower] of this.followers) {
       follower.sync(byTrack.get(trackId) ?? null, playing);
     }
@@ -1696,7 +1675,7 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   private currentSlot(): TimelineSlot | null {
-    return this.store.slots.value.find((slot) => slot.clip.id === this.segmentId) ?? null;
+    return this.store.slots.value.find(slot => slot.clip.id === this.segmentId) ?? null;
   }
 
   private isPlaying(): boolean {

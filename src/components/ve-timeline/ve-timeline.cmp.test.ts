@@ -127,9 +127,7 @@ function instanceOf<T>(tl: HTMLElement): T {
   const hostRef = (tl as HTMLElement & WithHostRef).__stencil__getHostRef?.();
   const instance =
     hostRef &&
-    Object.values(hostRef).find(
-      (v): v is T & WithHostRef => typeof v === 'object' && v !== null && v !== tl && (v as WithHostRef).__stencil__getHostRef?.() === hostRef,
-    );
+    Object.values(hostRef).find((v): v is T & WithHostRef => typeof v === 'object' && v !== null && v !== tl && (v as WithHostRef).__stencil__getHostRef?.() === hostRef);
   if (!instance) throw new Error('no component instance');
   return instance;
 }
@@ -1488,5 +1486,51 @@ describe('the lane glyphs', () => {
     expect(glyph.width).toBe(24);
     expect(glyph.left).toBeGreaterThanOrEqual(bar.left);
     expect(glyph.right).toBeLessThanOrEqual(bar.right);
+  });
+});
+
+/*
+ * A layer's animation on its lane: the in and the out drawn the way the zoom bar draws its camera's
+ * ramps, a fade at each end, from the spans the render plays them in - so a caption that pops in has
+ * a soft head, one that cuts in a hard one, and a layer too short for both is squeezed as it is in
+ * the file.
+ */
+describe('the lane ramps', () => {
+  function laneEl(tl: HTMLElement, id: string): HTMLElement {
+    const found = root(tl).querySelector<HTMLElement>(`[data-hit="layer"][data-id="${id}"]`);
+    if (!found) throw new Error(`no ${id} lane`);
+    return found;
+  }
+
+  function ramp(tl: HTMLElement, id: string, which: 'in' | 'out'): number {
+    return laneEl(tl, id).querySelector<HTMLElement>(`.item__ramp--${which}`)!.getBoundingClientRect().width;
+  }
+
+  it('draws an in and an out at the length they play, and nothing on a layer that cuts', async () => {
+    const { store, tl } = await mount();
+    const id = store.addSticker({ emoji: '🔥' })!;
+    store.select(null);
+    await until('the lane', () => !!root(tl).querySelector(`[data-hit="layer"][data-id="${id}"]`));
+    expect(ramp(tl, id, 'in')).toBe(0);
+    expect(ramp(tl, id, 'out')).toBe(0);
+
+    store.commitOverlay(id, { animation: { in: { id: 'pop', durationMs: 500 }, out: { id: 'fade', durationMs: 1000 } } }, 'Animation');
+    const pps = store.pps.value;
+    await until('the ramps', () => Math.abs(ramp(tl, id, 'in') - 0.5 * pps) < 0.5);
+    expect(ramp(tl, id, 'out')).toBeCloseTo(pps, 0);
+    // Drawing, not a control: nothing to read and nothing to press.
+    expect(laneEl(tl, id).querySelector('.item__ramp--in')!.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('squeezes the in and the out together on a layer too short for both, as the render does', async () => {
+    const { store, tl } = await mount();
+    const id = store.addSticker({ emoji: '🔥' })!;
+    store.select(null);
+    await until('the lane', () => !!root(tl).querySelector(`[data-hit="layer"][data-id="${id}"]`));
+    // 600 ms for 500 in and 1000 out: both at two fifths, 200 and 400.
+    store.commitOverlay(id, { startMs: 0, endMs: 600, animation: { in: { id: 'pop', durationMs: 500 }, out: { id: 'fade', durationMs: 1000 } } }, 'Animation');
+    const pps = store.pps.value;
+    await until('the ramps', () => Math.abs(ramp(tl, id, 'in') - 0.2 * pps) < 0.5);
+    expect(ramp(tl, id, 'out')).toBeCloseTo(0.4 * pps, 0);
   });
 });

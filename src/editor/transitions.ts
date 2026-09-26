@@ -130,6 +130,11 @@ interface Recipe {
 const BLACK: RGB = [0, 0, 0];
 const WHITE: RGB = [1, 1, 1];
 const EMBER: RGB = [1, 0.45, 0.1];
+const AMBER: RGB = [1, 0.62, 0.26];
+const ROSE: RGB = [1, 0.5, 0.38];
+
+/** How far `spin-blur` turns each side, in degrees. */
+const SPIN_BLUR_TURN = 90;
 
 /*
  * Every recipe owes the two ends the same thing, and a unit test holds every one of them to it:
@@ -201,8 +206,57 @@ const RECIPES: Record<string, Recipe> = {
       return { alpha: smoothstep(0.42, 0.58, p), from: side, to: side };
     },
   },
-  'whip-left': whip(-1),
-  'whip-right': whip(1),
+  'whip-left': whip(-1, 0),
+  'whip-right': whip(1, 0),
+  'whip-up': whip(0, -1),
+  'whip-down': whip(0, 1),
+  // Both sides punched in at the cut and smeared, the outgoing one rushing in to it and the incoming
+  // one settling back out of it: the zoom a beat drop gets, where `zoom-in` is the gentler push.
+  'zoom-blur': {
+    look: p => {
+      const a = easeInCubic(clamp01(p / 0.5));
+      const b = easeOutCubic(clamp01((p - 0.5) / 0.5));
+      return {
+        alpha: smoothstep(0.42, 0.58, p),
+        from: { scale: 1 + 0.9 * a, blur: 0.032 * a, gain: 1 + 0.2 * a },
+        to: { scale: 1.9 - 0.9 * b, blur: 0.032 * (1 - b), gain: 1 + 0.2 * (1 - b) },
+      };
+    },
+  },
+  // Flying THROUGH the outgoing frame: it rushes past, blurred, while the incoming one opens out of
+  // its middle - small, soft and framed by the outgoing clip's blur - and grows to fill the frame.
+  // Below full size the incoming frame's edges show over the outgoing one, which is the portal.
+  // It grows PAST full size and settles back: grown only to 1 it would crawl the last few percent
+  // with a thin line of the outgoing clip round it, where this way the edges leave at speed.
+  'zoom-through': {
+    look: p => {
+      const a = easeInCubic(clamp01(p / 0.62));
+      const grow = easeOutCubic(clamp01((p - 0.28) / 0.5));
+      const settle = easeInOutSine(clamp01((p - 0.78) / 0.22));
+      return {
+        alpha: smoothstep(0.28, 0.42, p),
+        from: { scale: 1 + 2.4 * a, blur: 0.036 * a },
+        to: { scale: 0.35 + 0.75 * grow - 0.1 * settle, blur: 0.028 * (1 - grow) },
+      };
+    },
+  },
+  // A quarter turn out and a quarter turn in, smeared by how fast it is turning, and always large
+  // enough to cover the frame at its angle, so no corner of black ever swings through.
+  'spin-blur': {
+    look: p => {
+      const a = easeInCubic(clamp01(2 * p));
+      const b = easeOutCubic(clamp01(2 * p - 1));
+      const out = SPIN_BLUR_TURN * a;
+      const back = -SPIN_BLUR_TURN * (1 - b);
+      const smear = 0.034 * (1 - Math.abs(2 * p - 1)) ** 2;
+      return {
+        alpha: smoothstep(0.46, 0.54, p),
+        from: { rotation: out, scale: coverScale(out), blur: smear },
+        to: { rotation: back, scale: coverScale(back), blur: smear },
+      };
+    },
+  },
+  'swipe-up': swipe(),
 
   /* -- Mask ---------------------------------------------------------------------------------- */
   // `angleDeg` is the way the edge TRAVELS, so a wipe left reveals the incoming clip from the right.
@@ -215,6 +269,10 @@ const RECIPES: Record<string, Recipe> = {
   'circle-close': { mask: { shape: 'circle', feather: 0.02, invert: true }, look: p => ({ reveal: 1 - easeInOutCubic(p) }) },
   'clock': wipe({ shape: 'clock', feather: 0.004 }),
   'blinds': wipe({ shape: 'blinds', angleDeg: 90, count: 8, feather: 0.04 }),
+  // Barn doors: the outgoing clip parts down the middle, and the incoming one settles into the gap
+  // from a little closer, so it arrives rather than being uncovered.
+  'split-open': opening({ shape: 'split', angleDeg: 0, feather: 0.008 }),
+  'diamond': opening({ shape: 'diamond', feather: 0.012 }),
 
   /* -- Effect -------------------------------------------------------------------------------- */
   'flash': {
@@ -261,6 +319,35 @@ const RECIPES: Record<string, Recipe> = {
       };
     },
   },
+  // Chromatic aberration with a small punch in: red and blue pull apart as the cut nears and snap
+  // back the other way after it, which is what makes the pair read as one hit rather than a blur.
+  'rgb-split': {
+    look: p => {
+      const k = Math.sin(Math.PI * p);
+      const punch = { scale: 1 + 0.07 * k, gain: 1 + 0.12 * k };
+      return {
+        alpha: smoothstep(0.45, 0.55, p),
+        from: { ...punch, split: 0.045 * k * k },
+        to: { ...punch, split: -0.045 * k * k },
+      };
+    },
+  },
+  // A warm light leak washing across the cut: both frames overexpose towards amber and rose while a
+  // very soft edge carries the incoming clip in from the side, so the two tints meet as a gradient
+  // rather than a flat colour. Where `burn` is a hard flare to ember, this is film fogged by light.
+  'leak': {
+    mask: { shape: 'linear', angleDeg: 200, feather: 0.32 },
+    fromTint: AMBER,
+    toTint: ROSE,
+    look: p => {
+      const k = Math.sin(Math.PI * p);
+      return {
+        reveal: easeInOutSine(p),
+        from: { gain: 1 + 1.25 * k, tint: 0.38 * k * k, blur: 0.005 * k },
+        to: { gain: 1 + 1.25 * k, tint: 0.38 * k * k, blur: 0.005 * k },
+      };
+    },
+  },
 };
 
 export const TRANSITIONS: readonly TransitionPreset[] = [
@@ -275,10 +362,16 @@ export const TRANSITIONS: readonly TransitionPreset[] = [
   { id: 'slide-down', label: 'Slide down', category: 'basic', posterAt: 0.5 },
   { id: 'zoom-in', label: 'Zoom in', category: 'camera', posterAt: 0.55 },
   { id: 'zoom-out', label: 'Zoom out', category: 'camera', posterAt: 0.4 },
+  { id: 'zoom-blur', label: 'Zoom blur', category: 'camera', posterAt: 0.4 },
+  { id: 'zoom-through', label: 'Zoom through', category: 'camera', posterAt: 0.45 },
   { id: 'spin', label: 'Spin', category: 'camera', posterAt: 0.35 },
+  { id: 'spin-blur', label: 'Spin blur', category: 'camera', posterAt: 0.4 },
   { id: 'shake', label: 'Shake', category: 'camera', posterAt: 0.3 },
   { id: 'whip-left', label: 'Whip left', category: 'camera', posterAt: 0.45 },
   { id: 'whip-right', label: 'Whip right', category: 'camera', posterAt: 0.45 },
+  { id: 'whip-up', label: 'Whip up', category: 'camera', posterAt: 0.45 },
+  { id: 'whip-down', label: 'Whip down', category: 'camera', posterAt: 0.45 },
+  { id: 'swipe-up', label: 'Swipe up', category: 'camera', posterAt: 0.3 },
   { id: 'wipe-left', label: 'Wipe left', category: 'mask', posterAt: 0.5 },
   { id: 'wipe-right', label: 'Wipe right', category: 'mask', posterAt: 0.5 },
   { id: 'wipe-up', label: 'Wipe up', category: 'mask', posterAt: 0.5 },
@@ -287,10 +380,14 @@ export const TRANSITIONS: readonly TransitionPreset[] = [
   { id: 'circle-close', label: 'Circle close', category: 'mask', posterAt: 0.5 },
   { id: 'clock', label: 'Clock', category: 'mask', posterAt: 0.4 },
   { id: 'blinds', label: 'Blinds', category: 'mask', posterAt: 0.5 },
+  { id: 'split-open', label: 'Split', category: 'mask', posterAt: 0.45 },
+  { id: 'diamond', label: 'Diamond', category: 'mask', posterAt: 0.5 },
   { id: 'flash', label: 'Flash', category: 'effect', posterAt: 0.3 },
   { id: 'pixelate', label: 'Pixelate', category: 'effect', posterAt: 0.4 },
   { id: 'glitch', label: 'Glitch', category: 'effect', posterAt: 0.4 },
   { id: 'burn', label: 'Burn', category: 'effect', posterAt: 0.4 },
+  { id: 'rgb-split', label: 'RGB split', category: 'effect', posterAt: 0.4 },
+  { id: 'leak', label: 'Light leak', category: 'effect', posterAt: 0.45 },
 ];
 
 export function transitionPreset(id: string): TransitionPreset | null {
@@ -648,21 +745,75 @@ function push(dx: number, dy: number, ease: (t: number) => number): Recipe {
 }
 
 /** The same cover, much faster through the middle and smeared by motion blur while it is fast. */
-function whip(dx: number): Recipe {
+function whip(dx: number, dy: number): Recipe {
   return {
     look: p => {
       const e = easeInOutQuart(p);
       const k = Math.sin(Math.PI * p) ** 2;
       return {
-        from: { x: dx * DRIFT * e, blur: 0.03 * k, tint: COVERED_TINT * e },
-        to: { x: -dx * (1 - e), blur: 0.03 * k },
+        from: { x: dx * DRIFT * e, y: dy * DRIFT * e, blur: 0.03 * k, tint: COVERED_TINT * e },
+        to: { x: -dx * (1 - e), y: -dy * (1 - e), blur: 0.03 * k },
       };
     },
   };
 }
 
+/**
+ * The swipe up a feed makes: the next clip flicked up from below, fast at once and settling slowly
+ * into place, the outgoing one pushed further up than a slide pushes it and darkened as it goes.
+ * Smeared by motion blur in step with the speed, so the blur is heaviest just after the flick and
+ * gone by the time the clip lands. Not a whip: that one is slow at both ends and fast in the middle,
+ * this one is a finger letting go.
+ */
+function swipe(): Recipe {
+  return {
+    look: p => {
+      const e = flick(p);
+      const k = flickSpeed(p);
+      return {
+        from: { y: -SWIPE_DRIFT * e, blur: 0.022 * k, tint: SWIPE_COVERED_TINT * e },
+        to: { y: 1 - e, blur: 0.026 * k },
+      };
+    },
+  };
+}
+
+/** How far a swipe pushes the outgoing clip, and how dark it goes under the incoming one. */
+const SWIPE_DRIFT = 0.55;
+const SWIPE_COVERED_TINT = 0.5;
+
+/**
+ * A mask opening from the middle, the incoming clip settling from a little larger as it opens. The
+ * settle leads the mask - it is mostly done by the time the gap is half open - so what the eye sees
+ * through the widening gap is a picture coming to rest, not one still sliding.
+ */
+function opening(mask: ComposeTransitionMask): Recipe {
+  return {
+    mask,
+    look: p => ({
+      reveal: easeInOutCubic(p),
+      to: { scale: 1 + 0.12 * (1 - easeOutCubic(p)) },
+    }),
+  };
+}
+
 function wipe(mask: ComposeTransitionMask): Recipe {
   return { mask, look: p => ({ reveal: easeInOutSine(p) }) };
+}
+
+/**
+ * How much a side turned `degrees` is scaled so it covers the frame, for any frame from 16:9 to 9:16.
+ * A frame W x H turned by t covers itself when its scale is at least `|cos t| + r |sin t|` with r the
+ * longer side over the shorter, and 16/9 is the widest a post is made at.
+ *
+ * With a few percent to spare while it is turned, because an engine never sees this function: it
+ * draws straight lines between samples of the angle and of the scale, and a straight line between two
+ * points of a curve that bows outward, as this one does, falls short of it in between.
+ */
+function coverScale(degrees: number): number {
+  const t = (degrees * Math.PI) / 180;
+  const turned = Math.abs(Math.sin(t));
+  return (Math.abs(Math.cos(t)) + (16 / 9) * turned) * (1 + 0.04 * turned);
 }
 
 export function smoothstep(e0: number, e1: number, x: number): number {
@@ -698,6 +849,27 @@ function easeInCubic(t: number): number {
 function easeOutCubic(t: number): number {
   return 1 - (1 - t) ** 3;
 }
+
+/**
+ * A flick: smoothstep run on a clock that starts fast, `1 - (1 - p)^2`. It leaves rest over the first
+ * few samples - so the frame before the window and the first one in it are not a jump - peaks at about
+ * a fifth of the way through, and spends the rest of the time arriving.
+ */
+function flick(p: number): number {
+  const q = 1 - (1 - p) ** 2;
+  return q * q * (3 - 2 * q);
+}
+
+/**
+ * [flick]'s speed, 0..1 of its peak: its derivative is `12 (u^3 - u^5)` with `u = 1 - p`, which is
+ * largest at `u^2 = 3/5`.
+ */
+function flickSpeed(p: number): number {
+  const u = 1 - clamp01(p);
+  return (u ** 3 - u ** 5) / FLICK_PEAK;
+}
+
+const FLICK_PEAK = 0.6 ** 1.5 - 0.6 ** 2.5;
 
 function sameRgb(a: RGB, b: RGB): boolean {
   return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];

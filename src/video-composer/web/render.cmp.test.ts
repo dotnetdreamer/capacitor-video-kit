@@ -1313,3 +1313,62 @@ describe('a zoom, end to end', () => {
     RENDER_TIMEOUT_MS,
   );
 });
+
+describe('a moving layer, end to end', () => {
+  it(
+    'draws a layer where its motion has it at each frame, and where it was put once the motion rests',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const uri = URL.createObjectURL(await makePicture('#00f', 160, 284));
+      const square = document.createElement('canvas');
+      square.width = 40;
+      square.height = 40;
+      const paint = square.getContext('2d');
+      if (!paint) throw new Error('no canvas');
+      paint.fillStyle = '#fff';
+      paint.fillRect(0, 0, 40, 40);
+      try {
+        const picture: ComposeClip = { key: 'p', uri, inMs: 0, outMs: 1500, speed: 1, volume: 1, muted: true, fit: 'cover', image: true };
+        // Put at a quarter across; half the frame to the right until a step at 500 ms, then a
+        // straight slide back home that ends at 1000 ms and holds.
+        const overlay = {
+          id: 'o',
+          png: square.toDataURL('image/png'),
+          cx: 0.25,
+          cy: 0.5,
+          wPx: 40,
+          hPx: 40,
+          rotationDeg: 0,
+          startMs: 0,
+          endMs: 1500,
+          opacity: 1,
+          motion: { atMs: [0, 500, 500, 1000], x: [0.5, 0.5, 0.5, 0] },
+        };
+        const outcome = await renderSpec(spec(uri, { jobId: 'job-motion', clips: [picture], overlays: [overlay] }), {
+          signal: new AbortController().signal,
+          onProgress: () => undefined,
+        });
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const white = (rgb: [number, number, number] | null) => rgb !== null && Math.min(...rgb) > 180;
+          const blue = (rgb: [number, number, number] | null) => rgb !== null && rgb[2] > 150 && rgb[0] < 90 && rgb[1] < 90;
+          // At a quarter of a second it is three quarters across, and not where it was put.
+          expect(white(await pixelOfVideo(url, 0.25, 120, 142))).toBe(true);
+          expect(blue(await pixelOfVideo(url, 0.25, 40, 142))).toBe(true);
+          // Resting after a second: back where it was put.
+          expect(white(await pixelOfVideo(url, 1.25, 40, 142))).toBe(true);
+          expect(blue(await pixelOfVideo(url, 1.25, 120, 142))).toBe(true);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } finally {
+        URL.revokeObjectURL(uri);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});

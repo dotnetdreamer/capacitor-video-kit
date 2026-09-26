@@ -658,6 +658,9 @@ class VideoComposerPlugin : Plugin() {
                     opacity = placement.opacity,
                     scaleX = scale.x,
                     scaleY = scale.y,
+                    halfWidth = placement.wPx.toFloat() / plan.spec.output.width,
+                    halfHeight = placement.hPx.toFloat() / plan.spec.output.height,
+                    motion = placement.motion,
                 )
             }
         } catch (e: Exception) {

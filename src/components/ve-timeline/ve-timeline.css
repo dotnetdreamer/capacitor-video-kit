@@ -607,6 +607,8 @@
 /*
  * The ramps: the bar fades in over the time the camera takes to reach the area and out over the
  * time it takes to come back, so an instant zoom is a hard-edged block and a slow one a soft one.
+ * A layer's lane draws its animation's in and out the same way: a caption that pops in has a soft
+ * head, and one that cuts in a hard one.
  */
 .item__ramp {
   position: absolute;

@@ -191,6 +191,38 @@ describe('ve-zoom-sheet', () => {
     await until('the seconds', () => readout(sheet, 'ramp') === '1.5s');
   });
 
+  it('keeps a template push-in a push-in when its ramp is dragged, even through nothing and back', async () => {
+    // A push-in held to the cut, longer than the slider reaches: the readout says what is stored.
+    const { store, sheet } = await mount(zoom({ rampMs: 4000, rampOutMs: 0 }));
+    expect(readout(sheet, 'ramp')).toBe('4.0s');
+
+    drag(slider(sheet, 'Zoom ramp'), 1, 1000 / MAX_ZOOM_RAMP_MS);
+    expect(current(store)).toMatchObject({ rampMs: 1000, rampOutMs: 0 });
+    await until('the seconds', () => readout(sheet, 'ramp') === '1.0s');
+
+    // One drag down to Instant and back up is scaled from where it began, not from the 0 it passed.
+    const bar = slider(sheet, 'Zoom ramp');
+    const track = bar.shadowRoot!.querySelector('.sl__track')!.getBoundingClientRect();
+    const at = (ms: number) => track.left + (ms / MAX_ZOOM_RAMP_MS) * track.width;
+    pointerId += 1;
+    const fire = (type: string, ms: number) => bar.dispatchEvent(new PointerEvent(type, { pointerId, isPrimary: true, clientX: at(ms), bubbles: true }));
+    fire('pointerdown', 1000);
+    fire('pointermove', 0);
+    expect(current(store)).toMatchObject({ rampMs: 0, rampOutMs: 0 });
+    fire('pointermove', 1500);
+    fire('pointerup', 1500);
+    expect(current(store)).toMatchObject({ rampMs: 1500, rampOutMs: 0 });
+  });
+
+  it('scales a pull-out by its ramp out, the one the slider shows', async () => {
+    const { store, sheet } = await mount(zoom({ rampMs: 0, rampOutMs: 1600 }));
+    expect(readout(sheet, 'ramp')).toBe('1.6s');
+
+    drag(slider(sheet, 'Zoom ramp'), 1600 / MAX_ZOOM_RAMP_MS, 800 / MAX_ZOOM_RAMP_MS);
+    expect(current(store)).toMatchObject({ rampMs: 0, rampOutMs: 800 });
+    await until('the seconds', () => readout(sheet, 'ramp') === '0.8s');
+  });
+
   it('closes the panel on the tick', async () => {
     const { store, sheet } = await mount();
     head(sheet, '[aria-label="Done"]')!.click();

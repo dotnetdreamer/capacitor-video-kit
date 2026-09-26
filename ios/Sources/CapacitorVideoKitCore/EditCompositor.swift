@@ -381,8 +381,20 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // Overlays are NOT seen through the camera: a caption, a sticker and a full-frame effect
         // stay where the customer put them while the video zooms under them. That is the contract,
         // and it is also simply where this loop already sits - after every video layer.
+        //
+        // They move by their OWN motion, read at this frame's output time: a still layer - every one
+        // without a motion, and a moving one at a moment its motion leaves it at rest - composites
+        // the image `OverlayBitmap` placed once, exactly as before layers moved, and a moving one is
+        // placed again from its kept bitmap. nil is a layer its motion has shrunk or faded to
+        // nothing, which leaves the frame as it was.
         for ov in instr.plan.overlays where ov.startUs <= tUs && tUs < ov.endUs {
-            image = ov.image.composited(over: image)   // spec order is drawing order, later on top
+            guard ov.moving != nil else {
+                image = ov.image.composited(over: image)   // spec order is drawing order, later on top
+                continue
+            }
+            if let placed = ov.frame(atUs: tUs, render: instr.plan.renderSize) {
+                image = placed.composited(over: image)
+            }
         }
 
         // The four-argument render with `colorSpace: nil`, never `render(_:toCVPixelBuffer:)`: the

@@ -1,5 +1,6 @@
 import { cameraAt } from '../../editor/camera';
 import { byteCeiling, cssFor } from '../../editor/edit-manifest';
+import { overlayMotionAt } from '../../editor/motion';
 import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
 import type { ComposeClip, ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
@@ -200,9 +201,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
     // destination of its own, so the angle comes off the clip; the painter turns it about that
     // same rectangle's centre either way.
-    const baseJob = base
-      ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0)
-      : null;
+    const baseJob = base ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0) : null;
     // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
     // tail - read from its own element, drawn the way the base clip it continues was drawn - is
     // the other. The spec was lowered, so the window opens exactly where the base clip starts
@@ -275,7 +274,9 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     // then goes through untouched. The overlays below never see it: they stay where they were put.
     painter.paintLayers(camera ? throughCamera(draws, cameraAt(camera, atUs / 1000)) : draws);
 
-    // Manifest order is drawing order, which the plan preserved.
+    // Manifest order is drawing order, which the plan preserved. A layer that moves is read at the
+    // frame's own unrounded instant, on the milliseconds the preview reads it on, through the one
+    // helper both call; a layer that does not has a null motion and is drawn as it always was.
     for (const overlay of plan.overlays) {
       if (atUs < overlay.startUs || atUs >= overlay.endUs) continue;
       const bitmap = await overlays.get(overlay.id, overlay.png);
@@ -288,6 +289,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
         hPx: overlay.hPx,
         rotationDeg: overlay.rotationDeg,
         opacity: overlay.opacity,
+        motion: overlay.motion ? overlayMotionAt(overlay.motion, atUs / 1000) : null,
       });
     }
     overlays.retire(plan, atUs);

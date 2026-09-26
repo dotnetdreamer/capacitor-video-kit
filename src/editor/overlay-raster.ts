@@ -138,6 +138,17 @@ const FONT_LOAD_TIMEOUT_MS = 4000;
 
 const EMOJI_FONTS = '"Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
 
+/** How a layer's bitmap is to be drawn, beyond what the layer and the context already say. */
+export interface RasteriseOptions {
+  /**
+   * Pixels per output pixel, 1 and up: how much sharper than its resting size the bitmap is drawn,
+   * for a layer whose motion magnifies it (`overlayRasterDetail`). `wPx`/`hPx` are the resting size
+   * whatever this is, and the side cap still holds. Absent is 1, the bitmap every layer always had.
+   * An effect is the whole frame and never grows, and takes no notice of it.
+   */
+  detail?: number;
+}
+
 /**
  * Draws one manifest layer the way both the preview and the render show it: at OUTPUT pixel scale,
  * with `overlay.scale` baked in, and `wPx`/`hPx` being the size it covers on the output frame.
@@ -148,16 +159,17 @@ const EMOJI_FONTS = '"Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", 
  * has to be decoded before it can be drawn. Rejects with a clear message when an image cannot be
  * loaded or a sticker layer has nothing to draw.
  */
-export async function rasteriseOverlay(overlay: EditOverlay, ctx: RasterContext): Promise<RasterisedOverlay> {
+export async function rasteriseOverlay(overlay: EditOverlay, ctx: RasterContext, options: RasteriseOptions = {}): Promise<RasterisedOverlay> {
+  const detail = typeof options.detail === 'number' && options.detail > 1 && Number.isFinite(options.detail) ? options.detail : 1;
   switch (overlay.kind) {
     case 'text':
-      return rasteriseTextLayer(overlay, ctx);
+      return rasteriseTextLayer(overlay, ctx, detail);
     case 'sticker':
-      if (overlay.emoji) return rasteriseEmoji(overlay.emoji, layerScale(overlay.scale), ctx);
-      if (overlay.assetId) return rasteriseSticker(overlay.assetId, layerScale(overlay.scale), ctx);
+      if (overlay.emoji) return rasteriseEmoji(overlay.emoji, layerScale(overlay.scale), ctx, detail);
+      if (overlay.assetId) return rasteriseSticker(overlay.assetId, layerScale(overlay.scale), ctx, detail);
       throw new Error(`sticker layer ${overlay.id} has neither an emoji nor a sticker asset`);
     case 'image':
-      return rasteriseImage(overlay, ctx);
+      return rasteriseImage(overlay, ctx, detail);
     case 'effect':
       return rasteriseEffect(overlay.effectId, ctx);
   }
@@ -248,7 +260,7 @@ interface TextPen {
   capHeight: number;
 }
 
-async function rasteriseTextLayer(overlay: TextOverlay, ctx: RasterContext): Promise<RasterisedOverlay> {
+async function rasteriseTextLayer(overlay: TextOverlay, ctx: RasterContext, detail: number): Promise<RasterisedOverlay> {
   const style = ctx.textStyle(overlay.styleId);
   const scale = layerScale(overlay.scale);
   const fontPx = Math.max(4, Math.round(ctx.output.width * OVERLAY_BASE.textFont * scale));
@@ -271,7 +283,7 @@ async function rasteriseTextLayer(overlay: TextOverlay, ctx: RasterContext): Pro
   // empty line to put it in and to hit-test.
   if (empty) return { png: transparentPng(), wPx: layout.width, hPx: layout.height };
 
-  const k = bitmapRatio(layout.width, layout.height, ctx);
+  const k = bitmapRatio(layout.width, layout.height, ctx, detail);
   const { canvas, g } = createCanvas(layout.width * k, layout.height * k);
   g.scale(k, k);
   g.translate(layout.originX, layout.originY);
@@ -600,7 +612,7 @@ async function loadFont(font: string, sample: string): Promise<void> {
 /* Stickers, photos, effects                                                                      */
 /* -------------------------------------------------------------------------------------------- */
 
-async function rasteriseEmoji(emoji: string, scale: number, ctx: RasterContext): Promise<RasterisedOverlay> {
+async function rasteriseEmoji(emoji: string, scale: number, ctx: RasterContext, detail: number): Promise<RasterisedOverlay> {
   const box = Math.max(4, ctx.output.width * OVERLAY_BASE.emoji * scale);
   await loadFont(`${round2(box)}px ${EMOJI_FONTS}`, emoji);
 
@@ -617,7 +629,7 @@ async function rasteriseEmoji(emoji: string, scale: number, ctx: RasterContext):
 
   // A little air on every side, so a glyph whose ink the engine under-reports is still not clipped.
   const side = Math.ceil(box * 1.16);
-  const k = bitmapRatio(side, side, ctx);
+  const k = bitmapRatio(side, side, ctx, detail);
   const { canvas, g } = createCanvas(side * k, side * k);
   g.scale(k, k);
   g.font = `${round2(fontPx)}px ${EMOJI_FONTS}`;
@@ -635,23 +647,23 @@ async function rasteriseEmoji(emoji: string, scale: number, ctx: RasterContext):
   return trimToInk(canvas, g, side, side);
 }
 
-async function rasteriseSticker(assetId: string, scale: number, ctx: RasterContext): Promise<RasterisedOverlay> {
+async function rasteriseSticker(assetId: string, scale: number, ctx: RasterContext, detail: number): Promise<RasterisedOverlay> {
   const url = ctx.stickerUrl(assetId);
   const image = await loadImage(url);
   const width = ctx.output.width * OVERLAY_BASE.sticker * scale;
   // A sticker asset is drawn inside its own canvas with air around it, and that air is the layer's
   // box until it is taken off.
-  return drawImageLayer(image, width, width / (intrinsicAspect(image, url) ?? 1), ctx, true);
+  return drawImageLayer(image, width, width / (intrinsicAspect(image, url) ?? 1), ctx, true, detail);
 }
 
-async function rasteriseImage(overlay: ImageOverlay, ctx: RasterContext): Promise<RasterisedOverlay> {
+async function rasteriseImage(overlay: ImageOverlay, ctx: RasterContext, detail: number): Promise<RasterisedOverlay> {
   const url = ctx.fileUrl(overlay.uri);
   const image = await loadImage(url);
   const width = ctx.output.width * OVERLAY_BASE.image * layerScale(overlay.scale);
   const aspect = intrinsicAspect(image, url) ?? (overlay.aspect > 0 && Number.isFinite(overlay.aspect) ? overlay.aspect : 1);
   // Not trimmed: a photo's frame is the photo, and a customer who has a picture with transparent
   // edges put it there on purpose - cropping it would silently change the picture they chose.
-  return drawImageLayer(image, width, width / aspect, ctx, false);
+  return drawImageLayer(image, width, width / aspect, ctx, false, detail);
 }
 
 /**
@@ -677,10 +689,11 @@ function drawImageLayer(
   height: number,
   ctx: RasterContext,
   trim: boolean,
+  detail: number,
 ): RasterisedOverlay {
   const wPx = Math.max(1, Math.round(width));
   const hPx = Math.max(1, Math.round(height));
-  const k = bitmapRatio(wPx, hPx, ctx);
+  const k = bitmapRatio(wPx, hPx, ctx, detail);
   const { canvas, g } = createCanvas(wPx * k, hPx * k);
   g.imageSmoothingEnabled = true;
   g.imageSmoothingQuality = 'high';
@@ -770,10 +783,15 @@ function toPng(canvas: HTMLCanvasElement): string {
   }
 }
 
-/** How much smaller than its output size a bitmap has to be drawn to stay under the side cap. */
-function bitmapRatio(width: number, height: number, ctx: RasterContext): number {
+/**
+ * How many bitmap pixels a layer gets per output pixel: `detail` - 1 for a layer that never grows -
+ * or less, to stay under the side cap. A moving layer asks for more than 1 and a pinched-up photo is
+ * brought down, and the cap is what both answer to, so a slam on a huge sticker is no larger a bitmap
+ * than the sticker already was.
+ */
+function bitmapRatio(width: number, height: number, ctx: RasterContext, detail = 1): number {
   const cap = Math.max(ctx.output.width, ctx.output.height) * MAX_BITMAP_SIDE_RATIO;
-  return Math.min(1, cap / Math.max(1, width, height));
+  return Math.min(detail, cap / Math.max(1, width, height));
 }
 
 /* -------------------------------------------------------------------------------------------- */

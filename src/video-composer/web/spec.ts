@@ -1,6 +1,8 @@
 import type {
   ComposeCamera,
   ComposeFit,
+  ComposeOverlay,
+  ComposeOverlayMotion,
   ComposePlacement,
   ComposeRect,
   ComposeSpec,
@@ -13,6 +15,7 @@ import type {
 
 import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
 import { normaliseCamera } from '../../editor/camera';
+import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
 import { batchIdRefusal } from '../batch-id';
 
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
@@ -180,7 +183,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     if (wPx <= 0) throw new SpecError(`${path}.wPx`);
     if (hPx <= 0) throw new SpecError(`${path}.hPx`);
     const startMs = Math.max(0, finite(overlay.startMs, 0));
-    return {
+    const read: ComposeOverlay = {
       id: nonEmpty(overlay.id, `${path}.id`),
       png,
       cx: finite(overlay.cx, 0.5),
@@ -192,6 +195,11 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
       endMs: Math.max(startMs, finite(overlay.endMs, startMs)),
       opacity: clamp(finite(overlay.opacity, 1), 0, 1),
     };
+    // Last of the layer's fields, as the native parsers read it, and set only when it moves
+    // something: absent is what the plan tests to place the layer as it always has.
+    const motion = readOverlayMotion((overlay as unknown as Record<string, unknown>)['motion'], `${path}.motion`);
+    if (motion) read.motion = motion;
+    return read;
   });
 
   // After the overlays, in the fixed order the native parsers read the top level in.
@@ -299,6 +307,26 @@ function readCamera(value: unknown): ComposeCamera | null {
     const key = /atMs\[(\d+)\]/.exec(message);
     if (key) throw new SpecError(`camera.atMs[${key[1]}]`);
     throw new SpecError('camera', `invalid_spec:${message}`);
+  }
+}
+
+/**
+ * A layer's motion, checked and clamped - or null for none, which is also what a motion that moves
+ * nothing comes back as.
+ *
+ * The rules are `normaliseOverlayMotion`'s, shared with the editor and the tests, and NOT written
+ * again here, for the reason [readCamera] gives. What this adds is the refusal turned into a
+ * [SpecError] naming the path that broke - `overlays[2].motion.atMs[7]`, `overlays[2].motion.scale` -
+ * and, for a motion refused as a whole, the words the native parsers put after it. The arrays that
+ * come back are new ones, so a caller still editing its own spec cannot move a layer under a render.
+ */
+function readOverlayMotion(value: unknown, path: string): ComposeOverlayMotion | null {
+  try {
+    return normaliseOverlayMotion(value);
+  } catch (error) {
+    if (!(error instanceof OverlayMotionError)) throw error;
+    const at = error.field ? `${path}.${error.field}` : path;
+    throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
   }
 }
 

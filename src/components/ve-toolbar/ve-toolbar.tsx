@@ -651,6 +651,11 @@ export class VeToolbar {
         run: () => store.openPanel('effects'),
       });
     }
+    // Every kind of layer: text, stickers and photos get the whole In / Out / Loop catalogue, and an
+    // effect a fade in and a fade out, which is all of a move a full-frame picture can show. Beside
+    // the tools that make the layer what it is and ahead of the ones that move it in time or in the
+    // stack, where CapCut keeps it.
+    tiles.push({ id: 'animation', label: 'Animation', icon: 'animation-outline', run: () => store.openAnimation() });
     // The move tools call the store even when they are dimmed: it answers "Already on top".
     tiles.push(
       {

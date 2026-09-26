@@ -16,7 +16,10 @@ export interface ZoomSlot {
   id: string;
   startMs: number;
   endMs: number;
-  /** The ramps actually run, `min(rampMs, window / 2)`: a short window squeezes them. */
+  /**
+   * The ramps actually run: `rampMs` and `rampOutMs` (or `rampMs` again), squeezed IN PROPORTION when
+   * the two do not fit the window, so a push-in stays a push-in however short its clip is cut.
+   */
   rampInMs: number;
   rampOutMs: number;
   /** Whether the camera arrives by PANNING from the zoom before rather than from the whole frame. */
@@ -30,12 +33,20 @@ export interface ZoomSlot {
  * squeezed into their window and chains marked. The timeline draws these and [compileCamera] compiles
  * them, so the lane can never show a ramp the render does not do.
  *
+ * Two neighbours are chained when the gap between them is under [ZOOM_CHAIN_GAP_MS], the first lets
+ * go of its after side and the second of its before side ([EditZoom.chain]: `false` keeps both sides,
+ * `'in'` the after side, `'out'` the before side). Either one keeping its side is enough: a pan has
+ * two ends, and a zoom kept apart from the one before it must not be dragged into it by that one's
+ * wish to pan.
+ *
  * Sorted and de-overlapped again here although a normalised manifest already is: a hand-built list
  * straight from a host must not make the camera two functions of time.
  */
 export function zoomSlots(zooms: readonly EditZoom[], totalMs: number): ZoomSlot[] {
   const sorted = [...zooms].sort((a, b) => a.startMs - b.startMs);
   const slots: ZoomSlot[] = [];
+  /** Whether each zoom will pan from the one before it, and on to the one after it. */
+  const sides: { before: boolean; after: boolean }[] = [];
   for (const zoom of sorted) {
     const window = zoomWindow(zoom, totalMs);
     if (!window) continue;
@@ -43,16 +54,37 @@ export function zoomSlots(zooms: readonly EditZoom[], totalMs: number): ZoomSlot
     const startMs = prev ? Math.max(window.startMs, prev.endMs) : window.startMs;
     const endMs = window.endMs;
     if (!(endMs > startMs)) continue;
-    const ramp = Math.max(0, Math.min(Number.isFinite(zoom.rampMs) ? zoom.rampMs : 0, (endMs - startMs) / 2));
-    slots.push({ id: zoom.id, startMs, endMs, rampInMs: ramp, rampOutMs: ramp, chainedIn: false, chainedOut: false });
+    const [rampInMs, rampOutMs] = squeezedRamps(zoom, endMs - startMs);
+    slots.push({ id: zoom.id, startMs, endMs, rampInMs, rampOutMs, chainedIn: false, chainedOut: false });
+    sides.push({ before: zoom.chain !== false && zoom.chain !== 'out', after: zoom.chain !== false && zoom.chain !== 'in' });
   }
   for (let i = 1; i < slots.length; i++) {
-    if (slots[i].startMs - slots[i - 1].endMs < ZOOM_CHAIN_GAP_MS) {
+    if (sides[i - 1].after && sides[i].before && slots[i].startMs - slots[i - 1].endMs < ZOOM_CHAIN_GAP_MS) {
       slots[i - 1].chainedOut = true;
       slots[i].chainedIn = true;
     }
   }
   return slots;
+}
+
+/**
+ * A zoom's two ramps held inside a window `windowMs` long: as asked when they fit, and both scaled by
+ * the same factor when they do not. In proportion rather than each held to half the window, which is
+ * what a zoom with two equal ramps has always got and still gets: a push-in asking for the whole
+ * window in and nothing out keeps the whole window, where halving would have stopped it half way.
+ */
+function squeezedRamps(zoom: EditZoom, windowMs: number): [number, number] {
+  const rampIn = rampOf(zoom.rampMs, 0);
+  const rampOut = rampOf(zoom.rampOutMs, rampIn);
+  const both = rampIn + rampOut;
+  if (!(both > windowMs)) return [rampIn, rampOut];
+  const k = Math.max(0, windowMs) / both;
+  return [rampIn * k, rampOut * k];
+}
+
+/** A stored ramp, or `fallback` for none: a hand-built list may carry `null` or a string. */
+function rampOf(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : fallback;
 }
 
 /** How far along an ease is at `p` (0..1 of the ramp), 0 at the start and exactly 1 at the end. */
@@ -123,18 +155,22 @@ const SAMPLE_MS = 1000 / 60;
  * The camera for a post's zooms, or `null` when none of them is visible - which is the ABSENT key on
  * the wire and every engine's old path, decided the same way as [isUntouched] decides it.
  *
- * Each zoom is a move in from the whole frame over its ramp, a hold on its area, and a move back out
- * over the same ramp, all inside its window. A ramp of 0 is a STEP: two keys at one time, which the
- * wire reads as a cut. Two zooms closer than [ZOOM_CHAIN_GAP_MS] are one PAN instead, from where the
- * first starts leaving to where the second has arrived, with the second zoom's ease - the camera never
- * passes through the whole frame between them.
+ * Each zoom is a move in from the whole frame over its in-ramp, a hold on its area, and a move back
+ * out over its out-ramp, all inside its window. A ramp of 0 is a STEP: two keys at one time, which the
+ * wire reads as a cut - so a push-in with no ramp out holds its area to the end of its window and cuts
+ * to the whole frame there, and a pull-out with no ramp in is on its area from its first frame. Two
+ * zooms closer than [ZOOM_CHAIN_GAP_MS] are one PAN instead, from where the first starts leaving to
+ * where the second has arrived, with the second zoom's ease - the camera never passes through the
+ * whole frame between them - unless either is kept apart ([EditZoom.chain] `false`), when each keeps
+ * its own ramps and two touching at 0 cut straight from one area to the other.
  */
 export function compileCamera(zooms: readonly EditZoom[], totalMs: number): ComposeCamera | null {
   const slots = zoomSlots(zooms, totalMs);
   if (slots.length === 0) return null;
-  const byId = new Map(zooms.map((zoom) => [zoom.id, zoom]));
-  // A post with the most zooms and the longest ramps stays far under [MAX_CAMERA_KEYS] at one key a
-  // frame; this loop only coarsens the sampling for a hand-built list that would not.
+  const byId = new Map(zooms.map(zoom => [zoom.id, zoom]));
+  // One key a frame of MOVEMENT, and the moves never overlap, so a camera only passes
+  // [MAX_CAMERA_KEYS] when more than five minutes of it is moving - a template's push-ins across a
+  // very long post, or a hand-built list. This loop coarsens the sampling for those.
   for (let step = SAMPLE_MS; ; step *= 2) {
     const keys = compileKeys(slots, byId, step);
     if (keys.length <= MAX_CAMERA_KEYS || step > 10_000) return toCamera(keys.slice(0, MAX_CAMERA_KEYS));
@@ -144,8 +180,10 @@ export function compileCamera(zooms: readonly EditZoom[], totalMs: number): Comp
 function compileKeys(slots: ZoomSlot[], byId: Map<string, EditZoom>, step: number): Key[] {
   const keys: Key[] = [];
   const push = (t: number, view: CameraView) => {
-    const time = Math.round(t * 1000) / 1000;
     const last = keys[keys.length - 1];
+    // Never back in time, which every parser refuses: two ramps squeezed in proportion meet at a
+    // moment float arithmetic can put a hair either side of itself.
+    const time = Math.max(last ? last.t : -Infinity, Math.round(t * 1000) / 1000);
     if (last && last.t === time && sameView(last.view, view)) return;
     keys.push({ t: time, view });
   };

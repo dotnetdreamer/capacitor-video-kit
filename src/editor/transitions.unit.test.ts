@@ -131,6 +131,104 @@ describe('every transition, at its two ends', () => {
   });
 });
 
+/** One output pixel of `kind` at `p` on a `w` x `h` frame, in the red and blue world above. */
+function pixelOf(kind: string, p: number, x: number, y: number, w = 90, h = 160): RGB {
+  const compiled = compileTransition(kind)!;
+  return transitionPixel(compiled, lookAt(compiled.curves, p), x, y, w, h, read);
+}
+
+function lookOf(kind: string, p: number) {
+  return lookAt(compileTransition(kind)!.curves, p);
+}
+
+describe('the transitions a template cuts on', () => {
+  it('whips up and down: the incoming clip comes from below, or from above', () => {
+    // Half way, a whip is half across: the incoming clip on one half, the outgoing one darkening on the other.
+    expect(near(pixelOf('whip-up', 0.5, 45, 150), BLUE)).toBe(true);
+    expect(pixelOf('whip-up', 0.5, 45, 5)[0]).toBeGreaterThan(0.6);
+    expect(near(pixelOf('whip-down', 0.5, 45, 5), BLUE)).toBe(true);
+    expect(pixelOf('whip-down', 0.5, 45, 150)[0]).toBeGreaterThan(0.6);
+    // Straight up and down, so nothing moves sideways.
+    expect(compileTransition('whip-up')!.curves.from?.x).toBeUndefined();
+  });
+
+  it('swipes up like a flick: most of the way there by the middle, and blurred most just after it lets go', () => {
+    expect(lookOf('swipe-up', 0.5).to.y).toBeLessThan(0.2);
+    expect(lookOf('swipe-up', 0.25).to.blur).toBeGreaterThan(lookOf('swipe-up', 0.75).to.blur);
+    for (const p of [0, 1]) {
+      expect(lookOf('swipe-up', p).from.blur).toBe(0);
+      expect(lookOf('swipe-up', p).to.blur).toBe(0);
+    }
+    // Always moving up, never back down.
+    for (let p = 0.02; p <= 1; p += 0.02) expect(lookOf('swipe-up', p).to.y).toBeLessThanOrEqual(lookOf('swipe-up', p - 0.02).to.y + 1e-9);
+  });
+
+  it('turns spin-blur on a frame that covers the picture at every moment, portrait, landscape or square', () => {
+    for (const [w, h] of [
+      [90, 160],
+      [160, 90],
+      [100, 100],
+    ]) {
+      for (let p = 0; p <= 1.0001; p += 0.01) {
+        const alpha = lookOf('spin-blur', p).alpha;
+        for (let y = 0.5; y < h; y += Math.max(1, (h - 1) / 12)) {
+          for (let x = 0.5; x < w; x += Math.max(1, (w - 1) / 12)) {
+            // Red and blue mixed by alpha, and nothing else: a side that did not cover this pixel
+            // would let black through, or the other side alone.
+            const px = pixelOf('spin-blur', p, x, y, w, h);
+            expect(px[0], `${w}x${h} at ${p.toFixed(2)} (${x}, ${y})`).toBeCloseTo(1 - alpha, 6);
+            expect(px[2], `${w}x${h} at ${p.toFixed(2)} (${x}, ${y})`).toBeCloseTo(alpha, 6);
+          }
+        }
+      }
+    }
+    expect(Math.abs(lookOf('spin-blur', 0.45).from.rotation)).toBeGreaterThan(45);
+  });
+
+  it('punches both sides into the cut for zoom-blur', () => {
+    const cut = lookOf('zoom-blur', 0.5);
+    expect(cut.from.scale).toBeGreaterThan(1.8);
+    expect(cut.to.scale).toBeGreaterThan(1.8);
+    expect(cut.from.blur).toBeGreaterThan(0.02);
+  });
+
+  it('opens the incoming clip small in the middle for zoom-through, and never leaves an edge of it showing late', () => {
+    expect(near(pixelOf('zoom-through', 0.45, 45, 80), BLUE)).toBe(true);
+    expect(near(pixelOf('zoom-through', 0.45, 2, 2), RED)).toBe(true);
+    for (let p = 0.55; p <= 1.0001; p += 0.01) expect(lookOf('zoom-through', p).to.scale, `at ${p.toFixed(2)}`).toBeGreaterThanOrEqual(1);
+  });
+
+  it('opens split from a line down the middle, and diamond from a point', () => {
+    expect(near(pixelOf('split-open', 0.3, 45, 80), BLUE)).toBe(true);
+    expect(near(pixelOf('split-open', 0.3, 45, 2), BLUE)).toBe(true);
+    expect(near(pixelOf('split-open', 0.3, 2, 80), RED)).toBe(true);
+    expect(near(pixelOf('split-open', 0.3, 88, 80), RED)).toBe(true);
+    expect(compileTransition('split-open')!.mask).toMatchObject({ shape: 'split', angleDeg: 0 });
+
+    // A diamond: as far along an axis is in, as far along a diagonal is out.
+    expect(near(pixelOf('diamond', 0.4, 45 + 25, 80), BLUE)).toBe(true);
+    expect(near(pixelOf('diamond', 0.4, 45 + 20, 80 + 20), RED)).toBe(true);
+    expect(near(pixelOf('diamond', 0.4, 2, 2), RED)).toBe(true);
+  });
+
+  it('pulls the colours apart one way before the cut and the other way after it', () => {
+    expect(lookOf('rgb-split', 0.4).from.split).toBeGreaterThan(0.02);
+    expect(lookOf('rgb-split', 0.6).to.split).toBeLessThan(-0.02);
+  });
+
+  it('washes the leak in two warm tints that meet across a wide soft edge', () => {
+    const leak = compileTransition('leak')!;
+    expect(leak.fromTint).toBeDefined();
+    expect(leak.toTint).toBeDefined();
+    expect(leak.fromTint).not.toEqual(leak.toTint);
+    expect(leak.mask).toMatchObject({ shape: 'linear' });
+    expect(leak.mask!.feather!).toBeGreaterThan(0.2);
+    const peak = lookOf('leak', 0.5);
+    expect(peak.from.gain).toBeGreaterThan(2);
+    expect(peak.to.tint).toBeGreaterThan(0.3);
+  });
+});
+
 describe('reading a curve', () => {
   it('interpolates in a straight line between the samples either side', () => {
     expect(sample([0, 1], 0.25, 9)).toBeCloseTo(0.25);

@@ -33,6 +33,7 @@ import {
   type EditVoiceover,
   type EditZoom,
 } from './edit-manifest';
+import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -176,8 +177,7 @@ export function trackIdOfClip(manifest: EditManifest, clipId: string): string | 
 export function patchClip(
   manifest: EditManifest,
   clipId: string,
-  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image'>> &
-    ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null },
+  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image'>> & ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null },
 ): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
@@ -438,14 +438,7 @@ function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip
  * otherwise, because a still has no whole length to take. A video replacing a picture takes the
  * picture's length the same way it takes any segment's, and stops being one.
  */
-export function replaceClipSource(
-  manifest: EditManifest,
-  clipId: string,
-  clipKey: string,
-  sourceDurationMs: number,
-  keepLength = true,
-  picture = false,
-): EditManifest {
+export function replaceClipSource(manifest: EditManifest, clipId: string, clipKey: string, sourceDurationMs: number, keepLength = true, picture = false): EditManifest {
   if (picture) {
     const found = findClip(manifest, clipId);
     if (!found) return manifest;
@@ -603,10 +596,12 @@ export function cutPostTo(manifest: EditManifest, durationMs: number): EditManif
 }
 
 function cutZooms(zooms: EditZoom[], end: number): EditZoom[] {
+  // Only a zoom the cut SHORTENED is held to [MIN_ZOOM_MS]. A template's punch is shorter than that
+  // to begin with, and a cut that never reached it has no business taking it away.
   const cut = zooms
     .filter(zoom => zoom.startMs < end)
-    .map(zoom => (zoom.endMs > end ? { ...zoom, endMs: end } : zoom))
-    .filter(zoom => zoom.endMs - zoom.startMs >= MIN_ZOOM_MS);
+    .filter(zoom => zoom.endMs <= end || end - zoom.startMs >= MIN_ZOOM_MS)
+    .map(zoom => (zoom.endMs > end ? { ...zoom, endMs: end } : zoom));
   // The same array when the cut missed every zoom, so a caller comparing by identity sees no change.
   return cut.length === zooms.length && cut.every((zoom, i) => zoom === zooms[i]) ? zooms : cut;
 }
@@ -912,6 +907,9 @@ export function patchOverlay(manifest: EditManifest, id: string, patch: Partial<
   const current = findOverlay(manifest, id);
   if (!current) return manifest;
   const next = normaliseLayer({ ...current, ...patch } as EditOverlay);
+  // The same moves handed in again as a new object - a sheet re-picking the preset it is showing -
+  // are the same animation, and so no change and no undo step.
+  if (next.animation && current.animation && sameOverlayAnimation(next.animation, current.animation)) next.animation = current.animation;
   if (sameFields(current, next)) return manifest;
   return {
     ...manifest,
@@ -978,7 +976,14 @@ export function setOverlayWindow(manifest: EditManifest, id: string, startMs: nu
   return patchOverlay(manifest, id, { startMs: start, endMs: end >= totalMs - 1 ? 0 : end });
 }
 
-/** Cuts a layer in two at `atMs`; the right half gets `newId` and sits directly above the left. */
+/**
+ * Cuts a layer in two at `atMs`; the right half gets `newId` and sits directly above the left.
+ *
+ * A layer's animation is shared out the way a cut shares out a clip's transitions: the left half
+ * keeps how the layer ARRIVES and the right half how it LEAVES, and both keep its loop. Anything else
+ * would be a layer that pops in twice or fades out in the middle of the screen at the cut, where the
+ * customer asked for nothing but a place to change it.
+ */
 export function splitOverlayAt(manifest: EditManifest, id: string, atMs: number, newId: string, totalMs: number): EditManifest | null {
   const index = manifest.overlays.findIndex(overlay => overlay.id === id);
   if (index < 0 || manifest.overlays.length >= MAX_LAYERS) return null;
@@ -987,12 +992,22 @@ export function splitOverlayAt(manifest: EditManifest, id: string, atMs: number,
   const cut = Math.round(atMs);
   if (cut - overlay.startMs < MIN_LAYER_MS || end - cut < MIN_LAYER_MS) return null;
   const overlays = [...manifest.overlays];
-  overlays.splice(index, 1, { ...overlay, endMs: cut }, { ...overlay, id: newId, startMs: cut });
+  overlays.splice(index, 1, withoutMove({ ...overlay, endMs: cut }, 'out'), withoutMove({ ...overlay, id: newId, startMs: cut }, 'in'));
   return { ...manifest, overlays };
 }
 
+/** A layer with one of its animation's moves taken off, and the key itself when nothing is left. */
+function withoutMove<T extends EditOverlay>(overlay: T, move: 'in' | 'out'): T {
+  if (!overlay.animation?.[move]) return overlay;
+  const rest = { ...overlay.animation };
+  delete rest[move];
+  const copy: T = { ...overlay, animation: rest };
+  if (!rest.in && !rest.out && !rest.loop) delete copy.animation;
+  return copy;
+}
+
 function normaliseLayer<T extends EditOverlay>(overlay: T): T {
-  return {
+  const layer: T = {
     ...overlay,
     cx: clamp(overlay.cx, 0, 1),
     cy: clamp(overlay.cy, 0, 1),
@@ -1001,6 +1016,15 @@ function normaliseLayer<T extends EditOverlay>(overlay: T): T {
     startMs: Math.max(0, Math.round(overlay.startMs)),
     endMs: Math.max(0, Math.round(overlay.endMs)),
   };
+  // Held to what the manifest reader would make of it, and the KEY taken off when nothing is left -
+  // a patch of `animation: undefined` or `null` is how a sheet takes a layer's moves away, and an
+  // `undefined` left under the key would survive a structured clone and read as present to `in`. An
+  // animation already in shape comes back as the very object, so a patch that did not touch it is
+  // still no change at all.
+  const animation = normaliseOverlayAnimation(overlay.animation);
+  if (animation) layer.animation = animation;
+  else delete layer.animation;
+  return layer;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1053,11 +1077,12 @@ export function addZoom(manifest: EditManifest, zoom: EditZoom, totalMs: number)
 }
 
 /** The parts of a zoom that are not its window. Timing has one owner, [setZoomWindow], which keeps the lane apart. */
-export type ZoomPatch = Partial<Pick<EditZoom, 'cx' | 'cy' | 'scale' | 'rampMs' | 'ease'>>;
+export type ZoomPatch = Partial<Pick<EditZoom, 'cx' | 'cy' | 'scale' | 'rampMs' | 'rampOutMs' | 'ease' | 'chain'>>;
 
 /**
- * Changes a zoom's area, level, ramp or ease, held to what the editor offers ([normaliseZoom]). The
- * same manifest when nothing changed, so a slider let go where it started records no undo step.
+ * Changes a zoom's area, level, ramps, ease or chaining, held to what the editor offers
+ * ([normaliseZoom]). The same manifest when nothing changed, so a slider let go where it started
+ * records no undo step.
  */
 export function updateZoom(manifest: EditManifest, id: string, patch: ZoomPatch): EditManifest {
   const current = findZoom(manifest, id);
@@ -1067,10 +1092,40 @@ export function updateZoom(manifest: EditManifest, id: string, patch: ZoomPatch)
   if (patch.cy !== undefined) picked.cy = patch.cy;
   if (patch.scale !== undefined) picked.scale = patch.scale;
   if (patch.rampMs !== undefined) picked.rampMs = patch.rampMs;
+  if (patch.rampOutMs !== undefined) picked.rampOutMs = patch.rampOutMs;
   if (patch.ease !== undefined) picked.ease = patch.ease;
+  if (patch.chain !== undefined) picked.chain = patch.chain;
   const next = normaliseZoom({ ...current, ...picked });
   if (sameFields(current, next)) return manifest;
   return { ...manifest, zooms: manifest.zooms.map(zoom => (zoom.id === id ? next : zoom)) };
+}
+
+/**
+ * The one ramp the zoom sheet shows: the longer of the two. For a zoom the editor made that is simply
+ * its ramp; for a template's push-in it is the push, where the move out it does not make would read 0.
+ */
+export function zoomRampMs(zoom: Pick<EditZoom, 'rampMs' | 'rampOutMs'>): number {
+  return Math.max(zoom.rampMs, zoom.rampOutMs ?? zoom.rampMs);
+}
+
+/**
+ * What setting that one ramp to `ms` writes, given the ramps the zoom had when the gesture began.
+ *
+ * A zoom with one ramp gets `rampMs` alone, as it always has. A zoom with two is scaled whole, so the
+ * longer ramp becomes `ms` and the other keeps its share: a push-in dragged shorter is a quicker
+ * push-in that still holds to the cut, and a pull-out a quicker pull-out. Writing `rampMs` alone would
+ * move a ramp the sheet is not showing - on a pull-out the slider would stay put under the finger
+ * while a move in nobody asked for appeared. Two ramps of 0 have no shape to keep, and both take `ms`.
+ *
+ * `from` is the zoom as it was when the drag STARTED, not as the last frame of it wrote it: a drag
+ * through 0 and back would otherwise lose the shape at the bottom and come back symmetric.
+ */
+export function zoomRampPatch(from: Pick<EditZoom, 'rampMs' | 'rampOutMs'>, ms: number): ZoomPatch {
+  const target = Math.max(0, Math.round(ms));
+  if (from.rampOutMs === undefined) return { rampMs: target };
+  const longest = zoomRampMs(from);
+  if (!(longest > 0)) return { rampMs: target, rampOutMs: target };
+  return { rampMs: Math.round((target * from.rampMs) / longest), rampOutMs: Math.round((target * from.rampOutMs) / longest) };
 }
 
 /**
@@ -1096,7 +1151,8 @@ export function setZoomWindow(manifest: EditManifest, id: string, startMs: numbe
 /**
  * A copy placed straight after the original, as long as the original where there is room and
  * shortened where there is less. The two touch, so the camera holds the area across both rather than
- * zooming out and back in. Null when less than [MIN_ZOOM_MS] fits there, or at [MAX_ZOOMS].
+ * zooming out and back in - unless the original is kept apart ([EditZoom.chain]), which the copy is
+ * too. Null when less than [MIN_ZOOM_MS] fits there, or at [MAX_ZOOMS].
  */
 export function duplicateZoom(manifest: EditManifest, id: string, newId: string, totalMs: number): EditManifest | null {
   const zoom = findZoom(manifest, id);

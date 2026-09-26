@@ -54,6 +54,7 @@ import {
   type TextAlign,
   type TextEffect,
 } from '../editor/edit-manifest';
+import { OVERLAY_ANIMATIONS, normaliseOverlayAnimation } from '../editor/motion';
 import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
 import {
   addOverlay,
@@ -261,7 +262,7 @@ function transitionOf(op: Record<string, unknown>): EditTransition | null {
   const value = nullableObject(op, 'transition');
   if (value === null) return null;
   const kind = str(value, 'kind');
-  if (!isTransitionKind(kind)) throw new Error(`"kind" must be one of ${TRANSITIONS.map((t) => t.id).join(', ')}`);
+  if (!isTransitionKind(kind)) throw new Error(`"kind" must be one of ${TRANSITIONS.map(t => t.id).join(', ')}`);
   const durationMs = value['durationMs'] === undefined ? DEFAULT_TRANSITION_MS : num(value, 'durationMs');
   return { kind, durationMs };
 }
@@ -274,27 +275,27 @@ function requireClip(manifest: EditManifest, clipId: string): EditClip {
 
 function requireOverlay(manifest: EditManifest, id: string): EditOverlay {
   const overlay = findOverlay(manifest, id);
-  const ids = manifest.overlays.map((o) => o.id);
+  const ids = manifest.overlays.map(o => o.id);
   if (!overlay) throw new Error(`no layer "${id}" - layers on this post: ${ids.join(', ') || 'none'}`);
   return overlay;
 }
 
 function requireTrack(manifest: EditManifest, trackId: string): void {
   if (findVideoTrack(manifest, trackId)) return;
-  const ids = manifest.videoTracks.map((t) => t.id);
+  const ids = manifest.videoTracks.map(t => t.id);
   throw new Error(`no video track "${trackId}" - tracks on this post: ${ids.join(', ') || 'none (only the base track)'}`);
 }
 
 function requireVoiceover(manifest: EditManifest, id: string): EditVoiceover {
   const take = findVoiceover(manifest, id);
-  const ids = manifest.voiceovers.map((v) => v.id);
+  const ids = manifest.voiceovers.map(v => v.id);
   if (!take) throw new Error(`no voiceover "${id}" - takes on this post: ${ids.join(', ') || 'none'}`);
   return take;
 }
 
 /** Every clip id on the post, base track and video tracks together - the ids an op may name. */
 function clipIds(manifest: EditManifest): string[] {
-  return [...manifest.clips, ...manifest.videoTracks.flatMap((track) => track.clips)].map((clip) => clip.id);
+  return [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)].map(clip => clip.id);
 }
 
 /** An id an op is about to introduce must not already be in use, or two clips become unaddressable. */
@@ -303,12 +304,12 @@ function requireFreeClipId(manifest: EditManifest, id: string): void {
 }
 
 function requireFreeLayerId(manifest: EditManifest, id: string): void {
-  if (manifest.overlays.some((overlay) => overlay.id === id)) throw new Error(`layer id "${id}" is already on this post`);
+  if (manifest.overlays.some(overlay => overlay.id === id)) throw new Error(`layer id "${id}" is already on this post`);
 }
 
 function requireZoom(manifest: EditManifest, id: string): EditZoom {
   const zoom = findZoom(manifest, id);
-  const ids = manifest.zooms.map((z) => z.id);
+  const ids = manifest.zooms.map(z => z.id);
   if (!zoom) throw new Error(`no zoom "${id}" - zooms on this post: ${ids.join(', ') || 'none'}`);
   return zoom;
 }
@@ -329,7 +330,9 @@ function zoomPatchOf(op: Record<string, unknown>): ZoomPatch {
   if (op['cy'] !== undefined) patch.cy = num(op, 'cy');
   if (op['scale'] !== undefined) patch.scale = num(op, 'scale');
   if (op['rampMs'] !== undefined) patch.rampMs = num(op, 'rampMs');
+  if (op['rampOutMs'] !== undefined) patch.rampOutMs = num(op, 'rampOutMs');
   if (op['ease'] !== undefined) patch.ease = oneOf(op, 'ease', ZOOM_EASES);
+  if (op['chain'] !== undefined) patch.chain = bool(op, 'chain');
   return patch;
 }
 
@@ -350,6 +353,7 @@ function requireLayerRoom(manifest: EditManifest): void {
  * than a placeholder for one.
  */
 function overlayCommon(op: Record<string, unknown>, id: string) {
+  const animation = animationOf(op['animation']);
   return {
     id,
     cx: optionalNum(op, 'cx', 0.5),
@@ -359,7 +363,28 @@ function overlayCommon(op: Record<string, unknown>, id: string) {
     opacity: optionalNum(op, 'opacity', 1),
     startMs: optionalNum(op, 'startMs', 0),
     endMs: optionalNum(op, 'endMs', 0),
+    ...(animation ? { animation } : {}),
   };
+}
+
+/**
+ * A layer's `animation` as an op gives it, or null for none. Every move's id is checked against the
+ * catalogue and REFUSED when it is not in it: the manifest's own reader drops a move it cannot draw
+ * without a word, which is right for a draft written by a newer build and wrong for an agent that
+ * mistyped `pop`. The lengths are the normaliser's to clamp, the way the editor's sheet has them.
+ */
+function animationOf(value: unknown) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('"animation" must be an object or null');
+  for (const part of ['in', 'out', 'loop'] as const) {
+    const move = (value as Record<string, unknown>)[part];
+    if (move === undefined || move === null) continue;
+    if (typeof move !== 'object' || Array.isArray(move)) throw new Error(`"animation.${part}" must be an object`);
+    const ids = OVERLAY_ANIMATIONS[part].map(preset => preset.id);
+    const id = (move as Record<string, unknown>)['id'];
+    if (typeof id !== 'string' || !ids.includes(id)) throw new Error(`"animation.${part}.id" must be one of ${ids.join(', ')}`);
+  }
+  return normaliseOverlayAnimation(value);
 }
 
 const TEXT_EFFECTS: readonly TextEffect[] = ['none', 'plate', 'plateSoft', 'outline', 'shadow'];
@@ -398,7 +423,7 @@ const OPS: Record<string, Apply> = {
   setClipTransition: (manifest, op) => {
     const clipId = str(op, 'clipId');
     requireClip(manifest, clipId);
-    const index = manifest.clips.findIndex((clip) => clip.id === clipId);
+    const index = manifest.clips.findIndex(clip => clip.id === clipId);
     if (index < 0) throw new Error(`"${clipId}" is on a video track, and only the base track has transitions`);
     if (index === 0) throw new Error(`"${clipId}" is the first clip of the base track, so there is nothing for it to come in from`);
     return setClipTransition(manifest, clipId, transitionOf(op));
@@ -451,9 +476,7 @@ const OPS: Record<string, Apply> = {
     const atMs = num(op, 'atMs');
     const next = splitClipAt(manifest, atMs, newId);
     if (!next) {
-      throw new Error(
-        `nothing to split at ${atMs}ms - a split needs to land at least 200ms from both ends of a base clip`,
-      );
+      throw new Error(`nothing to split at ${atMs}ms - a split needs to land at least 200ms from both ends of a base clip`);
     }
     return next;
   },
@@ -463,10 +486,7 @@ const OPS: Record<string, Apply> = {
     requireClip(manifest, clipId);
     const next = joinWithNext(manifest, clipId);
     if (!next) {
-      throw new Error(
-        `"${clipId}" cannot be joined to the one after it - they have to be the same source, ` +
-          `at the same speed, and meet frame to frame`,
-      );
+      throw new Error(`"${clipId}" cannot be joined to the one after it - they have to be the same source, ` + `at the same speed, and meet frame to frame`);
     }
     return next;
   },
@@ -576,7 +596,7 @@ const OPS: Record<string, Apply> = {
   applyLayoutPreset: (manifest, op) => {
     const trackId = str(op, 'trackId');
     requireTrack(manifest, trackId);
-    const ids = layoutPresets().map((preset) => preset.id);
+    const ids = layoutPresets().map(preset => preset.id);
     const presetId = str(op, 'presetId');
     if (!ids.includes(presetId as LayoutPresetId)) throw new Error(`"presetId" must be one of ${ids.join(', ')}`);
     return applyLayoutPreset(manifest, trackId, presetId as LayoutPresetId);
@@ -588,18 +608,15 @@ const OPS: Record<string, Apply> = {
     const id = str(op, 'id');
     requireFreeLayerId(manifest, id);
     requireLayerRoom(manifest);
-    return added(
-      manifest,
-      {
-        ...overlayCommon(op, id),
-        kind: 'text',
-        text: str(op, 'text'),
-        styleId: optionalStr(op, 'styleId') ?? 'classic',
-        color: optionalStr(op, 'color') ?? '#ffffff',
-        effect: optionalOneOf(op, 'effect', TEXT_EFFECTS, 'none'),
-        align: optionalOneOf(op, 'align', TEXT_ALIGNS, 'center'),
-      },
-    );
+    return added(manifest, {
+      ...overlayCommon(op, id),
+      kind: 'text',
+      text: str(op, 'text'),
+      styleId: optionalStr(op, 'styleId') ?? 'classic',
+      color: optionalStr(op, 'color') ?? '#ffffff',
+      effect: optionalOneOf(op, 'effect', TEXT_EFFECTS, 'none'),
+      align: optionalOneOf(op, 'align', TEXT_ALIGNS, 'center'),
+    });
   },
 
   addSticker: (manifest, op) => {
@@ -618,16 +635,13 @@ const OPS: Record<string, Apply> = {
     const id = str(op, 'id');
     requireFreeLayerId(manifest, id);
     requireLayerRoom(manifest);
-    return added(
-      manifest,
-      {
-        ...overlayCommon(op, id),
-        kind: 'image',
-        uri: str(op, 'uri'),
-        fileName: optionalStr(op, 'fileName') ?? '',
-        aspect: optionalNum(op, 'aspect', 1),
-      },
-    );
+    return added(manifest, {
+      ...overlayCommon(op, id),
+      kind: 'image',
+      uri: str(op, 'uri'),
+      fileName: optionalStr(op, 'fileName') ?? '',
+      aspect: optionalNum(op, 'aspect', 1),
+    });
   },
 
   addEffect: (manifest, op) => {
@@ -645,7 +659,10 @@ const OPS: Record<string, Apply> = {
     // that belong to the old one leaves a layer that is neither.
     if ('kind' in patch) throw new Error('a layer’s "kind" cannot be patched - remove it and add the kind you want');
     if ('id' in patch) throw new Error('a layer’s "id" cannot be patched');
-    return patchOverlay(manifest, id, patch as Record<string, unknown>);
+    // Checked as an add checks it, on a copy rather than the caller's own object; null takes the
+    // layer's moves away.
+    const fields = 'animation' in patch ? { ...patch, animation: animationOf(patch['animation']) } : patch;
+    return patchOverlay(manifest, id, fields as Record<string, unknown>);
   },
 
   removeOverlay: (manifest, op) => {

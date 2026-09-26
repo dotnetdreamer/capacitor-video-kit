@@ -1,4 +1,5 @@
 import { isIdentityView, type CameraView } from '../../editor/camera';
+import { isNeutralMotion, type OverlayMotionSample } from '../../editor/motion';
 import type { TransitionLook } from '../../editor/transitions';
 import type { ComposeRect, ComposeTransition } from '../definitions';
 
@@ -122,6 +123,16 @@ export interface OverlayDraw {
   hPx: number;
   rotationDeg: number;
   opacity: number;
+  /**
+   * Where the layer's motion has it at this frame - `overlayMotionAt(motion, t)` - or absent for a
+   * layer at rest. See `ComposeOverlayMotion` for the contract: the offsets are added to the centre
+   * in fractions of the frame, the size multiplies `wPx`/`hPx` about that centre, the turn is added
+   * to `rotationDeg`, and the opacity multiplies the layer's own.
+   *
+   * Absent, null, or a sample that moves nothing is the path every overlay took before layers moved,
+   * the very same three canvas calls, so a still frame is the same to the bit.
+   */
+  motion?: OverlayMotionSample | null;
 }
 
 /** The whole output frame, for a base-track layer that is not placed anywhere in particular. */
@@ -343,6 +354,11 @@ export class Painter {
 
   /** One overlay, centred, rotated clockwise and blended - the same three lines in both paths. */
   paintOverlay(overlay: OverlayDraw): void {
+    const motion = overlay.motion && !isNeutralMotion(overlay.motion) ? overlay.motion : null;
+    if (motion) {
+      this.paintMovingOverlay(overlay, motion);
+      return;
+    }
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = overlay.opacity;
@@ -353,6 +369,29 @@ export class Painter {
     // `rotationDeg` means, so there is no sign to flip here. The GL engines flip it; this does not.
     if (overlay.rotationDeg !== 0) ctx.rotate((overlay.rotationDeg * Math.PI) / 180);
     ctx.drawImage(overlay.bitmap, -overlay.wPx / 2, -overlay.hPx / 2, overlay.wPx, overlay.hPx);
+    ctx.restore();
+  }
+
+  /**
+   * One overlay where its motion has it: the same three lines with the motion's numbers folded into
+   * them - the centre moved, the turn added, the size and the opacity multiplied - which is the
+   * static layer's own transform and so needs no second idea of where a layer's centre is. A layer
+   * the motion has shrunk to nothing or faded out is simply not drawn.
+   */
+  private paintMovingOverlay(overlay: OverlayDraw, motion: OverlayMotionSample): void {
+    const alpha = overlay.opacity * motion.opacity;
+    const w = overlay.wPx * motion.scale;
+    const h = overlay.hPx * motion.scale;
+    if (!(alpha > 0) || !(w > 0) || !(h > 0)) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.translate((overlay.cx + motion.x) * this.output.width, (overlay.cy + motion.y) * this.output.height);
+    const degrees = overlay.rotationDeg + motion.rotation;
+    if (degrees !== 0) ctx.rotate((degrees * Math.PI) / 180);
+    ctx.drawImage(overlay.bitmap, -w / 2, -h / 2, w, h);
     ctx.restore();
   }
 

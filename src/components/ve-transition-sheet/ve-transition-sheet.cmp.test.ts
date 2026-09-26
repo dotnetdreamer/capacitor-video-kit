@@ -252,16 +252,16 @@ describe('ve-transition-sheet', () => {
 
     tab(sheet, 'Camera').click();
     await until('the camera row', () => labels(sheet)[0] === 'Zoom in');
-    expect(labels(sheet)).toEqual(['Zoom in', 'Zoom out', 'Spin', 'Shake', 'Whip left', 'Whip right']);
+    expect(labels(sheet)).toEqual(['Zoom in', 'Zoom out', 'Zoom blur', 'Zoom through', 'Spin', 'Spin blur', 'Shake', 'Whip left', 'Whip right', 'Whip up', 'Whip down', 'Swipe up']);
     expect(row(sheet).scrollLeft).toBe(0);
 
     tab(sheet, 'Mask').click();
     await until('the mask row', () => labels(sheet)[0] === 'Wipe left');
-    expect(labels(sheet)).toHaveLength(8);
+    expect(labels(sheet)).toHaveLength(10);
 
     tab(sheet, 'Effect').click();
     await until('the effect row', () => labels(sheet)[0] === 'Flash');
-    expect(labels(sheet)).toEqual(['Flash', 'Pixelate', 'Glitch', 'Burn']);
+    expect(labels(sheet)).toEqual(['Flash', 'Pixelate', 'Glitch', 'Burn', 'RGB split', 'Light leak']);
   });
 
   it('opens a dressed cut on its own tab, with its tile in the middle of the row', async () => {
@@ -555,10 +555,10 @@ describe('ve-transition-sheet', () => {
       tab(sheet, 'Mask').click();
       await until('the mask row to be drawn', () => labels(sheet)[0] === 'Wipe left' && drawn('Wipe left'), 8000);
       row(sheet).scrollLeft = row(sheet).scrollWidth;
-      await until('the far tile', () => drawn('Blinds'), 8000);
-      tile(sheet, 'Blinds').click();
+      await until('the far tile', () => drawn('Diamond'), 8000);
+      tile(sheet, 'Diamond').click();
       const seen = new Set<string>();
-      await until('the chosen tile to move', () => seen.add(pixels(canvasOf(sheet, 'Blinds'))).size >= 3, 12000);
+      await until('the chosen tile to move', () => seen.add(pixels(canvasOf(sheet, 'Diamond'))).size >= 3, 12000);
 
       expect(contexts).toHaveLength(1);
       expect(contexts[0].isContextLost()).toBe(false);

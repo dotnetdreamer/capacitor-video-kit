@@ -1,12 +1,7 @@
 import type { RasterisedOverlay } from '../editor';
 
 /** What the customer has picked on the timeline or the preview. At most one thing at a time. */
-export type EditorSelection =
-  | { kind: 'clip'; id: string }
-  | { kind: 'overlay'; id: string }
-  | { kind: 'music' }
-  | { kind: 'voice'; id: string }
-  | { kind: 'zoom'; id: string };
+export type EditorSelection = { kind: 'clip'; id: string } | { kind: 'overlay'; id: string } | { kind: 'music' } | { kind: 'voice'; id: string } | { kind: 'zoom'; id: string };
 
 /**
  * The sheets that can slide up over the timeline and the toolbar. One at a time; opening one closes
@@ -27,7 +22,8 @@ export type EditorPanel =
   | 'sound'
   | 'quality'
   | 'transition'
-  | 'zoom';
+  | 'zoom'
+  | 'animation';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the

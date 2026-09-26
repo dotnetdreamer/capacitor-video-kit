@@ -765,6 +765,34 @@ class RenderPlanTest {
         assertEquals(10_000_000L, total)
     }
 
+    /*
+     * THE DROP DID NOT EXPORT ON A PHONE. Its 16 s score looped under a post whose speeds summed to
+     * 16.000074 s, and the plan added a second repetition 74 us long. Media3 measures an item's
+     * progress in whole milliseconds, so that item had a duration of 0, and `Util.percentInt` divided
+     * by it the first time the export's progress was polled on it: "divide by zero", every time.
+     */
+    @Test
+    fun `a looping track is not repeated for a sliver of the video's rounding`() {
+        val music = Music("file:///m.m4a", 0, 0, 16_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val plan = RenderPlan.build(
+            spec(
+                // 14.15 s, and 1.721 s of footage slowed to 40/43: 1.850074 s of output, not 1.85.
+                listOf(clip("a", outMs = 14_150), clip("b", outMs = 1_721, speed = 0.9302325581395349f)),
+                audio = Audio(true, 1f, music, emptyList()),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(20_000),
+                "file:///b.mp4" to probe(20_000),
+                "file:///m.m4a" to probe(16_000),
+            ),
+        )
+        // The premise: the video runs past 16 s, by less than a frame.
+        assertTrue(plan.totalUs > 16_000_000L && plan.totalUs < 16_000_000L + 33_333L)
+        val items = plan.music!!.items
+        assertEquals(1, items.size)
+        assertEquals(16_000_000L, items.single().outUs - items.single().inUs)
+    }
+
     @Test
     fun `a track that starts late gets a leading gap and covers only the rest`() {
         val music = Music("file:///m.m4a", 4_000, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)

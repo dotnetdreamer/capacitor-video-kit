@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { TRANSITIONS, compileTransition } from '../../editor/transitions';
-import { MAX_CAMERA_KEYS, MAX_CAMERA_SCALE, type ComposeClip, type ComposeSpec } from '../definitions';
+import { MAX_CAMERA_KEYS, MAX_CAMERA_SCALE, MAX_OVERLAY_MOTION_KEYS, type ComposeClip, type ComposeSpec } from '../definitions';
 
 import { MAX_VIDEO_TRACKS, SpecError, validateSpec } from './spec';
 
@@ -546,5 +546,51 @@ describe('camera', () => {
 
   it('is read after the overlays', () => {
     expect(pathOf(spec({ overlays: 'x' as unknown as ComposeSpec['overlays'], camera: cam({ atMs: 'x' }) }))).toBe('overlays');
+  });
+});
+
+describe('overlay motion', () => {
+  const layer = (motion?: unknown): ComposeSpec['overlays'][number] =>
+    ({ id: 'o', png: PNG, cx: 0.5, cy: 0.5, wPx: 100, hPx: 50, rotationDeg: 0, startMs: 0, endMs: 1000, opacity: 1, ...(motion === undefined ? {} : { motion }) }) as ComposeSpec['overlays'][number];
+  const refusal = (input: ComposeSpec): { path?: string; message?: string } => {
+    try {
+      validateSpec(input);
+      return {};
+    } catch (error) {
+      return { path: (error as SpecError).path, message: (error as SpecError).message };
+    }
+  };
+
+  it('leaves the key off for a layer with none, a null one, no times, and one that moves nothing', () => {
+    expect('motion' in validateSpec(spec({ overlays: [layer()] })).overlays[0]).toBe(false);
+    expect('motion' in validateSpec(spec({ overlays: [layer(null)] })).overlays[0]).toBe(false);
+    expect('motion' in validateSpec(spec({ overlays: [layer({ atMs: [] })] })).overlays[0]).toBe(false);
+    expect('motion' in validateSpec(spec({ overlays: [layer({ atMs: [0, 500], scale: [1, 1], opacity: [1, 1] })] })).overlays[0]).toBe(false);
+  });
+
+  it('keeps a motion that moves, clamped, its neutral channels dropped, and copied rather than aliased', () => {
+    const motion = { atMs: [0, 250, 250, 500], x: [0.12, 0, 0, 0], scale: [30, 1, 1, 1], opacity: [0, 1, 1, 1], rotation: [0, 0, 0, 0] };
+    const checked = validateSpec(spec({ overlays: [layer(motion)] })).overlays[0].motion!;
+    expect(checked).toEqual({ atMs: [0, 250, 250, 500], x: [0.12, 0, 0, 0], scale: [20, 1, 1, 1], opacity: [0, 1, 1, 1] });
+    motion.x[0] = 3;
+    expect(checked.x![0]).toBe(0.12);
+  });
+
+  it('refuses a motion of the wrong shape with the layer path, in the order every parser reads it', () => {
+    expect(refusal(spec({ overlays: [layer([1, 2])] })).path).toBe('overlays[0].motion');
+    expect(refusal(spec({ overlays: [layer({ atMs: 5 })] })).path).toBe('overlays[0].motion.atMs');
+    expect(refusal(spec({ overlays: [layer(), layer({ atMs: [0, 1], x: [0] })] })).path).toBe('overlays[1].motion.x');
+    expect(refusal(spec({ overlays: [layer({ atMs: [0, 1], x: [0, 1], glow: [0, 1] })] })).path).toBe('overlays[0].motion.glow');
+    expect(refusal(spec({ overlays: [layer({ atMs: [0, Number.POSITIVE_INFINITY], x: [0, 1] })] })).path).toBe('overlays[0].motion.atMs[1]');
+    expect(refusal(spec({ overlays: [layer({ atMs: [10, 5], x: [0, 1] })] })).path).toBe('overlays[0].motion.atMs[1]');
+    const many = Array.from({ length: MAX_OVERLAY_MOTION_KEYS + 1 }, (_, i) => i);
+    expect(refusal(spec({ overlays: [layer({ atMs: many, x: many.map(() => 0.1) })] }))).toEqual({
+      path: 'overlays[0].motion',
+      message: `invalid_spec:overlays[0].motion at most ${MAX_OVERLAY_MOTION_KEYS} keys`,
+    });
+  });
+
+  it('is read after the rest of the layer', () => {
+    expect(refusal(spec({ overlays: [{ ...layer({ atMs: 'x' }), wPx: 0 }] })).path).toBe('overlays[0].wPx');
   });
 });

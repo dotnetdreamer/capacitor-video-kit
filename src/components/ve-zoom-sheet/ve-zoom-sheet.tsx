@@ -3,7 +3,7 @@ import { Component, Prop } from '@stencil/core';
 import { closeWhenGone } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, type ZoomEase } from '../../editor';
+import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, zoomRampMs, zoomRampPatch, type ZoomEase } from '../../editor';
 import { zoomLevelLabel, zoomRampLabel } from './zoom-labels';
 
 /** The three curves, in the order the row shows them, with the word each is shown by. */
@@ -86,8 +86,21 @@ export class VeZoomSheet {
 
   private readonly formatRamp = (ms: number): string => zoomRampLabel(ms);
 
+  /**
+   * The selected zoom's two ramps as they were when the current ramp gesture began, so every frame of
+   * a drag scales THAT shape (see [zoomRampPatch]). The slider opens a gesture for a key press too, so
+   * there is always one; the id is only there so a shape can never be read onto another zoom.
+   */
+  private rampShape: { id: string; rampMs: number; rampOutMs?: number } | null = null;
+
   private readonly onGestureStart = () => {
     this.gestures++;
+  };
+
+  private readonly onRampGestureStart = () => {
+    this.gestures++;
+    const zoom = this.ctx.store.selectedZoom.value;
+    this.rampShape = zoom ? { id: zoom.id, rampMs: zoom.rampMs, rampOutMs: zoom.rampOutMs } : null;
   };
 
   /** Inside the slider's gesture; the coalesce key folds the whole drag into one step. */
@@ -98,11 +111,17 @@ export class VeZoomSheet {
     if (scale !== zoom.scale) this.ctx.store.updateZoom(zoom.id, { scale }, { coalesce: `zoom-level:${this.gestures}` });
   };
 
+  /**
+   * One slider for what may be two ramps: a zoom the editor made has one, and a template's push-in or
+   * pull-out has two, which the drag scales together so the move keeps its shape.
+   */
   private readonly onRamp = (event: CustomEvent<number>) => {
     const zoom = this.ctx.store.selectedZoom.value;
     if (!zoom) return;
-    const rampMs = Math.round(event.detail);
-    if (rampMs !== zoom.rampMs) this.ctx.store.updateZoom(zoom.id, { rampMs }, { coalesce: `zoom-ramp:${this.gestures}` });
+    const ms = Math.round(event.detail);
+    if (ms === zoomRampMs(zoom)) return;
+    const shape = this.rampShape?.id === zoom.id ? this.rampShape : zoom;
+    this.ctx.store.updateZoom(zoom.id, zoomRampPatch(shape, ms), { coalesce: `zoom-ramp:${this.gestures}` });
   };
 
   private chooseEase(ease: ZoomEase): void {
@@ -170,17 +189,18 @@ export class VeZoomSheet {
                   class="zs__slider"
                   ctx={this.ctx}
                   label="Zoom ramp"
-                  value={zoom.rampMs}
+                  value={Math.min(zoomRampMs(zoom), MAX_ZOOM_RAMP_MS)}
                   min={0}
                   max={MAX_ZOOM_RAMP_MS}
                   step={RAMP_STEP_MS}
                   pin="none"
                   format={this.formatRamp}
-                  onVeGestureStart={this.onGestureStart}
+                  onVeGestureStart={this.onRampGestureStart}
                   onVeLive={this.onRamp}
                 />
+                {/* The ramp as stored, which a template's push-in may have longer than the slider reaches. */}
                 <span class="zs__value zs__value--wide" data-readout="ramp">
-                  {zoomRampLabel(zoom.rampMs)}
+                  {zoomRampLabel(zoomRampMs(zoom))}
                 </span>
               </div>
 

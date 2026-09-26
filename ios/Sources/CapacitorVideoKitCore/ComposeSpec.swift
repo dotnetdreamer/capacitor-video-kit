@@ -275,6 +275,37 @@ struct ComposeOverlay: Sendable {
     let startMs: Int64
     let endMs: Int64
     let opacity: Double        // 0...1
+    /// How the layer MOVES - `ComposeOverlayMotion` in `definitions.ts`, which is the contract - or
+    /// nil for a layer that stands still, which is every overlay of every spec written before layers
+    /// moved and what the parser makes of a motion that moves nothing. nil is decided HERE, once, and
+    /// `OverlayBitmap` then places the layer by exactly the arithmetic it always has.
+    ///
+    /// A `var` with a default, and declared LAST, so the memberwise initialiser takes it as an
+    /// optional last argument and every overlay built without one is built exactly as it was.
+    var motion: ComposeOverlayMotion? = nil
+}
+
+/// A layer's moves, LOWERED to keys by JS (`compileOverlayMotion` in `src/editor/motion.ts`), as the
+/// parser leaves them: `atMs` finite and non-decreasing, 1...`ComposeSpecParser.maxOverlayMotionKeys`
+/// of them, and every channel present as long as `atMs`, each value already clamped - and a channel
+/// that never leaves its neutral value left out as nil, so reading it costs nothing.
+///
+/// Doubles and milliseconds for the camera's reasons (`ComposeCameraKey`): nothing downstream needs a
+/// `CMTime`, and a hand-built time multiplied into microseconds could overflow.
+struct ComposeOverlayMotion: Sendable {
+    /// Output-timeline milliseconds.
+    let atMs: [Double]
+    /// Offset of the centre, a fraction of the output WIDTH, positive right. nil holds 0.
+    let x: [Double]?
+    /// The same, a fraction of the output HEIGHT, positive DOWN - the wire's y, flipped only where
+    /// the layer is placed in Core Image's y-up space (`OverlayBitmap.placement`). nil holds 0.
+    let y: [Double]?
+    /// Size about the centre, multiplying `wPx`/`hPx`. nil holds 1.
+    let scale: [Double]?
+    /// CLOCKWISE degrees added to `rotationDeg`. nil holds 0.
+    let rotation: [Double]?
+    /// Multiplied into `opacity`. nil holds 1.
+    let opacity: [Double]?
 }
 
 struct ComposeMusic: Sendable {

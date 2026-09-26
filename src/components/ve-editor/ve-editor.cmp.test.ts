@@ -271,7 +271,7 @@ describe('ve-editor while the video is built', () => {
  * a render that passes it comes back `too_large` - which the customer is told as a video too big to
  * post, with the edit itself as the way out, because trying again builds the same file.
  */
-describe('ve-editor under a host\'s size ceiling', () => {
+describe("ve-editor under a host's size ceiling", () => {
   const MAX_BYTES = 100 * 1024 * 1024;
 
   async function exportingUnderCeiling() {
@@ -282,7 +282,7 @@ describe('ve-editor under a host\'s size ceiling', () => {
     return { editor, held };
   }
 
-  it('hands the host\'s ceiling to the render, for the spec it builds', async () => {
+  it("hands the host's ceiling to the render, for the spec it builds", async () => {
     const { held } = await exportingUnderCeiling();
 
     expect(held.request()?.maxBytes).toBe(MAX_BYTES);
@@ -317,7 +317,7 @@ describe('ve-editor under a host\'s size ceiling', () => {
  * drawn for 720p and burned in soft.
  */
 describe('ve-editor hands its render the raster context', () => {
-  it('makes it for the frame the post renders at, with the host\'s own fileUrl', async () => {
+  it("makes it for the frame the post renders at, with the host's own fileUrl", async () => {
     const held = heldRender();
     const fileUrl = (uri: string) => `https://localhost/_capacitor_file_${uri}`;
     const output = { width: 1080, height: 1920, fps: 30 };

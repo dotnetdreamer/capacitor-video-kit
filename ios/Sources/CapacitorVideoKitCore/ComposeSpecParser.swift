@@ -32,6 +32,9 @@ enum ComposeSpecParser {
     /// rest of the post - and a key magnifying more is clamped, as every other out-of-range value is.
     static let maxCameraKeys = 20000
     static let maxCameraScale: Double = 8
+    /// `MAX_OVERLAY_MOTION_KEYS` from `definitions.ts`. A layer's motion with more keys is REFUSED
+    /// rather than truncated, in Android's words (`MotionTooLong`), for the camera's reason.
+    static let maxOverlayMotionKeys = 6000
     /// Every curve of a transition has the same number of samples, and this many at the least and
     /// at the most. Two is a straight line from start to end; 121 is three times what the editor
     /// sends, room for a finer catalogue without letting a spec carry a curve of any length at all.
@@ -123,7 +126,8 @@ enum ComposeSpecParser {
                            rotationDeg: o.rotationDeg,
                            startMs: o.startMs,
                            endMs: o.endMs,
-                           opacity: clamp01(o.opacity))
+                           opacity: clamp01(o.opacity),
+                           motion: o.motion)
         }
 
         let music = d.audio.music.map { m in
@@ -660,6 +664,12 @@ private struct ComposeSpecDTO: Decodable {
                     } catch let e as SpecError {
                         held = SpecError("overlays[\(i)]\(e.path.isEmpty ? "" : ".\(e.path)")")
                         break
+                    } catch is MotionTooLong {
+                        // Android's wording to the character, which the path alone cannot carry:
+                        // the splice above rebuilds an error from its path and drops any message.
+                        held = SpecError("overlays[\(i)].motion",
+                                         "invalid_spec:overlays[\(i)].motion at most \(ComposeSpecParser.maxOverlayMotionKeys) keys")
+                        break
                     } catch {
                         held = SpecError("overlays[\(i)]")
                         break
@@ -1162,9 +1172,11 @@ private struct OverlayDTO: Decodable {
     let startMs: Int64
     let endMs: Int64
     let opacity: Double
+    /// Shape-checked and clamped by `OverlayMotionDTO`, or nil for a layer that does not move.
+    let motion: ComposeOverlayMotion?
 
     private enum K: String, CodingKey {
-        case id, png, cx, cy, wPx, hPx, rotationDeg, startMs, endMs, opacity
+        case id, png, cx, cy, wPx, hPx, rotationDeg, startMs, endMs, opacity, motion
     }
 
     init(from decoder: Decoder) throws {
@@ -1189,6 +1201,135 @@ private struct OverlayDTO: Decodable {
         cy = c.double(.cy, 0.5)
         rotationDeg = c.double(.rotationDeg, 0)
         opacity = c.double(.opacity, 1)
+        // Last, after every field a layer had before layers moved, where Android's `parseOverlay`
+        // reads it, so a layer broken somewhere else reports the same first failure it always did.
+        // Absent, or null, is a still layer. Present and not an object fails as `motion`, the
+        // camera's rule: a mangled motion means nothing, and drawing the layer still in its place
+        // would ship a post nobody asked for without a word.
+        if c.has(.motion) {
+            do {
+                motion = try c.decode(OverlayMotionDTO.self, forKey: .motion).motion
+            } catch let e as SpecError {
+                throw e
+            } catch let e as MotionTooLong {
+                throw e
+            } catch {
+                // Capacitor's decoder throws a `DecodingError` when the value is not an object.
+                throw SpecError("motion")
+            }
+        } else {
+            motion = nil
+        }
+    }
+}
+
+/// Thrown for a layer's motion with more than `maxOverlayMotionKeys` keys, and turned into Android's
+/// message by the overlays loop, which alone knows the layer's index.
+private struct MotionTooLong: Error {}
+
+/// A layer's `motion`: `atMs` and five PARALLEL channels, exactly as `ComposeOverlayMotion` puts them
+/// on the wire. `normaliseOverlayMotion` in `src/editor/motion.ts` is the rule book; Android's
+/// `parseOverlayMotion` is the order and the wording, and this is both halves of it, check for check:
+///
+/// - not an object: `motion` (thrown by the caller, where the `DecodingError` surfaces).
+/// - `atMs` absent or null: no motion. `atMs` present but not an array: `motion.atMs`. Empty: none.
+/// - each channel in the contract's order - `x`, `y`, `scale`, `rotation`, `opacity` - absent or null
+///   holds its neutral value; present and not an array exactly as long as `atMs`: `motion.<name>`.
+/// - a key that is none of those: `motion.<key>`, the transitions' rule, because a channel skipped
+///   in silence is a different animation from the preview's. `firstUnknownKey` says which key when
+///   there are several.
+/// - more than `maxOverlayMotionKeys` keys: `MotionTooLong`, which becomes Android's message.
+/// - a time that is not a finite number, or less than the one before it: `motion.atMs[i]`. Equal
+///   times are legal - they are a step.
+/// - a channel value that is not a finite number is NOT refused: it reads as the channel's neutral
+///   value, the camera's rule; every other value is clamped to its channel's range.
+///
+/// A channel that holds its neutral value at every key is left out, and a motion left with no
+/// channel at all is nil: the absent path.
+///
+/// Leaf paths are thrown from here, as `RectDTO` throws them: the overlays loop puts `overlays[i]` in
+/// front.
+private struct OverlayMotionDTO: Decodable {
+    let motion: ComposeOverlayMotion?
+
+    /// The channels in the contract's order, each with its neutral value and its range - the
+    /// transitions' own bounds, and `MOTION_CHANNELS` in the TypeScript.
+    private static let channels: [(name: String, neutral: Double, range: ClosedRange<Double>)] = [
+        ("x", 0, -4...4),
+        ("y", 0, -4...4),
+        ("scale", 1, 0...20),
+        ("rotation", 0, -3600...3600),
+        ("opacity", 1, 0...1),
+    ]
+
+    init(from decoder: Decoder) throws {
+        // Not an object throws a DecodingError here, which the caller reports as `motion`.
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        guard let timesKey = AnyKey(stringValue: "atMs"), c.has(timesKey) else {
+            motion = nil
+            return
+        }
+        guard var timeList = try? c.nestedUnkeyedContainer(forKey: timesKey),
+              let n = timeList.count else { throw SpecError("motion.atMs") }
+        guard n > 0 else {
+            motion = nil
+            return
+        }
+        // Every channel's shape before anything else, in order, so a motion broken in two places
+        // names the same one on every engine.
+        var lists: [UnkeyedDecodingContainer?] = []
+        for channel in Self.channels {
+            guard let key = AnyKey(stringValue: channel.name), c.has(key) else {
+                lists.append(nil)
+                continue
+            }
+            guard let list = try? c.nestedUnkeyedContainer(forKey: key), list.count == n else {
+                throw SpecError("motion.\(channel.name)")
+            }
+            lists.append(list)
+        }
+        // A closure and not `\.name`: `channels` holds TUPLES, and a key path to a tuple element
+        // used as a function is not a form every compiler this package builds with is sure to take.
+        if let unknown = firstUnknownKey(c, known: ["atMs"] + Self.channels.map({ $0.name })) {
+            throw SpecError("motion.\(unknown)")
+        }
+        if n > ComposeSpecParser.maxOverlayMotionKeys { throw MotionTooLong() }
+
+        var times: [Double] = []
+        times.reserveCapacity(n)
+        for i in 0..<n {
+            // NaN fails `isFinite`, so a time that was not a number at all stops here too.
+            guard !timeList.isAtEnd, let t = try? timeList.decode(Double.self), t.isFinite else {
+                throw SpecError("motion.atMs[\(i)]")
+            }
+            if i > 0 && t < times[i - 1] { throw SpecError("motion.atMs[\(i)]") }
+            times.append(t)
+        }
+
+        var values: [[Double]?] = []
+        for (index, channel) in Self.channels.enumerated() {
+            guard var list = lists[index] else {
+                values.append(nil)
+                continue
+            }
+            var read: [Double] = []
+            read.reserveCapacity(n)
+            // Bounded by `n` and not by `isAtEnd`, for the reason `CameraDTO.numbers` gives.
+            for _ in 0..<n {
+                if !list.isAtEnd, let v = try? list.decode(Double.self), v.isFinite {
+                    read.append(min(channel.range.upperBound, max(channel.range.lowerBound, v)))
+                } else {
+                    read.append(channel.neutral)
+                }
+            }
+            values.append(read.contains(where: { $0 != channel.neutral }) ? read : nil)
+        }
+        guard values.contains(where: { $0 != nil }) else {
+            motion = nil
+            return
+        }
+        motion = ComposeOverlayMotion(atMs: times, x: values[0], y: values[1], scale: values[2],
+                                      rotation: values[3], opacity: values[4])
     }
 }
 

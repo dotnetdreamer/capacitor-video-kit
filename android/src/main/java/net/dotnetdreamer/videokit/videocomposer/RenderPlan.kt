@@ -303,6 +303,12 @@ class RenderPlan private constructor(
         val opacity: Float,
         val wPx: Int,
         val hPx: Int,
+        /**
+         * How the layer moves, in output-timeline milliseconds, or null for one that stands still.
+         * The flips into GL's space happen per frame, in [OverlayPose.moved], on the numbers read
+         * off it - the keys themselves stay in the web's terms, as the camera's do.
+         */
+        val motion: OverlayMotion? = null,
     )
 
     data class MusicItem(
@@ -401,6 +407,7 @@ class RenderPlan private constructor(
                     opacity = o.opacity,
                     wPx = o.wPx,
                     hPx = o.hPx,
+                    motion = o.motion,
                 )
             }
 
@@ -448,7 +455,7 @@ class RenderPlan private constructor(
                 tails = tails,
                 colorMatrix = colorMatrix,
                 overlays = overlays,
-                music = planMusic(spec.audio.music, probes, totalUs),
+                music = planMusic(spec.audio.music, probes, totalUs, minRepetitionUs = frameIntervalUs(spec.output)),
                 voice = planVoice(spec.audio.voiceover, probes, totalUs),
                 posterAtUs = min(spec.posterAtMs * 1000L, max(0L, totalUs - 1L)),
                 camera = camera,
@@ -960,7 +967,12 @@ class RenderPlan private constructor(
          * seconds on every repeat. Explicit items also let the last one be clipped exactly to the
          * end of the video, so the audio sequence can never outlast (and therefore extend) it.
          */
-        private fun planMusic(music: Music?, probes: Map<String, ProbedInput>, totalUs: Long): MusicPlan? {
+        private fun planMusic(
+            music: Music?,
+            probes: Map<String, ProbedInput>,
+            totalUs: Long,
+            minRepetitionUs: Long,
+        ): MusicPlan? {
             if (music == null) return null
             val probed = probes[music.uri]
             val outMs = if (probed != null && probed.durationMs > 0L) {
@@ -975,17 +987,27 @@ class RenderPlan private constructor(
             val availableUs = totalUs - startUs
             if (availableUs <= 0L) return null
 
-            val reps = if (music.loop) {
+            var reps = if (music.loop) {
                 max(1, ceil(availableUs.toDouble() / trackLenUs.toDouble()).toInt())
             } else {
                 1
             }
+            /*
+             * A last repetition shorter than a frame is the video's rounding, not music, and is left
+             * off: the one before it plays whole and stops that sliver short of the end. A 16 s score
+             * under a post whose speeds sum to 16.000074 s got a second repetition 74 us long, and
+             * Media3 measures an item's progress in whole milliseconds - an item under one is a
+             * duration of 0, and `Util.percentInt` in `ExoPlayerAssetLoader.getProgress` divided by
+             * it and failed the export the moment progress was polled on it.
+             */
+            if (reps > 1 && availableUs - (reps - 1) * trackLenUs < minRepetitionUs) reps--
             val lastLenUs = if (music.loop) {
-                availableUs - (reps - 1) * trackLenUs
+                min(trackLenUs, availableUs - (reps - 1) * trackLenUs)
             } else {
                 min(trackLenUs, availableUs)
             }
-            if (lastLenUs <= 0L) return null
+            // The same floor for music that starts under a millisecond before the end: nothing to hear.
+            if (lastLenUs < MIN_CLIP_US) return null
 
             val inUs = music.inMs * 1000L
             val fadeInUs = music.fadeInMs * 1000L

@@ -30,10 +30,10 @@ const THUMB_PX_H = Math.round(THUMB_H * THUMB_SCALE);
 const CELL_PX = Math.round(64 * Math.max(1, Math.min(2, globalThis.devicePixelRatio || 1)));
 
 /**
- * The one preset outside the Frames category that is drawn entirely at the frame's edges: its black
+ * The presets outside the Frames category that are drawn entirely at the frame's edges: their black
  * bars run along the top and the bottom, which is exactly what a square crop takes away.
  */
-const CINEMA_ID = 'cinema';
+const BAR_IDS: readonly string[] = ['cinema', 'letterbox'];
 
 /**
  * The effects whose whole point is what they draw at the FRAME'S EDGES: the film strip's sprocket
@@ -41,9 +41,7 @@ const CINEMA_ID = 'cinema';
  * square cell cuts those edges off - on the phone, the film strip's bands were a dark sliver and the
  * polaroid's card was gone - so their previews show the whole frame instead, letterboxed in the cell.
  */
-const EDGE_EFFECT_IDS = new Set(
-  EFFECT_PRESETS.filter(preset => preset.category === 'frame' || preset.id === CINEMA_ID).map(preset => preset.id),
-);
+const EDGE_EFFECT_IDS = new Set(EFFECT_PRESETS.filter(preset => preset.category === 'frame' || BAR_IDS.includes(preset.id)).map(preset => preset.id));
 
 /** Finished thumbnails kept, by effect and frame: two frames' worth of the whole catalogue. */
 const THUMB_CACHE_MAX = 40;
@@ -252,9 +250,7 @@ export class VeEffectsSheet {
       });
     }
     if (tab === TRENDING) {
-      return EFFECT_CATEGORIES.flatMap(category =>
-        EFFECT_PRESETS.filter(preset => preset.category === category.id).slice(0, TRENDING_PER_CATEGORY),
-      );
+      return EFFECT_CATEGORIES.flatMap(category => EFFECT_PRESETS.filter(preset => preset.category === category.id).slice(0, TRENDING_PER_CATEGORY));
     }
     return EFFECT_PRESETS.filter(preset => preset.category === tab);
   }
@@ -567,13 +563,7 @@ export class VeEffectsSheet {
  * customer is choosing. What is left either side stays transparent, so the cell's own grey shows
  * there - the Cinema bars are black, and on a black letterbox nobody could tell they were bars.
  */
-function drawIntoCell(
-  g: CanvasRenderingContext2D,
-  thumb: HTMLCanvasElement,
-  width: number,
-  height: number,
-  letterbox: boolean,
-): void {
+function drawIntoCell(g: CanvasRenderingContext2D, thumb: HTMLCanvasElement, width: number, height: number, letterbox: boolean): void {
   if (letterbox) {
     const frameWidth = Math.round((height * thumb.width) / thumb.height);
     g.drawImage(thumb, Math.round((width - frameWidth) / 2), 0, frameWidth, height);

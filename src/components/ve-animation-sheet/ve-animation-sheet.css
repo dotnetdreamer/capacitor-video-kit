@@ -1,0 +1,254 @@
+/*
+ * The Animation sheet: a row of tiles under the frame's In / Out / Loop tabs, and how long the move
+ * takes - or how fast it goes.
+ *
+ * Budgeted against the compact sheet like the transition sheet, whose tiles and bottom row these
+ * are: the 53px head, 102px of tiles, a 52px length row and 6px of air come to 213px - well under
+ * the 259px that sheet is held to - so the picture the move plays on keeps as much of the screen as
+ * it can. The sheet's browser test holds the figure.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+.an {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding-bottom: 6px;
+}
+
+/* ------------------------------------------------------------------------------------- tiles */
+
+/* Positioned so a tile's `offsetLeft` is measured from the row, for centring the chosen one. */
+.an__row {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 16px 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.an__row::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: form controls do not
+ * inherit the page's font, and no reset stylesheet reaches in here to make them.
+ */
+.an__tile {
+  display: flex;
+  flex: 0 0 64px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 64px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/*
+ * The glyph is centred by the grid and never by a transform: its transform is the move, written
+ * frame by frame, and a centring translate in the same property would be overwritten by the first.
+ * `overflow: hidden` is the frame of the video - a slide starts outside it, as it does in the post.
+ */
+.an__frame {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--ve-raised, #2c2c2e);
+  transition: transform 120ms ease;
+}
+
+.an__tile:active .an__frame {
+  transform: scale(0.95);
+}
+
+/*
+ * The selection ring is drawn over the picture rather than as a border, so choosing a move does not
+ * shrink the frame inside it - the transition sheet's ring, a hairline of dark inside the white.
+ */
+.an__frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+}
+
+/*
+ * Only ever transform and opacity, both of which the compositor moves without a layout, so fourteen
+ * tiles cost the main thread fourteen style writes a frame and nothing else.
+ */
+.an__glyph {
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.an__frame--fill .an__glyph {
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * `contain`, because a picture standing in for a layer with no bitmap yet - a sticker's file, a photo
+ * - is fitted into a square box whose shape is not its own. A bitmap is already sized to its box.
+ */
+.an__picture {
+  display: block;
+  object-fit: contain;
+}
+
+/* An effect is the whole frame, so its tile is too: the middle of it, as a video thumbnail is. */
+.an__frame--fill .an__picture {
+  object-fit: cover;
+}
+
+.an__word-glyph {
+  color: #fff;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.an__icon {
+  color: var(--ve-text, #fff);
+  font-size: 30px;
+}
+
+/* None is a way back rather than a move, so it is drawn the way the frame's own None is. */
+.an__none {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 30px;
+}
+
+/*
+ * Allowed a little wider than the tile, into the gap either side of it: Slide right and Heartbeat
+ * come close to 64px in bold, and a tile that cut one to an ellipsis would do it exactly when it is
+ * chosen.
+ */
+.an__label {
+  max-width: 76px;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.an__tile--on {
+  color: var(--ve-text, #fff);
+}
+
+.an__tile--on .an__frame::after {
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    inset 0 0 0 3px rgba(0, 0, 0, 0.35);
+}
+
+.an__tile--on .an__label {
+  font-weight: 700;
+}
+
+.an__tile--on .an__none {
+  color: var(--ve-text, #fff);
+}
+
+/* Inset, like every focus ring on a row that scrolls: the row clips anything drawn outside a tile. */
+.an__tile:focus-visible .an__frame {
+  outline: 2px solid var(--ve-accent, #a6ff2e);
+  outline-offset: -2px;
+}
+
+/* ------------------------------------------------------------------------------------ length */
+
+/*
+ * The word, the slider and the number, in the transition sheet's duration row's measurements, so
+ * the bottom rows of the sheets are the same row.
+ */
+.an__length {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+  transition: opacity 160ms ease;
+}
+
+/*
+ * None: the row is there to say there is a length to set, and out of reach until there is. Out of
+ * a finger's reach here, which every WebView honours - Chrome 99 on the A13 included, where `inert`
+ * does nothing - while the row stays in the accessibility tree, readout and all.
+ */
+.an__length--off {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* One width for both words, so the slider starts at the same x on every tab. */
+.an__word {
+  flex: 0 0 62px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.an__value {
+  flex: 0 0 34px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/*
+ * The slider's own gutter is taken away, because this row already has one: the knob's overhang at
+ * either end lands in the gaps beside the word and the number.
+ */
+.an__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+/* ------------------------------------------------------------------------------------- mouse */
+
+@media (hover: hover) and (pointer: fine) {
+  .an__tile:not(.an__tile--on):hover {
+    color: var(--ve-text, #fff);
+  }
+
+  .an__tile:hover .an__frame {
+    transform: scale(1.04);
+  }
+
+  .an__tile:active .an__frame {
+    transform: scale(0.95);
+  }
+}
