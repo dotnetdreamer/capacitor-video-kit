@@ -1196,6 +1196,36 @@ tapping Next settles which ones are gone. Left unimplemented, every dropped clip
 app is killed, up to 100 MB of recording each. The browser default revokes the object URLs it minted
 itself, and leaves alone both a URL a kept source still names and any URL the application handed in.
 
+### The edits the host settles
+
+A few edits have more than one defensible answer, and the apps on this editor want different ones.
+`editing` is where a host says which. Every field is optional and an absent one keeps the editor's
+own default, so a host that says nothing edits exactly as it always has:
+
+```ts
+editor.host = {
+  ...host,
+  editing: { pictures: true, zoom: false },
+};
+```
+
+| Field | Default | What it decides |
+|---|---|---|
+| `replaceKeepsLength` | `true` | Whether Replace trims the new footage to the length of the segment it fills, so nothing after it moves, or takes the whole of the new file |
+| `pictures` | `false` | Whether the clip pickers - Add clip, a second video layer, Replace - offer stills beside videos, through `media.pickMedia`. The render has to be able to draw one, which all three of the package's engines can |
+| `zoom` | `true` | Whether the Zoom tool is offered: the Zoom tile on the root tool row, between Crop and Layout, and Duplicate on a selected zoom's row, which are the only two ways a customer adds a zoom. `false` takes both away rather than dimming them, and the root row closes up around the gap |
+
+**`pictures` and `zoom` govern what the editor OFFERS, and nothing else.** A manifest or a draft that
+already holds a picture or a zoom still shows it, edits it and renders it: a zoom is still on the
+timeline's zoom row, and is still opened, changed, retimed, deleted and undone. Hiding it would leave
+a camera move in the preview that nothing on screen can reach, and dropping it would change the post
+behind the customer's back. The reasons behind each default are written on `EditorEditingOptions` in
+`src/host/host.types.ts`.
+
+`zoom` is the editor's alone. The MCP server has no host and never sees these settings, so its
+`addZoom` and `duplicateZoom` ops still work, and a manifest an agent built with a zoom in it opens
+in an editor with Zoom off as any other manifest holding one does.
+
 ### A size ceiling is the host's to set
 
 The package holds a video to no size of its own, because how big a finished file may be is a

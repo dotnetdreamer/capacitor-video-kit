@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { EditorContext } from '../../bridge/editor-context';
 import { emptyManifest, type EditManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
+import type { VideoEditorHost } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
 
@@ -89,8 +90,8 @@ function fixture(): EditManifest {
   };
 }
 
-async function mount(): Promise<{ store: EditorStore; bar: HTMLElement }> {
-  const host = resolveEditorHost({});
+async function mount(given: VideoEditorHost = {}): Promise<{ store: EditorStore; bar: HTMLElement }> {
+  const host = resolveEditorHost(given);
   const store = new EditorStore(host);
   const ctx: EditorContext = { store, media: new EditorMedia(store, host) };
   const sources = [
@@ -579,5 +580,48 @@ describe('ve-toolbar', () => {
     expect(store.manifest.value.zooms.length).toBe(before + 1);
     expect(store.panel.value).toBe('zoom');
     expect(store.selection.value?.kind).toBe('zoom');
+  });
+});
+
+/*
+ * A host that does not offer Zoom (`editing.zoom: false`), which is choisy's answer while the
+ * feature is new. What goes is every way to put a NEW zoom in; a zoom the post already has is still
+ * the customer's to open, change and delete.
+ */
+describe('ve-toolbar on a host that does not offer Zoom', () => {
+  const NO_ZOOM: VideoEditorHost = { editing: { zoom: false } };
+
+  it('takes the Zoom tile off the root row and leaves every other tile where it was', async () => {
+    const on = await mount();
+    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+
+    const off = await mount(NO_ZOOM);
+    expect(label(off.bar)).toBe('Editing tools');
+    expect(ids(off.bar)).toEqual(['edit', 'crop', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    // Taken away rather than dimmed: there is nothing to hear a reason from and no tile to tap.
+    expect(root(off.bar).querySelector('[data-tile="zoom"]')).toBeNull();
+    expect(ids(off.bar)).toEqual(ids(on.bar).filter(id => id !== 'zoom'));
+  });
+
+  it('still gives a zoom the post already has its own row, without the copy that would add another', async () => {
+    const { store, bar } = await mount(NO_ZOOM);
+
+    store.select({ kind: 'zoom', id: 'zm-1' });
+    await until('the zoom row', () => label(bar) === 'Zoom tools');
+    expect(ids(bar)).toEqual(['edit', 'delete']);
+
+    tile(bar, 'edit').click();
+    expect(store.panel.value).toBe('zoom');
+    expect(store.selection.value).toEqual({ kind: 'zoom', id: 'zm-1' });
+    store.closePanel();
+
+    store.select({ kind: 'zoom', id: 'zm-1' });
+    await until('the zoom row again', () => label(bar) === 'Zoom tools');
+    tile(bar, 'delete').click();
+    expect(store.manifest.value.zooms).toEqual([]);
+    await until('the root row', () => label(bar) === 'Editing tools');
+
+    store.undo();
+    expect(store.manifest.value.zooms.map(zoom => zoom.id)).toEqual(['zm-1']);
   });
 });

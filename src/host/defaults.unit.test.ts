@@ -114,6 +114,28 @@ describe('resolveEditorHost', () => {
       expect(resolveEditorHost({ output: { maxBytes: none } }).output.maxBytes).toBeNull();
     }
   });
+
+  /*
+   * Zoom shipped on for every host, so a host that has never heard of the setting keeps the tool it
+   * already has, and only an explicit false takes it away.
+   */
+  it('offers Zoom unless the host says false', () => {
+    expect(resolveEditorHost().editing.zoom).toBe(true);
+    expect(resolveEditorHost({}).editing.zoom).toBe(true);
+    expect(resolveEditorHost({ editing: {} }).editing.zoom).toBe(true);
+    expect(resolveEditorHost({ editing: { zoom: true } }).editing.zoom).toBe(true);
+    expect(resolveEditorHost({ editing: { zoom: false } }).editing.zoom).toBe(false);
+  });
+
+  it('settles each editing option on its own, so turning Zoom off leaves the other two as they were', () => {
+    expect(resolveEditorHost({ editing: { zoom: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: false });
+    expect(resolveEditorHost({ editing: { pictures: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true });
+    expect(resolveEditorHost({ editing: { pictures: true, replaceKeepsLength: false } }).editing).toEqual({
+      replaceKeepsLength: false,
+      pictures: true,
+      zoom: true,
+    });
+  });
 });
 
 describe('envSafeAreaInsets', () => {

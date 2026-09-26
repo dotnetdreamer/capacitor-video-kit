@@ -67,6 +67,27 @@ export interface EditorEditingOptions {
    * or a post with one fails at the very end, with the editing already done.
    */
   pictures?: boolean;
+
+  /**
+   * Whether the Zoom tool is offered. Defaults to TRUE.
+   *
+   * On, the root tool row has Zoom between Crop and Layout, which puts a zoom at the playhead and
+   * opens its sheet, and a selected zoom's row has Duplicate beside Edit and Delete. Those two are
+   * the only ways a customer can put a NEW zoom into a post: the timeline's zoom row only draws the
+   * zooms already there, and no key adds one.
+   *
+   * Off takes both away rather than dimming them. A dimmed tile says "not now", and on an app that
+   * has not taken the feature it is never, so the root row simply closes up around the gap and every
+   * other tile keeps its order. It is for an app that is not ready to show Zoom to its customers yet,
+   * and a host that says nothing keeps it, which is what every host has had since Zoom arrived.
+   *
+   * It governs what the editor OFFERS, as [pictures] does: a manifest or a draft that already holds a
+   * zoom still shows it on the timeline, and it is still selected, opened in its sheet, changed,
+   * retimed, deleted, undone and rendered exactly as before. Hiding a zoom the post already has would
+   * leave the customer a camera move they can see in the preview and have no way to reach, and
+   * dropping it would change the post behind their back.
+   */
+  zoom?: boolean;
 }
 
 /**
@@ -575,6 +596,7 @@ export interface ResolvedEditorHost {
 export interface ResolvedEditingOptions {
   replaceKeepsLength: boolean;
   pictures: boolean;
+  zoom: boolean;
 }
 
 export interface ResolvedOutputOptions {

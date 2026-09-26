@@ -125,6 +125,9 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       // Off unless the host says so: an app that has never heard of pictures on the timeline keeps
       // pickers that offer what they always offered.
       pictures: host?.editing?.pictures === true,
+      // On unless the host says so: Zoom shipped on for every host, and one that has never heard of
+      // this setting keeps the tool it already has. Only an explicit false takes it away.
+      zoom: host?.editing?.zoom !== false,
     },
   };
 }

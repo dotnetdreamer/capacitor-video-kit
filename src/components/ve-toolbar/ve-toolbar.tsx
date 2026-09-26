@@ -393,6 +393,13 @@ export class VeToolbar {
     const store = this.ctx.store;
     const full = store.layersFull.value;
     const soundOpen = store.soundMenuOpen.value;
+    // Beside Crop, the other tool about framing. It adds a zoom at the playhead and opens its sheet;
+    // the store says so when there is no room for one, or when the post is at its cap. Not there at
+    // all on a host that does not offer Zoom (`editing.zoom`), rather than dimmed: dimmed says "not
+    // now", and for that app it is never. The row closes up around the gap.
+    const zoom: ToolTile[] = store.host.editing.zoom
+      ? [{ id: 'zoom', label: 'Zoom', icon: 'search-outline', run: () => store.addZoomAtPlayhead() }]
+      : [];
     return {
       kind: 'root',
       label: 'Editing tools',
@@ -402,9 +409,7 @@ export class VeToolbar {
         // Crop is the one tool a customer hunts for by name, so it is on the root row as well as on
         // the clip row. It selects the segment under the playhead itself, exactly as Edit does.
         { id: 'crop', label: 'Crop', icon: 'crop-outline', run: () => store.openCrop() },
-        // Beside Crop, the other tool about framing. It adds a zoom at the playhead and opens its
-        // sheet; the store says so when there is no room for one, or when the post is at its cap.
-        { id: 'zoom', label: 'Zoom', icon: 'search-outline', run: () => store.addZoomAtPlayhead() },
+        ...zoom,
         {
           id: 'layout',
           label: 'Layout',
@@ -725,6 +730,10 @@ export class VeToolbar {
    * The tools for a selected zoom. Short on purpose: its window is set by dragging its bar on the
    * timeline, and its level, curve and ramp in the sheet Edit opens. The zoom's id is read at tap
    * time, not from the row, for the reason [zoomSelected] gives.
+   *
+   * A host that does not offer Zoom (`editing.zoom`) still gets this row for a zoom its post already
+   * had, since that zoom is still the customer's to change or take out. It loses Duplicate, which is
+   * a way to add a zoom as surely as the root row's tile is.
    */
   private zoomRow(): ToolRow {
     const store = this.ctx.store;
@@ -732,13 +741,16 @@ export class VeToolbar {
       const zoom = store.selectedZoom.value;
       if (zoom) act(zoom.id);
     };
+    const duplicate: ToolTile[] = store.host.editing.zoom
+      ? [{ id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withZoom(id => store.duplicateZoom(id)) }]
+      : [];
     return {
       kind: 'zoom',
       label: 'Zoom tools',
       collapse: this.deselect('Close zoom tools'),
       tiles: [
         { id: 'edit', label: 'Edit', icon: 'create-outline', run: withZoom(id => store.openZoom(id)) },
-        { id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withZoom(id => store.duplicateZoom(id)) },
+        ...duplicate,
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: withZoom(id => store.deleteZoom(id)) },
       ],
     };

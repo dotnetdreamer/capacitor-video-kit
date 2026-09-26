@@ -1799,8 +1799,14 @@ export class EditorStore {
    * [DEFAULT_ZOOM_SCALE] - shortened to fit before the next zoom and the end of the post, then opens
    * the zoom sheet on it so the area can be drawn straight away. Paused first, because the sheet
    * shows the whole frame only while paused.
+   *
+   * Does nothing at all on a host that does not offer Zoom (`editing.zoom`). Nothing in the editor
+   * offers it there - the toolbar leaves the tile out - so this is the backstop that keeps a way in
+   * added later from putting a zoom into that app's posts, and it says nothing because no customer
+   * asked.
    */
   addZoomAtPlayhead(): void {
+    if (!this.host.editing.zoom) return;
     if (this.manifest.value.zooms.length >= MAX_ZOOMS) {
       this.showToast(`You can add up to ${MAX_ZOOMS} zooms`);
       this.haptic('warning');
@@ -1858,8 +1864,12 @@ export class EditorStore {
     this.commitCoalesced('Zoom', m => setZoomWindowOp(m, id, startMs, endMs, total), opts?.coalesce);
   }
 
-  /** A copy straight after the original, selected. Says so when there is no room there. */
+  /**
+   * A copy straight after the original, selected. Says so when there is no room there. A copy is a
+   * new zoom, so on a host that does not offer Zoom this does nothing, as [addZoomAtPlayhead] does.
+   */
   duplicateZoom(id: string): void {
+    if (!this.host.editing.zoom) return;
     if (this.manifest.value.zooms.length >= MAX_ZOOMS) {
       this.showToast(`You can add up to ${MAX_ZOOMS} zooms`);
       this.haptic('warning');

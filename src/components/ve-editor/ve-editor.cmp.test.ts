@@ -448,3 +448,69 @@ describe('ve-editor fits the window it is given', () => {
     expect(layout()).toEqual(modern);
   });
 });
+
+/*
+ * Zoom on a host that does not offer it, through the element a host actually places: `editing.zoom`
+ * goes in on `host` and nowhere else. What goes is every way to put a NEW zoom in. A zoom the post
+ * already has - a draft from before the host turned it off, a manifest built elsewhere - is still on
+ * the timeline and still the customer's to change or take out, because hiding it would leave a
+ * camera move in the preview that nothing on screen can reach.
+ */
+describe('ve-editor on a host that does not offer Zoom', () => {
+  const NO_ZOOM: VideoEditorHost = { ...HOST, editing: { zoom: false } };
+
+  /** `manifest()` with a 2.0x zoom over its first two and a half seconds. */
+  function zoomed(): EditManifest {
+    return { ...manifest(), zooms: [{ id: 'zm-1', startMs: 500, endMs: 3000, cx: 0.5, cy: 0.5, scale: 2, rampMs: 400, ease: 'smooth' }] };
+  }
+
+  function toolIds(editor: HTMLElement): string[] {
+    const tiles = inside(editor, 've-toolbar')?.shadowRoot?.querySelectorAll<HTMLButtonElement>('.tb__track .tile') ?? [];
+    return [...tiles].map(tile => tile.dataset.tile!);
+  }
+
+  function zoomBar(editor: HTMLElement): HTMLButtonElement | null {
+    return inside(editor, 've-timeline')?.shadowRoot?.querySelector<HTMLButtonElement>('[data-row="zoom"] .item--zoom') ?? null;
+  }
+
+  it('leaves Zoom off the tool row, where a host that says nothing keeps it beside Crop', async () => {
+    const on = await mount();
+    await until('the tool row', () => toolIds(on.editor).length > 0);
+    expect(toolIds(on.editor).slice(0, 4)).toEqual(['edit', 'crop', 'zoom', 'layout']);
+
+    const off = await mount(NO_ZOOM);
+    await until('the tool row', () => toolIds(off.editor).length > 0);
+    expect(toolIds(off.editor)).toEqual(toolIds(on.editor).filter(id => id !== 'zoom'));
+  });
+
+  it('still shows a zoom the post already has, and lets it be changed, deleted and brought back', async () => {
+    const { editor } = await mount(NO_ZOOM, SCREEN, zoomed());
+    const changes: EditManifest[] = [];
+    editor.addEventListener('veChange', event => changes.push((event as CustomEvent).detail.manifest));
+
+    await until('the zoom on the timeline', () => !!zoomBar(editor));
+    expect(zoomBar(editor)!.getAttribute('aria-label')).toBe('Zoom 2.0x');
+
+    // A tap opens it in its sheet, and the sheet still changes it.
+    zoomBar(editor)!.click();
+    await until('the zoom sheet', () => !!inside(editor, 've-zoom-sheet'));
+    const sheet = inside(editor, 've-zoom-sheet')!;
+    await (sheet as StencilElement).componentOnReady?.();
+    await until('the sheet to draw its chips', () => !!sheet.shadowRoot?.querySelector('[data-ease="snappy"]'));
+    sheet.shadowRoot!.querySelector<HTMLButtonElement>('[data-ease="snappy"]')!.click();
+    await until('the change to be filed', () => changes.at(-1)?.zooms[0]?.ease === 'snappy');
+
+    // Done leaves it selected, on its own row: Edit and Delete, and no Duplicate to add a second.
+    sheet.shadowRoot!.querySelector('ve-sheet')!.shadowRoot!.querySelector<HTMLButtonElement>('[aria-label="Done"]')!.click();
+    await until('the zoom row', () => toolIds(editor).includes('delete'));
+    expect(toolIds(editor)).toEqual(['edit', 'delete']);
+
+    inside(editor, 've-toolbar')!.shadowRoot!.querySelector<HTMLButtonElement>('[data-tile="delete"]')!.click();
+    await until('the zoom to go', () => !zoomBar(editor));
+    expect(changes.at(-1)!.zooms).toEqual([]);
+
+    inside<HTMLButtonElement>(editor, '[aria-label="Undo"]')!.click();
+    await until('the zoom to come back', () => !!zoomBar(editor));
+    expect(changes.at(-1)!.zooms).toMatchObject([{ id: 'zm-1', ease: 'snappy', startMs: 500, endMs: 3000 }]);
+  });
+});

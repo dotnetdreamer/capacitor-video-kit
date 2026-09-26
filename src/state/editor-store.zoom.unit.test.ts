@@ -197,3 +197,58 @@ describe('EditorStore zooms', () => {
     expect(store.panel.value).toBeNull();
   });
 });
+
+/*
+ * A host that does not offer Zoom (`editing.zoom: false`). The toolbar leaves out every way in, and
+ * the store refuses a new zoom as well; a zoom the post already holds is still the customer's.
+ */
+describe('EditorStore zooms on a host that does not offer Zoom', () => {
+  let store: EditorStore;
+  const sources: EditorSource[] = [{ key: 'a', fileName: 'a.mp4' }];
+
+  function load(extra: Partial<EditManifest> = {}): void {
+    store.load(sources, new Map([['a', 10_000]]), { ...emptyManifest(), clips: [clip('a', 0, 10_000)], ...extra });
+  }
+
+  beforeEach(() => {
+    store = new EditorStore(resolveEditorHost({ editing: { zoom: false } }));
+  });
+
+  it('adds no zoom and no copy of one, quietly and with no step to undo', () => {
+    load({ zooms: [zoom('z', 1000, 4000)] });
+    const revision = store.revision.value;
+    store.seek(6000);
+
+    store.addZoomAtPlayhead();
+    store.duplicateZoom('z');
+
+    expect(store.zooms.value.map((z) => z.id)).toEqual(['z']);
+    expect(store.revision.value).toBe(revision);
+    expect(store.canUndo.value).toBe(false);
+    expect(store.toast.value).toBeNull();
+    expect(store.panel.value).toBeNull();
+  });
+
+  it('still opens, changes, retimes, deletes and undoes a zoom the post already has', () => {
+    load({ zooms: [zoom('z', 1000, 4000)] });
+    expect(store.camera.value).not.toBeNull();
+
+    store.openZoom('z');
+    expect(store.selection.value).toEqual({ kind: 'zoom', id: 'z' });
+    expect(store.panel.value).toBe('zoom');
+
+    store.updateZoom('z', { scale: 3, ease: 'snappy' });
+    store.setZoomWindow('z', 2000, 5000);
+    expect(store.zooms.value[0]).toMatchObject({ scale: 3, ease: 'snappy', startMs: 2000, endMs: 5000 });
+
+    store.deleteSelection();
+    expect(store.zooms.value).toEqual([]);
+    expect(store.panel.value).toBeNull();
+
+    store.undo();
+    expect(store.zooms.value[0]).toMatchObject({ id: 'z', startMs: 2000, endMs: 5000 });
+    store.undo();
+    store.undo();
+    expect(store.zooms.value[0]).toMatchObject({ scale: 2, ease: 'smooth', startMs: 1000, endMs: 4000 });
+  });
+});
