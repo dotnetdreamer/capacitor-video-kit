@@ -1,16 +1,6 @@
 import type { Signal } from '@preact/signals-core';
 
-import {
-  MAX_SCALE,
-  MIN_SCALE,
-  clamp,
-  findClip,
-  isOverlayVisibleAt,
-  type ClipFramingPatch,
-  type EditOverlay,
-  type EditPlacement,
-  type EditRect,
-} from '../../editor';
+import { MAX_SCALE, MIN_SCALE, clamp, findClip, isOverlayVisibleAt, type ClipFramingPatch, type EditOverlay, type EditPlacement, type EditRect } from '../../editor';
 import {
   MIN_CLIP_RECT,
   MIN_CROP,
@@ -29,15 +19,7 @@ import {
 } from '../../state/clip-framing';
 import type { CoalesceKey, EditorStore } from '../../state/editor-store';
 import type { OverlayBitmap } from '../../state/editor.types';
-import {
-  ZOOM_CORNER_CURSORS,
-  moveZoomArea,
-  pinchZoomArea,
-  resizeZoomArea,
-  zoomCornerAt,
-  type ZoomAreaView,
-  type ZoomCorner,
-} from './zoom-area';
+import { ZOOM_CORNER_CURSORS, moveZoomArea, pinchZoomArea, resizeZoomArea, zoomCornerAt, type ZoomAreaView, type ZoomCorner } from './zoom-area';
 
 /** Further than this and a press is a drag, not a tap. */
 const TAP_SLOP_PX = 8;
@@ -175,14 +157,7 @@ export type SelectionHandle = 'delete' | 'edit' | 'transform';
  * Whether a point on the frame (pixels from its top-left) falls on a layer's rotated box. The point
  * is turned back by the layer's rotation so the test is a plain rectangle.
  */
-export function hitsLayer(
-  px: number,
-  py: number,
-  frameWidth: number,
-  frameHeight: number,
-  overlay: Pick<EditOverlay, 'cx' | 'cy' | 'rotationDeg'>,
-  box: LayerBox,
-): boolean {
+export function hitsLayer(px: number, py: number, frameWidth: number, frameHeight: number, overlay: Pick<EditOverlay, 'cx' | 'cy' | 'rotationDeg'>, box: LayerBox): boolean {
   return withinHitBox(toLayerSpace(px, py, frameWidth, frameHeight, overlay), box, frameWidth);
 }
 
@@ -466,28 +441,28 @@ export class OverlayGestures {
      * something new. Left to `pointermove` alone the hand stayed closed after the button came up,
      * until the mouse was nudged.
      */
-    this.listen('pointerdown', (e) => {
+    this.listen('pointerdown', e => {
       this.onDown(e as PointerEvent);
       this.updateCursor(e as PointerEvent);
     });
-    this.listen('pointermove', (e) => {
+    this.listen('pointermove', e => {
       this.onMove(e as PointerEvent);
       this.updateCursor(e as PointerEvent);
     });
-    this.listen('pointerup', (e) => {
+    this.listen('pointerup', e => {
       this.onUp(e as PointerEvent);
       this.updateCursor(e as PointerEvent);
     });
-    this.listen('pointercancel', (e) => {
+    this.listen('pointercancel', e => {
       this.onUp(e as PointerEvent);
       this.updateCursor(e as PointerEvent);
     });
     // The mouse has left the picture, so whatever it was over is no longer under it.
     this.listen('pointerleave', () => this.setCursor(''));
     // On the way DOWN, so it can be stopped before it reaches the handle's own click handler.
-    this.listen('click', (e) => this.onClick(e), true);
+    this.listen('click', e => this.onClick(e), true);
     // A long press on the video would otherwise open the WebView's image/video context menu.
-    this.listen('contextmenu', (e) => e.preventDefault());
+    this.listen('contextmenu', e => e.preventDefault());
   }
 
   destroy(): void {
@@ -860,12 +835,7 @@ export class OverlayGestures {
    * moves the other way. `source` is the whole source frame's box at the start of the drag, which
    * turns a distance on screen into a distance across the source.
    */
-  private moveClipDrag(
-    grip: ClipGrip,
-    gesture: Extract<Gesture, { kind: 'drag' }>,
-    point: Point,
-    rect: DOMRect,
-  ): void {
+  private moveClipDrag(grip: ClipGrip, gesture: Extract<Gesture, { kind: 'drag' }>, point: Point, rect: DOMRect): void {
     const dx = (point.x - gesture.x0) / rect.width;
     const dy = (point.y - gesture.y0) / rect.height;
     if (grip.mode === 'crop') {
@@ -914,7 +884,7 @@ export class OverlayGestures {
       return;
     }
 
-    const overlay = this.store.manifest.value.overlays.find((o) => o.id === gesture.id);
+    const overlay = this.store.manifest.value.overlays.find(o => o.id === gesture.id);
     if (!overlay) {
       this.endTwist();
       return;
@@ -1090,9 +1060,7 @@ export class OverlayGestures {
       // stage is a pixel of the unzoomed frame the box is drawn on.
       const dx = (e.clientX - gesture.x0) / rect.width;
       const dy = (e.clientY - gesture.y0) / rect.height;
-      const view = gesture.corner
-        ? resizeZoomArea(gesture.view0, gesture.corner, dx, dy)
-        : moveZoomArea(gesture.view0, dx, dy);
+      const view = gesture.corner ? resizeZoomArea(gesture.view0, gesture.corner, dx, dy) : moveZoomArea(gesture.view0, dx, dy);
       this.queue({ kind: 'zoom', id: gesture.id, patch: view, key: gesture.key });
       return;
     }
@@ -1230,16 +1198,7 @@ export class OverlayGestures {
     const box = overlay && bitmap ? layerBox(overlay, bitmap, this.store.outputWidth.value) : null;
     if (!overlay || !box) return handle;
     const rect = this.stage.getBoundingClientRect();
-    const mine = pressBelongsToLayer(
-      e.clientX - rect.left,
-      e.clientY - rect.top,
-      rect.width,
-      rect.height,
-      overlay,
-      box,
-      handle,
-      chromeBounds(this.stage, rect),
-    );
+    const mine = pressBelongsToLayer(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, overlay, box, handle, chromeBounds(this.stage, rect));
     if (!mine) return handle;
     this.swallowClick = true;
     return null;
@@ -1364,10 +1323,7 @@ export class OverlayGestures {
      * there is no stage - the preview is showing the finished post - so it is where the whole
      * source frame WOULD sit at the crop's own scale, which is the box this has always used.
      */
-    const source =
-      mode === 'crop'
-        ? cropStageBox(aspect, rect0, frameAspect)
-        : sourceFrameBox(pictureBox(aspect, crop0, rect0, this.store.clipFit(clip), frameAspect), crop0);
+    const source = mode === 'crop' ? cropStageBox(aspect, rect0, frameAspect) : sourceFrameBox(pictureBox(aspect, crop0, rect0, this.store.clipFit(clip), frameAspect), crop0);
     // The angle is read once, here, for the same reason the mode is: a twist adds to where the
     // fingers landed, so re-reading it mid-pinch would compound the turn on every frame.
     return { id, mode, rect0, crop0, rot0: clip.rect?.rotationDeg ?? 0, source, side: null };
@@ -1381,10 +1337,7 @@ export class OverlayGestures {
 
   /** On screen right now: inside its time window, and drawn. */
   private isShown(overlay: EditOverlay): boolean {
-    return (
-      isOverlayVisibleAt(overlay, this.store.playheadMs.value, this.store.totalMs.value) &&
-      this.store.bitmaps.value.has(overlay.id)
-    );
+    return isOverlayVisibleAt(overlay, this.store.playheadMs.value, this.store.totalMs.value) && this.store.bitmaps.value.has(overlay.id);
   }
 
   private pausePlayback(): void {
@@ -1396,10 +1349,7 @@ export class OverlayGestures {
     const prev = this.pending;
     // Merged only into a patch for the same thing: a gesture that changed target mid-flight (a
     // drag that became a pinch on something else) must not carry the old fields across.
-    this.pending =
-      prev && prev.kind === next.kind && prev.id === next.id
-        ? ({ ...next, patch: { ...prev.patch, ...next.patch } } as Pending)
-        : next;
+    this.pending = prev && prev.kind === next.kind && prev.id === next.id ? ({ ...next, patch: { ...prev.patch, ...next.patch } } as Pending) : next;
     if (this.frameRequest) return;
     this.frameRequest = requestAnimationFrame(() => {
       this.frameRequest = 0;
@@ -1424,11 +1374,7 @@ export class OverlayGestures {
   private setGuides(next: SnapGuides): void {
     const prev = this.ui.guides.value;
     const same =
-      prev.x === next.x &&
-      prev.y === next.y &&
-      prev.rotation?.deg === next.rotation?.deg &&
-      prev.rotation?.cx === next.rotation?.cx &&
-      prev.rotation?.cy === next.rotation?.cy;
+      prev.x === next.x && prev.y === next.y && prev.rotation?.deg === next.rotation?.deg && prev.rotation?.cx === next.rotation?.cx && prev.rotation?.cy === next.rotation?.cy;
     if (same) return;
     if ((next.x && !prev.x) || (next.y && !prev.y) || (next.rotation && !prev.rotation)) {
       this.store.haptic('selection');
@@ -1555,13 +1501,7 @@ function handleOf(target: EventTarget | null): SelectionHandle | null {
  * A point on the frame (pixels from its top-left) in the LAYER's own frame: measured from its
  * centre and turned back by its rotation, so every test against it is a plain rectangle.
  */
-function toLayerSpace(
-  px: number,
-  py: number,
-  frameWidth: number,
-  frameHeight: number,
-  overlay: Pick<EditOverlay, 'cx' | 'cy' | 'rotationDeg'>,
-): Point {
+function toLayerSpace(px: number, py: number, frameWidth: number, frameHeight: number, overlay: Pick<EditOverlay, 'cx' | 'cy' | 'rotationDeg'>): Point {
   const dx = px - overlay.cx * frameWidth;
   const dy = py - overlay.cy * frameHeight;
   const rad = (overlay.rotationDeg * Math.PI) / 180;
@@ -1574,9 +1514,7 @@ function toLayerSpace(
 function withinHitBox(local: Point, box: LayerBox, frameWidth: number): boolean {
   const width = box.widthFrac * frameWidth;
   const height = width / box.aspect;
-  return (
-    Math.abs(local.x) <= Math.max(width, MIN_HIT_PX) / 2 && Math.abs(local.y) <= Math.max(height, MIN_HIT_PX) / 2
-  );
+  return Math.abs(local.x) <= Math.max(width, MIN_HIT_PX) / 2 && Math.abs(local.y) <= Math.max(height, MIN_HIT_PX) / 2;
 }
 
 function distance(a: Point, b: Point): number {

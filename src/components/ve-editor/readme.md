@@ -119,6 +119,7 @@ open, and owns leaving - back, discard, and the render on Next. The parts do the
 - [ve-sound-sheet](../ve-sound-sheet)
 - [ve-transition-sheet](../ve-transition-sheet)
 - [ve-zoom-sheet](../ve-zoom-sheet)
+- [ve-animation-sheet](../ve-animation-sheet)
 - [ve-toolbar](../ve-toolbar)
 
 ### Graph
@@ -145,6 +146,7 @@ graph TD;
   ve-editor --> ve-sound-sheet
   ve-editor --> ve-transition-sheet
   ve-editor --> ve-zoom-sheet
+  ve-editor --> ve-animation-sheet
   ve-editor --> ve-toolbar
   ve-timeline --> ve-icon
   ve-preview --> ve-icon
@@ -180,6 +182,9 @@ graph TD;
   ve-transition-sheet --> ve-slider
   ve-zoom-sheet --> ve-sheet
   ve-zoom-sheet --> ve-slider
+  ve-animation-sheet --> ve-sheet
+  ve-animation-sheet --> ve-icon
+  ve-animation-sheet --> ve-slider
   ve-toolbar --> ve-icon
   style ve-editor fill:#f9f,stroke:#333,stroke-width:4px
 ```

@@ -294,6 +294,13 @@ data class Overlay(
     val startMs: Long,
     val endMs: Long,
     val opacity: Float,
+    /**
+     * How the layer moves - see [OverlayMotion]. Null, which is what every spec written before layers
+     * moved says and what the parser makes of a motion that moves nothing, is the old overlay in full:
+     * placed once, by the arithmetic it always was. Last and defaulted, so every overlay built without
+     * one is built exactly as it was.
+     */
+    val motion: OverlayMotion? = null,
 )
 
 data class Music(

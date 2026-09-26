@@ -1,4 +1,5 @@
 import type { FilterOp } from '../video-composer/definitions';
+import { normaliseOverlayAnimation } from './motion';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -15,7 +16,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 10;
+export const MANIFEST_VERSION = 11;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -201,6 +202,43 @@ export interface OverlayCommon {
   /** Output-timeline window. `endMs` of 0 means "until the end". */
   startMs: number;
   endMs: number;
+  /**
+   * How a layer arrives, leaves, and moves while it is on screen. Absent is a cut in, a cut out, and
+   * still - every layer of every manifest written before version 11 - and absent is what
+   * [toComposeSpec] turns into a layer with no `motion` on the wire, byte for byte the spec it was.
+   *
+   * Every kind takes one. An EFFECT covers the frame and never moves, so it honours only what a
+   * preset does to its opacity: a leak that pops in fades in, and one that breathes breathes.
+   */
+  animation?: OverlayAnimation;
+}
+
+/**
+ * The moves of one layer, each an id from [OVERLAY_ANIMATIONS] and each optional. The ids are
+ * stored, so they are permanent; an id this version does not know is dropped when it is read
+ * ([normaliseOverlayAnimation]) rather than kept for an engine that could not draw it.
+ *
+ * The durations are what the customer ASKED for, the transition precedent: a window too short for
+ * the in and the out together squeezes both in proportion when the layer is compiled, so a layer
+ * trimmed short and dragged back gets its moves back as they were. The loop runs from the end of the
+ * in to the start of the out, its phase starting where the in ends.
+ */
+export interface OverlayAnimation {
+  in?: OverlayMove;
+  out?: OverlayMove;
+  loop?: OverlayLoop;
+}
+
+/** How a layer arrives or leaves: an id from `OVERLAY_ANIMATIONS.in` or `.out`, and how long it takes. */
+export interface OverlayMove {
+  id: string;
+  durationMs: number;
+}
+
+/** How a layer moves while it is on screen: an id from `OVERLAY_ANIMATIONS.loop`, and one cycle's length. */
+export interface OverlayLoop {
+  id: string;
+  periodMs: number;
 }
 
 export interface TextOverlay extends OverlayCommon {
@@ -271,7 +309,8 @@ export interface EditVoiceover {
 
 /**
  * How a zoom's camera moves between the whole frame and its area. Each is an easing curve over the
- * ramp; how LONG the ramp takes is [EditZoom.rampMs], and a ramp of 0 is an instant cut.
+ * ramp; how LONG each ramp takes is [EditZoom.rampMs] and [EditZoom.rampOutMs], and a ramp of 0 is
+ * an instant cut. One ease serves both ramps.
  *  - `smooth`: eases out of rest and into the area (ease-in-out) - the default, the Screen Studio feel.
  *  - `snappy`: leaves at once and settles gently, like a critically damped spring.
  *  - `steady`: one constant speed.
@@ -289,12 +328,17 @@ export type ZoomEase = 'smooth' | 'snappy' | 'steady';
  * an edge is held so the area stays on the frame.
  *
  * The ramps run INSIDE the window: the camera starts moving in at `startMs`, reaches the area
- * `rampMs` later, holds, and is back to the whole frame at `endMs`. `rampMs` is what the customer
- * ASKED for; a window too short for two ramps squeezes them when it is read (the transition
- * precedent), so a zoom trimmed short and dragged back gets its ramps back as they were.
+ * `rampMs` later, holds, and starts moving out `rampOutMs` before `endMs`, where it is back to the
+ * whole frame. The ramps are what the customer ASKED for; a window too short for both squeezes them
+ * in proportion when it is read (the transition precedent), so a zoom trimmed short and dragged back
+ * gets its ramps back as they were.
+ *
+ * The two ramps are what let a template move a camera the way an editor does, with no new kind of
+ * move: a push-in that holds to the cut is `rampMs` of the whole window and `rampOutMs` of 0, a
+ * pull-out is the other way round, and a punch on a beat is a short snappy `rampMs` with no ramp out.
  *
  * Zooms never overlap - there is one camera. Two that touch or nearly touch PAN from one area to the
- * next rather than zooming out and in again.
+ * next rather than zooming out and in again, unless either says [chain] `false`.
  */
 export interface EditZoom {
   id: string;
@@ -304,11 +348,36 @@ export interface EditZoom {
   /** Centre of the area, 0..1 of the output frame, top-left origin. */
   cx: number;
   cy: number;
-  /** Magnification, [MIN_ZOOM_SCALE]..[MAX_ZOOM_SCALE]. */
+  /**
+   * Magnification, [MIN_STORED_ZOOM_SCALE]..[MAX_ZOOM_SCALE]. The editor makes [MIN_ZOOM_SCALE] and up;
+   * a template's gentle push keeps a smaller number.
+   */
   scale: number;
-  /** How long the camera takes to move in, and again to move out. 0 is instant. */
+  /** How long the camera takes to move in, and again to move out when [rampOutMs] is absent. 0 is instant. */
   rampMs: number;
+  /**
+   * How long the camera takes to move back out, when that differs from the move in. Absent is
+   * `rampMs`, which is every zoom written before this existed and every zoom the editor adds: the
+   * sheet offers one ramp, and a zoom whose ramps differ comes from a template or an agent. 0 is a
+   * cut back to the whole frame at `endMs`.
+   */
+  rampOutMs?: number;
   ease: ZoomEase;
+  /**
+   * `false` keeps this zoom apart from its neighbours: it never pans to or from the zoom before or
+   * after it, however close they are, and where two such zooms touch the camera goes out and in
+   * again - a STEP, when neither has a ramp at the boundary. That is a template's cut: each clip gets
+   * its own push-in, where a pan would have dragged the first clip's area across the second clip.
+   * Absent (and `true`, which is never stored) is the automatic pan of [ZOOM_CHAIN_GAP_MS].
+   *
+   * `'in'` and `'out'` keep ONE side: an `'in'` zoom pans from the zoom before it and never on to the
+   * one after, an `'out'` zoom the other way round. That is a template's stair of punches inside one
+   * shot - 1.06, 1.12, 1.18 on three beats - where each step has to grow from the last rather than
+   * dropping to the whole frame and climbing again, while the shot's first and last step still keep
+   * apart from the shots either side. Two neighbours pan only when the first lets go of its after
+   * side and the second of its before side.
+   */
+  chain?: boolean | 'in' | 'out';
 }
 
 /** Every [ZoomEase], in the order a picker offers them; the first is the default. */
@@ -320,18 +389,44 @@ export const ZOOM_EASES: readonly ZoomEase[] = ['smooth', 'snappy', 'steady'];
  */
 export const MIN_ZOOM_SCALE = 1.1;
 /**
+ * The least a zoom a manifest KEEPS magnifies, far under [MIN_ZOOM_SCALE]. A template's Ken Burns on a
+ * one-beat photo is a push from 1 to 1.04: a drift the eye reads as life in a still, which is exactly
+ * the move [MIN_ZOOM_SCALE] rules out for a zoom a customer draws. Held at 1.10 when the editor opened
+ * the edit, every gentle push would become a lurch the template never asked for. The zoom sheet still
+ * offers [MIN_ZOOM_SCALE] and up; a template's smaller zoom keeps its own number until it is changed.
+ */
+export const MIN_STORED_ZOOM_SCALE = 1.01;
+/**
  * The most the editor offers. A 1080p screen recording at 4x is already showing a quarter of its
  * pixels at full size; past that a recording goes soft however sharply it is sampled. The wire
  * allows more ([MAX_CAMERA_SCALE]) so a later editor can offer it without a new spec.
  */
 export const MAX_ZOOM_SCALE = 4;
 export const DEFAULT_ZOOM_SCALE = 2;
-/** The shortest zoom window: time for a ramp in and out that the eye can follow. */
+/**
+ * The shortest zoom the editor makes: time for a ramp in and out that the eye can follow. The zoom
+ * tool and a drag on the timeline hold a customer's zoom to it.
+ */
 export const MIN_ZOOM_MS = 500;
+/**
+ * The shortest zoom a manifest KEEPS, far under [MIN_ZOOM_MS]: a template punches in on a single beat,
+ * which at 160 BPM is a 375 ms window, and on half a beat for a stutter. A punch is a 90 ms ramp in
+ * and a cut back out, so it needs none of the time a customer's two eased ramps do.
+ */
+export const MIN_STORED_ZOOM_MS = 200;
 /** How long a zoom added at the playhead lasts - long enough to read what it closes in on. */
 export const DEFAULT_ZOOM_MS = 3000;
 export const DEFAULT_ZOOM_RAMP_MS = 700;
+/** The longest ramp the zoom sheet's slider offers: past two seconds a customer's zoom is a drift. */
 export const MAX_ZOOM_RAMP_MS = 2000;
+/**
+ * The longest ramp a zoom may STORE, either way. Far past the slider, because a template's push-in
+ * runs the whole of its clip's window, and a four-second clip held to [MAX_ZOOM_RAMP_MS] would stop
+ * moving half way and sit still until the cut. A ramp is squeezed into its window when it is read,
+ * so this only keeps a number from being absurd; [compileCamera] holds the key count however long
+ * the moves are.
+ */
+export const MAX_STORED_ZOOM_RAMP_MS = 60_000;
 /**
  * A ceiling on absurdity rather than a memory cap: a zoom costs no bitmap, so it does NOT count
  * toward [MAX_LAYERS]. It also bounds the compiled camera well under [MAX_CAMERA_KEYS].
@@ -496,7 +591,7 @@ export const OUTPUT_FPS = [30, 60] as const;
 
 /** The frame those three choices come to. */
 export function outputFor(aspect: OutputAspect, qualityId: string, fps: number): EditOutput {
-  const quality = OUTPUT_QUALITIES.find((one) => one.id === qualityId) ?? OUTPUT_QUALITIES[0];
+  const quality = OUTPUT_QUALITIES.find(one => one.id === qualityId) ?? OUTPUT_QUALITIES[0];
   const short = quality.shortSide;
   // 16:9 of a 1080 short side is 1920, and both sides stay even because 16/9 of any multiple of 9
   // is a whole number and these are all multiples of 8.
@@ -757,7 +852,7 @@ export function estimatedBytes(totalMs: number, output: EditOutput): number {
 /* Colour                                                                                         */
 /* -------------------------------------------------------------------------------------------- */
 
-export type FilterCategory = 'trending' | 'food' | 'portrait' | 'landscape' | 'vintage' | 'mono';
+export type FilterCategory = 'trending' | 'film' | 'food' | 'portrait' | 'landscape' | 'vintage' | 'mono';
 
 export interface FilterPreset {
   id: string;
@@ -768,6 +863,7 @@ export interface FilterPreset {
 
 export const FILTER_CATEGORIES: { id: FilterCategory; label: string }[] = [
   { id: 'trending', label: 'Trending' },
+  { id: 'film', label: 'Film' },
   { id: 'food', label: 'Food' },
   { id: 'portrait', label: 'Portrait' },
   { id: 'landscape', label: 'Landscape' },
@@ -838,6 +934,90 @@ export const FILTER_PRESETS: FilterPreset[] = [
       { op: 'contrast', amount: 0.85 },
       { op: 'brightness', amount: 1.08 },
       { op: 'saturate', amount: 0.85 },
+    ],
+  },
+  /*
+   * The looks a template grades with. A colour matrix is linear, so it cannot tone shadows and
+   * highlights apart the way a grading suite does - but it has two handles that differ between them:
+   * a tint lifts every channel by a fixed amount, which shows most in the shadows, and sepia gains
+   * red more than blue, which shows most in the highlights. Set against each other they give the
+   * cool shadows and warm light of a graded film without a shader of its own, and every engine
+   * already folds both.
+   */
+  {
+    id: 'y2k',
+    label: 'Y2K',
+    category: 'trending',
+    ops: [
+      // A compact digital camera with its flash on: bright, punchy and a little cold.
+      { op: 'brightness', amount: 1.05 },
+      { op: 'contrast', amount: 1.1 },
+      { op: 'saturate', amount: 1.18 },
+      { op: 'tint', rgb: [150, 172, 255], alpha: 0.07 },
+    ],
+  },
+  {
+    id: 'cyber',
+    label: 'Cyber',
+    category: 'trending',
+    ops: [
+      // Reds turned toward magenta and blues toward cyan by a small hue turn, then shadows lifted
+      // violet: neon signs in the rain, without pushing a face purple.
+      { op: 'contrast', amount: 1.12 },
+      { op: 'saturate', amount: 1.22 },
+      { op: 'hueRotate', degrees: -10 },
+      { op: 'brightness', amount: 0.98 },
+      { op: 'tint', rgb: [96, 36, 176], alpha: 0.08 },
+    ],
+  },
+  {
+    id: 'cinematic',
+    label: 'Cinematic',
+    category: 'film',
+    ops: [
+      // Teal shadows and warm light: sepia warms what is bright, the teal tint cools what is dark.
+      { op: 'contrast', amount: 1.12 },
+      { op: 'saturate', amount: 0.92 },
+      { op: 'sepia', amount: 0.28 },
+      { op: 'brightness', amount: 1.02 },
+      { op: 'tint', rgb: [0, 84, 150], alpha: 0.11 },
+    ],
+  },
+  {
+    id: 'moody',
+    label: 'Moody',
+    category: 'film',
+    ops: [
+      // Muted and a little dark, with the blacks lifted to slate so it reads as matte, not murky.
+      { op: 'saturate', amount: 0.72 },
+      { op: 'brightness', amount: 0.96 },
+      { op: 'tint', rgb: [40, 58, 70], alpha: 0.15 },
+    ],
+  },
+  {
+    id: 'kodak',
+    label: 'Kodak',
+    category: 'film',
+    ops: [
+      // A warm consumer stock: golden skin, rich warm colour, soft contrast.
+      { op: 'sepia', amount: 0.12 },
+      { op: 'saturate', amount: 1.14 },
+      { op: 'contrast', amount: 1.04 },
+      { op: 'brightness', amount: 1.03 },
+      { op: 'tint', rgb: [255, 186, 116], alpha: 0.06 },
+    ],
+  },
+  {
+    id: 'fuji',
+    label: 'Fuji',
+    category: 'film',
+    ops: [
+      // The cooler stock: greens toward cyan, reds toward orange, and a mint cast in the shadows.
+      { op: 'hueRotate', degrees: 6 },
+      { op: 'saturate', amount: 1.06 },
+      { op: 'contrast', amount: 1.05 },
+      { op: 'brightness', amount: 1.03 },
+      { op: 'tint', rgb: [80, 176, 156], alpha: 0.06 },
     ],
   },
   {
@@ -940,6 +1120,19 @@ export const FILTER_PRESETS: FilterPreset[] = [
     ],
   },
   {
+    id: 'dusk',
+    label: 'Dusk',
+    category: 'landscape',
+    ops: [
+      // The last of the light: a little darker, and a rose-violet cast over a warm sky.
+      { op: 'brightness', amount: 0.96 },
+      { op: 'contrast', amount: 1.05 },
+      { op: 'saturate', amount: 1.1 },
+      { op: 'hueRotate', degrees: -5 },
+      { op: 'tint', rgb: [210, 96, 150], alpha: 0.09 },
+    ],
+  },
+  {
     id: 'retro',
     label: 'Retro',
     category: 'vintage',
@@ -969,6 +1162,17 @@ export const FILTER_PRESETS: FilterPreset[] = [
       { op: 'sepia', amount: 0.5 },
       { op: 'saturate', amount: 1.2 },
       { op: 'hueRotate', degrees: -10 },
+    ],
+  },
+  {
+    id: 'sepia',
+    label: 'Sepia',
+    category: 'vintage',
+    ops: [
+      // An old print's brown, with a touch of contrast back so it is not a flat wash.
+      { op: 'sepia', amount: 0.88 },
+      { op: 'contrast', amount: 1.06 },
+      { op: 'brightness', amount: 1.03 },
     ],
   },
   {
@@ -1023,7 +1227,7 @@ export function neutralAdjust(): EditAdjust {
 }
 
 export function filterPreset(id: string): FilterPreset {
-  return FILTER_PRESETS.find((preset) => preset.id === id) ?? FILTER_PRESETS[0];
+  return FILTER_PRESETS.find(preset => preset.id === id) ?? FILTER_PRESETS[0];
 }
 
 /**
@@ -1077,11 +1281,8 @@ export function adjustOps(adjust: EditAdjust): FilterOp[] {
  * putting them last here is what makes the native render do the same thing.
  */
 export function resolveFilterOps(manifest: Pick<EditManifest, 'filterId' | 'filterIntensity' | 'adjust'>): FilterOp[] {
-  const all = [
-    ...scaleOps(filterPreset(manifest.filterId).ops, manifest.filterIntensity ?? 1),
-    ...adjustOps(manifest.adjust ?? neutralAdjust()),
-  ].filter((op) => !isIdentityOp(op));
-  return [...all.filter((op) => op.op !== 'tint'), ...all.filter((op) => op.op === 'tint')];
+  const all = [...scaleOps(filterPreset(manifest.filterId).ops, manifest.filterIntensity ?? 1), ...adjustOps(manifest.adjust ?? neutralAdjust())].filter(op => !isIdentityOp(op));
+  return [...all.filter(op => op.op !== 'tint'), ...all.filter(op => op.op === 'tint')];
 }
 
 /**
@@ -1244,10 +1445,7 @@ export function isFullFrameRect(rect: EditPlacement | null | undefined): boolean
   // placement may hang off an edge and may be larger than the frame, and `x <= 0` alone would
   // call a video pushed half off the left side "the whole frame" and throw its rectangle away.
   return (
-    Math.abs(rect.x) <= FULL_FRAME_EPSILON &&
-    Math.abs(rect.y) <= FULL_FRAME_EPSILON &&
-    Math.abs(rect.w - 1) <= FULL_FRAME_EPSILON &&
-    Math.abs(rect.h - 1) <= FULL_FRAME_EPSILON
+    Math.abs(rect.x) <= FULL_FRAME_EPSILON && Math.abs(rect.y) <= FULL_FRAME_EPSILON && Math.abs(rect.w - 1) <= FULL_FRAME_EPSILON && Math.abs(rect.h - 1) <= FULL_FRAME_EPSILON
   );
 }
 
@@ -1387,6 +1585,11 @@ export function emptyManifest(): EditManifest {
  * spec with no `camera` key - byte for byte the spec version 9 produced. The bump itself matters: this
  * function rebuilds only the keys it knows, so an OLDER build reading a version-10 draft drops its
  * zooms, and the version is the only thing that says so.
+ *
+ * Version 10 to version 11 adds a layer's [OverlayCommon.animation], and nothing is written into an
+ * older manifest: a version-10 layer has no `animation`, which is a cut in, a cut out and still, and
+ * [toComposeSpec] sends it with no `motion` - byte for byte the spec version 10 produced. Bumped for
+ * the reason version 10 was: an older build reading a version-11 draft drops every layer's moves.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1402,13 +1605,15 @@ export function normaliseManifest(input: unknown): EditManifest {
   // reject it outright, and an empty lane in the timeline is a thing a customer cannot get rid of.
   // The cap counts the base track, so only MAX_VIDEO_TRACKS - 1 of these survive.
   const videoTracks: EditVideoTrack[] = (Array.isArray(raw['videoTracks']) ? raw['videoTracks'] : [])
-    .map((t: any, i: number): EditVideoTrack => ({
-      id: typeof t?.id === 'string' && t.id ? t.id : `vt-${i}`,
-      clips: readClips(t?.clips, usedIds, false),
-      startMs: Math.max(0, Math.round(num(t?.startMs, 0))),
-      z: Math.max(0, Math.round(num(t?.z, i + 1))),
-      opacity: clamp(num(t?.opacity, 1), 0, 1),
-    }))
+    .map(
+      (t: any, i: number): EditVideoTrack => ({
+        id: typeof t?.id === 'string' && t.id ? t.id : `vt-${i}`,
+        clips: readClips(t?.clips, usedIds, false),
+        startMs: Math.max(0, Math.round(num(t?.startMs, 0))),
+        z: Math.max(0, Math.round(num(t?.z, i + 1))),
+        opacity: clamp(num(t?.opacity, 1), 0, 1),
+      }),
+    )
     .filter((track: EditVideoTrack) => track.clips.length > 0)
     .slice(0, MAX_VIDEO_TRACKS - 1);
 
@@ -1418,16 +1623,16 @@ export function normaliseManifest(input: unknown): EditManifest {
           id: String(o.id),
           cx: num(o.cx, 0.5),
           cy: num(o.cy, 0.5),
-          scale: clamp(
-            typeof o.scale === 'number' ? o.scale : typeof o.fontScale === 'number' ? o.fontScale / OVERLAY_BASE.textFont : 1,
-            MIN_SCALE,
-            MAX_SCALE,
-          ),
+          scale: clamp(typeof o.scale === 'number' ? o.scale : typeof o.fontScale === 'number' ? o.fontScale / OVERLAY_BASE.textFont : 1, MIN_SCALE, MAX_SCALE),
           rotationDeg: num(o.rotationDeg, 0),
           opacity: clamp(num(o.opacity, 1), 0, 1),
           startMs: Math.max(0, num(o.startMs, 0)),
           endMs: Math.max(0, num(o.endMs, 0)),
         };
+        // Assigned rather than listed, like a clip's crop: a layer with no animation carries no key,
+        // and an animation whose every move this version does not know reads as none.
+        const animation = normaliseOverlayAnimation(o.animation);
+        if (animation) common.animation = animation;
         switch (o.kind) {
           case 'sticker':
             return { ...common, kind: 'sticker', emoji: o.emoji ?? null, assetId: o.assetId ?? null };
@@ -1539,15 +1744,13 @@ export function reconcileManifest(
 ): EditManifest {
   const current = manifest ? normaliseManifest(manifest) : emptyManifest();
   const known = new Set(clipKeys);
-  const kept = current.clips.filter((edit) => known.has(edit.clipKey));
+  const kept = current.clips.filter(edit => known.has(edit.clipKey));
 
   // Extra layers are reconciled but never grown: a source the host has added belongs on the base
   // timeline, where the customer put every other one, and silently appending it to a picture-in-
   // picture layer would drop a clip on top of their video without anybody asking for it. A layer
   // left with nothing goes, because an empty track is not a state the manifest holds.
-  const videoTracks = current.videoTracks
-    .map((track) => ({ ...track, clips: track.clips.filter((edit) => known.has(edit.clipKey)) }))
-    .filter((track) => track.clips.length > 0);
+  const videoTracks = current.videoTracks.map(track => ({ ...track, clips: track.clips.filter(edit => known.has(edit.clipKey)) })).filter(track => track.clips.length > 0);
 
   // Both what the extra layers are holding and what the base is holding count here, which is why
   // they are reconciled first. A source that is ONLY on a layer is already in the post, so leaving
@@ -1555,8 +1758,8 @@ export function reconcileManifest(
   // it onto the base timeline, underneath the picture in picture the customer built with it. And an
   // appended clip landing on an id a layer already holds would make the pair indistinguishable,
   // because every op takes a clip id and stops at the first clip that answers to it.
-  const seen = new Set(kept.map((edit) => edit.clipKey));
-  const usedIds = new Set(kept.map((edit) => edit.id));
+  const seen = new Set(kept.map(edit => edit.clipKey));
+  const usedIds = new Set(kept.map(edit => edit.id));
   for (const track of videoTracks) {
     for (const edit of track.clips) {
       seen.add(edit.clipKey);
@@ -1564,8 +1767,8 @@ export function reconcileManifest(
     }
   }
   const added = clipKeys
-    .filter((key) => !seen.has(key))
-    .map((key) => {
+    .filter(key => !seen.has(key))
+    .map(key => {
       let id = key;
       while (usedIds.has(id)) id = `${id}~`;
       usedIds.add(id);
@@ -1612,9 +1815,7 @@ export function withoutLeadingTransition(clips: EditClip[]): EditClip[] {
  * A caller measuring ONE track passes `{ clips }` on its own and gets the sequence sum, which is
  * what a track's length has always been.
  */
-export function contentDurationMs(
-  manifest: Pick<EditManifest, 'clips'> & Partial<Pick<EditManifest, 'videoTracks'>>,
-): number {
+export function contentDurationMs(manifest: Pick<EditManifest, 'clips'> & Partial<Pick<EditManifest, 'videoTracks'>>): number {
   let longest = clipsDurationMs(manifest.clips);
   for (const track of manifest.videoTracks ?? []) {
     // From where the layer STARTS, because `startMs` delays it rather than seeking into it - so a
@@ -1632,11 +1833,7 @@ export function contentDurationMs(
  * by hand, or one whose content has grown since the end was last dragged, cannot ask for an output
  * that cuts its own footage off.
  */
-export function totalDurationMs(
-  manifest: Pick<EditManifest, 'clips'> &
-    Partial<Pick<EditManifest, 'videoTracks'>> &
-    Partial<Pick<EditManifest, 'durationMs'>>,
-): number {
+export function totalDurationMs(manifest: Pick<EditManifest, 'clips'> & Partial<Pick<EditManifest, 'videoTracks'>> & Partial<Pick<EditManifest, 'durationMs'>>): number {
   return Math.max(contentDurationMs(manifest), Math.max(0, manifest.durationMs ?? 0));
 }
 
@@ -1647,8 +1844,8 @@ export function totalDurationMs(
  * half of itself missing.
  */
 export function uniqueClipKeys(manifest: Pick<EditManifest, 'clips' | 'videoTracks'>): string[] {
-  const keys = manifest.clips.map((clip) => clip.clipKey);
-  for (const track of manifest.videoTracks) keys.push(...track.clips.map((clip) => clip.clipKey));
+  const keys = manifest.clips.map(clip => clip.clipKey);
+  for (const track of manifest.videoTracks) keys.push(...track.clips.map(clip => clip.clipKey));
   return [...new Set(keys)];
 }
 
@@ -1691,8 +1888,8 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   // [zoomWindow] is the same test the compiled camera makes, so a zoom the render would show is
   // never lost by posting the file as it is - and one parked past the end costs no re-encode.
   const totalMs = totalDurationMs(manifest);
-  if ((manifest.zooms ?? []).some((zoom) => zoomWindow(zoom, totalMs))) return false;
-  return manifest.clips.every((clip) => {
+  if ((manifest.zooms ?? []).some(zoom => zoomWindow(zoom, totalMs))) return false;
+  return manifest.clips.every(clip => {
     const source = durations.get(clip.clipKey) ?? 0;
     const untrimmed = clip.inMs === 0 && (source === 0 || Math.abs(clip.outMs - source) <= 100);
     // A cropped or reframed clip is a different picture from the file on disk, however little else
@@ -1731,36 +1928,46 @@ function num(value: unknown, fallback: number): number {
 /**
  * One zoom's look held to what the editor offers: the scale FIRST, because the range the centre may
  * take depends on it (`0.5 / scale .. 1 - 0.5 / scale`, the area kept on the frame), then the centre
- * slid back in rather than squashed, the ramp to 0..[MAX_ZOOM_RAMP_MS] and an unknown ease to the
- * default - falling back keeps the customer's area, dropping the zoom would throw it away.
+ * slid back in rather than squashed, each ramp to 0..[MAX_STORED_ZOOM_RAMP_MS] and an unknown ease to
+ * the default - falling back keeps the customer's area, dropping the zoom would throw it away.
  *
  * Rounded BEFORE the clamp, and clamped to bounds themselves rounded INWARD to the same four decimals,
  * so the result is both on the frame and a fixed point: normalising it again changes nothing. A bound
  * like `1 - 0.5 / 3` is not a four-decimal number, and clamping to it exactly made the next pass round
  * the centre again - a patch that changed nothing came back as a change, and an undo step with it.
  * The window is left as it is: where a zoom may sit depends on its neighbours, which only the list knows.
+ *
+ * `rampOutMs` is kept only when it is a number, and `chain` only when it is `false`, `'in'` or `'out'`:
+ * an absent key is the old zoom exactly, and a `chain: true` would be a second way of writing the
+ * default that a patch comparing fields would read as a change.
  */
 export function normaliseZoom(zoom: EditZoom): EditZoom {
-  const scale = clamp(round4(num(zoom.scale, DEFAULT_ZOOM_SCALE)), MIN_ZOOM_SCALE, MAX_ZOOM_SCALE);
+  const scale = clamp(round4(num(zoom.scale, DEFAULT_ZOOM_SCALE)), MIN_STORED_ZOOM_SCALE, MAX_ZOOM_SCALE);
   const lo = Math.ceil((0.5 / scale) * 10_000 - 1e-6) / 10_000;
   const hi = 1 - lo;
-  return {
+  const out: EditZoom = {
     id: zoom.id,
     startMs: Math.max(0, Math.round(num(zoom.startMs, 0))),
     endMs: Math.max(0, Math.round(num(zoom.endMs, 0))),
     cx: round4(clamp(round4(num(zoom.cx, 0.5)), lo, hi)),
     cy: round4(clamp(round4(num(zoom.cy, 0.5)), lo, hi)),
     scale,
-    rampMs: Math.round(clamp(num(zoom.rampMs, DEFAULT_ZOOM_RAMP_MS), 0, MAX_ZOOM_RAMP_MS)),
+    rampMs: Math.round(clamp(num(zoom.rampMs, DEFAULT_ZOOM_RAMP_MS), 0, MAX_STORED_ZOOM_RAMP_MS)),
     ease: ZOOM_EASES.includes(zoom.ease) ? zoom.ease : ZOOM_EASES[0],
   };
+  // Assigned rather than listed, so a zoom that has neither keeps neither (see [readClips]).
+  if (typeof zoom.rampOutMs === 'number' && Number.isFinite(zoom.rampOutMs)) {
+    out.rampOutMs = Math.round(clamp(zoom.rampOutMs, 0, MAX_STORED_ZOOM_RAMP_MS));
+  }
+  if (zoom.chain === false || zoom.chain === 'in' || zoom.chain === 'out') out.chain = zoom.chain;
+  return out;
 }
 
 /**
  * Stored zooms made into the list [EditManifest.zooms] promises: sorted, one camera's worth. Anything
  * that is not an object is dropped, ids are made unique (the clip `~` idiom), and an overlap is
  * resolved by starting the later zoom where the earlier one ends - dropping it if what is left is
- * under [MIN_ZOOM_MS]. Voiceovers are only sorted; zooms go further because two engines reading two
+ * under [MIN_STORED_ZOOM_MS]. Voiceovers are only sorted; zooms go further because two engines reading two
  * overlapping cameras could disagree about which one wins, and the camera must be one function of
  * time. Not cut to the post's length, for the reason `durationMs` is not: a zoom past the end is
  * hidden when read ([zoomWindow]) and comes back when the end does.
@@ -1782,7 +1989,7 @@ function normaliseZooms(value: unknown): EditZoom[] {
   for (const zoom of read) {
     const prev = out[out.length - 1];
     const startMs = prev ? Math.max(zoom.startMs, prev.endMs) : zoom.startMs;
-    if (zoom.endMs - startMs < MIN_ZOOM_MS) continue;
+    if (zoom.endMs - startMs < MIN_STORED_ZOOM_MS) continue;
     out.push(startMs === zoom.startMs ? zoom : { ...zoom, startMs });
     if (out.length === MAX_ZOOMS) break;
   }

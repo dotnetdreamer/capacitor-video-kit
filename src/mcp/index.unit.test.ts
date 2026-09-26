@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MIN_ZOOM_MS, defaultClipEdit, emptyManifest, normaliseManifest, type EditManifest } from '../editor/edit-manifest';
+import { MIN_STORED_ZOOM_MS, defaultClipEdit, emptyManifest, normaliseManifest, type EditManifest } from '../editor/edit-manifest';
 import * as entry from './index';
 import { ToolError, applyEditOps, createTools, refuseZooms, type EditOp } from './index';
 
@@ -75,7 +75,7 @@ describe('refuseZooms, for a host with a tool of its own', () => {
       { ...post(), zooms: [] },
       { ...post(), zooms: null },
       { ...post(), zooms: {} },
-      { ...post(), zooms: [null, 7, {}, { id: 'a', startMs: 1000, endMs: 1000 + MIN_ZOOM_MS - 1 }] },
+      { ...post(), zooms: [null, 7, {}, { id: 'a', startMs: 1000, endMs: 1000 + MIN_STORED_ZOOM_MS - 1 }] },
     ]) {
       expect(hostEdit(manifest, muted).clips[0]?.muted).toBe(true);
     }

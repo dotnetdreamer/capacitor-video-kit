@@ -288,6 +288,25 @@ describe('ve-toolbar', () => {
     await until('the root row', () => label(bar) === 'Editing tools');
   });
 
+  it('offers Animation on every layer row, and opens its sheet on the layer', async () => {
+    const { store, bar } = await mount();
+
+    store.select({ kind: 'overlay', id: 'ov-text' });
+    await until('the text layer row', () => label(bar) === 'Text layer tools');
+    // Beside Edit, ahead of the tools that move the layer in time or in the stack.
+    expect(ids(bar).slice(0, 3)).toEqual(['edit-text', 'animation', 'split']);
+    expect(tile(bar, 'animation').textContent?.trim()).toBe('Animation');
+
+    store.select({ kind: 'overlay', id: 'ov-sticker' });
+    await until('the sticker row', () => label(bar) === 'Sticker tools');
+    expect(ids(bar)[0]).toBe('animation');
+
+    tile(bar, 'animation').click();
+    expect(store.panel.value).toBe('animation');
+    // Still on the sticker: the sheet is about it.
+    expect(store.selectedOverlay.value?.id).toBe('ov-sticker');
+  });
+
   it('dims a tool that cannot do anything, and still lets it answer', async () => {
     const { store, bar } = await mount();
 

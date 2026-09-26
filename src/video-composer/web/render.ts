@@ -1,5 +1,6 @@
 import { cameraAt } from '../../editor/camera';
 import { byteCeiling, cssFor } from '../../editor/edit-manifest';
+import { overlayMotionAt } from '../../editor/motion';
 import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
 import type { ComposeClip, ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
@@ -9,9 +10,10 @@ import { throughCamera } from './camera-draw';
 import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
 import { pictureDest } from './geometry';
-import { decodeImage, FrameReader, probeMedia, probePicture, StillReader, type SourceReader } from './media';
+import { decodeImage, FrameReader, probeMedia, probePicture, readFrameTimes, StillReader, type SourceReader } from './media';
 import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from './painter';
 import { buildPlan, clipIndexAt, sourceTimeUs, transitionAt, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
+import { clipWindow, isSlowMotion } from './slow-motion';
 
 /**
  * The render itself: plan, mix, then one pass down the output timeline.
@@ -200,9 +202,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
     // destination of its own, so the angle comes off the clip; the painter turns it about that
     // same rectangle's centre either way.
-    const baseJob = base
-      ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0)
-      : null;
+    const baseJob = base ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0) : null;
     // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
     // tail - read from its own element, drawn the way the base clip it continues was drawn - is
     // the other. The spec was lowered, so the window opens exactly where the base clip starts
@@ -275,7 +275,9 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     // then goes through untouched. The overlays below never see it: they stay where they were put.
     painter.paintLayers(camera ? throughCamera(draws, cameraAt(camera, atUs / 1000)) : draws);
 
-    // Manifest order is drawing order, which the plan preserved.
+    // Manifest order is drawing order, which the plan preserved. A layer that moves is read at the
+    // frame's own unrounded instant, on the milliseconds the preview reads it on, through the one
+    // helper both call; a layer that does not has a null motion and is drawn as it always was.
     for (const overlay of plan.overlays) {
       if (atUs < overlay.startUs || atUs >= overlay.endUs) continue;
       const bitmap = await overlays.get(overlay.id, overlay.png);
@@ -288,6 +290,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
         hPx: overlay.hPx,
         rotationDeg: overlay.rotationDeg,
         opacity: overlay.opacity,
+        motion: overlay.motion ? overlayMotionAt(overlay.motion, atUs / 1000) : null,
       });
     }
     overlays.retire(plan, atUs);
@@ -340,14 +343,20 @@ async function layerDraw(
   extraFrameAspect: number | null = null,
 ): Promise<LayerDraw | null> {
   const reader = await layers.reader(layerId, clip.clip);
-  await reader.seek(sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000, frameSeconds);
+  const seconds = sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000;
+  // A clip slowed below 1x is made from the two recorded frames either side of this instant rather
+  // than from whichever one covers it, so it moves at the output's frame rate instead of stepping at
+  // the source's times the speed; see `slow-motion.ts`. Everything else - and a slowed clip whose
+  // frames could not be had - is seeked and drawn exactly as it always was.
+  const synthesised = isSlowMotion(clip) && reader.tweenAt ? await reader.tweenAt(seconds, clipWindow(clip)) : null;
+  if (!synthesised) await reader.seek(seconds, frameSeconds);
   if (reader.width <= 0 || reader.height <= 0) return null;
   // An extra layer's `rect` became its destination when the plan was built and was taken off the
   // clip, so what is left here is the crop and the fit - which is the whole of the difference
   // between a clip on the base track and one on a layer.
   const framing = { fit: clip.clip.fit, crop: clip.clip.crop, rect: clip.clip.rect };
-  return {
-    source: reader.source,
+  const draw: LayerDraw = {
+    source: synthesised ? synthesised.source : reader.source,
     sourceWidth: reader.width,
     sourceHeight: reader.height,
     framing,
@@ -355,6 +364,8 @@ async function layerDraw(
     opacity,
     rotationDeg,
   };
+  if (synthesised?.tween) draw.tween = synthesised.tween;
+  return draw;
 }
 
 /**
@@ -420,10 +431,15 @@ async function probeInputs(spec: ComposeSpec, signal: AbortSignal): Promise<Map<
  * Re-pointing a layer at another file is a NEW element, though, and so is every transition tail,
  * and whatever was drawing from the old one kept something for it - the painter a texture per
  * element, a frame of GPU memory each. `onClose` hears about every element as it goes, whichever
- * way it goes, so that can be let go of at the same moment rather than at the end of the render.
+ * way it goes, so that can be let go of at the same moment rather than at the end of the render -
+ * and about every frame a slowed clip held and has finished with, for the same reason.
+ *
+ * A file's frame times, which a slowed clip is drawn by, are read once a render: a post that comes
+ * back to a file, or draws it on two layers, asks the one reading rather than parsing it again.
  */
 class LayerReaders {
   private readonly open = new Map<string, { uri: string; reader: SourceReader }>();
+  private readonly frameTimes = new Map<string, Promise<Float64Array | null>>();
 
   /**
    * @param pictureEdge the long side a picture is decoded at: enough for a crop to zoom into it
@@ -446,7 +462,7 @@ class LayerReaders {
     if (current) this.closeReader(current.reader);
     this.open.delete(layerId);
     try {
-      const reader = clip.image ? await StillReader.open(uri, this.pictureEdge) : await FrameReader.open(uri);
+      const reader = clip.image ? await StillReader.open(uri, this.pictureEdge) : await FrameReader.open(uri, { onDrop: this.onClose, frameTimes: () => this.frameTimesOf(uri) });
       this.open.set(layerId, { uri, reader });
       return reader;
     } catch (error) {
@@ -464,6 +480,16 @@ class LayerReaders {
   close(): void {
     for (const entry of this.open.values()) this.closeReader(entry.reader);
     this.open.clear();
+    this.frameTimes.clear();
+  }
+
+  private frameTimesOf(uri: string): Promise<Float64Array | null> {
+    let times = this.frameTimes.get(uri);
+    if (!times) {
+      times = readFrameTimes(uri);
+      this.frameTimes.set(uri, times);
+    }
+    return times;
   }
 
   private closeReader(reader: SourceReader): void {

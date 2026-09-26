@@ -5,7 +5,7 @@ import { compileTransition } from '../../editor/transitions';
 import type { ComposeClip, ComposeSpec } from '../definitions';
 
 import { renderSupport, resetRenderSupport } from './capabilities';
-import { Painter, isTransitionDraw, type LayerSource } from './painter';
+import { Painter, isTransitionDraw, type LayerDraw, type LayerSource, type TransitionDraw } from './painter';
 import { renderSpec } from './render';
 
 /**
@@ -254,7 +254,7 @@ describe('the web renderer, end to end', () => {
    * little over a kilobyte is the MP4's own boxes, which are written last, and a ceiling of half that
    * is passed only when the finished file is measured.
    */
-  describe('held to the host\'s size ceiling', () => {
+  describe("held to the host's size ceiling", () => {
     it(
       'stops a render as soon as it grows past the ceiling, rather than finishing a file nobody can send',
       async ctx => {
@@ -927,7 +927,10 @@ describe('the MediaRecorder fallback', () => {
           renderSpec(
             spec(source, {
               jobId: 'job-rec-ceiling',
-              clips: [{ ...second, key: 'c1' }, { ...second, key: 'c2' }],
+              clips: [
+                { ...second, key: 'c1' },
+                { ...second, key: 'c2' },
+              ],
               output: { ...spec(source).output, maxBytes: 2000 },
             }),
             { signal: new AbortController().signal, onProgress: progress => seen.push(progress) },
@@ -1145,7 +1148,7 @@ describe('the painter', () => {
     painter.dispose();
   });
 
-  it("cuts a base-track clip at its RECTANGLE, which fitting it COVER makes it overflow", () => {
+  it('cuts a base-track clip at its RECTANGLE, which fitting it COVER makes it overflow', () => {
     // A square source into a rectangle half the frame wide and half of it tall, on a frame that is
     // not square: fitted `cover`, the picture is 50 across and 50 down inside a rectangle that is
     // 50 by 25, so 12 or so of it hangs over each side. Every engine cuts it at the rectangle, and
@@ -1308,6 +1311,268 @@ describe('a zoom, end to end', () => {
         }
       } finally {
         URL.revokeObjectURL(uri);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});
+
+describe('a moving layer, end to end', () => {
+  it(
+    'draws a layer where its motion has it at each frame, and where it was put once the motion rests',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const uri = URL.createObjectURL(await makePicture('#00f', 160, 284));
+      const square = document.createElement('canvas');
+      square.width = 40;
+      square.height = 40;
+      const paint = square.getContext('2d');
+      if (!paint) throw new Error('no canvas');
+      paint.fillStyle = '#fff';
+      paint.fillRect(0, 0, 40, 40);
+      try {
+        const picture: ComposeClip = { key: 'p', uri, inMs: 0, outMs: 1500, speed: 1, volume: 1, muted: true, fit: 'cover', image: true };
+        // Put at a quarter across; half the frame to the right until a step at 500 ms, then a
+        // straight slide back home that ends at 1000 ms and holds.
+        const overlay = {
+          id: 'o',
+          png: square.toDataURL('image/png'),
+          cx: 0.25,
+          cy: 0.5,
+          wPx: 40,
+          hPx: 40,
+          rotationDeg: 0,
+          startMs: 0,
+          endMs: 1500,
+          opacity: 1,
+          motion: { atMs: [0, 500, 500, 1000], x: [0.5, 0.5, 0.5, 0] },
+        };
+        const outcome = await renderSpec(spec(uri, { jobId: 'job-motion', clips: [picture], overlays: [overlay] }), {
+          signal: new AbortController().signal,
+          onProgress: () => undefined,
+        });
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const white = (rgb: [number, number, number] | null) => rgb !== null && Math.min(...rgb) > 180;
+          const blue = (rgb: [number, number, number] | null) => rgb !== null && rgb[2] > 150 && rgb[0] < 90 && rgb[1] < 90;
+          // At a quarter of a second it is three quarters across, and not where it was put.
+          expect(white(await pixelOfVideo(url, 0.25, 120, 142))).toBe(true);
+          expect(blue(await pixelOfVideo(url, 0.25, 40, 142))).toBe(true);
+          // Resting after a second: back where it was put.
+          expect(white(await pixelOfVideo(url, 1.25, 40, 142))).toBe(true);
+          expect(blue(await pixelOfVideo(url, 1.25, 120, 142))).toBe(true);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } finally {
+        URL.revokeObjectURL(uri);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+});
+
+describe('slow motion, end to end', () => {
+  /**
+   * A grey ramp: frame `i` of `frames` is the grey `255 * i / (frames - 1)`, at 12 fps. Because the
+   * ramp is a straight line through the frames and a cross-fade is a straight line between two, a
+   * slowed clip made from it is a straight line through OUTPUT time - a grey that can be predicted
+   * for every output frame, where a clip that repeats frames climbs in steps.
+   */
+  async function makeRampVideo(frames = SOURCE_FRAMES): Promise<Blob> {
+    const canvas = document.createElement('canvas');
+    canvas.width = SOURCE_WIDTH;
+    canvas.height = SOURCE_HEIGHT;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no canvas');
+    const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() });
+    const source = new CanvasSource(canvas, { codec: 'avc', quality: new Quality({ bitrate: 1_000_000 }) });
+    output.addVideoTrack(source);
+    await output.start();
+    for (let i = 0; i < frames; i++) {
+      const grey = Math.round((255 * i) / (frames - 1));
+      ctx.fillStyle = `rgb(${grey}, ${grey}, ${grey})`;
+      ctx.fillRect(0, 0, SOURCE_WIDTH, SOURCE_HEIGHT);
+      await source.add(i / SOURCE_FPS, 1 / SOURCE_FPS);
+    }
+    await output.finalize();
+    const buffer = (output.target as BufferTarget).buffer;
+    if (!buffer) throw new Error('no fixture');
+    return new Blob([buffer], { type: 'video/mp4' });
+  }
+
+  /** The draws of every frame a render paints, and the grey at the middle of each finished frame. */
+  function watchFrames(): { draws: (LayerDraw | TransitionDraw)[][]; greys: number[]; restore(): void } {
+    const draws: (LayerDraw | TransitionDraw)[][] = [];
+    const greys: number[] = [];
+    const real = Painter.prototype.paintLayers;
+    const spy = vi.spyOn(Painter.prototype, 'paintLayers').mockImplementation(function (this: Painter, layers) {
+      real.call(this, layers);
+      draws.push([...layers]);
+      const probe = document.createElement('canvas');
+      probe.width = 1;
+      probe.height = 1;
+      const ctx = probe.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('no canvas');
+      ctx.drawImage(this.frame, this.frame.width / 2, this.frame.height / 2, 1, 1, 0, 0, 1, 1);
+      greys.push(ctx.getImageData(0, 0, 1, 1).data[1] ?? 0);
+    });
+    return { draws, greys, restore: () => spy.mockRestore() };
+  }
+
+  const quiet = () => ({ signal: new AbortController().signal, onProgress: () => undefined });
+
+  it(
+    'makes every output frame of a clip at 0.3x a new picture, between the recorded frames either side of it',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const uri = URL.createObjectURL(await makeRampVideo());
+      const watch = watchFrames();
+      try {
+        // 600 ms of a one-second ramp at 0.3x: two seconds of post, twenty frames at 10 fps, and the
+        // source moves 30 ms - under half of one of its 83 ms frames - per output frame.
+        const clip: ComposeClip = { key: 'slow', uri, inMs: 0, outMs: 600, speed: 0.3, volume: 1, muted: false, fit: 'cover' };
+        const outcome = await renderSpec(spec(uri, { jobId: 'job-slow', clips: [clip] }), quiet());
+        expect(outcome.durationMs).toBe(2000);
+        expect(watch.greys.length).toBe(20);
+
+        // Every frame greyer than the one before - the plain path repeated each recorded frame two
+        // or three times - and each where the straight line through the ramp says: at output frame
+        // k the source is at 30k ms, 0.36k of the way through its 12 frames of 255/11 grey each.
+        for (let k = 1; k < watch.greys.length; k++) {
+          expect(watch.greys[k]!, `frame ${k} against frame ${k - 1}`).toBeGreaterThan(watch.greys[k - 1]!);
+        }
+        watch.greys.forEach((grey, k) => expect(Math.abs(grey - (255 / 11) * 0.36 * k), `frame ${k}: ${grey}`).toBeLessThanOrEqual(4));
+
+        // Drawn from two held frames with a weight wherever the instant falls between two, and from
+        // one, alone, where it lands on a frame - the first.
+        const layers = watch.draws.map(draws => draws[0] as LayerDraw);
+        expect(layers.every(layer => layer.source instanceof ImageBitmap)).toBe(true);
+        expect(layers[0]?.tween).toBeUndefined();
+        expect(layers.slice(1).every(layer => layer.tween && layer.tween.source instanceof ImageBitmap && layer.tween.weight > 0 && layer.tween.weight < 1)).toBe(true);
+
+        // ...and it reaches the file: the decoded frame a third of the way in is between the greys
+        // of the two recorded frames either side of it, not either one of them.
+        const url = URL.createObjectURL(outcome.blob);
+        try {
+          const third = await pixelOfVideo(url, 0.65, 80, 142);
+          expect(third).not.toBeNull();
+          // Output frame 6: 180 ms into the source, 2.16 frames - between 46 and 70, at about 50.
+          expect(third![1]).toBeGreaterThan(47);
+          expect(third![1]).toBeLessThan(62);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } finally {
+        watch.restore();
+        URL.revokeObjectURL(uri);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'draws a clip at 1x exactly as before, and a slowed clip’s recorded frames in the same colours',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const uri = URL.createObjectURL(await makeRampVideo());
+      const clip: ComposeClip = { key: 'c', uri, inMs: 0, outMs: 1000, speed: 1, volume: 1, muted: false, fit: 'cover' };
+      try {
+        const plain = watchFrames();
+        try {
+          await renderSpec(spec(uri, { jobId: 'job-1x', clips: [clip] }), quiet());
+        } finally {
+          plain.restore();
+        }
+        // The one-frame path: the `<video>` element itself, and never a second frame.
+        const layers = plain.draws.map(draws => draws[0] as LayerDraw);
+        expect(layers.length).toBe(10);
+        expect(layers.every(layer => layer.source instanceof HTMLVideoElement && !('tween' in layer))).toBe(true);
+
+        // At 0.5x, the output frames that land exactly on a recorded frame are drawn from a copy of it
+        // alone - frames 3, 6 and 9 at output frames 5, 10 and 15 - and have to be the very greys the
+        // 1x render drew the same recorded frames in, at its output frames 3, 5 and 8. A copy that
+        // came out in other colours would flash at every join between a clip's 1x and slowed parts.
+        const slow = watchFrames();
+        try {
+          await renderSpec(spec(uri, { jobId: 'job-half', clips: [{ ...clip, speed: 0.5 }] }), quiet());
+        } finally {
+          slow.restore();
+        }
+        for (const [slowed, recorded] of [
+          [5, 3],
+          [10, 5],
+          [15, 8],
+        ] as const) {
+          expect((slow.draws[slowed]?.[0] as LayerDraw).tween).toBeUndefined();
+          expect(Math.abs(slow.greys[slowed]! - plain.greys[recorded]!), `output ${slowed} against ${recorded}`).toBeLessThanOrEqual(1);
+        }
+      } finally {
+        URL.revokeObjectURL(uri);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
+
+  it(
+    'slows a transition’s outgoing clip the same way',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.supported, support.reason);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const ramp = URL.createObjectURL(await makeRampVideo());
+      const blue = URL.createObjectURL(await makeSourceVideo('#00f'));
+      const watch = watchFrames();
+      try {
+        // A ramp at 0.5x dissolving into blue: 0..400 ms of source is 800 ms of post, and the next
+        // 200 ms of source - 400 ms of post - travel as the tail under blue.
+        const slowed: ComposeClip = { key: 'ramp', uri: ramp, inMs: 0, outMs: 600, speed: 0.5, volume: 1, muted: false, fit: 'cover' };
+        const dissolve = JSON.parse(JSON.stringify(compileTransition('dissolve'))) as NonNullable<ReturnType<typeof compileTransition>>;
+        await renderSpec(
+          spec(ramp, {
+            jobId: 'job-slow-tail',
+            clips: [
+              { ...slowed, outMs: 400 },
+              {
+                key: 'blue',
+                uri: blue,
+                inMs: 0,
+                outMs: 1000,
+                speed: 1,
+                volume: 1,
+                muted: false,
+                fit: 'cover',
+                transitionIn: { ...dissolve, from: { ...slowed, inMs: 400 } },
+              },
+            ],
+          }),
+          quiet(),
+        );
+        const sides = watch.draws.flatMap(draws => draws.filter(isTransitionDraw));
+        expect(sides.length).toBe(4);
+        // The tail is drawn from held frames, and between two of them wherever it is not on one; the
+        // incoming side, at 1x, is its element as it always was.
+        expect(sides.every(side => side.from?.source instanceof ImageBitmap)).toBe(true);
+        expect(sides.some(side => (side.from?.tween?.weight ?? 0) > 0)).toBe(true);
+        expect(sides.every(side => side.to?.source instanceof HTMLVideoElement && !side.to.tween)).toBe(true);
+      } finally {
+        watch.restore();
+        URL.revokeObjectURL(ramp);
+        URL.revokeObjectURL(blue);
       }
     },
     RENDER_TIMEOUT_MS,

@@ -67,6 +67,13 @@ drawn: skip a layer whose element has `readyState < 2` and the previous frame si
 **Chrome stays DOM.** Selection box and handles, snap guides, the bin, the crop window, the
 placeholder, the REC pill. They are UI, not picture, and they need hit testing.
 
+**Layers that move stay DOM too.** A layer's animation (`OverlayCommon.animation`) is compiled to
+the same keys the render gets (`EditorStore.overlayMotions`, through `overlayMotionFor`) and read
+with the same `overlayMotionAt` the web render reads. `LayerMotion` writes each moving `<img>`'s
+`left`/`top`/`transform`/`opacity` directly - on every animation frame while playing, on every
+playhead move while paused, and after every render - so a moving layer never re-renders
+`ve-preview`. The vdom keeps writing the layer at rest; the selection box stays at rest with it.
+
 **The draw loop.** `requestAnimationFrame` while playing; on demand otherwise — playhead moved, edit
 changed, a layer's box changed, a bitmap landed, a seek settled. Do not draw on a timer when nothing
 moved.

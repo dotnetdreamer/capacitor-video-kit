@@ -95,6 +95,39 @@ class RenderPlanTest {
     }
 
     @Test
+    fun `only a video below 1x is slowed, and every copy of it says so`() {
+        val still = picture("p", outMs = 1_000)
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", speed = 0.25f),
+                    clip("b", speed = 0.999f),
+                    clip("c", speed = 1f),
+                    clip("d", speed = 2f),
+                    still,
+                    // A hand-built picture at half speed is still a picture: Media3 emits a still at
+                    // the output's rate whatever its speed says.
+                    still.copy(key = "q", speed = 0.5f),
+                ),
+                tracks = listOf(track(listOf(clip("e", outMs = 30_000, speed = 0.5f)))),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(2_000),
+                "file:///b.mp4" to probe(2_000),
+                "file:///c.mp4" to probe(2_000),
+                "file:///d.mp4" to probe(2_000),
+                "file:///e.mp4" to probe(30_000),
+                still.uri to pictureProbe,
+            ),
+        )
+        assertEquals(listOf(true, true, false, false, false, false), plan.clips.map { it.slowed })
+        // The layer clip was cut to the room the base leaves, and the cut copy is still slowed.
+        val layerClip = plan.tracks[0].clips[0]
+        assertTrue(layerClip.outUs < 30_000_000L)
+        assertTrue(layerClip.slowed)
+    }
+
+    @Test
     fun `a picture's length is never clamped to a probed duration, because it has none`() {
         val still = picture("p", outMs = 45_000)
         val plan = RenderPlan.build(spec(listOf(still)), mapOf(still.uri to pictureProbe))
@@ -763,6 +796,34 @@ class RenderPlanTest {
         assertEquals(1_000_000L, items.last().outUs - items.last().inUs)
         val total = items.sumOf { it.outUs - it.inUs }
         assertEquals(10_000_000L, total)
+    }
+
+    /*
+     * THE DROP DID NOT EXPORT ON A PHONE. Its 16 s score looped under a post whose speeds summed to
+     * 16.000074 s, and the plan added a second repetition 74 us long. Media3 measures an item's
+     * progress in whole milliseconds, so that item had a duration of 0, and `Util.percentInt` divided
+     * by it the first time the export's progress was polled on it: "divide by zero", every time.
+     */
+    @Test
+    fun `a looping track is not repeated for a sliver of the video's rounding`() {
+        val music = Music("file:///m.m4a", 0, 0, 16_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val plan = RenderPlan.build(
+            spec(
+                // 14.15 s, and 1.721 s of footage slowed to 40/43: 1.850074 s of output, not 1.85.
+                listOf(clip("a", outMs = 14_150), clip("b", outMs = 1_721, speed = 0.9302325581395349f)),
+                audio = Audio(true, 1f, music, emptyList()),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(20_000),
+                "file:///b.mp4" to probe(20_000),
+                "file:///m.m4a" to probe(16_000),
+            ),
+        )
+        // The premise: the video runs past 16 s, by less than a frame.
+        assertTrue(plan.totalUs > 16_000_000L && plan.totalUs < 16_000_000L + 33_333L)
+        val items = plan.music!!.items
+        assertEquals(1, items.size)
+        assertEquals(16_000_000L, items.single().outUs - items.single().inUs)
     }
 
     @Test

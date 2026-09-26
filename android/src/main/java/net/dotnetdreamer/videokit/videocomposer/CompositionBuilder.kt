@@ -132,12 +132,25 @@ object CompositionBuilder {
         // which is exactly the 30 every manifest the editor writes asks for, but a spec naming a
         // lower ceiling would still see its gaps run at 30, and there is no way to ask a gap for
         // anything else.
+        //
+        // The one rate this engine RAISES is a slowed clip's. Media3 retimes a clip below 1x and
+        // invents nothing, so 30 fps footage at 0.3x arrives as nine pictures a second; every such
+        // clip carries a [SlowMotionEffect] that synthesises the missing frames at the spec's rate
+        // inside the clip's own chain, before anything that moves with time is drawn (see
+        // editedClip). It lives per input and so works with the compositor rather than against it:
+        // a slowed clip on the PRIMARY input gives the compositor a frame to emit at every output
+        // instant, and a slowed clip on any other input - the base under a layer, a transition's
+        // tail - gives the nearest-timestamp pairing a frame within half an interval of every
+        // primary frame, where it used to find one up to a source frame stale. What it cannot do is
+        // lend its cadence to a primary that has none: a layer at 1x from 24 fps footage still sets
+        // the post's rate while it is on screen, slowed base under it or not.
         val layers = plan.tracks.asReversed()
         for (track in layers) {
             sequences += layerSequence(track, plan.totalUs, output, grade)
         }
         sequences += videoSequence(
             plan.clips,
+            plan.prefixOutUs,
             plan.totalUs - plan.baseUs,
             plan.videoSeqHasAudio,
             output,
@@ -271,6 +284,8 @@ object CompositionBuilder {
      */
     private fun videoSequence(
         clips: List<RenderPlan.PlannedClip>,
+        /** Where each clip starts on the output timeline: the plan's prefix sums. */
+        startsUs: LongArray,
         tailUs: Long,
         hasAudio: Boolean,
         output: Output,
@@ -282,10 +297,11 @@ object CompositionBuilder {
         val items = clips.mapIndexed { i, planned ->
             val tail = transitionsInto[i]
             if (tail == null) {
-                editedClip(planned, output, grade, geometries, camera = camera)
+                editedClip(planned, startsUs[i], output, grade, geometries, camera = camera)
             } else {
                 editedClip(
                     planned,
+                    startsUs[i],
                     output,
                     grade,
                     geometries,
@@ -378,7 +394,9 @@ object CompositionBuilder {
         val builder = EditedMediaItemSequence.Builder(trackTypes)
         if (track.startUs > 0L) builder.addGap(track.startUs)
         val geometries = Geometries()
-        for (planned in track.clips) builder.addItem(editedClip(planned, output, grade, geometries))
+        for ((i, planned) in track.clips.withIndex()) {
+            builder.addItem(editedClip(planned, track.placements[i].startUs, output, grade, geometries))
+        }
         // A gap must have a positive duration or Media3 rejects it, and a layer cut at the base's
         // own end has no room left for one.
         val tailUs = totalUs - track.endUs
@@ -433,6 +451,7 @@ object CompositionBuilder {
             builder.addItem(
                 editedClip(
                     tail.clip,
+                    tail.itemStartUs,
                     output,
                     grade,
                     geometries,
@@ -460,9 +479,14 @@ object CompositionBuilder {
      * effect on a tail, silent for its first [silentUs] and then fading out over [fadeOutUs]. Left
      * at their defaults they change nothing - the effect list and the audio processors are the ones
      * every clip was given before transitions existed.
+     *
+     * [startUs] is where the item starts on its sequence's timeline, which is the output's. Only a
+     * slowed clip reads it, to know the piece of the timeline its synthesised frames may fill - see
+     * [SlowMotionEffect].
      */
     private fun editedClip(
         planned: RenderPlan.PlannedClip,
+        startUs: Long,
         output: Output,
         grade: ColorMatrixEffect?,
         geometries: Geometries,
@@ -553,8 +577,21 @@ object CompositionBuilder {
         // contract has each side be its clip's whole frame as seen through the camera, with the
         // transition's move, blur and mask then acting in output pixels as they always have. A
         // clip the plan did not mark zoomed - every clip of a post with no camera - gets nothing.
+        //
+        // A SLOWED clip's frame synthesis goes between the grade and the geometry, and every other
+        // position is wrong for a reason. It has to come after the speed change, which it does
+        // wherever it goes: the speed is the source's own retimed samples, not an effect, so every
+        // frame reaching the chain is already stamped on the output timeline. It has to come before
+        // the camera and the transition's side, which read the frame's timestamp and so have to be
+        // handed every synthesised instant to move on every one. It cannot sit between the geometry
+        // and the camera, because that would split the one pass the zoom's sharpness depends on (the
+        // paragraph above). And after the grade rather than before it, so the grade is drawn once per
+        // SOURCE frame instead of once per output frame; a colour matrix and a cross-fade commute but
+        // for the clamp, which a blend of two clamped colours never leaves. A clip at 1x or faster, and
+        // every picture, gets nothing, and its list is the one it always had.
         val videoEffects: List<Effect> = listOfNotNull(
             grade,
+            if (planned.slowed) SlowMotionEffect(startUs, startUs + planned.outDurUs, output.fps) else null,
             geometry,
             camera?.takeIf { planned.zoomed }?.let { CameraTransformation(it) },
             transition,
@@ -566,8 +603,10 @@ object CompositionBuilder {
             // turns it into one frame interval in the asset loader's video renderer and drops any
             // decoded frame that arrives inside it, and the speed change has already been applied
             // to the sample timestamps by then, so a 4x clip is capped here like any other source.
-            // Nothing in Media3 can raise a rate, which is why this is the whole of the cadence
-            // this engine controls - see the compositor note in toComposition.
+            // That renderer is AHEAD of every effect, which is what lets a slowed clip keep it: it
+            // still caps a fast source before [SlowMotionEffect] sees a frame, and it can never drop
+            // one of the frames that effect makes. Nothing in Media3 itself raises a rate - see the
+            // compositor note in toComposition for what that leaves to this engine.
             .setFrameRate(output.fps)
             .setEffects(Effects(audioProcessors, videoEffects))
 
@@ -577,9 +616,12 @@ object CompositionBuilder {
             // an image the frame rate above is not a ceiling but the rate the still is emitted at.
             builder.setDurationUs(pictureDurationUs(planned))
         } else if (clip.speed != 1f) {
-            // Transformer inserts the speed change as the first video effect and first audio
-            // processor of the item, so our gain runs on post-speed audio and the geometry on
-            // post-speed frames. Passing a SpeedChangeEffect alongside this throws, so none is.
+            // Transformer retimes the video in the SOURCE - `ExoPlayerAssetLoader` wraps the item's
+            // media source in a `SpeedChangingMediaSource`, so the samples are stamped post-speed
+            // before they are even decoded - and inserts the speed change as the first audio
+            // processor of the item. So our gain runs on post-speed audio, and every video effect,
+            // the decimator ahead of them included, sees post-speed timestamps. Passing a
+            // SpeedChangeEffect alongside this throws, so none is.
             builder.setSpeed(SpeedParameters(ConstantSpeedProvider(clip.speed), MAINTAIN_PITCH))
         }
         return builder.build()

@@ -14,6 +14,9 @@ import {
   DEFAULT_ZOOM_SCALE,
   addZoom as addZoomOp,
   compileCamera,
+  compileOverlayMotion,
+  overlayWireWindow,
+  type ComposeOverlayMotion,
   deleteZoom as deleteZoomOp,
   duplicateZoom as duplicateZoomOp,
   findZoom,
@@ -95,12 +98,28 @@ import {
   type StickerOverlay,
   type TextOverlay,
   type TimelineSlot,
+  isOverlayVisibleAt,
+  overlayAnimationPreset,
+  overlayAnimationSpans,
+  type OverlayAnimation,
+  type OverlayAnimationPart,
+  type OverlayLoop,
+  type OverlayMove,
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
 import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './editor.types';
+
+/** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
+interface CompiledMotion {
+  animation: NonNullable<EditOverlay['animation']>;
+  kind: EditOverlay['kind'];
+  startMs: number;
+  endMs: number;
+  motion: ComposeOverlayMotion | null;
+}
 
 interface HistoryEntry {
   manifest: EditManifest;
@@ -282,17 +301,18 @@ export class EditorStore {
   /**
    * While a group is open, each of the transition sheet's own steps after its first folds into the
    * entry the first one made - see [beginHistoryGroup]. `entry` is that entry's index in [past], or
-   * -1 before it exists and again once anything else has been recorded on top of it.
+   * -1 before it exists and again once anything else has been recorded on top of it. The animation
+   * sheet opens one the same way, for the same reason.
    */
   private historyGroup: { entry: number } | null = null;
   /**
-   * The open gesture is the transition sheet's duration slider, so its end is one of the sheet's
-   * steps and folds with the rest of the visit.
+   * The open gesture is the transition sheet's duration slider - or the animation sheet's length
+   * slider - so its end is one of the sheet's steps and folds with the rest of the visit.
    *
-   * Marked by [setTransitionDuration] as it previews into the gesture rather than read off the label
-   * the gesture ends with. A gesture the sheet did not start never passes through there, and one it
-   * did start can be closed under another name: [flushGesture] ends a slider still held when a
-   * button is tapped as 'Change', and that is still the sheet's own step.
+   * Marked by [setTransitionDuration] and [setAnimationMs] as they preview into the gesture rather
+   * than read off the label the gesture ends with. A gesture the sheet did not start never passes
+   * through there, and one it did start can be closed under another name: [flushGesture] ends a
+   * slider still held when a button is tapped as 'Change', and that is still the sheet's own step.
    */
   private gestureInGroup = false;
   readonly canUndo = computed(() => this.past.value.length > 0);
@@ -798,7 +818,8 @@ export class EditorStore {
     if (selection) this.toolbarMode.value = 'root';
     // A sheet that was about the old selection makes no sense for the new one.
     const panel = this.panel.value;
-    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition' || panel === 'zoom') this.closePanel();
+    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition' || panel === 'zoom' || panel === 'animation')
+      this.closePanel();
   }
 
   isSelected(selection: EditorSelection): boolean {
@@ -810,11 +831,13 @@ export class EditorStore {
   openPanel(panel: EditorPanel | null): void {
     this.soundMenuOpen.value = false;
     if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
+    if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
     this.panel.value = panel;
   }
 
   closePanel(): void {
     if (this.panel.value === 'transition') this.leaveTransition();
+    if (this.panel.value === 'animation') this.leaveAnimation();
     this.panel.value = null;
     this.volumeTarget.value = null;
   }
@@ -1626,6 +1649,169 @@ export class EditorStore {
   }
 
   /* ========================================================================================= */
+  /* Layer animation                                                                           */
+  /* ========================================================================================= */
+
+  /**
+   * The Animation tool: opens the animation sheet on the selected layer.
+   *
+   * Everything done in the sheet is one undo step (see [beginHistoryGroup]): six entrances tried one
+   * after another before settling on one are one decision, exactly as six transitions are. The
+   * preview is paused, and put on the layer where it has arrived when the playhead is somewhere the
+   * layer is not on screen, so the picture is the thing the sheet is about; each tile then plays its
+   * move there ([auditionAnimation]).
+   */
+  openAnimation(): void {
+    const overlay = this.selectedOverlay.value;
+    if (!overlay) return;
+    this.pause();
+    // Opened first, which lets go of whatever was open and the group that went with it.
+    this.openPanel('animation');
+    this.beginHistoryGroup();
+    const total = this.totalMs.value;
+    if (!isOverlayVisibleAt(overlay, this.playheadMs.value, total)) {
+      const { startMs, endMs } = overlayWireWindow(overlay, total);
+      const arrived = startMs + overlayAnimationSpans(overlay.animation, endMs - startMs).inMs;
+      this.seek(Math.max(startMs, Math.min(arrived, Math.min(endMs, total) - 1)));
+    }
+    this.haptic('light');
+  }
+
+  /**
+   * A tile: preset `id` for one part of the selected layer's animation, at the preset's OWN length.
+   * Not the length the last preset had: each is tuned at its own (a stamp is 200 ms, a flicker 800),
+   * and a flicker squeezed into a stamp's 200 ms is a blink. The preset the part already has keeps
+   * the length the customer gave it, and a tap on it plays it again - the only way to see it twice.
+   */
+  chooseAnimation(part: OverlayAnimationPart, id: string): void {
+    const overlay = this.selectedOverlay.value;
+    const preset = overlayAnimationPreset(part, id);
+    if (!overlay || !preset) return;
+    if (overlay.animation?.[part]?.id !== id) {
+      const move = part === 'loop' ? { id, periodMs: preset.defaultMs } : { id, durationMs: preset.defaultMs };
+      this.commitStep('Animation', m => withAnimationPart(m, overlay.id, part, move), true);
+      this.haptic('selection');
+    }
+    this.auditionAnimation(part);
+  }
+
+  /** None: that part of the selected layer's animation taken off, the other two left as they are. */
+  removeAnimation(part: OverlayAnimationPart): void {
+    const overlay = this.selectedOverlay.value;
+    if (!overlay?.animation?.[part]) return;
+    // An audition left running would go on playing a move that is no longer there.
+    if (this.stopAudition) {
+      this.endAudition();
+      this.pause();
+    }
+    this.commitStep('Animation', m => withAnimationPart(m, overlay.id, part, null), true);
+    this.haptic('selection');
+  }
+
+  /**
+   * The length slider: an in's or an out's duration, or a loop's period. Live while it is dragged
+   * (the slider wraps the drag in a gesture), one step otherwise. Held to the preset ranges by the
+   * ops, which normalise every animation they are handed.
+   */
+  setAnimationMs(part: OverlayAnimationPart, ms: number, live = false): void {
+    const overlay = this.selectedOverlay.value;
+    const current = overlay?.animation?.[part];
+    if (!overlay || !current) return;
+    const move = part === 'loop' ? { id: current.id, periodMs: ms } : { id: current.id, durationMs: ms };
+    const fn = (m: EditManifest): EditManifest => withAnimationPart(m, overlay.id, part, move);
+    if (live) {
+      this.preview(fn);
+      // After the preview, which is what opens the gesture when the slider has not already.
+      this.gestureInGroup = true;
+    } else {
+      this.commitStep('Animation', fn, true);
+    }
+  }
+
+  /**
+   * Plays one part of the selected layer's animation on the frame, once, and parks the preview where
+   * the layer is at rest, which is how it will mostly be seen:
+   *  - an in from a moment before the layer arrives to a moment after it has landed, parked landed;
+   *  - an out from a moment before it starts leaving to the end of the layer, parked before it goes;
+   *  - a loop from where it starts, for two cycles or a second and a half, parked where it started.
+   *
+   * The times are the render's: the spans the moves really play in, squeezed when the layer is too
+   * short for both, and all of it inside the layer's own window.
+   */
+  auditionAnimation(part: OverlayAnimationPart): void {
+    const overlay = this.selectedOverlay.value;
+    const animation = overlay?.animation;
+    if (!overlay || !animation?.[part]) return;
+    const total = this.totalMs.value;
+    const { startMs, endMs } = overlayWireWindow(overlay, total);
+    const end = Math.min(endMs, total);
+    const spans = overlayAnimationSpans(animation, endMs - startMs);
+    // Landed, but never at the window's end, where the layer is no longer drawn.
+    const arrived = Math.min(startMs + spans.inMs, end - 1);
+    switch (part) {
+      case 'in':
+        this.playOnce(Math.max(0, startMs - AUDITION_LEAD_MS), Math.min(end, arrived + AUDITION_TAIL_MS), arrived);
+        return;
+      case 'out': {
+        const leaving = Math.max(startMs, endMs - spans.outMs);
+        this.playOnce(Math.max(startMs, leaving - AUDITION_LEAD_MS), end, Math.min(leaving, end - 1));
+        return;
+      }
+      case 'loop': {
+        const cycles = Math.max(2 * (animation.loop?.periodMs ?? 0), AUDITION_LOOP_MS);
+        this.playOnce(arrived, Math.min(startMs + spans.loopEndMs, end, arrived + cycles), arrived);
+        return;
+      }
+    }
+  }
+
+  /**
+   * Plays `fromMs..toMs` once and parks, paused, on `parkMs` - the transition audition's shape, on
+   * any stretch of the post. Paused by the customer part way, it is over and the playhead stays where
+   * they put it. It holds [stopAudition], so starting one ends any other.
+   */
+  private playOnce(fromMs: number, toMs: number, parkMs: number): void {
+    this.endAudition();
+    if (!(toMs > fromMs)) {
+      this.pause();
+      this.seek(parkMs);
+      return;
+    }
+    this.seek(fromMs);
+    this.play();
+    let started = false;
+    const dispose = effect(() => {
+      const at = this.playheadMs.value;
+      const playing = this.playing.value;
+      if (playing) started = true;
+      const interrupted = started && !playing;
+      if (at < toMs && !interrupted) return;
+      queueMicrotask(() => {
+        if (this.stopAudition !== stop) return;
+        this.endAudition();
+        if (!interrupted) {
+          this.pause();
+          this.seek(parkMs);
+        }
+      });
+    });
+    const stop = (): void => dispose();
+    this.stopAudition = stop;
+  }
+
+  /**
+   * Everything the animation sheet was holding open, let go of as it shuts. A gesture still open that
+   * the sheet did not start is not the sheet's to close - a tap on a caption opens the text sheet over
+   * this one having just begun its own - so then only the group goes, and the gesture is left to the
+   * sheet it belongs to.
+   */
+  private leaveAnimation(): void {
+    this.endAudition();
+    if (this.gestureStart && !this.gestureInGroup) this.historyGroup = null;
+    else this.endHistoryGroup();
+  }
+
+  /* ========================================================================================= */
   /* Colour                                                                                    */
   /* ========================================================================================= */
 
@@ -1731,6 +1917,35 @@ export class EditorStore {
    */
   readonly camera = computed(() => compileCamera(this.zooms.value, this.totalMs.value));
   /**
+   * Every moving layer's motion, by layer id, compiled exactly as [toComposeSpec] compiles it: over
+   * the layer's window as the wire carries it ([overlayWireWindow]), so the preview reads the same
+   * keys through [overlayMotionAt] that the render is handed. A layer that does not move has no entry.
+   *
+   * Recomputed when the manifest changes, never per frame - and a layer whose animation, window and
+   * kind are what they were keeps the keys it had, because a drag across the frame writes the
+   * manifest on every movement of the finger and moves none of those three.
+   */
+  readonly overlayMotions = computed<ReadonlyMap<string, ComposeOverlayMotion>>(() => {
+    const total = this.totalMs.value;
+    const motions = new Map<string, ComposeOverlayMotion>();
+    const kept = new Map<string, CompiledMotion>();
+    for (const overlay of this.manifest.value.overlays) {
+      if (!overlay.animation) continue;
+      const { startMs, endMs } = overlayWireWindow(overlay, total);
+      const known = this.compiledMotions.get(overlay.id);
+      const same = known && known.animation === overlay.animation && known.kind === overlay.kind && known.startMs === startMs && known.endMs === endMs;
+      const entry: CompiledMotion = same
+        ? known
+        : { animation: overlay.animation, kind: overlay.kind, startMs, endMs, motion: compileOverlayMotion({ startMs, endMs }, overlay.animation, overlay.kind) };
+      kept.set(overlay.id, entry);
+      if (entry.motion) motions.set(overlay.id, entry.motion);
+    }
+    this.compiledMotions = kept;
+    return motions;
+  });
+  /** What [overlayMotions] compiled last time, and from what, so an unchanged layer is not compiled again. */
+  private compiledMotions = new Map<string, CompiledMotion>();
+  /**
    * What the stage shows while the zoom sheet is open and paused: the whole frame with the area box
    * on it (`area`), or the zoomed picture at the playhead (`result`).
    *
@@ -1787,8 +2002,8 @@ export class EditorStore {
    * open at all - and each new way would need a rule of its own here. A key that cannot repeat needs
    * none, and leaves the run's rule what it was: the same key, the newest entry, nothing to redo.
    *
-   * `name` is only there to make a key readable in a debugger; two gestures with the same name still
-   * get two keys.
+   * `name` is only there to make a key readable when stepping through the code; two gestures with the
+   * same name still get two keys.
    */
   coalesceKey(name: string): CoalesceKey {
     return `${name}:${++this.coalesceKeys}` as CoalesceKey;
@@ -2019,4 +2234,27 @@ function sameValue(a: unknown, b: unknown): boolean {
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
   return ka.every(key => Object.prototype.hasOwnProperty.call(b, key) && sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+}
+
+/** How much of the frame before a layer arrives, or before it starts to leave, an audition shows. */
+const AUDITION_LEAD_MS = 300;
+/** How long an audition of an in stays on the layer once it has landed, so the landing is seen. */
+const AUDITION_TAIL_MS = 400;
+/** The least an audition of a loop plays: a slow sway's two cycles are more, a quick shake's far less. */
+const AUDITION_LOOP_MS = 1500;
+
+/**
+ * The manifest with one part of a layer's animation set to `move`, or taken off for null. The rest of
+ * the animation is kept as it was, and `patchOverlay` takes the `animation` key itself off when the
+ * part taken was the last - and hands the same manifest back when nothing changed, so a length
+ * dragged back to where it was is no step at all.
+ */
+function withAnimationPart(m: EditManifest, id: string, part: OverlayAnimationPart, move: OverlayMove | OverlayLoop | null): EditManifest {
+  const overlay = findOverlay(m, id);
+  if (!overlay) return m;
+  const animation: OverlayAnimation = { ...overlay.animation };
+  if (!move) delete animation[part];
+  else if (part === 'loop') animation.loop = move as OverlayLoop;
+  else animation[part] = move as OverlayMove;
+  return patchOverlay(m, id, { animation });
 }

@@ -27,6 +27,7 @@ import {
   type EditClip,
   type EditManifest,
   type EditOverlay,
+  type EditZoom,
 } from '../editor/edit-manifest';
 import { clipDurationMs, overlayEndMs, timelineSlots } from '../editor/edit-ops';
 import type { FilterOp } from '../video-composer/definitions';
@@ -46,8 +47,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
 
   const { width, height, fps } = manifest.output;
   lines.push(
-    `Post: ${time(totalMs)}, ${width}x${height} at ${fps}fps ` +
-      `(${aspectOf(manifest.output)}, ${qualityOf(manifest.output).label}), manifest version ${manifest.version}`,
+    `Post: ${time(totalMs)}, ${width}x${height} at ${fps}fps ` + `(${aspectOf(manifest.output)}, ${qualityOf(manifest.output).label}), manifest version ${manifest.version}`,
   );
 
   /* ---- the base track ---- */
@@ -111,10 +111,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
     const section = music.outMs > 0 ? `${time(music.inMs)}..${time(music.outMs)}` : `from ${time(music.inMs)}`;
     const loop = music.loop ? ', looped' : '';
     const fade = music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '';
-    sound.push(
-      `Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post, ` +
-        `${percent(music.volume)}${loop}${fade}`,
-    );
+    sound.push(`Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post, ` + `${percent(music.volume)}${loop}${fade}`);
   } else {
     sound.push('Music: none');
   }
@@ -123,9 +120,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
   } else {
     sound.push(`Voiceover: ${count(manifest.voiceovers.length, 'take')}`);
     for (const take of manifest.voiceovers) {
-      sound.push(
-        `  "${take.id}" ${time(take.startMs)}..${time(take.startMs + take.durationMs)}, ${percent(take.volume)}`,
-      );
+      sound.push(`  "${take.id}" ${time(take.startMs)}..${time(take.startMs + take.durationMs)}, ${percent(take.volume)}`);
     }
   }
   lines.push(...sound);
@@ -151,7 +146,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
     for (const zoom of manifest.zooms) {
       lines.push(
         `  "${zoom.id}" ${time(zoom.startMs)}..${time(zoom.endMs)}, ${zoom.scale}x on (${zoom.cx}, ${zoom.cy}), ` +
-          `${zoom.rampMs > 0 ? `${time(zoom.rampMs)} ${zoom.ease} ramps` : 'instant'}`,
+          `${describeZoomRamps(zoom)}${CHAIN_NOTES[String(zoom.chain)] ?? ''}`,
       );
     }
   }
@@ -159,7 +154,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
   /* ---- the look ---- */
 
   lines.push('');
-  const filter = FILTER_PRESETS.find((preset) => preset.id === manifest.filterId);
+  const filter = FILTER_PRESETS.find(preset => preset.id === manifest.filterId);
   const filterName = filter ? filter.label : `${manifest.filterId} (not a preset this build knows)`;
   lines.push(`Look: fit ${manifest.fit}, filter ${filterName} at ${percent(manifest.filterIntensity)}`);
   const adjusted = describeAdjust(manifest.adjust);
@@ -167,11 +162,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
   // What the render will actually do, which is not the same list as the preset's: the intensity and
   // the Adjust are folded into it, and a preset at 0% resolves to nothing at all.
   const ops = resolveFilterOps(manifest);
-  lines.push(
-    ops.length === 0
-      ? '  Resolved colour ops: none, so the picture goes through untouched'
-      : `  Resolved colour ops: ${ops.map(describeFilterOp).join(', ')}`,
-  );
+  lines.push(ops.length === 0 ? '  Resolved colour ops: none, so the picture goes through untouched' : `  Resolved colour ops: ${ops.map(describeFilterOp).join(', ')}`);
 
   return lines.join('\n');
 }
@@ -217,23 +208,35 @@ function describeOverlay(overlay: EditOverlay, totalMs: number): string {
   if (overlay.scale !== 1) extras.push(`${round(overlay.scale)}x`);
   if (overlay.rotationDeg !== 0) extras.push(`turned ${round(overlay.rotationDeg)} degrees`);
   if (overlay.opacity !== 1) extras.push(`${percent(overlay.opacity)}`);
+  const moves = describeAnimation(overlay);
+  if (moves) extras.push(moves);
   const tail = extras.length > 0 ? `, ${extras.join(', ')}` : '';
 
   switch (overlay.kind) {
     case 'text':
-      return `text "${overlay.id}": ${JSON.stringify(overlay.text)} in ${overlay.styleId} ${overlay.color}, ` +
-        `${overlay.align}, effect ${overlay.effect}, ${window} ${where}${tail}`;
+      return (
+        `text "${overlay.id}": ${JSON.stringify(overlay.text)} in ${overlay.styleId} ${overlay.color}, ` + `${overlay.align}, effect ${overlay.effect}, ${window} ${where}${tail}`
+      );
     case 'sticker':
-      return `sticker "${overlay.id}": ${overlay.emoji ? `emoji ${overlay.emoji}` : `asset ${overlay.assetId}`}, ` +
-        `${window} ${where}${tail}`;
+      return `sticker "${overlay.id}": ${overlay.emoji ? `emoji ${overlay.emoji}` : `asset ${overlay.assetId}`}, ` + `${window} ${where}${tail}`;
     case 'image':
-      return `image "${overlay.id}": ${overlay.fileName || overlay.uri}, aspect ${round(overlay.aspect)}, ` +
-        `${window} ${where}${tail}`;
+      return `image "${overlay.id}": ${overlay.fileName || overlay.uri}, aspect ${round(overlay.aspect)}, ` + `${window} ${where}${tail}`;
     case 'effect':
       // An effect covers the frame, so its centre and angle are fixed and saying them would be
       // saying something that is true of every effect there has ever been.
-      return `effect "${overlay.id}": ${overlay.effectId}, ${window}, strength ${percent(overlay.opacity)}`;
+      return `effect "${overlay.id}": ${overlay.effectId}, ${window}, strength ${percent(overlay.opacity)}${moves ? `, ${moves}` : ''}`;
   }
+}
+
+/** A layer's moves as asked for, `in pop 470ms, loop pulse every 1000ms, out fade 400ms`, or '' for none. */
+function describeAnimation(overlay: EditOverlay): string {
+  const animation = overlay.animation;
+  if (!animation) return '';
+  const parts: string[] = [];
+  if (animation.in) parts.push(`in ${animation.in.id} ${animation.in.durationMs}ms`);
+  if (animation.loop) parts.push(`loop ${animation.loop.id} every ${animation.loop.periodMs}ms`);
+  if (animation.out) parts.push(`out ${animation.out.id} ${animation.out.durationMs}ms`);
+  return parts.join(', ');
 }
 
 /** Only what was moved. A list of six zeroes is the same sentence as "untouched", spelled longer. */
@@ -246,6 +249,24 @@ function describeAdjust(adjust: EditAdjust): string {
 
 function rect(value: { x: number; y: number; w: number; h: number }): string {
   return `${round(value.x)},${round(value.y)} ${round(value.w)}x${round(value.h)}`;
+}
+
+/**
+ * `700ms (0:00.7) smooth ramps` for the zoom the editor makes, and both ramps named when a template
+ * made them differ: `steady ramps, 3000ms (0:03.0) in and instant out` is a push-in held to the cut.
+ */
+/** What a zoom's [EditZoom.chain] keeps it from, by its stored value; absent pans both ways and says nothing. */
+const CHAIN_NOTES: Readonly<Record<string, string>> = {
+  false: ', never pans to a neighbour',
+  in: ', pans from the zoom before and never on to the next',
+  out: ', pans on to the next zoom and never from the one before',
+};
+
+function describeZoomRamps(zoom: EditZoom): string {
+  const out = zoom.rampOutMs ?? zoom.rampMs;
+  if (out === zoom.rampMs) return zoom.rampMs > 0 ? `${time(zoom.rampMs)} ${zoom.ease} ramps` : 'instant';
+  const ramp = (ms: number): string => (ms > 0 ? time(ms) : 'instant');
+  return `${zoom.ease} ramps, ${ramp(zoom.rampMs)} in and ${ramp(out)} out`;
 }
 
 /** `4500ms (0:04.5)`, and a plain `0ms` for the start, where a clock adds nothing. */

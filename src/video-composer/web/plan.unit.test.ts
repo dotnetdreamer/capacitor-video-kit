@@ -501,3 +501,21 @@ describe('camera', () => {
     expect(withCamera.overlays).toEqual(without.overlays);
   });
 });
+
+describe('overlay motion', () => {
+  const layer = { id: 'o', png: 'data:image/png;base64,AAAA', cx: 0.5, cy: 0.5, wPx: 100, hPx: 50, rotationDeg: 0, startMs: 200, endMs: 900, opacity: 1 };
+
+  it('is null for a layer that stands still, which is every layer written before layers moved', () => {
+    expect(buildPlan(spec({ overlays: [layer] }), new Map()).overlays[0].motion).toBeNull();
+    const flat = { ...layer, motion: { atMs: [200, 900], scale: [1, 1] } };
+    expect(buildPlan(spec({ overlays: [flat] }), new Map()).overlays[0].motion).toBeNull();
+  });
+
+  it('keeps a moving layer its keys in output milliseconds, and moves nothing else', () => {
+    const motion = { atMs: [200, 500], opacity: [0, 1], x: [0.12, 0] };
+    const plan = buildPlan(spec({ overlays: [{ ...layer, motion }] }), new Map());
+    expect(plan.overlays[0].motion).toEqual(motion);
+    const still = buildPlan(spec({ overlays: [layer] }), new Map());
+    expect({ ...plan.overlays[0], motion: null }).toEqual(still.overlays[0]);
+  });
+});

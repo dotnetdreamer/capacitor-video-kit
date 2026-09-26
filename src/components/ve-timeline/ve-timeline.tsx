@@ -18,7 +18,9 @@ import {
   musicSectionMs,
   musicSourceMsAt,
   musicWindow,
+  overlayAnimationSpans,
   overlayEndMs,
+  overlayWireWindow,
   timelineSlots,
   totalDurationMs,
   trackIdOfClip,
@@ -255,6 +257,9 @@ interface LayerLaneView {
   kind: OverlayKind;
   x: number;
   w: number;
+  /** How much of each end the layer's animation arrives and leaves over, drawn as the zoom bars' fade. 0 for a cut. */
+  rampInPx: number;
+  rampOutPx: number;
   selected: boolean;
   label: string;
   emoji: string | null;
@@ -746,11 +751,15 @@ export class VeTimeline {
         const overlay = m.overlays[i];
         const start = Math.min(overlay.startMs, total);
         const end = Math.max(start, overlayEndMs(overlay, total));
+        // The in and the out as they PLAY - squeezed when the layer is too short for both - over the
+        // window the render compiles them against, so the fade drawn is the move exported. The
+        // zoom bars' geometry, because a lane is the same bar: the same x and width, ramps and all.
+        const wire = overlayWireWindow(overlay, total);
+        const spans = overlay.animation ? overlayAnimationSpans(overlay.animation, wire.endMs - wire.startMs) : null;
         lanes.push({
           id: overlay.id,
           kind: overlay.kind,
-          x: pad + (start / 1000) * pps,
-          w: Math.max(MIN_ITEM_PX, ((end - start) / 1000) * pps),
+          ...zoomBar({ startMs: start, endMs: end, rampInMs: spans?.inMs ?? 0, rampOutMs: spans?.outMs ?? 0 }, pps, pad),
           selected: selection?.kind === 'overlay' && selection.id === overlay.id,
           ...this.laneContent(overlay),
         });
@@ -758,7 +767,20 @@ export class VeTimeline {
       return lanes;
     },
     (a, b) =>
-      sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.selected === y.selected && x.label === y.label && x.emoji === y.emoji && x.image === y.image),
+      sameList(
+        a,
+        b,
+        (x, y) =>
+          x.id === y.id &&
+          x.x === y.x &&
+          x.w === y.w &&
+          x.rampInPx === y.rampInPx &&
+          x.rampOutPx === y.rampOutPx &&
+          x.selected === y.selected &&
+          x.label === y.label &&
+          x.emoji === y.emoji &&
+          x.image === y.image,
+      ),
   );
 
   /*
@@ -1100,8 +1122,7 @@ export class VeTimeline {
       sameList(
         a,
         b,
-        (x, y) =>
-          x.id === y.id && x.x === y.x && x.w === y.w && x.rampInPx === y.rampInPx && x.rampOutPx === y.rampOutPx && x.selected === y.selected && x.label === y.label,
+        (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.rampInPx === y.rampInPx && x.rampOutPx === y.rampOutPx && x.selected === y.selected && x.label === y.label,
       ),
   );
 
@@ -3499,8 +3520,11 @@ export class VeTimeline {
                       data-hit="layer"
                       data-id={lane.id}
                       data-kind={lane.kind}
-                      style={{ left: `${lane.x}px`, width: `${lane.w}px` }}
+                      style={{ 'left': `${lane.x}px`, 'width': `${lane.w}px`, '--ramp-in': `${lane.rampInPx}px`, '--ramp-out': `${lane.rampOutPx}px` }}
                     >
+                      {/* The layer arriving and leaving, as the zoom bar draws its camera's: a fade at each end. */}
+                      <span class="item__ramp item__ramp--in" aria-hidden="true"></span>
+                      <span class="item__ramp item__ramp--out" aria-hidden="true"></span>
                       <span class="item__label">{this.laneLabel(lane)}</span>
                     </div>
                     {lane.selected && layerHandles

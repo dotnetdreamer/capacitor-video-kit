@@ -86,6 +86,7 @@ import {
   MIN_CLIP_MS,
   MIN_LAYER_MS,
   MAX_ZOOMS,
+  MAX_STORED_ZOOM_RAMP_MS,
   MAX_ZOOM_RAMP_MS,
   MAX_ZOOM_SCALE,
   MIN_ZOOM_MS,
@@ -103,6 +104,7 @@ import {
 import { insertClip } from '../editor/edit-ops';
 import { EFFECT_CATEGORIES, EFFECT_PRESETS } from '../editor/effects';
 import { layoutPresets } from '../editor/layout-presets';
+import { MAX_OVERLAY_LOOP_MS, MAX_OVERLAY_MOVE_MS, MIN_OVERLAY_LOOP_MS, MIN_OVERLAY_MOVE_MS, OVERLAY_ANIMATIONS } from '../editor/motion';
 import { DEFAULT_TRANSITION_MS, MAX_TRANSITION_MS, MIN_TRANSITION_MS, TRANSITIONS, TRANSITION_CATEGORIES } from '../editor/transitions';
 import { DEFAULT_TEXT_STYLE_ID, TEXT_STYLES, TEXT_STYLE_CATEGORIES } from '../data/text-styles';
 import { applyEditOps, opNamesFor, zoomOffered, type EditOp, type McpEditingOptions } from './ops';
@@ -406,25 +408,25 @@ export const OP_REFERENCE: Record<string, string> = {
   setTrackStart: 'trackId, startMs - where the whole layer begins on the output timeline.',
   setTrackOpacity: 'trackId, opacity (0..1).',
   swapTrackZ: 'trackId - swaps this layer with the one above it.',
-  moveClipToTrack:
-    'clipId, target ({kind:"base"} | {kind:"track",trackId} | {kind:"new",index}), atMs, newTrackId - ' +
-    'newTrackId is only used when the target is "new".',
+  moveClipToTrack: 'clipId, target ({kind:"base"} | {kind:"track",trackId} | {kind:"new",index}), atMs, newTrackId - ' + 'newTrackId is only used when the target is "new".',
   applyLayoutPreset: 'trackId, presetId - see the "layouts" section for the ids.',
 
   /* layers */
   addText:
     'id, text, styleId?, color?, effect?, align?, and the layer fields cx, cy, scale, rotationDeg, ' +
-    'opacity, startMs, endMs. endMs of 0 means "to the end of the post".',
+    'opacity, startMs, endMs, animation?. endMs of 0 means "to the end of the post". animation is ' +
+    '{in?: {id, durationMs}, out?: {id, durationMs}, loop?: {id, periodMs}} - see the "animations" section; ' +
+    'an effect honours only what a preset does to its opacity.',
   addSticker: 'id, exactly one of emoji or assetId, plus the layer fields.',
   addImage: 'id, uri, fileName?, aspect?, plus the layer fields.',
   addEffect: 'id, effectId, plus the layer fields. opacity is the effect’s strength.',
-  patchOverlay: 'id, patch - any of the layer’s own fields except id and kind.',
+  patchOverlay: 'id, patch - any of the layer’s own fields except id and kind. animation: null takes its moves away.',
   removeOverlay: 'id.',
   duplicateOverlay: 'id, newId.',
   moveLayer: 'id, move ("forward" | "backward" | "front" | "back") - drawing order.',
   moveLayerTo: 'id, toIndex.',
   setOverlayWindow: 'id, startMs, endMs - when the layer is on screen.',
-  splitOverlay: 'id, atMs, newId - two layers where there was one.',
+  splitOverlay: 'id, atMs, newId - two layers where there was one; the first keeps the animation’s in, the second its out, both its loop.',
 
   /* sound */
   setMusic: 'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, volume?, loop?, fadeOutMs?}) or null.',
@@ -437,9 +439,12 @@ export const OP_REFERENCE: Record<string, string> = {
   /* zooms */
   addZoom:
     'id, startMs, endMs? (default startMs + 3000), cx?, cy? (centre of the area, 0..1 of the frame), scale? (1.1..4, default 2), ' +
-    'rampMs? (0..2000, the move in and again out, inside the window; 0 is a cut), ease? ("smooth" | "snappy" | "steady") - ' +
+    'rampMs? (0..60000, default 700: the move in, and the move out too unless rampOutMs is given, inside the window; 0 is a cut), ' +
+    'rampOutMs? (the move out when it differs: rampMs = the window with rampOutMs 0 is a push-in held to the end, rampMs 0 with rampOutMs = the window a pull-out; ' +
+    'ramps that do not fit the window are shortened in proportion), ease? ("smooth" | "snappy" | "steady"), ' +
+    'chain? (false: never pan to or from the zoom either side, so touching zooms cut from one area to the next) - ' +
     'the camera closes in on that area of the VIDEO (text and stickers stay put). Zooms never overlap; shortened to fit before the next one.',
-  updateZoom: 'id, and any of cx, cy, scale, rampMs, ease.',
+  updateZoom: 'id, and any of cx, cy, scale, rampMs, rampOutMs, ease, chain.',
   setZoomWindow: 'id, startMs, endMs - held between the zooms either side and the end. Zooms under 1s apart pan from one area to the next.',
   duplicateZoom: 'id, newId - a copy straight after the original.',
   deleteZoom: 'id.',
@@ -449,9 +454,7 @@ export const OP_REFERENCE: Record<string, string> = {
   setAdjust: 'patch - any of brightness, contrast, saturation, warmth, tint (each -1..1), fade (0..1).',
   setFit: 'fit ("contain" | "cover") - the post’s fit, and the default for a clip with none.',
   setOriginalMuted: 'muted - mutes every clip’s own sound, leaving music and voiceover alone.',
-  setOutput:
-    'either aspect? ("9:16" | "16:9"), qualityId? and fps?, or width and height outright with fps?. ' +
-    'Anything left out keeps what the post has.',
+  setOutput: 'either aspect? ("9:16" | "16:9"), qualityId? and fps?, or width and height outright with fps?. ' + 'Anything left out keeps what the post has.',
 };
 
 /** [OP_REFERENCE] as these settings leave it: a copy, in the same order, without the refused ops. */
@@ -463,7 +466,7 @@ function opReferenceFor(opNames: readonly string[]): Record<string, string> {
 /* The tools                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
 
-const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'layouts', 'textStyles', 'output', 'ops', 'limits'] as const;
+const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'animations', 'layouts', 'textStyles', 'output', 'ops', 'limits'] as const;
 type CatalogSection = (typeof CATALOG_SECTIONS)[number];
 
 /*
@@ -545,7 +548,7 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
           aspect: { type: 'string', enum: ['9:16', '16:9'], description: 'Defaults to 9:16, a vertical post.' },
           qualityId: {
             type: 'string',
-            enum: OUTPUT_QUALITIES.map((quality) => quality.id),
+            enum: OUTPUT_QUALITIES.map(quality => quality.id),
             description: 'Named by the frame’s short side. Defaults to 720p.',
           },
           fps: { type: 'number', enum: [...OUTPUT_FPS], description: 'Defaults to 30.' },
@@ -560,17 +563,13 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
         if (aspect !== undefined || qualityId !== undefined || fps !== undefined) {
           manifest = {
             ...manifest,
-            output: outputFor(
-              (aspect as '9:16' | '16:9') ?? '9:16',
-              (qualityId as string) ?? '720p',
-              (fps as number) ?? DEFAULT_OUTPUT.fps,
-            ),
+            output: outputFor((aspect as '9:16' | '16:9') ?? '9:16', (qualityId as string) ?? '720p', (fps as number) ?? DEFAULT_OUTPUT.fps),
           };
         }
 
         for (const [index, raw] of readSources(args['sources']).entries()) {
           const id = raw.id ?? raw.clipKey;
-          if (manifest.clips.some((clip) => clip.id === id)) {
+          if (manifest.clips.some(clip => clip.id === id)) {
             throw new ToolError(`sources[${index}]: two clips would share the id "${id}" - give one an "id" of its own`);
           }
           manifest = insertClip(manifest, defaultClipEdit(raw.clipKey, raw.durationMs, id));
@@ -616,10 +615,7 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
         if (typeof version !== 'number') notes.push(`No version on the input; read as version ${MANIFEST_VERSION}.`);
         else if (version < MANIFEST_VERSION) notes.push(`Migrated from version ${version} to ${MANIFEST_VERSION}.`);
         else if (version > MANIFEST_VERSION) {
-          notes.push(
-            `The input says version ${version}, which is NEWER than the ${MANIFEST_VERSION} this build knows. ` +
-              'Anything that version added has been dropped.',
-          );
+          notes.push(`The input says version ${version}, which is NEWER than the ${MANIFEST_VERSION} this build knows. ` + 'Anything that version added has been dropped.');
         }
 
         // A field-by-field diff would be a second normaliser to keep in step with the first, so what
@@ -700,8 +696,8 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
       name: 'catalog_list',
       title: 'List what a post can be made of',
       description:
-        'The fixed lists an edit draws on: the filter presets, the full-frame effects, the layout ' +
-        'presets for arranging a second video over the first, the text styles, the output frames on ' +
+        'The fixed lists an edit draws on: the filter presets, the full-frame effects, the transitions, ' +
+        'the moves a layer can make, the layout presets for arranging a second video over the first, the text styles, the output frames on ' +
         'offer, what every edit op reads, and the limits a post is held to. Ask for one section or ' +
         'leave it out for all of them.',
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -777,21 +773,21 @@ function catalogSection(
   const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
   switch (section) {
     case 'filters': {
-      const data = FILTER_PRESETS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
+      const data = FILTER_PRESETS.map(preset => ({ id: preset.id, label: preset.label, category: preset.category }));
       return {
         data: { categories: copy(FILTER_CATEGORIES), presets: data },
         lines: `Filters (setFilter filterId):\n${byCategory(data)}`,
       };
     }
     case 'effects': {
-      const data = EFFECT_PRESETS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
+      const data = EFFECT_PRESETS.map(preset => ({ id: preset.id, label: preset.label, category: preset.category }));
       return {
         data: { categories: copy(EFFECT_CATEGORIES), presets: data },
         lines: `Full-frame effects (addEffect effectId):\n${byCategory(data)}`,
       };
     }
     case 'transitions': {
-      const data = TRANSITIONS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
+      const data = TRANSITIONS.map(preset => ({ id: preset.id, label: preset.label, category: preset.category }));
       return {
         data: { categories: copy(TRANSITION_CATEGORIES), presets: data, durationMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS, default: DEFAULT_TRANSITION_MS } },
         lines:
@@ -799,17 +795,34 @@ function catalogSection(
           `default ${DEFAULT_TRANSITION_MS}ms, and never more than half of either clip:\n${byCategory(data)}`,
       };
     }
-    case 'layouts': {
-      const data = layoutPresets().map((preset) => ({ id: preset.id, label: preset.label }));
+    case 'animations': {
+      const data = {
+        in: OVERLAY_ANIMATIONS.in.map(preset => ({ ...preset })),
+        out: OVERLAY_ANIMATIONS.out.map(preset => ({ ...preset })),
+        loop: OVERLAY_ANIMATIONS.loop.map(preset => ({ ...preset })),
+        durationMs: { min: MIN_OVERLAY_MOVE_MS, max: MAX_OVERLAY_MOVE_MS },
+        periodMs: { min: MIN_OVERLAY_LOOP_MS, max: MAX_OVERLAY_LOOP_MS },
+      };
+      const ids = (presets: readonly { id: string; defaultMs: number }[]) => presets.map(preset => `${preset.id} (${preset.defaultMs}ms)`).join(', ');
       return {
         data,
         lines:
-          'Layout presets (applyLayoutPreset presetId), for arranging a video track over the base:\n' +
-          data.map((preset) => `  ${preset.id} - ${preset.label}`).join('\n'),
+          `Layer animation (a layer's animation field), each with its default length:\n` +
+          `  in, ${MIN_OVERLAY_MOVE_MS}..${MAX_OVERLAY_MOVE_MS}ms: ${ids(OVERLAY_ANIMATIONS.in)}\n` +
+          `  out, ${MIN_OVERLAY_MOVE_MS}..${MAX_OVERLAY_MOVE_MS}ms: ${ids(OVERLAY_ANIMATIONS.out)}\n` +
+          `  loop, a period of ${MIN_OVERLAY_LOOP_MS}..${MAX_OVERLAY_LOOP_MS}ms: ${ids(OVERLAY_ANIMATIONS.loop)}\n` +
+          '  An in and an out too long for the layer are both shortened in proportion; the loop runs between them.',
+      };
+    }
+    case 'layouts': {
+      const data = layoutPresets().map(preset => ({ id: preset.id, label: preset.label }));
+      return {
+        data,
+        lines: 'Layout presets (applyLayoutPreset presetId), for arranging a video track over the base:\n' + data.map(preset => `  ${preset.id} - ${preset.label}`).join('\n'),
       };
     }
     case 'textStyles': {
-      const data = TEXT_STYLES.map((style) => ({ id: style.id, label: style.label, category: style.category }));
+      const data = TEXT_STYLES.map(style => ({ id: style.id, label: style.label, category: style.category }));
       return {
         data: { categories: copy(TEXT_STYLE_CATEGORIES), default: DEFAULT_TEXT_STYLE_ID, styles: data },
         lines: `Text styles (addText styleId, default "${DEFAULT_TEXT_STYLE_ID}"):\n${byCategory(data)}`,
@@ -818,14 +831,13 @@ function catalogSection(
     case 'output': {
       const data = {
         aspects: ['9:16', '16:9'],
-        qualities: OUTPUT_QUALITIES.map((quality) => ({ ...quality })),
+        qualities: OUTPUT_QUALITIES.map(quality => ({ ...quality })),
         fps: [...OUTPUT_FPS],
         default: { ...DEFAULT_OUTPUT },
       };
-      const frames = OUTPUT_QUALITIES.map((quality) => {
+      const frames = OUTPUT_QUALITIES.map(quality => {
         const portrait = outputFor('9:16', quality.id, 30);
-        return `  ${quality.id} (${quality.label}) - ${portrait.width}x${portrait.height} standing, ` +
-          `${portrait.height}x${portrait.width} laid down`;
+        return `  ${quality.id} (${quality.label}) - ${portrait.width}x${portrait.height} standing, ` + `${portrait.height}x${portrait.width} laid down`;
       });
       return {
         data,
@@ -871,14 +883,15 @@ function catalogSection(
               maxZooms: MAX_ZOOMS,
               minZoomMs: MIN_ZOOM_MS,
               zoomScale: { min: MIN_ZOOM_SCALE, max: MAX_ZOOM_SCALE },
-              zoomRampMs: { min: 0, max: MAX_ZOOM_RAMP_MS },
+              zoomRampMs: { min: 0, max: MAX_STORED_ZOOM_RAMP_MS },
               zoomChainGapMs: ZOOM_CHAIN_GAP_MS,
             }
           : {}),
       };
       const zooms = editing.zoom
         ? `  at most ${MAX_ZOOMS} zooms, each at least ${MIN_ZOOM_MS}ms, ${MIN_ZOOM_SCALE}x to ${MAX_ZOOM_SCALE}x, ` +
-          `ramps 0 to ${MAX_ZOOM_RAMP_MS}ms; zooms under ${ZOOM_CHAIN_GAP_MS}ms apart pan from one to the next`
+          `ramps 0 to ${MAX_STORED_ZOOM_RAMP_MS}ms each way (the zoom sheet offers up to ${MAX_ZOOM_RAMP_MS}ms); ` +
+          `zooms under ${ZOOM_CHAIN_GAP_MS}ms apart pan from one to the next`
         : '  no zooms: Zoom is turned off for this app, so a post here holds none and gains none';
       return {
         data,

@@ -20,8 +20,8 @@ import { EditorStore } from '../../state/editor-store';
 /** A vintage preset, so the sheet has a category other than Trending to open on. */
 const APPLIED = { id: 'retro', label: 'Retro', category: 'Vintage' };
 
-/** Trending holds seven presets and the first of them is Original, which the row never draws. */
-const TRENDING_LABELS = ['Crisp', 'Vivid', 'Warm', 'Golden', 'Cool', 'Fade'];
+/** Trending holds nine presets and the first of them is Original, which the row never draws. */
+const TRENDING_LABELS = ['Crisp', 'Vivid', 'Warm', 'Golden', 'Cool', 'Fade', 'Y2K', 'Cyber'];
 
 const mounted: { store: EditorStore; column: HTMLElement }[] = [];
 
@@ -148,7 +148,7 @@ describe('ve-filter-sheet', () => {
   });
 
   it('brings the chosen preset into the middle of a row that does not fit on the screen', async () => {
-    // Fourth of Trending's six, so a row left at its start would show only its edge - and far
+    // Fourth of Trending's eight, so a row left at its start would show only its edge - and far
     // enough from the end that the middle is somewhere the row can actually scroll to.
     const { sheet } = await mount('golden');
 
@@ -255,12 +255,22 @@ describe('ve-filter-sheet', () => {
     tab(sheet, 'Vintage').click();
     await until('the vintage presets', () => labels(sheet).includes(APPLIED.label));
 
-    expect(labels(sheet)).toEqual(['Retro', 'Polaroid', '1970']);
+    expect(labels(sheet)).toEqual(['Retro', 'Polaroid', '1970', 'Sepia']);
     expect(activeTab(sheet)).toBe('Vintage');
     // A new row started part way along would hide its first presets.
     expect(row(sheet).scrollLeft).toBe(0);
     // Switching tabs is browsing, not choosing: nothing has been applied.
     expect(thumbs(sheet).some(button => button.classList.contains('fs__thumb--on'))).toBe(false);
+  });
+
+  it('puts the graded film looks on a tab of their own, after Trending', async () => {
+    const { sheet } = await mount();
+
+    tab(sheet, 'Film').click();
+    await until('the film looks', () => labels(sheet).includes('Cinematic'));
+
+    expect(labels(sheet)).toEqual(['Cinematic', 'Moody', 'Kodak', 'Fuji']);
+    expect(activeTab(sheet)).toBe('Film');
   });
 
   it('closes the panel on the frame’s tick', async () => {

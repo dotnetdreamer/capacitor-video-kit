@@ -13,8 +13,8 @@ import type { EditorPanel } from '../../state/editor.types';
  * How tall a sheet is allowed to be, and therefore what stays on screen above it.
  *
  * `compact` keeps the preview, the transport and a slim timeline; `tall` takes the screen and the
- * sheet is the only thing on it. Twelve of the fifteen are compact, and the three that are not are the
- * ones with a keyboard or a scrolling list in them.
+ * sheet is the only thing on it. Thirteen of the sixteen are compact, and the three that are not
+ * are the ones with a keyboard or a scrolling list in them.
  *
  * A `Record` rather than the set of compact panels the Angular shell kept, because a `Record` over
  * [EditorPanel] cannot be left incomplete: a thirteenth panel added to that union fails the build
@@ -39,6 +39,11 @@ export const PANEL_LAYOUT: Readonly<Record<EditorPanel, 'compact' | 'tall'>> = {
    * in view while its window is set.
    */
   zoom: 'compact',
+  /*
+   * Compact because the move a tile is chosen for plays on the picture: the layer arriving, leaving
+   * or looping is the whole of what the sheet is showing, and it happens on the preview.
+   */
+  animation: 'compact',
   /* The keyboard sits under this one and the sheet has to clear it. */
   text: 'tall',
   /* A scrolling grid of several hundred tiles, with a search field and a category bar. */

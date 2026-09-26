@@ -144,7 +144,7 @@ describe('EditorStore zooms', () => {
   it('duplicates straight after, and says so without room', () => {
     load({ zooms: [zoom('z', 1000, 4000)] });
     store.duplicateZoom('z');
-    expect(store.zooms.value.map((z) => [z.startMs, z.endMs])).toEqual([
+    expect(store.zooms.value.map(z => [z.startMs, z.endMs])).toEqual([
       [1000, 4000],
       [4000, 7000],
     ]);

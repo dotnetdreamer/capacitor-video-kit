@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MIN_ZOOM_MS, emptyManifest, defaultClipEdit, normaliseManifest, type EditManifest } from '../editor/edit-manifest';
+import { MIN_STORED_ZOOM_MS, MIN_ZOOM_MS, emptyManifest, defaultClipEdit, normaliseManifest, type EditManifest } from '../editor/edit-manifest';
 import type { EditorEditingOptions } from '../host/host.types';
 import { OP_NAMES, ZOOM_OPS, applyEditOps, EditOpError } from './ops';
 import { OP_REFERENCE, createTools, type ToolDefinition, type ToolResult } from './tools';
@@ -377,7 +377,7 @@ describe('an app that has turned Zoom off', () => {
             { id: 'a', startMs: '1000', endMs: '3000' },
             { id: 'b', startMs: 1000 },
             { id: 'c', startMs: Number.NaN, endMs: 3000 },
-            { id: 'd', startMs: 1000, endMs: 1000 + MIN_ZOOM_MS - 1 },
+            { id: 'd', startMs: 1000, endMs: 1000 + MIN_STORED_ZOOM_MS - 1 },
           ],
         },
       ],
@@ -402,6 +402,10 @@ describe('an app that has turned Zoom off', () => {
       ['a manifest of a version newer than this build', { ...post(), version: 99, zooms: [zoom] }],
       ['a manifest with no version', { clips: post().clips, zooms: [zoom] }],
       ['two zooms on one window, the second moved on', { ...post(), zooms: [zoom, { ...zoom, endMs: 3000 + MIN_ZOOM_MS }] }],
+      [
+        'a template punch, shorter than the zoom sheet makes and long enough to keep',
+        { ...post(), zooms: [{ id: 'p', startMs: 1000, endMs: 1000 + MIN_STORED_ZOOM_MS, rampMs: 90, rampOutMs: 0 }] },
+      ],
     ];
     for (const [label, manifest] of shapes) {
       for (const [name, args] of wholeManifestCalls(manifest)) {

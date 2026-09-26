@@ -10,12 +10,17 @@ import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
 import { ClipMedia } from './clip-media';
+import { LayerMotion } from './layer-motion';
 import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPlayer } from './preview-player';
 import { zoomArea, zoomLevelLabel } from './zoom-area';
 
-/** One layer as the render places it. Positions and sizes are percentages of the frame. */
+/**
+ * One layer as the render places it AT REST. Positions and sizes are percentages of the frame; the
+ * centre, angle and opacity are also kept as the numbers they came from, for [LayerMotion] to move
+ * the layer from.
+ */
 interface LayerView {
   id: string;
   effect: boolean;
@@ -27,6 +32,11 @@ interface LayerView {
   aspect: string;
   transform: string;
   opacity: number;
+  cx: number;
+  cy: number;
+  rotationDeg: number;
+  /** The text being typed, which [LayerMotion] leaves at rest so it can be read. */
+  held: boolean;
 }
 
 interface SelectionView {
@@ -273,6 +283,12 @@ export class VePreview implements EditorPlayer {
   private player: PreviewPlayer | null = null;
   /** The compositor: everything the customer sees of their own footage; see [PreviewCanvas]. */
   private canvas: PreviewCanvas | null = null;
+  /**
+   * What makes the layers MOVE: a text popping in, a sticker pulsing. Each moving layer's `<img>` is
+   * written directly, frame by frame, over the resting place the vdom gives it; see [LayerMotion].
+   * Read off the player's clock, so a layer moves in step with the picture under it.
+   */
+  private readonly motion = new LayerMotion(() => this.player?.instantMs() ?? this.ctx.store.playheadMs.value);
   private gestures: OverlayGestures | null = null;
   private stageResize: ResizeObserver | null = null;
   private readonly disposers: Array<() => void> = [];
@@ -348,6 +364,10 @@ export class VePreview implements EditorPlayer {
           aspect: 'auto',
           transform: 'none',
           opacity: overlay.opacity,
+          cx: 0.5,
+          cy: 0.5,
+          rotationDeg: 0,
+          held: editing,
         });
         continue;
       }
@@ -363,6 +383,10 @@ export class VePreview implements EditorPlayer {
         aspect: `${bitmap.wPx} / ${bitmap.hPx}`,
         transform: layerTransform(overlay.rotationDeg),
         opacity: overlay.opacity,
+        cx: overlay.cx,
+        cy: overlay.cy,
+        rotationDeg: overlay.rotationDeg,
+        held: editing,
       });
     }
     return views;
@@ -667,6 +691,8 @@ export class VePreview implements EditorPlayer {
   componentDidRender() {
     this.setUp();
     this.attachExtras();
+    // A render writes every layer back at rest; the moving ones go straight back where they are.
+    this.motion.update(this.layers.value, this.ctx.store.overlayMotions.value);
     // The canvas is composited from the store and not from the DOM, so a render cannot move a
     // picture without something in the store having moved it - but a render is also the first
     // moment a newly written element exists, and the cheapest place to ask for the frame that puts
@@ -685,6 +711,7 @@ export class VePreview implements EditorPlayer {
     this.detachExtras();
     this.canvas?.destroy();
     this.canvas = null;
+    this.motion.destroy();
     this.gestures?.destroy();
     this.gestures = null;
     this.stageResize?.disconnect();
@@ -807,7 +834,19 @@ export class VePreview implements EditorPlayer {
     this.disposers.push(
       deferredEffect(
         () => store.playing.value,
-        playing => this.canvas?.setPlaying(playing),
+        playing => {
+          this.canvas?.setPlaying(playing);
+          this.motion.setPlaying(playing);
+        },
+      ),
+    );
+
+    // A moving layer where the playhead is, while the post is not playing: a scrub, a seek, a step,
+    // and a move or a preset changed under a paused playhead. Playing, the frame loop has it.
+    this.disposers.push(
+      deferredEffect(
+        () => [store.playheadMs.value, store.overlayMotions.value] as const,
+        ([, motions]) => this.motion.update(this.layers.value, motions),
       ),
     );
 
@@ -1071,7 +1110,15 @@ export class VePreview implements EditorPlayer {
 
               {this.layers.value.map(layer =>
                 layer.effect ? (
-                  <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} style={{ opacity: String(layer.opacity) }} />
+                  <img
+                    key={layer.id}
+                    class="pv__effect"
+                    alt=""
+                    draggable={false}
+                    src={layer.png}
+                    ref={this.motion.refFor(layer.id)}
+                    style={{ opacity: String(layer.opacity) }}
+                  />
                 ) : (
                   <img
                     key={layer.id}
@@ -1079,6 +1126,7 @@ export class VePreview implements EditorPlayer {
                     alt=""
                     draggable={false}
                     src={layer.png}
+                    ref={this.motion.refFor(layer.id)}
                     style={{
                       'left': `${layer.left}%`,
                       'top': `${layer.top}%`,

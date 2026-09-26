@@ -321,7 +321,8 @@ export interface ComposeTrack {
  *
  * WHAT IT MOVES. Every video layer - the base track, every [ComposeTrack], and each side of a
  * transition - and nothing else. Overlays are drawn over the result exactly as they are over any
- * frame, unmoved: a caption, a sticker and a full-frame effect stay where the customer put them.
+ * frame, unmoved by the camera: a caption, a sticker and a full-frame effect stay where the customer
+ * put them, and move only by their own [ComposeOverlay.motion], which the camera never touches.
  *
  * READING IT, at output time `t` (ms): the keys are in [atMs] order, non-decreasing. Before the first
  * key and after the last the end key HOLDS. Between key `i` and `i + 1` every field is read by
@@ -379,6 +380,16 @@ export interface ComposeOutput {
    * moment, so a lower-rate source has its frames repeated: 24p footage in a 60 fps post is a 60 fps
    * file on those two and a 24 fps one on Android. The picture is the same judder a 24p video has on
    * a 60 Hz screen, and H.264 codes a repeated frame for almost nothing.
+   *
+   * SLOW MOTION IS THE EXCEPTION, on Android and the web (iOS does not yet). A video clip whose
+   * `speed` is below 1 would otherwise run at its source rate times its speed - 30 fps footage at
+   * 0.3x is nine pictures a second - so both engines SYNTHESISE the frames in between at this rate:
+   * each output frame of a slowed clip is its two neighbouring source frames mixed by where the
+   * frame falls between them (Android's `SlowMotionEffect`, the web's `slow-motion.ts` and
+   * `frame-interpolation.ts`). Only frames inside the clip's own trim are used, its first frame is
+   * held from the clip's start and its last to its end, and nothing is mixed across a cut. A clip at
+   * 1x or faster, and a picture, is drawn exactly as described above. Nothing on the wire asks for
+   * it: `speed` below 1 is the whole of the signal, so a spec from any version of the editor gets it.
    */
   fps: number;
   /**
@@ -472,7 +483,80 @@ export interface ComposeOverlay {
    * black is mid grey on every engine, which is what the web renderer's `globalAlpha` draws.
    */
   opacity: number;
+  /**
+   * How the layer MOVES while it is on screen: a pop in, a slide out, a pulse. Absent is a bitmap
+   * that cuts on at `startMs`, stands exactly where the fields above put it, and cuts off at `endMs`,
+   * which is every spec written before this key - and every engine is expected to decide that ONCE,
+   * when it builds its plan, so a still layer is placed by exactly the arithmetic it always was.
+   */
+  motion?: ComposeOverlayMotion;
 }
+
+/**
+ * A layer's animation, LOWERED to keys exactly as [ComposeCamera] is: JS compiles every preset, ease,
+ * spring and loop into straight lines (`compileOverlayMotion` in `src/editor/motion.ts`), and an
+ * engine only interpolates between the keys it is handed. Three hand-written copies of a spring would
+ * drift apart one release at a time, and the customer would see a different pop in the preview from
+ * the one in their export.
+ *
+ * READING IT, at output time `t` (ms): exactly the camera's reading. The keys are in [atMs] order,
+ * non-decreasing. Before the first key and after the last the end key HOLDS. Between key `i` and
+ * `i + 1` every channel present is read by straight-line interpolation,
+ * `v = v[i] + (v[i + 1] - v[i]) * (t - atMs[i]) / (atMs[i + 1] - atMs[i])`; two keys at the same time
+ * are a STEP, the later one taking effect at that time. Every channel present has the length of
+ * [atMs], 1 to [MAX_OVERLAY_MOTION_KEYS]; a channel that is absent holds its neutral value. The keys
+ * say nothing about visibility: the layer is still drawn exactly while `startMs <= t < endMs`.
+ *
+ * DRAWING IT. With the channels read at `t`, the layer is drawn as the static layer would be with
+ *
+ *   centre      = (cx + x, cy + y)             in the 0..1 top-left fractions, y DOWN
+ *   size        = (wPx * scale, hPx * scale)   output pixels, about that centre
+ *   rotationDeg = rotationDeg + rotation       CLOCKWISE, about that centre, in OUTPUT PIXELS
+ *   opacity     = opacity * opacity            applied to the ALPHA, as the static one is
+ *
+ * which is the static layer's own transform with three numbers added and two multiplied: scale, then
+ * turn, then place, so a stretched bitmap is never sheared and `x` and `y` move the layer across the
+ * screen whatever it is turned to. Engines whose frame is y-UP flip `y` and the rotation as they
+ * already flip `cy` and `rotationDeg`. A frame where the drawn size is 0 or the drawn opacity is 0 has
+ * nothing to draw, and an engine may skip the layer there.
+ *
+ * The PNG may carry more pixels than `wPx x hPx` - a layer that slams in from 1.8x is rasterised at
+ * up to 1.5x so its landing is crisp - and every engine already scales the bitmap it decodes to
+ * `wPx x hPx` before anything here applies, which is what keeps the numbers above in output pixels.
+ *
+ * Each parser CLAMPS every value - `x` and `y` to -4..4, `scale` to 0..20, `rotation` to -3600..3600,
+ * `opacity` to 0..1 - and reads one that is not a finite number as the channel's neutral value, the
+ * camera's rule for a key it cannot read. REFUSED, as shape errors, with the path that broke: a
+ * motion that is not an object, `atMs` or a channel that is not an array, a channel whose length is
+ * not `atMs`'s, a key nobody defined (a channel an engine silently skipped would be a different
+ * animation from the preview's), more than [MAX_OVERLAY_MOTION_KEYS] keys, and a time that is not a
+ * finite number or goes back in time. No `atMs`, an empty one, and a motion in which every channel
+ * holds its neutral value at every key are ABSENT - the old path - which is also what the builder
+ * sends for a layer with no animation. `normaliseOverlayMotion` states these rules once for the web
+ * engine and the tests; the Kotlin and Swift parsers check in the same order: `atMs`, then each
+ * channel in the order declared below, then the unknown keys, then the count, then the times.
+ */
+export interface ComposeOverlayMotion {
+  /** Output-timeline milliseconds, non-decreasing; equal times are a step (the later key wins). */
+  atMs: number[];
+  /** Offset of the layer's centre, a fraction of the output WIDTH, positive right. Neutral 0. */
+  x?: number[];
+  /** The same, a fraction of the output HEIGHT, positive DOWN. Neutral 0. */
+  y?: number[];
+  /** Size about the layer's centre, multiplying `wPx` and `hPx`. Neutral 1. */
+  scale?: number[];
+  /** Clockwise degrees ADDED to `rotationDeg`, about the layer's centre. Neutral 0. */
+  rotation?: number[];
+  /** 0..1, MULTIPLIED into `opacity`. Neutral 1. */
+  opacity?: number[];
+}
+
+/**
+ * The most keys one layer's [ComposeOverlayMotion] may carry. A spec with more is rejected rather
+ * than truncated. The compiler writes a key per 60th of a second and coarsens the sampling long
+ * before it gets here - a hundred seconds of a looping layer - so every layer of a post fits.
+ */
+export const MAX_OVERLAY_MOTION_KEYS = 6000;
 
 export interface ComposeMusic {
   uri: string;

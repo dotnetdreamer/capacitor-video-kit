@@ -53,6 +53,13 @@ interface EffectDefinition extends EffectPreset {
  */
 const CINEMA_BAR = (1 - 16 / 9 / 2.35) / 2;
 
+/**
+ * Letterbox's bars: half of what a 2.39:1 film gets on a 16:9 screen, a fraction of the height each.
+ * The widescreen look as a phone frames it - enough of a bar to say "film" over a portrait post, and
+ * little enough that the subject keeps the frame, which [CINEMA_BAR]'s heavier pair does not.
+ */
+const LETTERBOX_BAR = (1 - 16 / 9 / 2.39) / 4;
+
 /*
  * Ids are stored in manifests, so they are permanent: renaming one would silently drop the effect
  * from saved drafts. Labels and drawings can change; ids cannot.
@@ -136,6 +143,37 @@ const EFFECTS: EffectDefinition[] = [
       ]);
     },
   },
+  {
+    id: 'glow',
+    label: 'Glow',
+    category: 'basic',
+    draw: (g, w, h) => {
+      // Bloom as a layer can fake it: the picture cannot be brightened where it is bright, so the
+      // light comes in from the rim instead - warm at the top, where a backlight would be, rosier at
+      // the bottom - over a faint lift of the whole frame that reads as the haze bloom leaves.
+      g.fillStyle = 'rgba(255,238,222,0.06)';
+      g.fillRect(0, 0, w, h);
+      g.fillStyle = withStops(g.createLinearGradient(0, 0, 0, h), [
+        [0, 'rgba(255,214,150,0.3)'],
+        [0.28, 'rgba(255,220,170,0)'],
+        [0.75, 'rgba(255,190,200,0)'],
+        [1, 'rgba(255,180,200,0.22)'],
+      ]);
+      g.fillRect(0, 0, w, h);
+      frameEllipse(g, w, h, 0.5, 1.42, [
+        [0, 'rgba(255,232,210,0)'],
+        [0.5, 'rgba(255,226,200,0.08)'],
+        [0.85, 'rgba(255,228,204,0.24)'],
+        [1, 'rgba(255,236,216,0.36)'],
+      ]);
+      const d = Math.hypot(w, h);
+      blob(g, w * 0.5, -h * 0.04, d * 0.42, d * 0.2, 0, [
+        [0, 'rgba(255,246,226,0.55)'],
+        [0.45, 'rgba(255,220,180,0.2)'],
+        [1, 'rgba(255,210,170,0)'],
+      ]);
+    },
+  },
 
   /* ---------------------------------------------------------------------------------------- */
   /* Film                                                                                       */
@@ -206,7 +244,7 @@ const EFFECTS: EffectDefinition[] = [
       // The play triangle is a path, not "▶": that character is an emoji on Android and would come
       // out as a blue button.
       const triangleX = margin + g.measureText('PLAY').width + size * 0.45;
-      vhsStamp(g, size, (dx) => {
+      vhsStamp(g, size, dx => {
         g.textAlign = 'left';
         g.fillText('PLAY', margin + dx, baseline);
         g.beginPath();
@@ -216,10 +254,10 @@ const EFFECTS: EffectDefinition[] = [
         g.closePath();
         g.fill();
       });
-      vhsStamp(g, size, (dx) => {
-        g.textAlign = 'right';
-        g.fillText('SEP 15 2026', w - margin + dx, h - margin * 1.35);
-      });
+      // No date stamp. One drawn into the bitmap was the same date on every customer's video, with
+      // nothing they could do to change it, and it sat low on the frame under the caption a Reel or
+      // a TikTok lays over it. A template that wants one puts it in a text layer, where it can be
+      // edited and moved.
     },
   },
   {
@@ -252,6 +290,75 @@ const EFFECTS: EffectDefinition[] = [
       // The grain gets a stream of its own: it takes a number per pixel, so sharing one would move
       // every speck and scratch drawn after it whenever the canvas size changes.
       grain(g, w, h, seeded('old-film/grain'), 0.28);
+    },
+  },
+  {
+    id: 'dust',
+    label: 'Dust',
+    category: 'film',
+    detail: 'line',
+    draw: (g, w, h, random) => {
+      // A print that has been handled: specks, flecks and a few hairs, with none of the scratches
+      // or the brown cast of Old film, so it sits on a clean modern picture as well as a graded one.
+      dust(g, w, h, random, 150, 9);
+      const m = Math.min(w, h);
+      // A few out-of-focus motes, larger and soft, the way dust on the lens rather than on the film
+      // looks: most light, since that is what catches the light.
+      for (let i = 0; i < 14; i++) {
+        const x = random() * w;
+        const y = random() * h;
+        const r = m * (0.008 + 0.02 * random());
+        const rgb = random() < 0.7 ? '255,250,240' : '30,22,14';
+        const a = 0.12 + 0.18 * random();
+        blob(g, x, y, r, r, 0, [
+          [0, rgba(rgb, a)],
+          [0.6, rgba(rgb, a * 0.6)],
+          [1, rgba(rgb, 0)],
+        ]);
+      }
+    },
+  },
+  {
+    id: 'scanlines',
+    label: 'Scanlines',
+    category: 'film',
+    detail: 'line',
+    draw: (g, w, h) => {
+      // A CRT's lines without the tape: finer than VHS's, about 300 to the frame height whatever the
+      // canvas, each a dark row and a clear one, so a thumbnail shows the texture and not a grey smear.
+      const period = Math.max(2, Math.round(h / 300));
+      const line = Math.max(1, Math.round(period / 2));
+      g.fillStyle = 'rgba(0,0,0,0.26)';
+      for (let y = 0; y < h; y += period) g.fillRect(0, y, w, line);
+      // The phosphor's faint cool cast, and the corners of curved glass falling away.
+      g.fillStyle = 'rgba(70,150,255,0.05)';
+      g.fillRect(0, 0, w, h);
+      frameEllipse(g, w, h, 0.72, 1.5, [
+        [0, 'rgba(0,0,0,0)'],
+        [0.5, 'rgba(0,0,0,0.16)'],
+        [1, 'rgba(0,0,0,0.55)'],
+      ]);
+      // One brighter band, caught part way down where a real set's refresh would be rolling.
+      const top = h * 0.58;
+      const band = h * 0.09;
+      g.fillStyle = withStops(g.createLinearGradient(0, top, 0, top + band), [
+        [0, 'rgba(255,255,255,0)'],
+        [0.5, 'rgba(255,255,255,0.07)'],
+        [1, 'rgba(255,255,255,0)'],
+      ]);
+      g.fillRect(0, top, w, band);
+    },
+  },
+  {
+    id: 'letterbox',
+    label: 'Letterbox',
+    category: 'film',
+    detail: 'line',
+    draw: (g, w, h) => {
+      const bar = Math.round(h * LETTERBOX_BAR);
+      g.fillStyle = '#000000';
+      g.fillRect(0, 0, w, bar);
+      g.fillRect(0, h - bar, w, bar);
     },
   },
 
@@ -387,6 +494,123 @@ const EFFECTS: EffectDefinition[] = [
       for (let i = 0; i < 8; i++) {
         sparkle(g, random() * w, random() * h, m * (0.018 + 0.035 * random()), 0.6 + 0.4 * random());
       }
+    },
+  },
+  {
+    id: 'flare',
+    label: 'Lens flare',
+    category: 'light',
+    draw: (g, w, h) => {
+      const d = Math.hypot(w, h);
+      const m = Math.min(w, h);
+      // The sun just inside the top right corner, where it clears a face and a caption both.
+      const sx = w * 0.8;
+      const sy = h * 0.14;
+      blob(g, sx, sy, d * 0.34, d * 0.34, 0, [
+        [0, 'rgba(255,250,236,0.95)'],
+        [0.06, 'rgba(255,232,190,0.72)'],
+        [0.25, 'rgba(255,170,96,0.22)'],
+        [1, 'rgba(255,120,60,0)'],
+      ]);
+      // The anamorphic streak: a thin line of blue-white light straight across the frame through the
+      // source, and a wider, fainter one under it - the flare a scope lens throws, and the one every
+      // "cinematic" template reaches for.
+      blob(g, sx, sy, w * 1.15, m * 0.011, 0, [
+        [0, 'rgba(240,248,255,0.9)'],
+        [0.25, 'rgba(160,205,255,0.5)'],
+        [1, 'rgba(90,150,255,0)'],
+      ]);
+      blob(g, sx, sy, w * 0.8, m * 0.05, 0, [
+        [0, 'rgba(170,210,255,0.3)'],
+        [1, 'rgba(120,170,255,0)'],
+      ]);
+      // Ghosts of the aperture along the line from the source through the middle of the frame, each
+      // a little further out and a different tint, as a lens's elements throw them.
+      const ghosts: [number, number, string, number, boolean][] = [
+        [0.45, 0.028, '255,214,140', 0.3, false],
+        [0.82, 0.016, '150,255,210', 0.34, false],
+        [1.18, 0.06, '130,175,255', 0.16, true],
+        [1.45, 0.024, '255,150,205', 0.28, false],
+        [1.72, 0.1, '255,214,160', 0.1, true],
+      ];
+      for (const [t, r, rgb, a, aperture] of ghosts) {
+        const x = sx + (w / 2 - sx) * t;
+        const y = sy + (h / 2 - sy) * t;
+        const radius = r * m;
+        g.fillStyle = withStops(g.createRadialGradient(x, y, 0, x, y, radius), [
+          [0, rgba(rgb, a * 0.45)],
+          [0.75, rgba(rgb, a)],
+          [0.9, rgba(rgb, a * 0.55)],
+          [1, rgba(rgb, 0)],
+        ]);
+        g.beginPath();
+        if (aperture) polygonSubpath(g, x, y, radius, 6, 0.3);
+        else g.arc(x, y, radius, 0, Math.PI * 2);
+        g.fill();
+      }
+      // A faint ring round the source, the halo a bright light leaves on the front element.
+      g.fillStyle = withStops(g.createRadialGradient(sx, sy, 0, sx, sy, d * 0.24), [
+        [0.84, 'rgba(255,190,150,0)'],
+        [0.92, 'rgba(255,200,160,0.1)'],
+        [1, 'rgba(255,190,150,0)'],
+      ]);
+      g.fillRect(0, 0, w, h);
+    },
+  },
+  {
+    id: 'sparkle',
+    label: 'Sparkle',
+    category: 'light',
+    detail: 'line',
+    draw: (g, w, h, random) => {
+      const m = Math.min(w, h);
+      // Calmer toward the middle, where the subject usually is, as the bokeh's highlights are.
+      const edge = (x: number, y: number) => Math.min(1, Math.hypot((x / w - 0.5) * 2, (y / h - 0.5) * 2));
+      // Glitter first: many small points of light, each a hot centre in a soft halo.
+      for (let i = 0; i < 110; i++) {
+        const x = random() * w;
+        const y = random() * h;
+        const r = m * (0.004 + 0.008 * random());
+        const a = (0.3 + 0.6 * random()) * (0.25 + 0.75 * edge(x, y));
+        const rgb = random() < 0.65 ? '255,252,240' : '255,226,170';
+        blob(g, x, y, r, r, 0, [
+          [0, rgba(rgb, a)],
+          [0.3, rgba(rgb, a * 0.55)],
+          [1, rgba(rgb, 0)],
+        ]);
+      }
+      // Then the glints: four-pointed stars in a warm halo, a few of them large.
+      for (let i = 0; i < 18; i++) {
+        const x = random() * w;
+        const y = random() * h;
+        const size = m * (0.014 + 0.05 * random() ** 2) * (0.45 + 0.55 * edge(x, y));
+        const a = 0.7 + 0.3 * random();
+        blob(g, x, y, size * 1.6, size * 1.6, 0, [
+          [0, rgba('255,236,200', 0.35 * a)],
+          [1, 'rgba(255,236,200,0)'],
+        ]);
+        sparkle(g, x, y, size, a);
+        // The largest also throw a thin diagonal cross, as a star filter does.
+        if (size > m * 0.035) {
+          g.save();
+          g.translate(x, y);
+          g.rotate(Math.PI / 4);
+          sparkle(g, 0, 0, size * 0.55, a * 0.6);
+          g.restore();
+        }
+      }
+    },
+  },
+  {
+    id: 'flash-frame',
+    label: 'Flash',
+    category: 'light',
+    draw: (g, w, h) => {
+      // Plain white and nothing else, for a flash timed to a beat: the layer's opacity is how bright
+      // the flash is, and its window how long. A template fades it in and out with the layer's own
+      // animation; drawing the fade into the bitmap would fix one length for every beat.
+      g.fillStyle = '#ffffff';
+      g.fillRect(0, 0, w, h);
     },
   },
 
@@ -605,9 +829,235 @@ const EFFECTS: EffectDefinition[] = [
       g.fillRect(bx + gap, by + gap, (bw - gap * 2) * 0.75, bh - gap * 2);
     },
   },
+  {
+    id: 'rec',
+    label: 'Camcorder',
+    category: 'frame',
+    detail: 'line',
+    draw: (g, w, h) => {
+      const m = Math.min(w, h);
+      // A home camcorder's screen rather than a camera's viewfinder: heavier corners, a glowing REC,
+      // a battery and a format badge, and no crosshair in the subject's face. Inset further down
+      // than across, because the top of a portrait post sits under the app's own tabs. No clock:
+      // a time drawn into a still bitmap would never move, and a wrong date is worse than none.
+      const ix = m * 0.07;
+      const iy = Math.max(m * 0.07, h * 0.085);
+      const arm = m * 0.11;
+      const stroke = Math.max(1.5, m * 0.011);
+      const shade = iy + m * 0.17;
+      g.fillStyle = withStops(g.createLinearGradient(0, 0, 0, shade), [
+        [0, 'rgba(0,0,0,0.32)'],
+        [1, 'rgba(0,0,0,0)'],
+      ]);
+      g.fillRect(0, 0, w, shade);
+
+      g.strokeStyle = '#ffffff';
+      g.fillStyle = '#ffffff';
+      g.lineCap = 'square';
+      g.lineJoin = 'miter';
+      g.shadowColor = 'rgba(0,0,0,0.35)';
+      g.shadowBlur = m * 0.015;
+      g.lineWidth = stroke;
+      g.beginPath();
+      const corners: [number, number, number, number][] = [
+        [ix, iy, 1, 1],
+        [w - ix, iy, -1, 1],
+        [ix, h - iy, 1, -1],
+        [w - ix, h - iy, -1, -1],
+      ];
+      for (const [x, y, dx, dy] of corners) {
+        g.moveTo(x + dx * arm, y);
+        g.lineTo(x, y);
+        g.lineTo(x, y + dy * arm);
+      }
+      g.stroke();
+
+      const rowY = iy + m * 0.08;
+      const dot = m * 0.021;
+      const dotX = ix + m * 0.065;
+      g.save();
+      g.shadowColor = 'rgba(255,40,50,0.9)';
+      g.shadowBlur = m * 0.03;
+      g.fillStyle = '#ff2d3d';
+      g.beginPath();
+      g.arc(dotX, rowY, dot, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
+      const size = Math.max(6, Math.round(m * 0.052));
+      g.font = `700 ${size}px system-ui, Roboto, sans-serif`;
+      g.textAlign = 'left';
+      g.textBaseline = 'middle';
+      g.fillText('REC', dotX + dot + m * 0.022, rowY);
+
+      // The battery at the right of the same row, three bars of four, and the badge before it.
+      const bw = m * 0.085;
+      const bh = m * 0.04;
+      const bx = w - ix - m * 0.06 - bw;
+      const by = rowY - bh / 2;
+      g.lineWidth = Math.max(1, stroke * 0.65);
+      g.strokeRect(bx, by, bw, bh);
+      g.fillRect(bx + bw, by + bh * 0.3, Math.max(1, bw * 0.08), bh * 0.4);
+      const gap = Math.max(1, bh * 0.16);
+      const cell = (bw - gap * 5) / 4;
+      for (let i = 0; i < 3; i++) g.fillRect(bx + gap + i * (cell + gap), by + gap, cell, bh - gap * 2);
+
+      const badge = Math.max(5, Math.round(m * 0.034));
+      g.font = `800 ${badge}px system-ui, Roboto, sans-serif`;
+      const badgeW = g.measureText('HD').width + badge * 0.55;
+      const badgeH = badge * 1.3;
+      const badgeX = bx - m * 0.035 - badgeW;
+      g.beginPath();
+      roundRectSubpath(g, badgeX, rowY - badgeH / 2, badgeW, badgeH, badge * 0.22);
+      g.stroke();
+      g.textAlign = 'center';
+      g.fillText('HD', badgeX + badgeW / 2, rowY + badge * 0.05);
+    },
+  },
+  {
+    id: 'paper',
+    label: 'Paper',
+    category: 'frame',
+    detail: 'line',
+    draw: (g, w, h, random) => {
+      const m = Math.min(w, h);
+      const t = m * 0.06;
+      // The torn inner edge, walked clockwise round the picture. A fixed number of points per side
+      // for a given shape of frame, so the thumbnail and the render tear the same way; each is
+      // pushed in or out and smoothed toward the last, so it wanders like a deckle rather than buzzing.
+      const across = 48;
+      const down = Math.max(8, Math.round((across * h) / w));
+      const edge: [number, number][] = [];
+      let wander = 0;
+      const tear = (x: number, y: number, nx: number, ny: number): void => {
+        wander = wander * 0.55 + (random() - 0.5) * 0.9;
+        const off = t * (0.28 * wander + 0.1 * (random() - 0.5));
+        edge.push([x + nx * off, y + ny * off]);
+      };
+      const iw = w - t * 2;
+      const ih = h - t * 2;
+      for (let i = 0; i < across; i++) tear(t + (iw * i) / across, t, 0, 1);
+      for (let i = 0; i < down; i++) tear(w - t, t + (ih * i) / down, -1, 0);
+      for (let i = 0; i < across; i++) tear(w - t - (iw * i) / across, h - t, 0, -1);
+      for (let i = 0; i < down; i++) tear(t, h - t - (ih * i) / down, 1, 0);
+      const inner = (): void => {
+        g.moveTo(edge[0][0], edge[0][1]);
+        for (let i = 1; i < edge.length; i++) g.lineTo(edge[i][0], edge[i][1]);
+        g.closePath();
+      };
+
+      g.beginPath();
+      g.rect(0, 0, w, h);
+      inner();
+      g.fillStyle = withStops(g.createLinearGradient(0, 0, w, h), [
+        [0, '#f8f4ea'],
+        [1, '#ebe3d3'],
+      ]);
+      g.fill('evenodd');
+
+      // Fibres in the paper, kept to the border by the clip.
+      g.save();
+      g.beginPath();
+      g.rect(0, 0, w, h);
+      inner();
+      g.clip('evenodd');
+      g.lineCap = 'round';
+      for (let i = 0; i < 320; i++) {
+        const side = Math.floor(random() * 4);
+        const along = random();
+        const depth = random() * t * 1.2;
+        const x = side === 0 ? along * w : side === 1 ? w - depth : side === 2 ? along * w : depth;
+        const y = side === 0 ? depth : side === 1 ? along * h : side === 2 ? h - depth : along * h;
+        const length = m * (0.005 + 0.016 * random());
+        const angle = random() * Math.PI;
+        g.strokeStyle = rgba('130,110,80', 0.05 + 0.1 * random());
+        g.lineWidth = Math.max(0.5, m * 0.0012);
+        g.beginPath();
+        g.moveTo(x, y);
+        g.quadraticCurveTo(
+          x + Math.cos(angle) * length * 0.5 + (random() - 0.5) * length * 0.4,
+          y + Math.sin(angle) * length * 0.5 + (random() - 0.5) * length * 0.4,
+          x + Math.cos(angle) * length,
+          y + Math.sin(angle) * length,
+        );
+        g.stroke();
+      }
+      g.restore();
+
+      // The paper's own shadow on the picture along the tear, so the border sits ON the video.
+      g.save();
+      g.beginPath();
+      inner();
+      g.clip();
+      g.shadowColor = 'rgba(0,0,0,0.4)';
+      g.shadowBlur = m * 0.022;
+      g.strokeStyle = 'rgba(0,0,0,0.22)';
+      g.lineWidth = Math.max(1, m * 0.004);
+      g.beginPath();
+      inner();
+      g.stroke();
+      g.restore();
+    },
+  },
+  {
+    id: 'confetti',
+    label: 'Confetti',
+    category: 'frame',
+    detail: 'line',
+    draw: (g, w, h, random) => {
+      const m = Math.min(w, h);
+      const colours = ['#ff4f8b', '#ffd23f', '#3bceac', '#9b5de5', '#ff8c42', '#4d96ff', '#ffffff'];
+      // A soft shadow under every piece, so white and yellow still read over a bright sky.
+      g.shadowColor = 'rgba(0,0,0,0.25)';
+      g.shadowBlur = m * 0.006;
+      g.shadowOffsetY = m * 0.003;
+      g.lineCap = 'round';
+      // Thick along the top and down the sides, thin across the middle where the subject is: every
+      // candidate is kept with a chance that rises toward the edges and is higher at the top, where
+      // confetti is still falling from. Every draw takes the same numbers from `random` in the same
+      // order at any canvas size, so a thumbnail and the render scatter the same pieces.
+      let placed = 0;
+      for (let tries = 0; placed < 120 && tries < 3000; tries++) {
+        const fx = random();
+        const fy = random();
+        const roll = random();
+        const out = Math.max(Math.abs(fx - 0.5) * 2, Math.abs(fy - 0.5) * 2);
+        const keep = (0.06 + 0.94 * out ** 2.2) * (fy < 0.5 ? 1 : 0.7);
+        if (roll > keep) continue;
+        placed++;
+        const x = fx * w;
+        const y = fy * h;
+        const kind = random();
+        const colour = colours[Math.floor(random() * colours.length)];
+        const size = m * (0.014 + 0.02 * random());
+        const angle = random() * Math.PI;
+        const tumble = 0.25 + 0.75 * Math.abs(Math.cos(random() * Math.PI));
+        g.save();
+        g.translate(x, y);
+        g.rotate(angle);
+        g.fillStyle = colour;
+        g.strokeStyle = colour;
+        if (kind < 0.55) {
+          // A paper rectangle, foreshortened by how it has turned as it falls.
+          g.fillRect(-size / 2, (-size * 0.55 * tumble) / 2, size, size * 0.55 * tumble);
+        } else if (kind < 0.8) {
+          g.beginPath();
+          g.ellipse(0, 0, size * 0.36, size * 0.36 * tumble, 0, 0, Math.PI * 2);
+          g.fill();
+        } else {
+          // A curled streamer.
+          g.lineWidth = Math.max(1, size * 0.2);
+          g.beginPath();
+          g.moveTo(-size, 0);
+          g.bezierCurveTo(-size * 0.4, -size * 0.9 * tumble, size * 0.4, size * 0.9 * tumble, size, 0);
+          g.stroke();
+        }
+        g.restore();
+      }
+    },
+  },
 ];
 
-const BY_ID = new Map(EFFECTS.map((effect) => [effect.id, effect]));
+const BY_ID = new Map(EFFECTS.map(effect => [effect.id, effect]));
 
 export const EFFECT_PRESETS: EffectPreset[] = EFFECTS.map(({ id, label, category }) => ({ id, label, category }));
 
@@ -687,15 +1137,7 @@ function frameEllipse(g: CanvasRenderingContext2D, w: number, h: number, r0: num
 }
 
 /** A soft glow. `ry` below `rx` and an angle stretch it into a streak. The last stop must be clear. */
-function blob(
-  g: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  rx: number,
-  ry: number,
-  angle: number,
-  stops: Stops,
-): void {
+function blob(g: CanvasRenderingContext2D, x: number, y: number, rx: number, ry: number, angle: number, stops: Stops): void {
   if (!(rx > 0) || !(ry > 0)) return;
   g.save();
   g.translate(x, y);
@@ -750,14 +1192,7 @@ function grain(g: CanvasRenderingContext2D, w: number, h: number, random: () => 
 }
 
 /** Long, slightly wandering vertical scratches, mostly light (emulsion scraped off) and some dark. */
-function scratches(
-  g: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  random: () => number,
-  count: number,
-  alpha: number,
-): void {
+function scratches(g: CanvasRenderingContext2D, w: number, h: number, random: () => number, count: number, alpha: number): void {
   g.save();
   g.lineCap = 'round';
   g.lineJoin = 'round';
@@ -890,6 +1325,18 @@ function roundRectSubpath(g: CanvasRenderingContext2D, x: number, y: number, w: 
   g.arcTo(x + w, y + h, x, y + h, radius);
   g.arcTo(x, y + h, x, y, radius);
   g.arcTo(x, y, x + w, y, radius);
+  g.closePath();
+}
+
+/** A regular polygon of `sides` round (`x`, `y`), turned by `turn` radians, added to the current path. */
+function polygonSubpath(g: CanvasRenderingContext2D, x: number, y: number, radius: number, sides: number, turn: number): void {
+  for (let i = 0; i < sides; i++) {
+    const a = turn + (i / sides) * Math.PI * 2;
+    const px = x + Math.cos(a) * radius;
+    const py = y + Math.sin(a) * radius;
+    if (i === 0) g.moveTo(px, py);
+    else g.lineTo(px, py);
+  }
   g.closePath();
 }
 

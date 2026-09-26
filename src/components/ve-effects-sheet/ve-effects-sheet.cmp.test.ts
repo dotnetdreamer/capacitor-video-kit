@@ -235,9 +235,9 @@ describe('ve-effects-sheet', () => {
     await until('the grid to be scrolled', () => body(sheet).scrollTop > 0);
 
     tab(sheet, 'Frames').click();
-    await until('the frames', () => labels(sheet).length === 6);
+    await until('the frames', () => labels(sheet).length === 9);
 
-    expect(labels(sheet)).toEqual(['Polaroid', 'Film strip', 'Rounded', 'Neon', 'Hearts', 'Viewfinder']);
+    expect(labels(sheet)).toEqual(['Polaroid', 'Film strip', 'Rounded', 'Neon', 'Hearts', 'Viewfinder', 'Camcorder', 'Paper', 'Confetti']);
     // A tab switch that kept the scroll would open the new grid part way down it.
     await until('the grid to be back at the top', () => body(sheet).scrollTop === 0);
   });
@@ -248,9 +248,9 @@ describe('ve-effects-sheet', () => {
     await until('the results', () => labels(sheet).length === 2);
 
     tab(sheet, 'Basic').click();
-    await until('the basic looks', () => labels(sheet).length === 4);
+    await until('the basic looks', () => labels(sheet).length === 5);
 
-    expect(labels(sheet)).toEqual(['Vignette', 'Soft edges', 'Spotlight', 'Dreamy']);
+    expect(labels(sheet)).toEqual(['Vignette', 'Soft edges', 'Spotlight', 'Dreamy', 'Glow']);
     expect(frame(sheet)!.shadowRoot!.querySelector('input')!.value).toBe('');
   });
 

@@ -319,11 +319,12 @@ describe('a transition on the GPU, against the reference drawing', () => {
 
   it('draws every mask shape the contract names, at any angle and either way round', () => {
     /*
-     * The catalogue alone leaves most of the contract's mask unrun: nothing in it is a diamond or a
-     * split, no linear edge travels off the axes, and every transition tints both sides the same
-     * colour, so a shader that measured a diamond by the wrong half-size or tinted the incoming side
-     * with the outgoing side's colour would pass every case above. The contract is what the native
-     * engines draw, so all of it is held to the reference here.
+     * The catalogue alone runs only a corner of the contract's mask: one diamond and one split, each
+     * upright and at its own feather, a single edge off the axes (the leak's, at 200 degrees) and a
+     * single pair of tints that differ (the leak's amber and rose). A shader that measured a diamond
+     * by the wrong half-size once it was inverted, turned a split the wrong way at any other angle,
+     * or swapped the two tints under a mask the leak does not use would pass every case above. The
+     * contract is what the native engines draw, so all of it is held to the reference here.
      */
     for (const shape of MASK_SHAPES) {
       for (const angleDeg of [0, 35, 200]) {
@@ -626,8 +627,14 @@ describe('a painter whose GPU context is lost', () => {
   it('goes on drawing on the 2D path instead of holding its last frame', () => {
     const painter = new Painter({ width: W, height: H });
     try {
-      const red = layerOf(paintSource(10, 10, () => [255, 0, 0]), 'cover');
-      const blue = layerOf(paintSource(10, 10, () => [0, 0, 255]), 'cover');
+      const red = layerOf(
+        paintSource(10, 10, () => [255, 0, 0]),
+        'cover',
+      );
+      const blue = layerOf(
+        paintSource(10, 10, () => [0, 0, 255]),
+        'cover',
+      );
       painter.paintLayers([red]);
       expect(pixel(pixels(painter), 45, 80)[0]).toBeGreaterThan(240);
       const gl = (painter as unknown as { gl: WebGL2RenderingContext | null }).gl;

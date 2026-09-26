@@ -1,9 +1,11 @@
 import { normaliseCamera } from '../../editor/camera';
+import { normaliseOverlayMotion } from '../../editor/motion';
 import type {
   ComposeCamera,
   ComposeClip,
   ComposeMusic,
   ComposeOutput,
+  ComposeOverlayMotion,
   ComposePlacement,
   ComposeSpec,
   ComposeTrack,
@@ -105,6 +107,13 @@ export interface OverlayPlacement {
   opacity: number;
   wPx: number;
   hPx: number;
+  /**
+   * How the layer moves, in output-timeline MILLISECONDS, or null for a layer that stands still -
+   * every layer of every spec written before layers moved, and the render asks this once per layer
+   * rather than per frame. Milliseconds for the camera's reason: the ONE reading of it,
+   * `overlayMotionAt`, is shared verbatim with the preview, which runs in milliseconds.
+   */
+  motion: ComposeOverlayMotion | null;
 }
 
 export interface MusicItem {
@@ -274,6 +283,9 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
       opacity: clamp(overlay.opacity, 0, 1),
       wPx: overlay.wPx,
       hPx: overlay.hPx,
+      // The parser has already checked and clamped it; this is the plan holding the same line on its
+      // own, with the same rules, as it does for the camera.
+      motion: normaliseOverlayMotion(overlay.motion),
     })),
     music,
     voice,

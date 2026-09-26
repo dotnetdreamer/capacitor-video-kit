@@ -11,10 +11,10 @@ import { cameraAt, clampView, isIdentityView, normaliseCamera, unviewPoint, view
  */
 
 const cam = (keys: [number, number, number, number][]): ComposeCamera => ({
-  atMs: keys.map((k) => k[0]),
-  scale: keys.map((k) => k[1]),
-  cx: keys.map((k) => k[2]),
-  cy: keys.map((k) => k[3]),
+  atMs: keys.map(k => k[0]),
+  scale: keys.map(k => k[1]),
+  cx: keys.map(k => k[2]),
+  cy: keys.map(k => k[3]),
 });
 
 describe('cameraAt', () => {
@@ -103,21 +103,35 @@ describe('normaliseCamera', () => {
         [100, 10, -1, 2],
       ]),
     )!;
-    expect(out).toEqual(cam([
-      [0, 1, 0.5, 0.5],
-      [100, 8, 0.0625, 0.9375],
-    ]));
-    expect(normaliseCamera(cam([[0, 1, 0.2, 0.2], [100, 0.5, 0.5, 0.5]]))).toBeNull();
+    expect(out).toEqual(
+      cam([
+        [0, 1, 0.5, 0.5],
+        [100, 8, 0.0625, 0.9375],
+      ]),
+    );
+    expect(
+      normaliseCamera(
+        cam([
+          [0, 1, 0.2, 0.2],
+          [100, 0.5, 0.5, 0.5],
+        ]),
+      ),
+    ).toBeNull();
     expect(normaliseCamera(null)).toBeNull();
   });
 
   it('rejects what no engine could honour', () => {
     expect(() => normaliseCamera({ atMs: [0, 1], scale: [2], cx: [0.5, 0.5], cy: [0.5, 0.5] })).toThrow();
-    expect(() => normaliseCamera(cam([[100, 2, 0.5, 0.5], [50, 2, 0.5, 0.5]]))).toThrow();
+    expect(() =>
+      normaliseCamera(
+        cam([
+          [100, 2, 0.5, 0.5],
+          [50, 2, 0.5, 0.5],
+        ]),
+      ),
+    ).toThrow();
     expect(() => normaliseCamera(cam([[NaN, 2, 0.5, 0.5]]))).toThrow();
     const n = 20_001;
-    expect(() =>
-      normaliseCamera({ atMs: Array.from({ length: n }, (_, i) => i), scale: Array(n).fill(2), cx: Array(n).fill(0.5), cy: Array(n).fill(0.5) }),
-    ).toThrow();
+    expect(() => normaliseCamera({ atMs: Array.from({ length: n }, (_, i) => i), scale: Array(n).fill(2), cx: Array(n).fill(0.5), cy: Array(n).fill(0.5) })).toThrow();
   });
 });

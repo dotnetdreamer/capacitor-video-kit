@@ -19,7 +19,11 @@ import androidx.media3.effect.StaticOverlaySettings
  * runs after `Presentation`, so the "background" Media3's matrix provider measures against is
  * already the output frame, and the provider sizes a quad as `scale x texture size` output pixels.
  * A `w x h` bitmap drawn at `(wPx / w, hPx / h)` therefore covers exactly `wPx x hPx` - whether the
- * PNG was drawn at half resolution by the web side, halved again by the decode budget, or both.
+ * PNG was drawn at half resolution by the web side, halved again by the decode budget, or both -
+ * or at up to 1.5x by the web side, for a layer whose motion magnifies it.
+ *
+ * A layer that MOVES carries its [motion], and its settings are worked out per frame from the keys
+ * at that frame's time; one that does not hands back the same two settings objects it always did.
  */
 @OptIn(UnstableApi::class)
 class TimedBitmapOverlay(
@@ -39,12 +43,26 @@ class TimedBitmapOverlay(
      */
     scaleX: Float,
     scaleY: Float,
+    /**
+     * Half the overlay's size on the output in NDC, `wPx / width` and `hPx / height` - what a moving
+     * layer whose centre leaves the frame is placed by ([OverlayPose.anchors]). Unused, and 0 by
+     * default, for a layer that stands still: its centre is always on the frame.
+     */
+    halfWidth: Float = 0f,
+    halfHeight: Float = 0f,
+    /**
+     * How the layer moves - `ComposeOverlay.motion`, as the parser left it - or null for a layer that
+     * stands still, which is every overlay of every spec written before layers moved, and then
+     * nothing below is evaluated per frame. Last and defaulted, so a caller that has no motion to
+     * give constructs this exactly as it always did.
+     */
+    private val motion: OverlayMotion? = null,
 ) : BitmapOverlay() {
 
-    private val visible: OverlaySettings =
-        settings(anchorX, anchorY, rotationGlDeg, scaleX, scaleY, opacity)
-    private val hidden: OverlaySettings =
-        settings(anchorX, anchorY, rotationGlDeg, scaleX, scaleY, 0f)
+    /** Where the layer rests: where the fields above put it, and what [motion] moves it from. */
+    private val rest = OverlayPose(anchorX, anchorY, scaleX, scaleY, rotationGlDeg, opacity, halfWidth, halfHeight)
+    private val visible: OverlaySettings = overlaySettings(rest)
+    private val hidden: OverlaySettings = overlaySettings(rest.copy(alpha = 0f))
 
     /**
      * The same instance every time on purpose: `BitmapOverlay` caches the uploaded texture per
@@ -52,8 +70,19 @@ class TimedBitmapOverlay(
      */
     override fun getBitmap(presentationTimeUs: Long): Bitmap = bitmap
 
-    override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =
-        if (presentationTimeUs in startUs until endUs) visible else hidden
+    /**
+     * The layer at [presentationTimeUs]: hidden outside its window, and inside it either the one
+     * settings object it rests at or - for a moving layer at a moment its motion moves it - a pose
+     * made for this frame by [OverlayPose.moved] from the keys read at this very time. A pose shrunk
+     * to nothing or faded out is the hidden settings rather than a quad of no size, which is a matrix
+     * nothing should be asked to invert.
+     */
+    override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
+        if (presentationTimeUs !in startUs until endUs) return hidden
+        val sample = motion?.atUs(presentationTimeUs) ?: return visible
+        val pose = rest.moved(sample)
+        return if (pose.isDrawn) overlaySettings(pose) else hidden
+    }
 
     /**
      * Deliberately does NOT recycle the bitmap.
@@ -74,24 +103,31 @@ class TimedBitmapOverlay(
     fun recycle() {
         if (!bitmap.isRecycled) bitmap.recycle()
     }
+}
 
-    private fun settings(
-        anchorX: Float,
-        anchorY: Float,
-        rotationGlDeg: Float,
-        scaleX: Float,
-        scaleY: Float,
-        alpha: Float,
-    ): OverlaySettings = StaticOverlaySettings.Builder()
-        // Where on the output frame the overlay's own anchor lands, in NDC.
-        .setBackgroundFrameAnchor(anchorX, anchorY)
-        // ...and that anchor is the bitmap's centre. With a centred anchor Media3's matrix reduces
-        // to "scale in the bitmap's own axes, then rotate in pixel space", so a non-uniform scale
-        // stays a clean stretch to wPx x hPx and the rotation does not shear it.
-        .setOverlayFrameAnchor(0f, 0f)
-        .setScale(scaleX, scaleY)
-        .setRotationDegrees(rotationGlDeg)
-        .setAlphaScale(alpha)
+/**
+ * Media3's settings for an overlay at [pose]. Outside the class, and so outside `BitmapOverlay`, so
+ * the JVM tests can build the settings a moving layer gets without an Android bitmap.
+ *
+ * A pose with no [OverlayPose.anchors] - wholly off the frame - is a caller's to hide rather than to
+ * build; it is built here at its nearest edge, transparent, rather than handing Media3 an anchor it
+ * would throw on.
+ */
+@OptIn(UnstableApi::class)
+internal fun overlaySettings(pose: OverlayPose): OverlaySettings {
+    val anchors = pose.anchors()
+    return StaticOverlaySettings.Builder()
+        // Where on the output frame the overlay's own anchor lands, in NDC...
+        .setBackgroundFrameAnchor(anchors?.backgroundX ?: pose.anchorX.coerceIn(-1f, 1f), anchors?.backgroundY ?: pose.anchorY.coerceIn(-1f, 1f))
+        // ...and that anchor is the bitmap's centre, for every overlay whose centre is on the frame.
+        // With a centred anchor Media3's matrix reduces to "scale in the bitmap's own axes, then
+        // rotate in pixel space", so a non-uniform scale stays a clean stretch to wPx x hPx and the
+        // rotation does not shear it - and a motion's size and turn happen about the layer's own
+        // centre, which is what the contract asks. Off the frame see [OverlayPose.anchors].
+        .setOverlayFrameAnchor(anchors?.overlayX ?: 0f, anchors?.overlayY ?: 0f)
+        .setScale(pose.scaleX, pose.scaleY)
+        .setRotationDegrees(pose.rotationGlDeg)
+        .setAlphaScale(if (anchors == null) 0f else pose.alpha)
         .build()
 }
 

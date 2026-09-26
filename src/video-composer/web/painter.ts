@@ -1,9 +1,11 @@
 import { isIdentityView, type CameraView } from '../../editor/camera';
+import { isNeutralMotion, type OverlayMotionSample } from '../../editor/motion';
 import type { TransitionLook } from '../../editor/transitions';
 import type { ComposeRect, ComposeTransition } from '../definitions';
 
 import { cameraAffine } from './camera-draw';
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
+import { INTERPOLATE_FRAMES_GLSL, interpolateFrames2d } from './frame-interpolation';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
 import { Transition2d } from './transition-2d';
 import { TransitionGl } from './transition-gl';
@@ -38,6 +40,13 @@ import { TransitionGl } from './transition-gl';
  * in `ComposeTransition` and nothing else. A frame with no transition in it never reaches any of
  * that: the loop below is the loop it always was, and nothing is allocated for transitions until a
  * post first asks for one.
+ *
+ * A clip SLOWED below 1x can arrive with two source frames rather than one - [LayerDraw.tween] - and
+ * its picture is then made from both where the source is sampled, by the one step in
+ * `frame-interpolation.ts`, before anything else happens to it. Everything after that read is the
+ * layer's ordinary path, so the synthesised frame is cropped, fitted, placed, turned, graded and seen
+ * through the camera exactly as a recorded one, on either side of a transition as well as on its
+ * own. A layer with one frame - every clip at 1x or faster, every picture - never touches any of it.
  */
 
 /**
@@ -112,6 +121,29 @@ export interface LayerDraw {
    * in IEEE arithmetic, so the frame is the same to the bit) and no transform on the 2D canvas.
    */
   camera?: CameraView | null;
+  /**
+   * A frame SYNTHESISED between two source frames, for a clip slowed below 1x: `source` above is
+   * frame A, the last one at or before this instant, and this is frame B, the one after it, with how
+   * far from A towards B the instant is. See `slow-motion.ts` for which frames and why, and
+   * `frame-interpolation.ts` for the one step that mixes them.
+   *
+   * The two are mixed where the SOURCE is sampled - before the colour matrix, and through the very
+   * crop, fit, rectangle, turn and camera the layer would be drawn with from A alone - so a
+   * synthesised frame is placed and graded exactly as a recorded one. B has to be a frame of the
+   * same picture as A, at the same size: it is sampled at the coordinates A is.
+   *
+   * Absent, null, or a weight of 0 is no second frame, and takes exactly the path every layer took
+   * before this field existed - the one texture read, the same bits. Every clip at 1x or faster and
+   * every picture is drawn like that, always.
+   */
+  tween?: FrameTween | null;
+}
+
+/** Frame B of a synthesised frame, and how far towards it: see [LayerDraw.tween]. */
+export interface FrameTween {
+  source: LayerSource;
+  /** 0..1: 0 is frame A alone, 1 is this frame alone. */
+  weight: number;
 }
 
 export interface OverlayDraw {
@@ -122,6 +154,16 @@ export interface OverlayDraw {
   hPx: number;
   rotationDeg: number;
   opacity: number;
+  /**
+   * Where the layer's motion has it at this frame - `overlayMotionAt(motion, t)` - or absent for a
+   * layer at rest. See `ComposeOverlayMotion` for the contract: the offsets are added to the centre
+   * in fractions of the frame, the size multiplies `wPx`/`hPx` about that centre, the turn is added
+   * to `rotationDeg`, and the opacity multiplies the layer's own.
+   *
+   * Absent, null, or a sample that moves nothing is the path every overlay took before layers moved,
+   * the very same three canvas calls, so a still frame is the same to the bit.
+   */
+  motion?: OverlayMotionSample | null;
 }
 
 /** The whole output frame, for a base-track layer that is not placed anywhere in particular. */
@@ -171,12 +213,17 @@ precision highp float;
 in vec2 v_uv;
 in vec2 v_out;
 uniform sampler2D u_tex;
+// Frame B of a synthesised frame, and how far towards it; see LayerDraw.tween. u_tween is 0 for
+// every layer that has no second frame, and such a layer never reads u_texNext.
+uniform sampler2D u_texNext;
+uniform float u_tween;
 uniform vec4 u_clip;
 uniform vec4 u_kept;
 uniform mat3 u_matrix;
 uniform vec3 u_offset;
 uniform float u_opacity;
 out vec4 fragColor;
+${INTERPOLATE_FRAMES_GLSL}
 void main() {
   // Outside the layer's own RECTANGLE there is no layer. It matters for a base-track clip, whose
   // rectangle sits inside a destination that is the whole frame: fitted cover, its picture is
@@ -191,7 +238,12 @@ void main() {
   // against 0..1 drew into the bars.
   vec3 rgb = vec3(0.0);
   if (v_uv.x >= u_kept.x && v_uv.x <= u_kept.x + u_kept.z && v_uv.y >= u_kept.y && v_uv.y <= u_kept.y + u_kept.w) {
-    rgb = clamp(u_matrix * texture(u_tex, v_uv).rgb + u_offset, 0.0, 1.0);
+    // The picture at this instant: the one frame, or - for a slowed clip - a frame made from the two
+    // either side of it, read at the SAME coordinate so everything above and below applies to it as
+    // it would to a recorded one. The test is on a uniform, so every pixel of a layer takes the same
+    // side of it, and the side a layer with no second frame takes is the one read it always made.
+    vec3 texel = u_tween > 0.0 ? interpolateFrames(u_tex, u_texNext, v_uv, u_tween) : texture(u_tex, v_uv).rgb;
+    rgb = clamp(u_matrix * texel + u_offset, 0.0, 1.0);
   }
   // Premultiplied, which is what the blend function below expects.
   fragColor = vec4(rgb * u_opacity, u_opacity);
@@ -215,6 +267,8 @@ export class Painter {
   /** Built the first time a frame has a transition in it, and never for a post that has none. */
   private transitionGl: TransitionGl | null = null;
   private transition2d: Transition2d | null = null;
+  /** Where the 2D fallback makes a synthesised frame; built the first time it needs one. */
+  private tweenSurface: HTMLCanvasElement | null = null;
   private matrix: ColorMatrix | null = null;
   /** The CSS filter the 2D fallback draws with; `none` when there is no colour work. */
   private cssFilter = 'none';
@@ -343,6 +397,11 @@ export class Painter {
 
   /** One overlay, centred, rotated clockwise and blended - the same three lines in both paths. */
   paintOverlay(overlay: OverlayDraw): void {
+    const motion = overlay.motion && !isNeutralMotion(overlay.motion) ? overlay.motion : null;
+    if (motion) {
+      this.paintMovingOverlay(overlay, motion);
+      return;
+    }
     const ctx = this.ctx;
     ctx.save();
     ctx.globalAlpha = overlay.opacity;
@@ -353,6 +412,29 @@ export class Painter {
     // `rotationDeg` means, so there is no sign to flip here. The GL engines flip it; this does not.
     if (overlay.rotationDeg !== 0) ctx.rotate((overlay.rotationDeg * Math.PI) / 180);
     ctx.drawImage(overlay.bitmap, -overlay.wPx / 2, -overlay.hPx / 2, overlay.wPx, overlay.hPx);
+    ctx.restore();
+  }
+
+  /**
+   * One overlay where its motion has it: the same three lines with the motion's numbers folded into
+   * them - the centre moved, the turn added, the size and the opacity multiplied - which is the
+   * static layer's own transform and so needs no second idea of where a layer's centre is. A layer
+   * the motion has shrunk to nothing or faded out is simply not drawn.
+   */
+  private paintMovingOverlay(overlay: OverlayDraw, motion: OverlayMotionSample): void {
+    const alpha = overlay.opacity * motion.opacity;
+    const w = overlay.wPx * motion.scale;
+    const h = overlay.hPx * motion.scale;
+    if (!(alpha > 0) || !(w > 0) || !(h > 0)) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.translate((overlay.cx + motion.x) * this.output.width, (overlay.cy + motion.y) * this.output.height);
+    const degrees = overlay.rotationDeg + motion.rotation;
+    if (degrees !== 0) ctx.rotate((degrees * Math.PI) / 180);
+    ctx.drawImage(overlay.bitmap, -w / 2, -h / 2, w, h);
     ctx.restore();
   }
 
@@ -389,6 +471,11 @@ export class Painter {
     // painter that fell back to 2D mid-post would otherwise keep four frame-sized canvases alive.
     this.transition2d?.dispose();
     this.transition2d = null;
+    if (this.tweenSurface) {
+      this.tweenSurface.width = 0;
+      this.tweenSurface.height = 0;
+      this.tweenSurface = null;
+    }
     const gl = this.gl;
     if (!gl) return;
     for (const texture of this.textures.values()) gl.deleteTexture(texture);
@@ -452,25 +539,24 @@ export class Painter {
     };
     const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
 
-    // A bitmap cannot change once it is made - it is a picture on the timeline, decoded once - so it
-    // is uploaded the first time it is drawn and never again. Anything else is re-uploaded below.
-    const still = typeof ImageBitmap !== 'undefined' && layer.source instanceof ImageBitmap;
-    const uploaded = still && this.textures.has(layer.source);
-    gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, layer.source));
-    try {
-      // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
-      // texture object itself is kept, which is what saves the allocation.
-      if (!uploaded) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layer.source);
-    } catch {
-      // Not uploaded after all, so a bitmap must not be taken for one that was on its next frame.
-      if (still) this.textures.delete(layer.source);
-      // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
-      // canvas: `texImage2D` throws a SecurityError outright. Every source this package loads is
-      // same-origin (a blob, or the host's own file scheme), so this is the editor being pointed
-      // at a remote URL by a host that may - and the honest answer is the picture drawn without a
-      // shader rather than no picture at all.
+    if (!this.upload(gl, layer.source)) {
       gl.disable(gl.BLEND);
       return false;
+    }
+    // Frame B of a synthesised frame goes on unit 1, where only the shader's interpolation reads it.
+    // A layer with none leaves unit 1 empty - which is also what keeps a draw into a transition
+    // side's target from ever finding that target's own texture bound for sampling - and sets a
+    // weight of 0, which never reads it.
+    const tween = activeTween(layer);
+    if (tween) {
+      gl.activeTexture(gl.TEXTURE1);
+      const uploaded = this.upload(gl, tween.source);
+      if (!uploaded) gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0);
+      if (!uploaded) {
+        gl.disable(gl.BLEND);
+        return false;
+      }
     }
 
     const bounds = boundsOf(layer);
@@ -489,7 +575,43 @@ export class Painter {
     const camera = layer.camera && !isIdentityView(layer.camera) ? cameraAffine(layer.camera, this.output) : null;
     gl.uniform3f(this.uniforms['u_camera'] ?? null, camera ? camera.scale : 1, camera ? camera.tx : 0, camera ? camera.ty : 0);
     gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
+    // Set on every layer for the camera's reason: a layer with no second frame drawn after one with
+    // a second frame would otherwise inherit its weight.
+    gl.uniform1f(this.uniforms['u_tween'] ?? null, tween ? tween.weight : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (tween) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+    return true;
+  }
+
+  /**
+   * Binds `source`'s texture to the ACTIVE unit with the source's current picture in it. False when
+   * the browser would not let the shader have it.
+   */
+  private upload(gl: WebGL2RenderingContext, source: LayerSource): boolean {
+    // A bitmap cannot change once it is made - a picture on the timeline, decoded once, or one frame
+    // of a slowed clip held for the frames made from it - so it is uploaded the first time it is
+    // drawn and never again. Anything else is re-uploaded below.
+    const still = typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap;
+    const uploaded = still && this.textures.has(source);
+    gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, source));
+    try {
+      // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
+      // texture object itself is kept, which is what saves the allocation.
+      if (!uploaded) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    } catch {
+      // Not uploaded after all, so a bitmap must not be taken for one that was on its next frame.
+      if (still) this.textures.delete(source);
+      // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
+      // canvas: `texImage2D` throws a SecurityError outright. Every source this package loads is
+      // same-origin (a blob, or the host's own file scheme), so this is the editor being pointed
+      // at a remote URL by a host that may - and the honest answer is the picture drawn without a
+      // shader rather than no picture at all.
+      return false;
+    }
     return true;
   }
 
@@ -637,9 +759,13 @@ export class Painter {
     ctx.fillStyle = '#000';
     ctx.fillRect(clipX, clipY, clipW, clipH);
     if (rects) {
+      // A synthesised frame is made first, whole and at the source's own size, and then drawn from
+      // exactly as a recorded frame would be - the same rectangles, the same filter, the same tints.
+      const tween = activeTween(layer);
+      const picture = tween ? this.interpolated2d(layer.source, tween, layer.sourceWidth, layer.sourceHeight) : layer.source;
       ctx.globalAlpha = layer.opacity;
       ctx.filter = this.cssFilter;
-      ctx.drawImage(layer.source, rects.sx, rects.sy, rects.sw, rects.sh, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
+      ctx.drawImage(picture, rects.sx, rects.sy, rects.sw, rects.sh, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
       ctx.filter = 'none';
       for (const tint of this.cssTints) {
         ctx.globalAlpha = layer.opacity;
@@ -648,6 +774,23 @@ export class Painter {
       }
     }
     ctx.restore();
+  }
+
+  /**
+   * The fallback's synthesised frame: A and B mixed by `interpolateFrames2d` onto a surface the size
+   * of the source, which is made the first time a slowed clip is drawn without a GPU and kept -
+   * resized only when a source of another size comes along. One surface is enough: a layer is drawn
+   * from it completely before the next layer, or the other side of a transition, is made in it.
+   */
+  private interpolated2d(frameA: LayerSource, tween: FrameTween, width: number, height: number): HTMLCanvasElement {
+    const surface = this.tweenSurface ?? (this.tweenSurface = createCanvas(width, height));
+    if (surface.width !== width || surface.height !== height) {
+      surface.width = width;
+      surface.height = height;
+    }
+    const ctx = surface.getContext('2d');
+    if (ctx) interpolateFrames2d(ctx, frameA, tween.source, tween.weight, width, height);
+    return surface;
   }
 
   private textureFor(gl: WebGL2RenderingContext, source: LayerSource): WebGLTexture {
@@ -713,6 +856,16 @@ function boundsOf(layer: LayerDraw): ComposeRect {
 }
 
 /**
+ * A layer's second frame when there is one worth drawing: a weight above nothing. A weight past 1 is
+ * held at 1, which is frame B alone. Null - the one-frame path - for everything else.
+ */
+function activeTween(layer: LayerDraw): FrameTween | null {
+  const tween = layer.tween;
+  if (!tween || !(tween.weight > 0)) return null;
+  return tween.weight > 1 ? { source: tween.source, weight: 1 } : tween;
+}
+
+/**
  * Whether a transition side has a picture to draw. A side with none is ABSENT - transparent over
  * whatever is under it - rather than a black frame, which is what drawing a source with no size
  * into a frame cleared to black would otherwise have made it.
@@ -758,6 +911,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
   gl.enableVertexAttribArray(position);
   gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
   gl.uniform1i(gl.getUniformLocation(program, 'u_tex'), 0);
+  gl.uniform1i(gl.getUniformLocation(program, 'u_texNext'), 1);
   gl.activeTexture(gl.TEXTURE0);
 
   return {
@@ -775,6 +929,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
       u_matrix: gl.getUniformLocation(program, 'u_matrix'),
       u_offset: gl.getUniformLocation(program, 'u_offset'),
       u_opacity: gl.getUniformLocation(program, 'u_opacity'),
+      u_tween: gl.getUniformLocation(program, 'u_tween'),
     },
   };
 }

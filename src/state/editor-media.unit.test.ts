@@ -46,11 +46,7 @@ describe('EditorMedia', () => {
    */
   let pictures: { measure: ReturnType<typeof vi.fn>; thumbnail: ReturnType<typeof vi.fn> };
 
-  function open(
-    mediaHost: EditorMediaHost = fakeMedia(),
-    peaks: Peaks | null = null,
-    options: { pictures?: boolean; decodes?: boolean } = {},
-  ): void {
+  function open(mediaHost: EditorMediaHost = fakeMedia(), peaks: Peaks | null = null, options: { pictures?: boolean; decodes?: boolean } = {}): void {
     host = resolveEditorHost({ media: mediaHost, editing: { pictures: options.pictures } });
     store = new EditorStore(host);
     measure = vi.fn(async () => peaks);
