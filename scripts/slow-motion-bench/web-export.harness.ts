@@ -17,10 +17,22 @@ import { renderSpec } from '../../src/video-composer/web/render';
 
 const env = import.meta.env as unknown as Record<string, string | undefined>;
 const DIR = env['VITE_BENCH_DIR'] ?? '';
+// The URL Vite makes for a file outside the root: `/@fs/C:/...` on Windows, `/@fs/Users/...` for a
+// POSIX path - the path without its leading slash, which the dev server puts back.
+const FS = `/@fs/${DIR.replace(/^\//, '')}`;
 const OUT = env['VITE_BENCH_OUT'] ?? `${DIR}/out`;
 const FILTER = JSON.parse(env['VITE_BENCH_FILTER'] ?? '[]') as ComposeSpec['filter'];
 const SPEEDS = (env['VITE_BENCH_SPEEDS'] ?? '0.5,0.25').split(',').map(Number);
 const TAG = env['VITE_BENCH_TAG'] ?? '';
+
+/** The renderer WebGL really draws with, so a timing says whether it was the GPU or SwiftShader's CPU. */
+function renderer(): string {
+  const gl = document.createElement('canvas').getContext('webgl2');
+  const info = gl?.getExtension('WEBGL_debug_renderer_info');
+  const name = gl && info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : 'no WebGL 2';
+  gl?.getExtension('WEBGL_lose_context')?.loseContext();
+  return name;
+}
 
 function spec(uri: string, speed: number): ComposeSpec {
   return {
@@ -37,7 +49,7 @@ function spec(uri: string, speed: number): ComposeSpec {
 
 it('exports the benchmark post at 0.5x and 0.25x', async () => {
   expect(DIR, 'VITE_BENCH_DIR').not.toBe('');
-  const response = await fetch(`/@fs/${DIR}/bench-30fps.mp4`);
+  const response = await fetch(`${FS}/bench-30fps.mp4`);
   expect(response.ok).toBe(true);
   const source = URL.createObjectURL(await response.blob());
   try {
@@ -45,11 +57,14 @@ it('exports the benchmark post at 0.5x and 0.25x', async () => {
       const name = `web-bench${String(speed).replace('0.', '0')}${TAG}`;
       const started = performance.now();
       const outcome = await renderSpec(spec(source, speed), { signal: new AbortController().signal, onProgress: () => undefined });
+      const rendered = performance.now() - started;
       const bytes = new Uint8Array(await outcome.blob.arrayBuffer());
       let binary = '';
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
       await commands.writeFile(`${OUT}/${name}.mp4`, btoa(binary), 'base64');
-      await commands.writeFile(`${OUT}/${name}.txt`, `${Math.round(performance.now() - started)} ms\n`);
+      // The first line is the whole run, file written, as it always was; the render alone follows it.
+      const lines = [`${Math.round(performance.now() - started)} ms`, `render ${Math.round(rendered)} ms`, `renderer: ${renderer()}`];
+      await commands.writeFile(`${OUT}/${name}.txt`, lines.join('\n') + '\n');
     }
   } finally {
     URL.revokeObjectURL(source);

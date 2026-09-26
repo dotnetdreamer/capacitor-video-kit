@@ -376,25 +376,28 @@ export interface ComposeOutput {
    *
    * Android treats it as a MAXIMUM: Media3 decimates a higher-rate source to it and leaves a
    * lower-rate one alone, because nothing in Media3 can raise a rate. The web and iOS render a fixed
-   * cadence of one frame every `1 / fps` seconds, drawing whatever frame each source has at that
-   * moment, so a lower-rate source has its frames repeated: 24p footage in a 60 fps post is a 60 fps
-   * file on those two and a 24 fps one on Android. The picture is the same judder a 24p video has on
-   * a 60 Hz screen, and H.264 codes a repeated frame for almost nothing.
+   * cadence of one frame every `1 / fps` seconds, drawing for every clip that is not slowed (see
+   * below) whatever frame its source has at that moment, so a lower-rate source has its frames
+   * repeated: 24p footage in a 60 fps post is a 60 fps file on those two and a 24 fps one on Android.
+   * The picture is the same judder a 24p video has on a 60 Hz screen, and H.264 codes a repeated frame
+   * for almost nothing.
    *
-   * SLOW MOTION IS THE EXCEPTION, on Android and the web (iOS does not yet). A video clip whose
-   * `speed` is below 1 would otherwise run at its source rate times its speed - 30 fps footage at
-   * 0.3x is nine pictures a second - so both engines SYNTHESISE the frames in between at this rate:
-   * each output frame of a slowed clip is made from its two neighbouring source frames, at where the
-   * frame falls between them (`slow-motion.ts`, Android's `SlowMotionCadence`). An EXPORT follows the
-   * motion between the two - optical flow, one algorithm with the same passes and constants in both
-   * engines (`optical-flow.ts`, `OpticalFlow.kt`), each pixel taken from each frame part of the way
-   * along its path - and falls back to cross-fading the two wherever the flow cannot be trusted (a cut,
-   * a flash, motion faster than it can follow, a GPU without half-float targets). The live PREVIEW
-   * cross-fades (`frame-interpolation.ts` says why). Only frames inside the clip's own trim are used,
-   * its first frame is held from the clip's start and its last to its end, and nothing is mixed
-   * across a cut. A clip at 1x or faster, and a picture, is drawn exactly as described above.
-   * Nothing on the wire asks for it: `speed` below 1 is the whole of the signal, so a spec from any
-   * version of the editor gets it.
+   * SLOW MOTION IS THE EXCEPTION, on all three engines. A video clip whose `speed` is below 1 would
+   * otherwise run at its source rate times its speed - 30 fps footage at 0.3x is nine pictures a
+   * second - so every engine SYNTHESISES the frames in between at this rate: each output frame of a
+   * slowed clip is made from its two neighbouring source frames, at where the frame falls between
+   * them on their real timestamps (`slow-motion.ts`, Android's `SlowMotionCadence`, iOS's
+   * `SlowMotion.swift` with the clip's own frames read by `SlowMotionFrames.swift`). The web and iOS do
+   * it at this same fixed cadence, so no frame's time moves. An EXPORT follows the motion between the
+   * two - optical flow, one algorithm with the same passes and constants in all three engines
+   * (`optical-flow.ts`, `OpticalFlow.kt`, and `OpticalFlow.swift` run in Metal by `FlowEstimator.swift`),
+   * each pixel taken from each frame part of the way along its path - and falls back to cross-fading
+   * the two wherever the flow cannot be trusted (a cut, a flash, motion faster than it can follow, a GPU
+   * without half-float targets). The live PREVIEW cross-fades (`frame-interpolation.ts` says why).
+   * Only frames inside the clip's own trim are used, its first frame is held from the clip's start and
+   * its last to its end, and nothing is mixed across a cut. A clip at 1x or faster, and a picture, is
+   * drawn exactly as described above. Nothing on the wire asks for it: `speed` below 1 is the whole of
+   * the signal, so a spec from any version of the editor gets it.
    */
   fps: number;
   /**

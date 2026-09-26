@@ -42,9 +42,18 @@ mkdir -p "$TEX"
 
 ff() { ffmpeg -hide_banner -v error -y "$@"; }
 
-# Fonts for the text: Windows' own. Any bold sans will do elsewhere.
-FONT_BOLD='C\:/Windows/Fonts/arialbd.ttf'
-FONT='C\:/Windows/Fonts/arial.ttf'
+# Fonts for the text: Arial, from wherever the system keeps it - Windows' own, or macOS's copies of
+# the same two faces, so the scenes an iOS export is scored on are the scenes the web and Android
+# numbers came from. Any bold sans will do elsewhere: FONT_BOLD and FONT override both. A drive
+# letter's colon has to be escaped inside a filtergraph; a macOS path has none, and its space is
+# kept whole by the quotes the filter below puts round it.
+if [[ $(uname -s) == Darwin ]]; then
+  FONT_BOLD=${FONT_BOLD:-'/System/Library/Fonts/Supplemental/Arial Bold.ttf'}
+  FONT=${FONT:-'/System/Library/Fonts/Supplemental/Arial.ttf'}
+else
+  FONT_BOLD=${FONT_BOLD:-'C\:/Windows/Fonts/arialbd.ttf'}
+  FONT=${FONT:-'C\:/Windows/Fonts/arial.ttf'}
+fi
 
 # texture NAME MANDELBROT_X MANDELBROT_Y SCALE TEXT HUE
 texture() {

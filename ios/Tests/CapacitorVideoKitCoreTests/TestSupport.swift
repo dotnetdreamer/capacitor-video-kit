@@ -348,3 +348,171 @@ struct TestError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }
+
+// MARK: - Frame by frame
+
+extension TestMedia {
+    /// An H.264 video, no sound, whose frame `i` is `picture(i)` - tightly packed RGBA8, `width` x
+    /// `height`, rows top first - presented at `times[i]`. For the tests that need to know which
+    /// source frame a composed frame was drawn from, or to put a frame at an irregular time.
+    ///
+    /// `reorder` turns B-frames on (`AVVideoAllowFrameReorderingKey`), which makes the file decode in
+    /// a different order from the one it presents in and gives it the edit list every phone and
+    /// every ffmpeg recording with B-frames has - the two things a slowed clip's own frame list must
+    /// see through. `bitrate` is generous by default, so the pictures survive nearly intact.
+    /// `transform` is written as the track's `preferredTransform`, as a phone held upright writes one.
+    /// `sessionStart` is where the file's timeline starts, the first frame's time when nil; one earlier
+    /// than the first frame writes the file a phone or ffmpeg writes when its video starts after its
+    /// sound - an EMPTY edit from `sessionStart` to the first frame, then the media (measured).
+    static func frames(_ url: URL, width: Int, height: Int, times: [CMTime], reorder: Bool = false,
+                       bitrate: Int = 8_000_000, transform: CGAffineTransform = .identity,
+                       sessionStart: CMTime? = nil,
+                       picture: (Int) -> [UInt8]) async throws -> URL {
+        try? FileManager.default.removeItem(at: url)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        var properties: [String: Any] = [AVVideoAllowFrameReorderingKey: reorder,
+                                         AVVideoAverageBitRateKey: bitrate]
+        if reorder { properties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: properties,
+        ])
+        input.expectsMediaDataInRealTime = false
+        input.transform = transform
+        // The track keeps the times' own timescale. Left to the writer, it picks one of its own (600 here),
+        // and a frame written at 1.379 s lands at 1.378333 s - which would make every irregular time a test
+        // writes a different time in the file.
+        if let scale = times.first?.timescale { input.mediaTimeScale = scale }
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+        ])
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? TestError("startWriting") }
+        writer.startSession(atSourceTime: sessionStart ?? times.first ?? .zero)
+        for (i, time) in times.enumerated() {
+            while !input.isReadyForMoreMediaData {
+                if writer.status == .failed { throw writer.error ?? TestError("writer failed") }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            guard let buffer = TestPixels.buffer(rgba: picture(i), width: width, height: height) else {
+                throw TestError("pixel buffer")
+            }
+            guard adaptor.append(buffer, withPresentationTime: time) else {
+                throw writer.error ?? TestError("append frame \(i)")
+            }
+        }
+        input.markAsFinished()
+        // The last frame lasts as long as the one before it.
+        if let last = times.last {
+            let step = times.count > 1 ? last - times[times.count - 2] : CMTime(value: 1, timescale: 30)
+            writer.endSession(atSourceTime: last + step)
+        }
+        await writer.finishWriting()
+        if writer.status != .completed { throw writer.error ?? TestError("finishWriting") }
+        return url
+    }
+
+    /// `count` frame times `1/fps` apart from zero, exact in a 600 timescale.
+    static func evenTimes(_ count: Int, fps: Int32 = 30) -> [CMTime] {
+        (0..<count).map { CMTime(value: CMTimeValue($0) * 600 / CMTimeValue(fps), timescale: 600) }
+    }
+
+    /// A picture that says which frame it is, twice over: the TOP half is eight vertical stripes, stripe
+    /// `k` white when bit `k` of `index` is set and black when it is not (`indexOf` reads it back), and
+    /// the BOTTOM half is one flat grey, `grey(index)`, that differs between any two neighbouring
+    /// frames - so every pixel of a frame between two others is a mix of different values, and the
+    /// grey measures how far between them it is.
+    static func indexPicture(_ index: Int, width: Int, height: Int) -> [UInt8] {
+        var rgba = [UInt8](repeating: 255, count: width * height * 4)
+        let g = UInt8(grey(index))
+        for y in 0..<height {
+            for x in 0..<width {
+                let v: UInt8 = y < height / 2 ? ((index >> (x * 8 / width)) & 1 == 1 ? 255 : 0) : g
+                let i = (y * width + x) * 4
+                rgba[i] = v; rgba[i + 1] = v; rgba[i + 2] = v
+            }
+        }
+        return rgba
+    }
+
+    /// The bottom half's grey of frame `index`: 22 code values from its neighbours, 30 to 206.
+    static func grey(_ index: Int) -> Int { 30 + (index % 9) * 22 }
+
+    /// The frame index an `indexPicture` carries, read off tightly packed BGRA at the middle of each
+    /// stripe on the top half's middle row.
+    static func indexOf(_ bgra: [UInt8], width: Int, height: Int) -> Int {
+        var n = 0
+        let y = height / 4
+        for k in 0..<8 where bgra[(y * width + (2 * k + 1) * width / 16) * 4 + 1] > 128 { n |= 1 << k }
+        return n
+    }
+}
+
+/// One frame the compositor drew: its time, and its pixels as tightly packed BGRA.
+struct ComposedFrame: Equatable {
+    let seconds: Double
+    let width: Int
+    let height: Int
+    let bgra: [UInt8]
+
+    /// The mean of one channel over a rectangle of the frame, in rows from the top.
+    func mean(x: Int, y: Int, w: Int, h: Int, channel: Int = 1) -> Double {
+        var sum = 0
+        for yy in y..<(y + h) {
+            for xx in x..<(x + w) { sum += Int(bgra[(yy * width + xx) * 4 + channel]) }
+        }
+        return Double(sum) / Double(w * h)
+    }
+
+    /// The largest difference of any colour channel of any pixel.
+    func largestDifference(_ other: ComposedFrame) -> Int {
+        var most = 0
+        for i in 0..<bgra.count where i % 4 != 3 { most = max(most, abs(Int(bgra[i]) - Int(other.bgra[i]))) }
+        return most
+    }
+}
+
+enum TestComposed {
+    /// Every frame the COMPOSITOR draws for `built`, read the way `WriterEngine` reads a render - the
+    /// same reader range, an `AVAssetReaderVideoCompositionOutput` over every video track, the same
+    /// `frameSettings` and video composition - so these are the frames an encoder would be handed, and
+    /// nothing an encoder does to them can make two renders look alike or apart.
+    static func frames(_ built: BuiltComposition) throws -> [ComposedFrame] {
+        let reader = try AVAssetReader(asset: built.composition)
+        reader.timeRange = CMTimeRange(start: .zero, duration: ms(built.totalMs))
+        let output = AVAssetReaderVideoCompositionOutput(videoTracks: built.composition.tracks(withMediaType: .video),
+                                                         videoSettings: WriterEngine.frameSettings)
+        output.videoComposition = built.videoComposition
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { throw TestError("the reader refused the composed video output") }
+        reader.add(output)
+        guard reader.startReading() else { throw reader.error ?? TestError("startReading") }
+        var frames: [ComposedFrame] = []
+        while let sample = output.copyNextSampleBuffer() {
+            guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            frames.append(ComposedFrame(seconds: CMSampleBufferGetPresentationTimeStamp(sample).seconds,
+                                        width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer),
+                                        bgra: bgra(buffer)))
+        }
+        if reader.status != .completed { throw reader.error ?? TestError("the reader stopped at \(reader.status.rawValue)") }
+        return frames
+    }
+
+    /// A 32BGRA buffer's pixels, tightly packed: row padding is not picture.
+    static func bgra(_ buffer: CVPixelBuffer) -> [UInt8] {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return [] }
+        var out = [UInt8](repeating: 0, count: width * height * 4)
+        out.withUnsafeMutableBytes { dst in
+            for y in 0..<height { memcpy(dst.baseAddress! + y * width * 4, base + y * stride, width * 4) }
+        }
+        return out
+    }
+}

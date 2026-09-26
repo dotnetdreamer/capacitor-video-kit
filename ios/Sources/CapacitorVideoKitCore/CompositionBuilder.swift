@@ -60,6 +60,9 @@ private struct TimelineEntry {
     let trackID: CMPersistentTrackID
     let range: CMTimeRange
     let gain: Float
+    /// The clip's own frames and the ranges it was laid with, for a clip slowed below 1x; nil for every other
+    /// clip, and for every clip of a build with `SlowMotionMode.off`. See `SlowClip`.
+    let slow: SlowClip?
 }
 
 /// One video layer's clips after they have been placed, and what the instructions need to draw it.
@@ -90,6 +93,16 @@ private struct TransitionWindow {
 
     var endMs: Int64 { startMs + durMs }
     var range: CMTimeRange { CMTimeRange(start: ms(startMs), duration: ms(durMs)) }
+}
+
+/// The colour every render is converted to and tagged with: BT.709 primaries, transfer function and matrix, on
+/// the export's video composition and on every slowed clip's own (`ClipFrameComposition`). One place, because
+/// a slowed clip's frames match the frames the export hands the compositor only as long as both compositions
+/// ask for the same three.
+enum OutputColor {
+    static let primaries = AVVideoColorPrimaries_ITU_R_709_2
+    static let transferFunction = AVVideoTransferFunction_ITU_R_709_2
+    static let yCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
 }
 
 /// The one question `FormatTracks` asks of two files' video. Internal rather than private so that
@@ -351,12 +364,18 @@ enum CompositionBuilder {
     /// source any clip is planned with, which is what a clip left with no footage at all is given.
     private static let minClipMs: Int64 = 1
 
-    static func build(_ spec: ComposeSpec) async throws -> BuiltComposition {
+    /// `slowMotion` is how slowed clips are drawn, and only the tests and the benchmark pass anything but
+    /// the default: see `SlowMotionMode`. With `.off` nothing below loads, attaches or changes anything, and
+    /// the composition, the instructions and every pixel are what this engine built before it synthesised
+    /// slow motion.
+    static func build(_ spec: ComposeSpec, slowMotion: SlowMotionMode = .flow) async throws -> BuiltComposition {
         guard !spec.clips.isEmpty else { throw BuildError.internalFailure("spec has no clips") }
 
         // Built first, because it decodes every overlay PNG: a malformed overlay should fail the
         // job before we spend a second demuxing video.
-        let plan = try RenderPlan(spec: spec)
+        let plan = try RenderPlan(spec: spec, slowMotion: slowMotion)
+        // What makes a slowed clip's `SlowClip`, or nothing at all when slow motion is off.
+        let slowClips = slowMotion == .off ? nil : SlowClipSources()
 
         let comp = AVMutableComposition()
         // The base's first track, made here rather than on the first clip so that it comes before
@@ -465,8 +484,12 @@ enum CompositionBuilder {
                 placed = CMTimeRange(start: cursor, duration: scaled)
             }
 
+            // A slowed clip's frames are read here, now that both of its ranges are final: `srcRange` is
+            // what went in, `placed` where it landed after the millisecond rounding above.
+            let slow = await slowClip(clip, speed: speed, held: held, source: src, inserted: srcRange,
+                                      placed: placed, with: slowClips)
             entries.append(TimelineEntry(clip: clip, source: src, trackID: video.trackID,
-                                         range: placed, gain: clipGain))
+                                         range: placed, gain: clipGain, slow: slow))
             cursor = placed.end
 
             // The outgoing clip's last moments, laid UNDER this clip's first ones. After this clip
@@ -476,7 +499,8 @@ enum CompositionBuilder {
             // tail with nothing to come out of.
             if let transition = clip.transitionIn, entries.count > 1 {
                 let window = try await addTail(transition, under: placed, entry: entries.count - 1,
-                                               to: comp, tracks: tails, cache: cache, audio: spec.audio)
+                                               to: comp, tracks: tails, cache: cache, audio: spec.audio,
+                                               slowClips: slowClips)
                 if let window { windows.append(window) }
             }
         }
@@ -578,8 +602,8 @@ enum CompositionBuilder {
         // answer: the count is the customer's, and refusing a layout up front that this phone might
         // well have rendered is not.
         for track in spec.tracks ?? [] {
-            guard let extra = try await addLayer(track, to: comp, cache: cache,
-                                                 audio: spec.audio, totalMs: totalMs) else { continue }
+            guard let extra = try await addLayer(track, to: comp, cache: cache, audio: spec.audio,
+                                                 totalMs: totalMs, slowClips: slowClips) else { continue }
             layers.append(extra.layer)
             if let p = extra.params { params.append(p) }
         }
@@ -616,18 +640,30 @@ enum CompositionBuilder {
         // output is a fixed size at a fixed rate whatever the clips were shot at.
         vc.renderSize = plan.renderSize
         // fps is a MAXIMUM in the contract. The engine asks the compositor for one frame every
-        // frameDuration, so a 60 fps source is decimated to it. A slower source is not
-        // interpolated - the same picture is handed back again - and H.264 codes the repeat for
-        // almost nothing. `sourceTrackIDForFrameTiming` stays invalid; pointing it at the video
-        // track would pass a 60 fps source straight through and break the cap.
+        // frameDuration, from output zero, so a 60 fps source is decimated to it, and the cadence - every
+        // frame's time - is this line's and no clip's. `sourceTrackIDForFrameTiming` stays invalid;
+        // pointing it at the video track would pass a 60 fps source straight through and break the cap.
+        //
+        // A clip at 1x or faster is drawn from the frame the composition hands over. A source slower
+        // than this cadence is not interpolated - the same picture is handed back again (24p at 1x in a
+        // 60 fps post) - and H.264 codes the repeat for almost nothing. A clip SLOWED below 1x runs its
+        // source at its rate times the speed, which is usually far below this cadence (30 fps at 0.3x is
+        // nine pictures a second), and the contract has every engine invent the pictures in between
+        // (`ComposeOutput.fps` in definitions.ts): such a clip carries a `SlowClip`, and the compositor
+        // draws each instant from the clip's own two neighbouring frames, cross-faded or moved along the
+        // optical flow. It does that AT this cadence: not one frame time moves, and a picture - or a
+        // clip held on its last frame - still repeats, because it has nothing to interpolate.
+        // `SlowMotionMode.off` is the repeated frames, as this engine drew them before.
         vc.frameDuration = CMTime(value: 1, timescale: Int32(max(1, spec.output.fps)))
         vc.customVideoCompositorClass = EditCompositor.self
         // All three together, and only together. For a custom compositor these convert and tag the
         // source frames, so an HLG or PQ gallery pick arrives as 709 SDR instead of failing the
         // export. This is our analogue of Android's HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL.
-        vc.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
-        vc.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
-        vc.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        // `OutputColor` holds them, because a slowed clip's own frames are converted by a second video
+        // composition (`ClipFrameComposition`) that must name the very same three.
+        vc.colorPrimaries = OutputColor.primaries
+        vc.colorYCbCrMatrix = OutputColor.yCbCrMatrix
+        vc.colorTransferFunction = OutputColor.transferFunction
         // `renderScale` may only be other than 1 on a video composition set on an AVPlayerItem, and
         // `animationTool` is a Core Animation path we do not take - the overlays are already
         // bitmaps and the compositor draws them. Both stay at their defaults.
@@ -672,6 +708,22 @@ enum CompositionBuilder {
                                 audioMix: audioMix,
                                 totalMs: totalMs,
                                 plan: plan)
+    }
+
+    /// The `SlowClip` of a clip laid as `inserted` of its source and placed on `placed`, or nil when the clip is
+    /// not slowed or slow motion is off (`sources` is then nil).
+    ///
+    /// Slowed is `SlowMotion.isSlowMotion`: the CLAMPED speed below 1, and neither a picture nor held. Only
+    /// then is anything more loaded from the file; every other clip costs this a comparison. A clip whose
+    /// frames cannot be listed gets nil too and is drawn as it always was (`SlowClipSources`).
+    /// `window` is the clip's own frames when they reach past what was inserted, which only a cut transition
+    /// tail's do (`SlowClip.window`); nil is `inserted`.
+    private static func slowClip(_ clip: ComposeClip, speed: Double, held: Bool, source: SourceClip,
+                                 inserted: CMTimeRange, placed: CMTimeRange, window: CMTimeRange? = nil,
+                                 with sources: SlowClipSources?) async -> SlowClip? {
+        guard let sources, SlowMotion.isSlowMotion(speed: speed, image: clip.image, held: held) else { return nil }
+        return await sources.clip(asset: source.asset, track: source.videoTrack, trackRange: source.videoRange,
+                                  inserted: inserted, placed: placed, window: window)
     }
 
     /// What is wrong with the instruction ranges as a tiling of `[0, total)`, as a sentence for the
@@ -736,7 +788,8 @@ enum CompositionBuilder {
                                 to comp: AVMutableComposition,
                                 tracks tails: TailTracks,
                                 cache: SourceCache,
-                                audio: ComposeAudio) async throws -> TransitionWindow? {
+                                audio: ComposeAudio,
+                                slowClips: SlowClipSources?) async throws -> TransitionWindow? {
         let from = transition.from
         let startMs = msOf(placed.start)
         guard startMs >= tails.endMs else { return nil }
@@ -793,11 +846,23 @@ enum CompositionBuilder {
         }
         tails.endMs = msOf(range.end)
 
+        // A slowed tail is slowed motion too, and the side of the transition a customer watches go: its
+        // `SlowClip` is the span that went in and the window it was scaled onto. A tail is never held -
+        // a tail with no footage is a cut, above.
+        //
+        // Its OWN frames are the whole from-clip's, [in, outEff), and not only the span: the web plans a
+        // tail as the whole clip and cuts only its length (`planTransition` in plan.ts), so where the span
+        // was cut to a short incoming clip, the tail's last instants blend towards the next frame of the
+        // clip past the cut there. `outMsEff` is already clamped to the video track, so the file has every
+        // frame of it, and the one-clip composition the frames are read from covers the whole track.
+        let slow = await slowClip(from, speed: speed, held: false, source: src, inserted: srcRange,
+                                  placed: range, window: CMTimeRange(start: ms(from.inMs), end: ms(outMsEff)),
+                                  with: slowClips)
         return TransitionWindow(entry: index,
                                 startMs: startMs,
                                 durMs: span.placedMs,
                                 tail: TimelineEntry(clip: from, source: src, trackID: video.trackID,
-                                                    range: range, gain: tailGain),
+                                                    range: range, gain: tailGain, slow: slow),
                                 transition: transition)
     }
 
@@ -820,7 +885,8 @@ enum CompositionBuilder {
                                  to comp: AVMutableComposition,
                                  cache: SourceCache,
                                  audio: ComposeAudio,
-                                 totalMs: Int64) async throws
+                                 totalMs: Int64,
+                                 slowClips: SlowClipSources?) async throws
         -> (layer: LayerTimeline, params: AVMutableAudioMixInputParameters?)? {
 
         // Every track and the parameters are created on the first clip that actually needs them,
@@ -908,8 +974,12 @@ enum CompositionBuilder {
                 placed = CMTimeRange(start: cursor, duration: scaled)
             }
 
+            // The layer's ranges as they really are: the source CUT to the base's end, and the placement
+            // clamped to the room left, which is why neither can be recomputed from the spec.
+            let slow = await slowClip(clip, speed: speed, held: held, source: src, inserted: srcRange,
+                                      placed: placed, with: slowClips)
             entries.append(TimelineEntry(clip: clip, source: src, trackID: dest.trackID,
-                                         range: placed, gain: clipGain))
+                                         range: placed, gain: clipGain, slow: slow))
             cursor = placed.end
         }
 
@@ -944,7 +1014,8 @@ enum CompositionBuilder {
                   crop: e.clip.crop,
                   rect: e.clip.rect,
                   opacity: layer.opacity,
-                  render: plan.renderSize)
+                  render: plan.renderSize,
+                  slow: e.slow)
     }
 
     /// The outgoing side of one transition as the compositor draws it: the tail's clip on its tail
@@ -958,7 +1029,8 @@ enum CompositionBuilder {
                                               crop: w.tail.clip.crop,
                                               rect: w.tail.clip.rect,
                                               opacity: 1,
-                                              render: plan.renderSize),
+                                              render: plan.renderSize,
+                                              slow: w.tail.slow),
                               startUs: w.startMs * 1000,
                               durationUs: w.durMs * 1000,
                               curves: t.curves,

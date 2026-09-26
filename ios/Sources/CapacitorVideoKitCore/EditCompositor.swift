@@ -30,13 +30,30 @@ final class RenderPlan: @unchecked Sendable {
     /// Where the compositor has got to on THIS job's output timeline, read when the encode fails.
     let cursor = FrameCursor()
 
+    /// How slowed clips are drawn (see `SlowMotionMode`): `.flow` on every render the app makes. `.off` is
+    /// never consulted by the compositor, because the builder then attaches no `SlowClip` to anything.
+    let slowMotion: SlowMotionMode
+
+    /// The colour matrix as the optical flow's luma pass takes it: the web engine hands its luma pass the
+    /// post's grade (`FlowGrade` in optical-flow-gl.ts), because the flow's thresholds are in luma and the
+    /// graded picture is the one the customer sees. The frames themselves are still synthesised UNGRADED and
+    /// graded afterwards in `placedPicture`, exactly as a recorded frame is. Decided once, here.
+    let flowGrade: FlowGrade
+
+    /// TESTS ONLY: see `SlowMotionTestFaults`. Never set by the render.
+    let slowMotionFaults = SlowMotionTestFaults()
+
     /// Decodes every overlay ONCE, here, on the thread that builds the composition. Decoding inside
     /// the compositor would put a PNG decode on the render path thirty times a second.
     /// Throws `BuildError.invalidOverlay` when a PNG will not decode.
-    init(spec: ComposeSpec) throws {
+    init(spec: ComposeSpec, slowMotion: SlowMotionMode = .flow) throws {
         let size = CGSize(width: spec.output.width, height: spec.output.height)
         renderSize = size
         colorMatrix = ColorMatrix.fold(spec.filter)
+        // Row-major `m` into the columns the kernel's mat3 is built from; the identity when the post has no
+        // grade, which is `NO_GRADE` on the web.
+        flowGrade = colorMatrix.isIdentity ? .identity : FlowGrade(rowMajor: colorMatrix.m, bias: colorMatrix.b)
+        self.slowMotion = slowMotion
         camera = CameraTrack(spec.camera)
         // compactMap, because a fully transparent overlay decodes to nil rather than to an
         // invisible image the compositor would blend for nothing.
@@ -107,9 +124,17 @@ struct EditLayer {
     /// hands straight back, so the common frame pays nothing for the feature.
     let opacity: Double
 
+    /// The clip's own frames, for a clip slowed below 1x (see `SlowClip`), or nil for every other clip -
+    /// 1x and faster, pictures, held clips, and every clip of a build made with `SlowMotionMode.off` - which
+    /// then draws the frame the composition hands it, as every clip always did. Shared, as one instance, by
+    /// every layer cut from the same timeline entry.
+    let slow: SlowClip?
+
     init(trackID: CMPersistentTrackID, orientation: CGImagePropertyOrientation, fit: Fit,
-         crop: ComposeRect?, rect: ComposePlacement?, opacity: Double, render: CGSize) {
+         crop: ComposeRect?, rect: ComposePlacement?, opacity: Double, render: CGSize,
+         slow: SlowClip? = nil) {
         self.trackID = trackID
+        self.slow = slow
         self.orientation = orientation
         self.fit = fit
         self.crop = crop
@@ -197,11 +222,20 @@ final class EditInstruction: NSObject, AVVideoCompositionInstructionProtocol, @u
 
     let plan: RenderPlan
 
+    /// The slowed clips this stretch draws - its layers' and its transition tail's - by identity: what the
+    /// compositor keeps its slow-motion state for while this instruction renders, and releases for every
+    /// other clip. Empty for every instruction without a slowed clip, which is every instruction of a post
+    /// that slows nothing.
+    let slowClips: Set<ObjectIdentifier>
+
     init(timeRange: CMTimeRange, layers: [EditLayer], transition: EditTransition? = nil,
          plan: RenderPlan) {
         self.timeRange = timeRange
         self.layers = layers
         self.transition = transition
+        var slowed = Set(layers.compactMap { $0.slow.map(ObjectIdentifier.init) })
+        if let tail = transition?.tail.slow { slowed.insert(ObjectIdentifier(tail)) }
+        self.slowClips = slowed
         // Only the layers that actually have a clip at this instant, which is what lets a layer
         // that has not started yet cost the engine no decode at all - and the tail track only
         // inside a window, which is the only place it has anything on it.
@@ -215,22 +249,15 @@ final class EditInstruction: NSObject, AVVideoCompositionInstructionProtocol, @u
 
 enum CompositorError: Error { case badInstruction, noBuffer }
 
-/// The custom `AVVideoCompositing` that draws every output frame.
-///
-/// Safe to instantiate more than once per process: the exporter's one fallback builds a fresh
-/// `AVAssetExportSession` after the writer engine's reader has given up, and it builds a fresh
-/// compositor.
-final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
-
+/// What `EditCompositor` asks AVFoundation to hand it, and so how AVFoundation converts every source frame
+/// on the way in: in one place, because a slowed clip's own frames are read through a second compositor,
+/// `ClipFramePassthrough`, which must ask for exactly the same to be handed exactly the same pixels. Both
+/// compositors answer with these and nothing else; `SlowMotionFramesTests` holds them to it.
+enum CompositorSourceFormat {
     // Both dictionaries must carry a pixel format or AVFoundation raises an ObjC exception. 32BGRA
     // is what Core Image renders into without a conversion, and the Metal flag keeps the buffers
     // usable by the GPU-backed CIContext below.
-    var sourcePixelBufferAttributes: [String: any Sendable]? = [
-        kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-        kCVPixelBufferMetalCompatibilityKey as String: true,
-    ]
-
-    var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] = [
+    static let attributes: [String: any Sendable] = [
         kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
         kCVPixelBufferMetalCompatibilityKey as String: true,
     ]
@@ -238,8 +265,22 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     // Left at false on purpose. The framework then tone maps HLG and PQ gallery picks down to
     // BT.709 SDR before we ever see them, which is the iOS analogue of Android's
     // HDR_MODE_TONE_MAP_HDR_TO_SDR: an HDR source renders slightly flat instead of failing.
-    var supportsHDRSourceFrames: Bool { false }
-    var supportsWideColorSourceFrames: Bool { false }
+    static let supportsHDR = false
+    static let supportsWideColor = false
+}
+
+/// The custom `AVVideoCompositing` that draws every output frame.
+///
+/// Safe to instantiate more than once per process: the exporter's one fallback builds a fresh
+/// `AVAssetExportSession` after the writer engine's reader has given up, and it builds a fresh
+/// compositor.
+final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
+
+    // See `CompositorSourceFormat`, which a slowed clip's frame source shares.
+    var sourcePixelBufferAttributes: [String: any Sendable]? = CompositorSourceFormat.attributes
+    var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] = CompositorSourceFormat.attributes
+    var supportsHDRSourceFrames: Bool { CompositorSourceFormat.supportsHDR }
+    var supportsWideColorSourceFrames: Bool { CompositorSourceFormat.supportsWideColor }
 
     /// AVFoundation is explicitly allowed to call `startRequest` again before the previous request
     /// has finished, so every frame is rendered on this one serial queue.
@@ -264,7 +305,13 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     ///
     /// The identity case renders perfectly under all three, so `filter: []` proves nothing here;
     /// `crisp` on rgb(30,30,30) is the cheapest check that bites (expected 20, linear gives 0).
-    private let ci: CIContext = {
+    private let ci: CIContext
+
+    /// The context above, on `device`. The options are the whole of the colour contract and are exactly what
+    /// they were before the device was shared with the optical flow: sharing it changed which object makes the
+    /// device, not how a single frame is drawn. Internal so that the cross-fade's tests render through this
+    /// very configuration rather than a copy of it.
+    static func context(on device: MTLDevice?) -> CIContext {
         let options: [CIContextOption: Any] = [
             .workingColorSpace: NSNull(),   // no linearisation and no matching on the way in
             .outputColorSpace: NSNull(),    // none on the way out either
@@ -273,11 +320,25 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         ]
         // Every device and simulator this ships to has Metal; the CPU context is a last resort that
         // renders correctly and slowly rather than a crash on some future configuration.
-        if let device = MTLCreateSystemDefaultDevice() {
+        if let device {
             return CIContext(mtlDevice: device, options: options)
         }
         return CIContext(options: options)
-    }()
+    }
+
+    /// The slow-motion state: decoders, flows, the flow's estimator and its buffers. Touched only on `queue`,
+    /// inside `render`, which is what its class requires of it.
+    private let slow: SlowMotionState
+
+    /// The one Metal device this compositor draws with is made once, here, and handed to both sides: the
+    /// CIContext renders every frame on it, and the optical flow's textures and kernels live on it too, so a
+    /// synthesised frame never crosses devices on its way into Core Image. Neither needs it stored here.
+    override init() {
+        let device = MTLCreateSystemDefaultDevice()
+        ci = EditCompositor.context(on: device)
+        slow = SlowMotionState(device: device)
+        super.init()
+    }
 
     /// Required by the protocol, and deliberately empty: `render` reads `request.renderContext`
     /// straight off the request that carried it, which needs no stored state and cannot go stale.
@@ -330,6 +391,11 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // frame the job had reached.
         instr.plan.cursor.record(tUs)
 
+        // A slowed clip this instruction does not name is finished: its decoder and its flow go now, before
+        // this frame decodes anything of its own. An instruction without a slowed clip names none, so the
+        // last slowed clip's state is gone by the first frame after it.
+        slow.keep(only: instr.slowClips)
+
         // The camera, ONCE per frame and never per layer: every video layer and both sides of a
         // transition see the same camera, because it is a function of output time alone. nil for a
         // post with no zoom, and nil for every frame of a zoomed post where the camera is at rest
@@ -371,7 +437,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         for layer in layers {
             // nil for a track that has no frame at this instant. The layer is skipped and the frame
             // is still rendered: a hole in one layer is not a reason to fail an export.
-            guard let src = request.sourceFrame(byTrackID: layer.trackID),
+            guard let src = sourcePicture(of: layer, request, plan: instr.plan),
                   let picture = placedPicture(of: layer, from: src, plan: instr.plan, rect: rect,
                                               camera: camera)
             else { continue }
@@ -404,17 +470,42 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         return dst
     }
 
+    /// The layer's SOURCE picture at this instant, before anything is done to it, or nil when its track
+    /// has no frame here.
+    ///
+    /// For every clip that is not slowed this is the frame the composition hands over, wrapped exactly as
+    /// it always was - no colour space, because management is off - and nothing else runs.
+    ///
+    /// A slowed clip (`layer.slow`) is drawn from its OWN frames instead, at the output cadence: the frame
+    /// the composition would hand over is one of a slowed clip's source frames repeated two, three or four
+    /// times, and the contract (`ComposeOutput.fps` in definitions.ts) is that every engine invents the
+    /// pictures in between. `SlowMotionState` answers A alone on a source frame, the cross-fade of A and B
+    /// between two in `.blend`, and the optical flow's picture in `.flow`. It replaces only the source: the
+    /// orientation, grade, crop, fit, turn, camera, opacity and transition that follow are the ones every
+    /// other frame gets, which is also how the web and Android order it - interpolate the source, grade after.
+    /// When the clip's own frames cannot be read, `SlowMotionState` says so with nil and the composition's
+    /// frame is drawn, as before any of this existed.
+    private func sourcePicture(of layer: EditLayer, _ request: AVAsynchronousVideoCompositionRequest,
+                               plan: RenderPlan) -> CIImage? {
+        if let clip = layer.slow,
+           let picture = slow.picture(of: clip, at: request.compositionTime, mode: plan.slowMotion,
+                                      grade: plan.flowGrade, faults: plan.slowMotionFaults) {
+            return picture
+        }
+        guard let src = request.sourceFrame(byTrackID: layer.trackID) else { return nil }
+        return CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
+    }
+
     /// One layer's picture, oriented, graded and placed, TRANSPARENT everywhere it does not reach -
     /// exactly what every layer of every frame has always been drawn as - or nil when there is no
-    /// picture to place at all.
+    /// picture to place at all. `src` is what `sourcePicture` answered.
     ///
     /// `camera` is this frame's camera, or nil when there is none; it is folded into the placement
     /// itself (see `Placement.placed`) rather than applied to the finished frame, so the SOURCE is
     /// what gets magnified and a zoom into a sharp recording stays sharp.
-    private func placedPicture(of layer: EditLayer, from src: CVPixelBuffer, plan: RenderPlan,
+    private func placedPicture(of layer: EditLayer, from src: CIImage, plan: RenderPlan,
                                rect: CGRect, camera: CGAffineTransform?) -> CIImage? {
-        var pic = CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
-            .oriented(layer.orientation)
+        var pic = src.oriented(layer.orientation)
         // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
         // finished frame instead, any op with a non-zero bias paints the bars: `golden` carries
         // b = [0.1595, 0.1108, 0.0261], which gives rgb(41, 28, 7) bars, and a fade gives grey
@@ -449,7 +540,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     /// frame whose bars are black can be. The transition then works on that frame in output pixels.
     private func wholeFrame(_ layer: EditLayer, _ request: AVAsynchronousVideoCompositionRequest,
                             plan: RenderPlan, rect: CGRect, camera: CGAffineTransform?) -> CIImage? {
-        guard let src = request.sourceFrame(byTrackID: layer.trackID) else { return nil }
+        guard let src = sourcePicture(of: layer, request, plan: plan) else { return nil }
         let black = CIImage(color: .black).cropped(to: rect)
         guard let picture = placedPicture(of: layer, from: src, plan: plan, rect: rect,
                                           camera: camera) else { return black }

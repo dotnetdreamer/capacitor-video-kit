@@ -24,7 +24,9 @@ The flow has to clearly beat the cross-fade on the first three and must not be w
 
 ## Running it
 
-From the kit, with the fnm node on the path (`/c/Users/ik/AppData/Roaming/fnm/node-versions/v24.15.0/installation`):
+From the kit. On Windows, with the fnm node on the path
+(`/c/Users/ik/AppData/Roaming/fnm/node-versions/v24.15.0/installation`); on a Mac, the system node
+(24.15 or later). Either way an `ffmpeg` and `ffprobe` on the path, with drawtext, mandelbrot and psnr.
 
 ```sh
 # 1. The scenes (a minute; 360 640 for a quick run at half the pixels).
@@ -37,13 +39,25 @@ VITE_BENCH_DIR="$BENCH" VITE_BENCH_OUT="$BENCH/out" \
 # 3. The table.
 bash scripts/slow-motion-bench/score.sh "$BENCH" "$BENCH/out"
 
-# The whole post exported by the web engine, for the web/Android parity check:
+# The whole post exported by the web engine, for the parity checks (web-bench05.mp4, web-bench025.mp4);
+# graded with VITE_BENCH_FILTER='[{"op":"contrast","amount":1.5}]' VITE_BENCH_TAG=-c15 in front:
 VITE_BENCH_DIR="$BENCH" VITE_BENCH_OUT="$BENCH/web" \
   npx vitest run --config scripts/slow-motion-bench/vitest.bench.config.ts scripts/slow-motion-bench/web-export.harness.ts
+
+# An export of the post scored in luma, every frame, invented and recorded apart: against the truth,
+# or against another engine's export of the same post at the same speed.
+bash scripts/slow-motion-bench/score-export.sh truth "$BENCH" "$BENCH/web/web-bench05.mp4" 0.5
+bash scripts/slow-motion-bench/score-export.sh pair phone-bench05.mp4 "$BENCH/web/web-bench05.mp4" 0.5
 ```
 
-`BENCH` must be a Windows-style path (`C:/...`); the harness can only read and write under it and the
-kit. `generate.sh` also writes `bench-30fps.mp4`, the six recordings end to end, for a post on a phone.
+`BENCH` is a Windows-style path (`C:/...`) on Windows and an ordinary absolute path on a Mac. The
+harness can read and write only under it, the kit and `VITE_BENCH_OUT`. The runner picks ANGLE's
+backend by platform - Direct3D 11 on Windows, Metal on a Mac, where asking for Direct3D quietly lands
+on SwiftShader - and `BENCH_ANGLE` overrides it; `harness.txt` and each export's `.txt` name the
+renderer a run really got, and the interpolate harness refuses SwiftShader. `generate.sh` also writes
+`bench-30fps.mp4`, the six recordings end to end, for a post on a phone. Its `-colorspace bt709` is
+only a label: an ffmpeg whose scaler does not follow it (6.0, on the Mac) stores BT.601 pixels under
+it, so `score-export.sh` reads the matrix off the recording itself before it turns the truth into luma.
 
 ## The numbers (2026-09-26)
 
