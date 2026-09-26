@@ -1366,10 +1366,12 @@ describe('the zoom row', () => {
     expect(root(tl).querySelectorAll('[data-row="zoom"] .handle').length).toBe(2);
   });
 
-  it('retimes the end by its handle as one undo step', async () => {
-    const { store, tl, id } = await withZoom();
-    // The end brought in from the right side of the viewport, where a drag would start scrolling
-    // the timeline under itself.
+  /**
+   * The zoom's end handle dragged half a second later, a whole drag from finger down to finger up.
+   * The playhead is put at 3 s first, which brings the end in from the right side of the viewport,
+   * where a drag would start scrolling the timeline under itself.
+   */
+  async function dragEndLater(store: EditorStore, tl: HTMLElement, id: string): Promise<void> {
     store.seek(3000);
     await frames(3);
     store.select({ kind: 'zoom', id });
@@ -1383,12 +1385,46 @@ describe('the zoom row', () => {
     await frames(3);
     pointer(scroller, 'pointerup', from.x + 32, from.y);
     await frames(2);
+  }
+
+  it('retimes the end by its handle as one undo step', async () => {
+    const { store, tl, id } = await withZoom();
+    await dragEndLater(store, tl, id);
 
     // Half a second at 64 px a second.
     const zoom = store.manifest.value.zooms[0];
     expect(zoom.startMs).toBe(1000);
     expect(zoom.endMs).toBeCloseTo(4500, -2);
 
+    store.undo();
+    expect(store.manifest.value.zooms[0].endMs).toBe(4000);
+  });
+
+  /*
+   * The editor takes the timeline out in full screen and under the tall sheets and puts a new one
+   * in after. The drags used to be counted by the timeline for their keys, so the new one's first
+   * drag had the old one's first key and folded into its undo step.
+   */
+  it('keeps a drag on a timeline mounted again out of the step the last one made', async () => {
+    const { store, tl, id } = await withZoom();
+    await dragEndLater(store, tl, id);
+    expect(store.manifest.value.zooms[0].endMs).toBeCloseTo(4500, -2);
+
+    const column = tl.parentElement!;
+    const { ctx } = tl as HTMLElement & { ctx: EditorContext };
+    tl.remove();
+    const again = document.createElement('ve-timeline');
+    again.style.height = '100%';
+    Object.assign(again, { ctx });
+    column.append(again);
+    await (again as StencilElement).componentOnReady?.();
+    await frames(2);
+
+    await dragEndLater(store, again, id);
+    expect(store.manifest.value.zooms[0].endMs).toBeCloseTo(5000, -2);
+
+    store.undo();
+    expect(store.manifest.value.zooms[0].endMs).toBeCloseTo(4500, -2);
     store.undo();
     expect(store.manifest.value.zooms[0].endMs).toBe(4000);
   });

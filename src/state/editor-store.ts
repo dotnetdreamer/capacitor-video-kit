@@ -107,6 +107,15 @@ interface HistoryEntry {
   label: string;
 }
 
+/**
+ * The name of one gesture's run of zoom steps, which [EditorStore.commitCoalesced] folds into one
+ * undo step, and only ever made by [EditorStore.coalesceKey]. A string underneath, branded so that a
+ * key a component makes up for itself - a template string off a counter of its own, which is how
+ * three of them came to fold separate edits into one undo - is a type error rather than a bug found
+ * on a phone.
+ */
+export type CoalesceKey = string & { readonly __brand: 'CoalesceKey' };
+
 const HISTORY_LIMIT = 50;
 
 /**
@@ -1754,7 +1763,36 @@ export class EditorStore {
   }
 
   /** The coalesce key of the last zoom step, and the history entry it made; see [commitCoalesced]. */
-  private coalesced: { key: string; entry: number } | null = null;
+  private coalesced: { key: CoalesceKey; entry: number } | null = null;
+
+  /** How many keys [coalesceKey] has handed out, which numbers the next one. */
+  private coalesceKeys = 0;
+
+  /**
+   * A coalesce key for ONE gesture - a drag of a zoom sheet's slider, of a zoom's window on the
+   * timeline, of the box on the picture - that no gesture before it has had. The component asks for
+   * one as the finger goes down and passes it with every step of that gesture, so the gesture lands
+   * as one undo step and the next gesture, with a key of its own, as another.
+   *
+   * Handed out here rather than counted where the gesture happens, because the run a key folds into
+   * ([coalesced]) is the store's and lives as long as the store does, and nothing that passes keys
+   * lives that long: the zoom sheet is taken out every time its panel closes, the timeline in full
+   * screen and under the tall sheets, the preview's gestures whenever the preview leaves the page.
+   * Each of them used to count its own, so a new one started again at the same number and its first
+   * gesture carried the last one's first key - and folded into that one's step whenever nothing had
+   * been recorded in between. Level 2.0x to 3.0x, Done, Edit, 4.0x, and one Undo went back to 2.0x.
+   *
+   * Not by ending the run whenever a panel opens or closes, either. That is one of the ways a
+   * component goes and comes back, not all of them - the timeline goes in full screen with no panel
+   * open at all - and each new way would need a rule of its own here. A key that cannot repeat needs
+   * none, and leaves the run's rule what it was: the same key, the newest entry, nothing to redo.
+   *
+   * `name` is only there to make a key readable in a debugger; two gestures with the same name still
+   * get two keys.
+   */
+  coalesceKey(name: string): CoalesceKey {
+    return `${name}:${++this.coalesceKeys}` as CoalesceKey;
+  }
 
   /**
    * Adds a zoom at the playhead - [DEFAULT_ZOOM_MS] on the middle of the frame at
@@ -1804,10 +1842,10 @@ export class EditorStore {
 
   /**
    * Changes a zoom's area, level, ramp or ease. One undo step labelled 'Zoom'; a slider or a drag
-   * passes a `coalesce` key and every call with the same key, one after another, folds into that one
-   * step, so a drag across the frame is one undo and not sixty.
+   * passes a `coalesce` key from [coalesceKey] and every call with the same key, one after another,
+   * folds into that one step, so a drag across the frame is one undo and not sixty.
    */
-  updateZoom(id: string, patch: ZoomPatch, opts?: { coalesce?: string }): void {
+  updateZoom(id: string, patch: ZoomPatch, opts?: { coalesce?: CoalesceKey }): void {
     this.commitCoalesced('Zoom', m => updateZoomOp(m, id, patch), opts?.coalesce);
   }
 
@@ -1815,7 +1853,7 @@ export class EditorStore {
    * Moves a zoom's window, stopping at its neighbours and the end of the post and never shorter
    * than [MIN_ZOOM_MS]. Coalesces as [updateZoom] does, for the timeline's edge drags.
    */
-  setZoomWindow(id: string, startMs: number, endMs: number, opts?: { coalesce?: string }): void {
+  setZoomWindow(id: string, startMs: number, endMs: number, opts?: { coalesce?: CoalesceKey }): void {
     const total = this.totalMs.value;
     this.commitCoalesced('Zoom', m => setZoomWindowOp(m, id, startMs, endMs, total), opts?.coalesce);
   }
@@ -1856,7 +1894,7 @@ export class EditorStore {
    * recorded in between, an undo, or a redo ends the run, and the next call starts an entry of its
    * own - the history group's rule, for one control rather than one sheet.
    */
-  private commitCoalesced(label: string, fn: (m: EditManifest) => EditManifest | null, key?: string): boolean {
+  private commitCoalesced(label: string, fn: (m: EditManifest) => EditManifest | null, key?: CoalesceKey): boolean {
     if (!key) return this.commit(label, fn);
     this.flushGesture();
     const before = this.manifest.value;

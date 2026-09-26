@@ -63,9 +63,10 @@ describe('EditorStore zooms', () => {
 
   it('folds a run of coalesced updates into one undo step', () => {
     load({ zooms: [zoom('z', 1000, 4000)] });
-    store.updateZoom('z', { cx: 0.6 }, { coalesce: 'drag' });
-    store.updateZoom('z', { cx: 0.7 }, { coalesce: 'drag' });
-    store.updateZoom('z', { cx: 0.74 }, { coalesce: 'drag' });
+    const drag = store.coalesceKey('drag');
+    store.updateZoom('z', { cx: 0.6 }, { coalesce: drag });
+    store.updateZoom('z', { cx: 0.7 }, { coalesce: drag });
+    store.updateZoom('z', { cx: 0.74 }, { coalesce: drag });
     expect(store.zooms.value[0].cx).toBe(0.74);
     store.updateZoom('z', { scale: 3 });
     expect(store.canUndo.value).toBe(true);
@@ -78,10 +79,56 @@ describe('EditorStore zooms', () => {
 
   it('starts a new step for a different coalesce key', () => {
     load({ zooms: [zoom('z', 1000, 4000)] });
-    store.updateZoom('z', { rampMs: 800 }, { coalesce: 'ramp' });
-    store.setZoomWindow('z', 1000, 5000, { coalesce: 'edge' });
+    store.updateZoom('z', { rampMs: 800 }, { coalesce: store.coalesceKey('ramp') });
+    store.setZoomWindow('z', 1000, 5000, { coalesce: store.coalesceKey('edge') });
     store.undo();
     expect(store.zooms.value[0]).toMatchObject({ rampMs: 800, endMs: 4000 });
+  });
+
+  it('never hands out the same coalesce key twice, whatever the gesture is called', () => {
+    const keys = [store.coalesceKey('zoom-level'), store.coalesceKey('zoom-level'), store.coalesceKey('zoom-ramp')];
+    expect(new Set(keys).size).toBe(3);
+    // A load starts a new post, not a new count: the store is what outlives the components asking.
+    load();
+    expect(keys).not.toContain(store.coalesceKey('zoom-level'));
+  });
+
+  /*
+   * The run a key folds into lives here, and the sheet, the timeline and the preview that pass the
+   * keys come and go under it: the sheet every time its panel closes, the timeline in full screen.
+   * Each of them used to count its own gestures for the key, so a new one started the count again
+   * and its first gesture folded into the old one's undo step - Level 2.0x to 3.0x, Done, Edit,
+   * 4.0x, and one Undo went back to 2.0x. A key taken from the store is one no earlier gesture had.
+   */
+  it('keeps a gesture in a sheet opened again out of the step the last sheet made', () => {
+    load({ zooms: [zoom('z', 1000, 4000)] });
+    store.openZoom('z');
+    const first = store.coalesceKey('zoom-level');
+    store.updateZoom('z', { scale: 2.5 }, { coalesce: first });
+    store.updateZoom('z', { scale: 3 }, { coalesce: first });
+    store.closePanel();
+
+    store.openZoom('z');
+    store.updateZoom('z', { scale: 4 }, { coalesce: store.coalesceKey('zoom-level') });
+
+    store.undo();
+    expect(store.zooms.value[0].scale).toBe(3);
+    store.undo();
+    expect(store.zooms.value[0].scale).toBe(2);
+    expect(store.canUndo.value).toBe(false);
+  });
+
+  it('keeps a window drag out of the step the drag before it made, with nothing between them', () => {
+    load({ zooms: [zoom('z', 1000, 4000)] });
+    const first = store.coalesceKey('zoom-window');
+    store.setZoomWindow('z', 1000, 4500, { coalesce: first });
+    store.setZoomWindow('z', 1000, 5000, { coalesce: first });
+    store.setZoomWindow('z', 1000, 6000, { coalesce: store.coalesceKey('zoom-window') });
+
+    store.undo();
+    expect(store.zooms.value[0].endMs).toBe(5000);
+    store.undo();
+    expect(store.zooms.value[0].endMs).toBe(4000);
   });
 
   it('deletes the selected zoom from Delete and closes its sheet', () => {
