@@ -35,6 +35,11 @@ private struct SourceClip {
     let preferredTransform: CGAffineTransform
     let videoRange: CMTimeRange
     let audioRange: CMTimeRange?
+    /// How the video track's samples are encoded - codec, size and, for H.264 and HEVC, the parameter
+    /// sets themselves - which is what decides the composition track a clip is laid on (see
+    /// `FormatTracks`). One entry for nearly every file; more for a file whose stream changes format
+    /// part of the way through.
+    let videoFormats: [CMFormatDescription]
 }
 
 /// A music or voiceover file, which needs no video track and no transform.
@@ -49,14 +54,19 @@ private struct AudioSource {
 private struct TimelineEntry {
     let clip: ComposeClip
     let source: SourceClip
+    /// The composition track this clip was laid on, which is the track its instructions name. A
+    /// clip's own and not its layer's, because a layer whose clips were encoded differently is laid
+    /// across several tracks (see `FormatTracks`).
+    let trackID: CMPersistentTrackID
     let range: CMTimeRange
     let gain: Float
 }
 
-/// One video layer's clips after they have been placed, and what the instructions need to name it.
-/// The base track is always the first of these and carries z 0 and full opacity.
+/// One video layer's clips after they have been placed, and what the instructions need to draw it.
+/// The base is always the first of these, carries z 0 and full opacity, and is the one marked
+/// `isBase`: a flag rather than a track ID, because its clips can sit on more than one track.
 private struct LayerTimeline {
-    let trackID: CMPersistentTrackID
+    let isBase: Bool
     let z: Int
     let opacity: Double
     let entries: [TimelineEntry]
@@ -73,42 +83,156 @@ private struct TransitionWindow {
     let entry: Int
     let startMs: Int64
     let durMs: Int64
-    /// The outgoing clip's tail as it was placed on the tail track: `range` IS the window.
+    /// The outgoing clip's tail as it was placed on a tail track: `range` IS the window, and
+    /// `trackID` is the tail track this one went on.
     let tail: TimelineEntry
-    let tailTrackID: CMPersistentTrackID
     let transition: ComposeTransition
 
     var endMs: Int64 { startMs + durMs }
     var range: CMTimeRange { CMTimeRange(start: ms(startMs), duration: ms(durMs)) }
 }
 
-/// The one extra video track every outgoing tail of a post is laid on, and the one extra audio track
-/// its sound goes to, each created on the first tail that needs it.
+/// The one question `FormatTracks` asks of two files' video. Internal rather than private so that
+/// the tests can ask it too.
+enum VideoFormat {
+    /// What a file records about ITSELF in its sample description, which no decoder reads: the
+    /// compressor's name, and the sample entry copied out verbatim - which carries that name and the
+    /// `btrt` box again. CoreMedia leaves the two verbatim copies out of the comparison by itself
+    /// whenever any key is named here; they are named anyway, so that this list reads as the whole
+    /// of what is ignored.
+    private static let ignoredExtensions = [
+        kCMFormatDescriptionExtension_VerbatimSampleDescription,
+        kCMFormatDescriptionExtension_VerbatimISOSampleEntry,
+        kCMFormatDescriptionExtension_FormatName,
+    ] as CFArray
+    /// The bitrate box: the buffer size and bitrates of the file it was written into.
+    private static let ignoredAtoms = ["btrt"] as CFArray
+
+    /// Whether files whose video `a` and `b` describe can follow one another on one composition
+    /// track, which is the question `FormatTracks` asks of every clip.
+    ///
+    /// Everything a decoder is handed has to match - the codec, the size, the parameter sets in
+    /// `avcC` or `hvcC`, colour, range, pixel aspect, field order - and only what a file says about
+    /// itself is left out. Plain `CMFormatDescriptionEqual` would not leave it out: every file
+    /// ffmpeg writes carries a `btrt` with its own bitrate in it, so two of its files with the same
+    /// parameter sets byte for byte still compare unequal, and so did the pair of `crf 30` files
+    /// in the report `FormatTracks` describes - the pair that rendered correctly on one track.
+    /// Splitting on it would give every such file a track of its own, and a decoder with it, for
+    /// nothing.
+    static func decodesAlike(_ a: CMFormatDescription, _ b: CMFormatDescription) -> Bool {
+        CMFormatDescriptionEqualIgnoringExtensionKeys(a, otherFormatDescription: b,
+                                                      extensionKeysToIgnore: ignoredExtensions,
+                                                      sampleDescriptionExtensionAtomKeysToIgnore: ignoredAtoms)
+    }
+}
+
+/// The composition video tracks one layer's clips are laid on: one for each way those clips' video
+/// was encoded, each created on the first clip that needs it.
+///
+/// A composition track decodes whatever is on it through one decompression session, and when the
+/// track moves on from one file to the next AVFoundation can keep that session for the new file.
+/// For H.264 it does when the two sequence parameter sets match, and the second file is then
+/// decoded as if it carried the FIRST file's picture parameter set. Found on the iOS 26.5 simulator
+/// with two 1080x1920 x264 files encoded alike but for `crf`, so an identical SPS and a PPS that
+/// differs in `pic_init_qp` alone - the quantiser a CABAC stream starts every slice's contexts
+/// from: the export showed the first clip's last frame for all 60 s of the second, with a garbled
+/// band across its top. The OS log had the track's decompression session built ONCE for that whole
+/// render, and rebuilt at every change of file in the renders that came out right - the same pair
+/// encoded alike, and two clips of different sizes. The simulator's own encoder does the same at
+/// High profile with CABAC against CAVLC, which is how `MixedEncodingTests` reproduces it. Android
+/// and the web never meet this: Media3 gives every item of a sequence a decoder of its own, and the
+/// web renderer opens a fresh element whenever a layer changes file.
+///
+/// So no track here ever carries two formats. A file whose video has one format description shares
+/// a track with every other file whose description decodes alike (see `VideoFormat.decodesAlike`:
+/// the codec, the size, the parameter sets and everything else a decoder is handed), and a file
+/// with more than one is given a track of its own, shared only with its own other clips. Which of
+/// its formats a trim lands in is not worth working out: on its own track the file changes format
+/// as it does when it plays alone, and never into some other file's.
+///
+/// Alike is still stricter than the decoder needs - two files whose parameter sets match but whose
+/// descriptions differ in, say, a colour tag go on two tracks - and that is the side to err on: a
+/// second track costs a second decoder, while a shared one can cost the picture.
+///
+/// A post whose clips were all encoded alike - one camera, one app, or the stills of one size
+/// `PictureStills` writes - lays every clip on the first track, which is exactly the composition
+/// this engine has always built. Where the formats differ, one layer's tracks take turns and never
+/// overlap in time, so an instruction still names a single track for each layer: the one its clip
+/// is on.
+private final class FormatTracks {
+    private enum Key {
+        /// A file with exactly one format description, which it shares with every file whose
+        /// description decodes alike.
+        case format(CMFormatDescription)
+        /// A file with several, or none: that file alone, by its asset, which `SourceCache` hands
+        /// out once per `uri`.
+        case source(ObjectIdentifier)
+
+        func matches(_ other: Key) -> Bool {
+            switch (self, other) {
+            case let (.format(a), .format(b)): return VideoFormat.decodesAlike(a, b)
+            case let (.source(a), .source(b)): return a == b
+            default: return false
+            }
+        }
+    }
+
+    private var tracks: [(key: Key, track: AVMutableCompositionTrack)] = []
+    /// A track made before any clip was known, handed to the first clip that needs one: the base's,
+    /// which `build` creates ahead of the clips' audio track so that the track IDs of a post laid on
+    /// one track are the ones they always were.
+    private var spare: AVMutableCompositionTrack?
+    /// What an `internalFailure` names when the composition will not add another track.
+    private let label: String
+
+    init(label: String, spare: AVMutableCompositionTrack? = nil) {
+        self.label = label
+        self.spare = spare
+    }
+
+    /// The track `src` goes on: the one already holding its format, or a new one.
+    func track(for src: SourceClip, in comp: AVMutableComposition) throws -> AVMutableCompositionTrack {
+        let key: Key = src.videoFormats.count == 1
+            ? .format(src.videoFormats[0])
+            : .source(ObjectIdentifier(src.asset))
+        if let hit = tracks.first(where: { $0.key.matches(key) }) { return hit.track }
+        let track: AVMutableCompositionTrack
+        if let spare {
+            track = spare
+            self.spare = nil
+        } else {
+            guard let created = comp.addMutableTrack(withMediaType: .video,
+                                                     preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                throw BuildError.internalFailure(label)
+            }
+            track = created
+        }
+        tracks.append((key: key, track: track))
+        return track
+    }
+}
+
+/// The extra video track every outgoing tail of a post is laid on, and the one extra audio track its
+/// sound goes to, each created on the first tail that needs it.
 ///
 /// One of each is enough because the editor holds every transition to half of either clip it joins:
 /// a clip's own incoming and outgoing transitions then never overlap, so the tails never do either,
 /// and a composition track - which holds segments that do not overlap - can hold every one of them.
-/// A post without transitions never creates either track, which is what keeps its composition the
+/// The picture takes one more track for each further format the tails come in, for the reason
+/// `FormatTracks` gives: the tail track changes file at every transition, as the base does at every
+/// cut. A post without transitions never creates either, which is what keeps its composition the
 /// one this engine has always built.
 private final class TailTracks {
-    private(set) var video: AVMutableCompositionTrack?
+    let video = FormatTracks(label: "transition video track")
     private(set) var audio: AVMutableCompositionTrack?
     /// Its own parameters, because the tails fade OUT while the base clips fade in, and one set of
     /// parameters holds one volume at a time.
     private(set) var params: AVMutableAudioMixInputParameters?
     /// Where the last tail laid down ends. An insert is an insert and not an overwrite, so a tail
     /// starting before this would push the one before it later instead of sitting beside it.
+    /// Kept across every tail track rather than per track: the windows never overlap, so a tail that
+    /// starts before the last one ended is a broken spec whichever track it would have gone on.
     var endMs: Int64 = 0
-
-    func videoTrack(in comp: AVMutableComposition) throws -> AVMutableCompositionTrack {
-        if let existing = video { return existing }
-        guard let created = comp.addMutableTrack(withMediaType: .video,
-                                                 preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            throw BuildError.internalFailure("transition video track")
-        }
-        video = created
-        return created
-    }
 
     func audioTrack(in comp: AVMutableComposition) throws -> AVMutableCompositionTrack {
         if let existing = audio { return existing }
@@ -166,9 +290,11 @@ private final class SourceCache {
                 throw BuildError.unreadable(clip.key, "no video track")
             }
             let audio = try await asset.loadTracks(withMediaType: .audio).first
-            // Both properties in one load, and the audio track's range preloaded here rather than
-            // read at the call site: the synchronous `track.timeRange` is deprecated since iOS 16.
-            let (transform, videoRange) = try await video.load(.preferredTransform, .timeRange)
+            // All three properties in one load, and the audio track's range preloaded here rather
+            // than read at the call site: the synchronous `track.timeRange` is deprecated since
+            // iOS 16.
+            let (transform, videoRange, formats) = try await video.load(.preferredTransform, .timeRange,
+                                                                        .formatDescriptions)
             // A video track with no footage in it is a file nothing can be laid from, whatever the
             // trim says. Refused here, once, so every clip that is laid can hold its last frame.
             guard videoRange.duration > .zero else {
@@ -180,7 +306,8 @@ private final class SourceCache {
                                     audioTrack: audio,
                                     preferredTransform: transform,
                                     videoRange: videoRange,
-                                    audioRange: audioRange)
+                                    audioRange: audioRange,
+                                    videoFormats: formats)
             byURI[clip.uri] = source
             return source
         } catch let already as BuildError {
@@ -199,6 +326,11 @@ private final class SourceCache {
 /// each extra layer, and at most one audio track for each of those, for the music and for the
 /// voiceovers. Concurrent Media3 sequences are how Android mixes; parallel composition tracks and
 /// one `AVAudioMix` is how AVFoundation mixes. Neither platform needs a mixer of ours.
+///
+/// "One video track" is one per FORMAT, strictly: a layer whose clips were encoded differently is
+/// laid across one track for each way they were, taking turns, because AVFoundation can decode a
+/// file with the decoder it set up for the previous one (see `FormatTracks`). A post whose clips
+/// were encoded alike, which is most of them, is the shape above exactly.
 ///
 /// A post with transitions adds one video track and one audio track more, holding every outgoing
 /// clip's tail at the moment its transition starts (see `TailTracks`). The base track is laid exactly
@@ -227,13 +359,19 @@ enum CompositionBuilder {
         let plan = try RenderPlan(spec: spec)
 
         let comp = AVMutableComposition()
-        guard let video = comp.addMutableTrack(withMediaType: .video,
-                                               preferredTrackID: kCMPersistentTrackID_Invalid) else {
+        // The base's first track, made here rather than on the first clip so that it comes before
+        // the clips' audio track, as it always has. Every base clip encoded as the first one was goes
+        // on it, which on most posts is every base clip; a clip encoded differently goes on a track
+        // of its own format, created as it is laid (see `FormatTracks`).
+        guard let firstVideo = comp.addMutableTrack(withMediaType: .video,
+                                                    preferredTrackID: kCMPersistentTrackID_Invalid) else {
             throw BuildError.internalFailure("video track")
         }
-        // `preferredTransform` and `naturalSize` stay at their defaults on purpose. A timeline can
-        // mix a portrait and a landscape clip, so there is no single transform this track could
-        // carry; orientation is per clip and travels on the EditInstruction to the compositor.
+        let baseVideo = FormatTracks(label: "video track", spare: firstVideo)
+        // `preferredTransform` and `naturalSize` stay at their defaults on purpose, on every video
+        // track. A timeline can mix a portrait and a landscape clip, so there is no single transform
+        // a track could carry; orientation is per clip and travels on the EditInstruction to the
+        // compositor.
 
         // Decided from the spec alone, exactly like Android's `videoSeqHasAudio`, which is why the
         // empty-track sweep further down is mandatory rather than defensive.
@@ -268,6 +406,10 @@ enum CompositionBuilder {
             // both places.
             let srcRange = held ? lastFrame(of: src) : CMTimeRange(start: ms(clip.inMs), end: ms(outMsEff))
 
+            // On the track of this clip's format, at the absolute output cursor as the sound below
+            // is: a track whose format last played a few clips ago ends before the cursor, and
+            // AVFoundation writes the empty segment up to it itself.
+            let video = try baseVideo.track(for: src, in: comp)
             do {
                 try video.insertTimeRange(srcRange, of: src.videoTrack, at: cursor)
             } catch {
@@ -323,7 +465,8 @@ enum CompositionBuilder {
                 placed = CMTimeRange(start: cursor, duration: scaled)
             }
 
-            entries.append(TimelineEntry(clip: clip, source: src, range: placed, gain: clipGain))
+            entries.append(TimelineEntry(clip: clip, source: src, trackID: video.trackID,
+                                         range: placed, gain: clipGain))
             cursor = placed.end
 
             // The outgoing clip's last moments, laid UNDER this clip's first ones. After this clip
@@ -355,11 +498,16 @@ enum CompositionBuilder {
         // A failure here is not a failure of the render: the post is then as long as its footage,
         // which is a shorter video than was asked for rather than a wrong one, and the same answer
         // an engine that ignored the key would give.
+        //
+        // On the last clip's own track, which the frame's format already decides: the one track of a
+        // post laid on one, as it always was, and never a new track made only to be stretched.
         let asked = ms(max(0, spec.durationMs))
         if asked > cursor, let last = entries.last {
             let source = last.source.videoRange
             let frame = CMTimeMinimum(CMTime(value: 1, timescale: 30), source.duration)
             do {
+                let video = try baseVideo.track(for: last.source, in: comp)
+                assert(video.trackID == last.trackID, "the stretch left the last clip's track")
                 try video.insertTimeRange(CMTimeRange(start: source.start, duration: frame),
                                           of: last.source.videoTrack, at: cursor)
                 video.scaleTimeRange(CMTimeRange(start: cursor, duration: frame),
@@ -374,7 +522,7 @@ enum CompositionBuilder {
         let totalMs = max(1, msOf(total))
         // The bottom layer, and the only one whose length counts: `totalMs` is the output's length
         // and every extra layer is cut to it.
-        let base = LayerTimeline(trackID: video.trackID, z: 0, opacity: 1, entries: entries)
+        let base = LayerTimeline(isBase: true, z: 0, opacity: 1, entries: entries)
         var layers = [base]
 
         var params: [AVMutableAudioMixInputParameters] = []
@@ -567,7 +715,7 @@ enum CompositionBuilder {
         return CMTimeRange(start: footage.end - frame, duration: frame)
     }
 
-    /// Lays the outgoing clip's tail - `transition.from` - on the tail track under the incoming clip,
+    /// Lays the outgoing clip's tail - `transition.from` - on its tail track under the incoming clip,
     /// which has just been placed at `placed`, and answers the window it runs for. nil draws a cut.
     ///
     /// The tail goes in exactly as a base clip does: its source range clamped to its file, inserted
@@ -603,7 +751,9 @@ enum CompositionBuilder {
                                                roomMs: msOf(placed.duration)) else { return nil }
 
         let srcRange = CMTimeRange(start: ms(from.inMs), duration: ms(span.sourceMs))
-        let video = try tails.videoTrack(in: comp)
+        // The tail track of the outgoing file's format, for the base's reason: the tails of one post
+        // come from as many files as its transitions do.
+        let video = try tails.video.track(for: src, in: comp)
         do {
             try video.insertTimeRange(srcRange, of: src.videoTrack, at: placed.start)
         } catch {
@@ -646,12 +796,14 @@ enum CompositionBuilder {
         return TransitionWindow(entry: index,
                                 startMs: startMs,
                                 durMs: span.placedMs,
-                                tail: TimelineEntry(clip: from, source: src, range: range, gain: tailGain),
-                                tailTrackID: video.trackID,
+                                tail: TimelineEntry(clip: from, source: src, trackID: video.trackID,
+                                                    range: range, gain: tailGain),
                                 transition: transition)
     }
 
-    /// Lays one extra layer onto its own composition track and answers where its clips landed.
+    /// Lays one extra layer onto its own composition track and answers where its clips landed. Its
+    /// own track for each format its clips come in, strictly, as the base has (see `FormatTracks`),
+    /// and never a track of the base's or of another layer's: those play at the same time.
     ///
     /// The shape is the base track's, with three differences. It starts at `startMs` rather than at
     /// zero, and nothing pads the gap: the track is empty before the first insert and AVFoundation
@@ -671,10 +823,10 @@ enum CompositionBuilder {
                                  totalMs: Int64) async throws
         -> (layer: LayerTimeline, params: AVMutableAudioMixInputParameters?)? {
 
-        // Both tracks and the parameters are created on the first clip that actually needs them,
+        // Every track and the parameters are created on the first clip that actually needs them,
         // the way `addVoiceovers` creates its own, so a layer that turns out to contribute nothing
         // leaves no empty track behind for the exporter to choke on.
-        var videoTrack: AVMutableCompositionTrack?
+        let videoTracks = FormatTracks(label: "layer video track")
         var audioTrack: AVMutableCompositionTrack?
         var params: AVMutableAudioMixInputParameters?
         var entries: [TimelineEntry] = []
@@ -708,17 +860,7 @@ enum CompositionBuilder {
 
             let srcRange = held ? lastFrame(of: src) : CMTimeRange(start: ms(clip.inMs), end: ms(cutMs))
 
-            let dest: AVMutableCompositionTrack
-            if let existing = videoTrack {
-                dest = existing
-            } else {
-                guard let created = comp.addMutableTrack(withMediaType: .video,
-                                                         preferredTrackID: kCMPersistentTrackID_Invalid) else {
-                    throw BuildError.internalFailure("layer video track")
-                }
-                videoTrack = created
-                dest = created
-            }
+            let dest = try videoTracks.track(for: src, in: comp)
             do {
                 try dest.insertTimeRange(srcRange, of: src.videoTrack, at: cursor)
             } catch {
@@ -766,11 +908,14 @@ enum CompositionBuilder {
                 placed = CMTimeRange(start: cursor, duration: scaled)
             }
 
-            entries.append(TimelineEntry(clip: clip, source: src, range: placed, gain: clipGain))
+            entries.append(TimelineEntry(clip: clip, source: src, trackID: dest.trackID,
+                                         range: placed, gain: clipGain))
             cursor = placed.end
         }
 
-        guard let videoTrack else { return nil }
+        // No entry is no video track: a track is only ever made for the clip about to be inserted,
+        // and an insert that fails fails the build.
+        guard !entries.isEmpty else { return nil }
         // A level per clip, including the silent ones, held to the clip's end exactly as the base
         // track's are: a picture after a video on a layer must not fade the video out.
         if let p = params {
@@ -779,7 +924,7 @@ enum CompositionBuilder {
                 hold(e.gain, on: p, after: e.range.start, until: e.range.end)
             }
         }
-        return (LayerTimeline(trackID: videoTrack.trackID,
+        return (LayerTimeline(isBase: false,
                               z: track.z,
                               opacity: track.opacity,
                               entries: entries), params)
@@ -788,9 +933,12 @@ enum CompositionBuilder {
     /// One clip of one layer as the compositor sees it. The rectangle and its angle are resolved
     /// into render pixels and radians HERE, at build time, so that a clip carrying neither a crop
     /// nor a rect costs the compositor nothing but a nil test per frame.
+    ///
+    /// The track is the clip's own and the opacity the layer's: a layer can be spread across tracks,
+    /// one for each format its clips come in, but it is drawn as one.
     private static func editLayer(_ e: TimelineEntry, of layer: LayerTimeline,
                                   plan: RenderPlan) -> EditLayer {
-        EditLayer(trackID: layer.trackID,
+        EditLayer(trackID: e.trackID,
                   orientation: Orientation.imageOrientation(e.source.preferredTransform),
                   fit: e.clip.fit,
                   crop: e.clip.crop,
@@ -799,12 +947,12 @@ enum CompositionBuilder {
                   render: plan.renderSize)
     }
 
-    /// The outgoing side of one transition as the compositor draws it: the tail's clip on the tail
+    /// The outgoing side of one transition as the compositor draws it: the tail's clip on its tail
     /// track, framed exactly as that clip was framed on the base track a moment earlier, and at full
     /// opacity, because it IS the base while the transition runs.
     private static func editTransition(_ w: TransitionWindow, plan: RenderPlan) -> EditTransition {
         let t = w.transition
-        return EditTransition(tail: EditLayer(trackID: w.tailTrackID,
+        return EditTransition(tail: EditLayer(trackID: w.tail.trackID,
                                               orientation: Orientation.imageOrientation(w.tail.source.preferredTransform),
                                               fit: w.tail.clip.fit,
                                               crop: w.tail.clip.crop,
@@ -861,29 +1009,28 @@ enum CompositionBuilder {
         // Once per window rather than once per instruction: a window split by a layer's boundary is
         // still one transition, drawn from one description.
         let transitions = windows.map { editTransition($0, plan: plan) }
-        // The base is `layers[0]`, which is where `build` put it.
-        let baseTrackID = layers.first?.trackID
 
         return (0..<(cuts.count - 1)).map { i in
             let startMs = cuts[i]
-            let drawn = ordered.compactMap { layer -> EditLayer? in
+            let drawn = ordered.compactMap { layer -> (isBase: Bool, layer: EditLayer)? in
                 // The clip this layer is showing at that instant, or none at all: before its first
                 // clip and after its last a layer contributes nothing, not even a black frame, and
                 // an instruction that does not name its track is how that is said.
                 guard let e = layer.entries.first(where: {
                     msOf($0.range.start) <= startMs && startMs < msOf($0.range.end)
                 }) else { return nil }
-                return editLayer(e, of: layer, plan: plan)
+                return (isBase: layer.isBase, layer: editLayer(e, of: layer, plan: plan))
             }
             // The compositor draws a transition in place of the FIRST layer, so one is attached only
             // when that layer is the base. Inside a window it always is - the incoming clip is on the
             // base there, and the base sorts under everything - and the test keeps a mistake in that
-            // reasoning from drawing a transition in place of some other layer's clip.
-            let transition: EditTransition? = drawn.first?.trackID == baseTrackID
+            // reasoning from drawing a transition in place of some other layer's clip. The base is
+            // told by its flag and not by a track ID: its clips can be on several tracks.
+            let transition: EditTransition? = drawn.first?.isBase == true
                 ? windows.firstIndex(where: { $0.startMs <= startMs && startMs < $0.endMs }).map { transitions[$0] }
                 : nil
             return EditInstruction(timeRange: CMTimeRange(start: ms(startMs), end: ms(cuts[i + 1])),
-                                   layers: drawn,
+                                   layers: drawn.map(\.layer),
                                    transition: transition,
                                    plan: plan)
         }

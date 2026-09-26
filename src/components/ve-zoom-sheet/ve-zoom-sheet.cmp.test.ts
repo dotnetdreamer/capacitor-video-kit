@@ -33,7 +33,7 @@ function manifestWith(zooms: EditZoom[]): EditManifest {
 }
 
 /** The sheet over a store holding one zoom, opened the way the tool row opens it. */
-async function mount(z: EditZoom | null = zoom()): Promise<{ store: EditorStore; sheet: HTMLElement }> {
+async function mount(z: EditZoom | null = zoom()): Promise<{ store: EditorStore; sheet: HTMLElement; ctx: EditorContext; column: HTMLElement }> {
   const host = resolveEditorHost({});
   const store = new EditorStore(host);
   const ctx: EditorContext = { store, media: new EditorMedia(store, host) };
@@ -45,16 +45,25 @@ async function mount(z: EditZoom | null = zoom()): Promise<{ store: EditorStore;
   const column = document.createElement('div');
   column.style.cssText = 'width: 393px; height: 340px; display: flex; flex-direction: column';
   document.body.append(column);
+  mounted.push({ store, column });
 
+  const sheet = await mountSheet(ctx, column);
+  return { store, sheet, ctx, column };
+}
+
+/**
+ * A sheet element of its own over `ctx`, as the editor puts one in each time the zoom panel opens:
+ * it swaps the sheet for the tool row when the panel closes, so every Edit is a new element.
+ */
+async function mountSheet(ctx: EditorContext, column: HTMLElement): Promise<HTMLElement> {
   const sheet = document.createElement('ve-zoom-sheet');
   Object.assign(sheet, { ctx });
   column.append(sheet);
 
-  mounted.push({ store, column });
   await (sheet as StencilElement).componentOnReady?.();
   await (frame(sheet) as StencilElement | null)?.componentOnReady?.();
   for (const s of sliders(sheet)) await (s as StencilElement).componentOnReady?.();
-  return { store, sheet };
+  return sheet;
 }
 
 function frame(sheet: HTMLElement): HTMLElement | null {
@@ -175,6 +184,35 @@ describe('ve-zoom-sheet', () => {
     store.undo();
     expect(current(store).scale).toBe(2);
     // Two drags, two steps, and nothing behind them.
+    expect(store.canUndo.value).toBe(false);
+  });
+
+  /*
+   * What the iOS simulator showed: Level 2.0x to 3.0x, Done, Edit, 4.0x, Done, and one Undo went all
+   * the way back to 2.0x. The sheet counted its own drags for the keys, the run they fold into is the
+   * store's and outlived it, so the second sheet's first drag had the first sheet's first key and
+   * joined its undo step.
+   */
+  it('keeps a drag in a sheet opened again out of the step the last sheet made', async () => {
+    const { store, sheet, ctx, column } = await mount();
+
+    drag(slider(sheet, 'Zoom level'), levelAt(2), levelAt(3));
+    expect(current(store).scale).toBeCloseTo(3, 1);
+
+    // Done, then Edit on the bar: the editor takes this sheet out and puts a new one in.
+    head(sheet, '[aria-label="Done"]')!.click();
+    expect(store.panel.value).toBe(null);
+    sheet.remove();
+    store.openZoom(current(store).id);
+    const again = await mountSheet(ctx, column);
+
+    drag(slider(again, 'Zoom level'), levelAt(3), levelAt(4));
+    expect(current(store).scale).toBeCloseTo(4, 1);
+
+    store.undo();
+    expect(current(store).scale).toBeCloseTo(3, 1);
+    store.undo();
+    expect(current(store).scale).toBe(2);
     expect(store.canUndo.value).toBe(false);
   });
 

@@ -4,6 +4,7 @@ import { closeWhenGone } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, zoomRampMs, zoomRampPatch, type ZoomEase } from '../../editor';
+import type { CoalesceKey } from '../../state/editor-store';
 import { zoomLevelLabel, zoomRampLabel } from './zoom-labels';
 
 /** The three curves, in the order the row shows them, with the word each is shown by. */
@@ -54,11 +55,18 @@ export class VeZoomSheet {
   private stopClosing?: () => void;
 
   /**
-   * Counts the sliders' gestures, for the coalesce keys: `zoom-level:<n>` folds every value of ONE
-   * drag into one undo step, and a new `n` keeps the next drag of the same slider out of it - one
-   * shared key would fold two separate drags into one undo.
+   * The coalesce key of the slider drag under way: it folds every value of ONE drag into one undo
+   * step, and the next drag - of either slider - asks for a key of its own, since one shared key
+   * would fold two separate drags into one undo. Unset before the first drag, when a value is simply
+   * a step of its own.
+   *
+   * From the store and never counted here, because this element does not outlive its panel and the
+   * run the key folds into does: the editor swaps the sheet for the tool row on Done, so the next
+   * Edit is a new sheet, and a count of this sheet's own started again at the same number there. Its
+   * first drag then carried the last sheet's first key and folded into that step - Level 2.0x to
+   * 3.0x, Done, Edit, 4.0x, and one Undo went back to 2.0x. See [EditorStore.coalesceKey].
    */
-  private gestures = 0;
+  private gestureKey?: CoalesceKey;
 
   connectedCallback() {
     // Undo can take the zoom away, and Delete on the timeline can too; either way there is nothing
@@ -93,12 +101,14 @@ export class VeZoomSheet {
    */
   private rampShape: { id: string; rampMs: number; rampOutMs?: number } | null = null;
 
+  /** Both sliders' `veGestureStart`, which comes before the first value of every drag. */
   private readonly onGestureStart = () => {
-    this.gestures++;
+    this.gestureKey = this.ctx.store.coalesceKey('zoom-slider');
   };
 
+  /** The ramp slider's: a key like the level's, and the shape its drag scales. */
   private readonly onRampGestureStart = () => {
-    this.gestures++;
+    this.onGestureStart();
     const zoom = this.ctx.store.selectedZoom.value;
     this.rampShape = zoom ? { id: zoom.id, rampMs: zoom.rampMs, rampOutMs: zoom.rampOutMs } : null;
   };
@@ -108,7 +118,7 @@ export class VeZoomSheet {
     const zoom = this.ctx.store.selectedZoom.value;
     if (!zoom) return;
     const scale = event.detail / LEVEL_UNITS;
-    if (scale !== zoom.scale) this.ctx.store.updateZoom(zoom.id, { scale }, { coalesce: `zoom-level:${this.gestures}` });
+    if (scale !== zoom.scale) this.ctx.store.updateZoom(zoom.id, { scale }, { coalesce: this.gestureKey });
   };
 
   /**
@@ -121,7 +131,7 @@ export class VeZoomSheet {
     const ms = Math.round(event.detail);
     if (ms === zoomRampMs(zoom)) return;
     const shape = this.rampShape?.id === zoom.id ? this.rampShape : zoom;
-    this.ctx.store.updateZoom(zoom.id, zoomRampPatch(shape, ms), { coalesce: `zoom-ramp:${this.gestures}` });
+    this.ctx.store.updateZoom(zoom.id, zoomRampPatch(shape, ms), { coalesce: this.gestureKey });
   };
 
   private chooseEase(ease: ZoomEase): void {

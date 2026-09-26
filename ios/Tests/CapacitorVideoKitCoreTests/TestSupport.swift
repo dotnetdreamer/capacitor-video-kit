@@ -106,15 +106,21 @@ enum TestMedia {
     /// all of the tone - the writer holds the picture back waiting for sound that has not come yet,
     /// and past a second or two on the simulator's software encoder both inputs refuse for good and
     /// the test hangs.
+    ///
+    /// `compression` is merged over the encoder's properties, for a test that needs two files whose
+    /// pictures are the same size but whose streams were encoded differently.
     static func video(_ url: URL, durationMs: Int64, width: Int = 320, height: Int = 240,
-                      color: RGB, fps: Int32 = 30, audio: Bool = true) async throws -> URL {
+                      color: RGB, fps: Int32 = 30, audio: Bool = true,
+                      compression: [String: Any] = [:]) async throws -> URL {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        var properties: [String: Any] = [AVVideoAllowFrameReorderingKey: false]
+        for (k, v) in compression { properties[k] = v }
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [AVVideoAllowFrameReorderingKey: false],
+            AVVideoCompressionPropertiesKey: properties,
         ])
         vIn.expectsMediaDataInRealTime = true
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: vIn, sourcePixelBufferAttributes: [

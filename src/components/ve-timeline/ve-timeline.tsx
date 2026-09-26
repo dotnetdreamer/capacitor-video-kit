@@ -2345,12 +2345,15 @@ export class VeTimeline {
 
   /**
    * A zoom's window, moved or retimed. No store gesture: every frame goes through `setZoomWindow`
-   * with a coalesce key of the drag's own (`zoom-window:<n>`), which folds the whole drag into one
-   * undo step and keeps the next drag out of it; the op itself stops at the neighbours and the end of
-   * the post as this does.
+   * with a coalesce key of the drag's own, which folds the whole drag into one undo step and keeps
+   * the next drag out of it; the op itself stops at the neighbours and the end of the post as this
+   * does.
+   *
+   * The key is the store's to hand out (see [EditorStore.coalesceKey]) and not a count kept here:
+   * the editor takes this element out in full screen and under the tall sheets, and a count of its
+   * own started again at the same number in the one put back, so that one's first drag folded into
+   * the undo step of the last drag made before it.
    */
-  private zoomDrags = 0;
-
   private startZoomDrag(base: DragBase, id: string, mode: ZoomDrag['mode']): void {
     const store = this.ctx.store;
     const zooms = store.zooms.value;
@@ -2367,7 +2370,7 @@ export class VeTimeline {
       end0: Math.min(zoom.endMs, total),
       lo,
       hi,
-      coalesce: `zoom-window:${++this.zoomDrags}`,
+      coalesce: store.coalesceKey('zoom-window'),
       targets: [...this.snapTargets(), ...zoomSnapTargets(zooms, id)],
     });
   }

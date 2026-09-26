@@ -17,7 +17,7 @@ import {
   type CropSide,
   type FrameBox,
 } from '../../state/clip-framing';
-import type { EditorStore } from '../../state/editor-store';
+import type { CoalesceKey, EditorStore } from '../../state/editor-store';
 import type { OverlayBitmap } from '../../state/editor.types';
 import { ZOOM_CORNER_CURSORS, moveZoomArea, pinchZoomArea, resizeZoomArea, zoomCornerAt, type ZoomAreaView, type ZoomCorner } from './zoom-area';
 
@@ -267,7 +267,7 @@ type Pending =
   | { kind: 'overlay'; id: string; patch: TransformPatch }
   | { kind: 'clip'; id: string; patch: ClipFramingPatch }
   /** `key` folds every write of one touch into one undo step; see [ZoomGesture]. */
-  | { kind: 'zoom'; id: string; patch: ZoomAreaView; key: string };
+  | { kind: 'zoom'; id: string; patch: ZoomAreaView; key: CoalesceKey };
 
 /**
  * What the fingers are doing to a zoom's AREA while the zoom sheet is open on it.
@@ -280,7 +280,10 @@ type Pending =
  * Like every other gesture it is measured from where it STARTED: `view0` is the zoom as the fingers
  * landed and every frame is `view0` plus how far they have come, so a long drag cannot accumulate
  * rounding. `key` is the store's coalesce key for this touch - one per touch, so a drag and the pinch
- * it turns into are one undo step, and the NEXT drag is a step of its own.
+ * it turns into are one undo step, and the NEXT drag is a step of its own. The store hands it out
+ * ([EditorStore.coalesceKey]) because these gestures go with the preview whenever it leaves the page,
+ * and a count kept here started again at the same number in the next preview, whose first touch then
+ * folded into the undo step of the last one made before it.
  */
 type ZoomGesture =
   /** One finger: the box's body moves the area, a corner resizes it with the opposite corner held. */
@@ -288,7 +291,7 @@ type ZoomGesture =
       kind: 'one';
       pointerId: number;
       id: string;
-      key: string;
+      key: CoalesceKey;
       x0: number;
       y0: number;
       view0: ZoomAreaView;
@@ -296,7 +299,7 @@ type ZoomGesture =
       moved: boolean;
     }
   /** Two fingers anywhere on the frame: the box grows and shrinks with them. */
-  | { kind: 'pinch'; id: string; key: string; view0: ZoomAreaView; dist0: number }
+  | { kind: 'pinch'; id: string; key: CoalesceKey; view0: ZoomAreaView; dist0: number }
   /** Finished, or given up on, while fingers are still down. */
   | { kind: 'spent' };
 
@@ -413,8 +416,6 @@ export class OverlayGestures {
   private gesture: Gesture | null = null;
   /** The zoom tool's gesture, while it has one; see [ZoomGesture]. Never set alongside [gesture]. */
   private zoomGesture: ZoomGesture | null = null;
-  /** Counts zoom touches, for each one's own coalesce key. */
-  private zoomTouches = 0;
   private pending: Pending | null = null;
   private frameRequest = 0;
   /** Set when a press on a handle was taken back by the layer under it; see [handleAt]. */
@@ -1006,7 +1007,7 @@ export class OverlayGestures {
       return;
     }
     const previous = this.zoomGesture;
-    const key = previous && previous.kind !== 'spent' ? previous.key : `zoom-area:${++this.zoomTouches}`;
+    const key = previous && previous.kind !== 'spent' ? previous.key : this.store.coalesceKey('zoom-area');
     if (this.pointers.size === 1) {
       const rect = this.stage.getBoundingClientRect();
       const view0 = { cx: zoom.cx, cy: zoom.cy, scale: zoom.scale };

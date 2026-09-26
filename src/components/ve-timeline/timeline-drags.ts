@@ -1,4 +1,5 @@
 import { MIN_LAYER_MS, clamp, type ClipDropTarget, type EditMusic } from '../../editor';
+import type { CoalesceKey } from '../../state/editor-store';
 
 import type { DropRow } from './timeline-geometry';
 
@@ -183,8 +184,10 @@ export interface ZoomDrag extends DragBase {
   /**
    * The store's coalesce key for this drag's steps, new for every drag: every frame of one drag folds
    * into one undo step, and the next drag is a step of its own rather than folding into this one.
+   * Taken from [EditorStore.coalesceKey] as the drag begins, which is what keeps it new across a
+   * timeline taken out and put back.
    */
-  coalesce: string;
+  coalesce: CoalesceKey;
   /** 0, the end, every segment boundary and the other zooms' edges. The centre line is added per frame. */
   targets: number[];
 }
