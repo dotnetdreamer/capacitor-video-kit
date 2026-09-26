@@ -2,10 +2,13 @@
  * The edit operations an agent can ask for, as a table of names.
  *
  * `src/editor/edit-ops.ts` is already the whole vocabulary of an edit, and this file adds nothing to
- * it: every entry below reads a few values out of a JSON object and calls the function the editor's
- * own UI calls. That is the point. An agent driving this package and a customer dragging a clip
- * must land on the SAME manifest, or the two halves of the product disagree about what an edit is,
- * and the only way to be sure of that is for the agent's path to have no maths of its own.
+ * it: every entry below reads a few values out of a JSON object and does what the editor's own UI
+ * does. For most that is calling the same function; the five that set something on the whole post
+ * (`setFilter`, `setAdjust`, `setFit`, `setOriginalMuted`, `setOutput`) have none in `edit-ops.ts`,
+ * so they set those fields here exactly as the editor's store does. That is the point. An agent
+ * driving this package and a customer dragging a clip must land on the SAME manifest, or the two
+ * halves of the product disagree about what an edit is, and the only way to be sure of that is for
+ * the agent's path to have no maths of its own.
  *
  * Two things are added, both of them about being driven by something that cannot see the screen:
  *
@@ -23,6 +26,13 @@
  * `totalMs` is never taken from the caller. Three ops need it, and it is a function of the manifest
  * ([totalDurationMs]) rather than a choice, so an agent passing its own would be passing a number
  * the editor would have computed differently.
+ *
+ * One thing is taken away, when the host asks: every zoom op, on an app that has turned Zoom off
+ * (`editing.zoom`, the same setting its editor reads). The server built on these ops keeps no zoom
+ * in any post while Zoom is off - `tools.ts` refuses a manifest that holds one at the door - so
+ * there is no zoom for `updateZoom`, `setZoomWindow` or `deleteZoom` to act on, and `addZoom` and
+ * `duplicateZoom` would put one in. [applyEditOps] is where that is decided, per call, for the
+ * reason written on it, and [ZOOM_OPS] says why no other op in the table can make a zoom either.
  */
 import {
   DEFAULT_ZOOM_MS,
@@ -109,6 +119,19 @@ import {
   type ZoomPatch,
 } from '../editor/edit-ops';
 import { applyLayoutPreset, layoutPresets, type LayoutPresetId } from '../editor/layout-presets';
+/*
+ * Type only, and the one thing this server takes from the editor's host contract. It is the same
+ * type rather than a lookalike so that what `zoom` means is written in one place, on
+ * `EditorEditingOptions`, and so a host can hand the MCP server the very `editing` object it hands
+ * the editor, as a variable or written out in place. The import is erased from the JavaScript, so
+ * the server never loads the host contract.
+ *
+ * What it costs the `mcp/` tree is `mcp/host/host.types.{js,d.ts}`, emitted because the file is in
+ * the program: the declaration is what `ops.d.ts` names, the JavaScript - `RenderFailedError`, the
+ * one runtime value in it - is loaded by nothing here, and the file's own imports are the editor
+ * core that is already in the tree, so `mcp/` stays self-contained and still deletes whole.
+ */
+import type { EditorEditingOptions } from '../host/host.types';
 
 /** One op: a name, and whatever that name reads. Deliberately loose - each entry validates its own. */
 export interface EditOp {
@@ -850,8 +873,133 @@ const OPS: Record<string, Apply> = {
   },
 };
 
-/** Every op name there is, sorted - what the tool description lists and what the tests count. */
-export const OP_NAMES: readonly string[] = Object.keys(OPS).sort();
+/**
+ * Every op name there is, sorted - what the tool description lists and what the tests count.
+ *
+ * Frozen, because it is exported and `readonly` is a type, which a host written in plain JavaScript
+ * never sees. It is also what [opNamesFor] hands every set of tools with Zoom on, as it is, so a
+ * name pushed onto it from outside would turn up in the catalogue of servers that had already told
+ * their agents which ops there are.
+ */
+export const OP_NAMES: readonly string[] = Object.freeze(Object.keys(OPS).sort());
+
+/* -------------------------------------------------------------------------------------------- */
+/* What the host has turned off                                                                   */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The editor's `editing` options, taken whole, of which this server reads `zoom` and nothing else.
+ *
+ * Whole rather than picked, so that a host can pass on the setting it already has however it
+ * writes it. A `Pick` of `zoom` alone took a variable holding the editor's object and refused the
+ * same object written out in place - `{ pictures: true, zoom: false }` is an object literal with a
+ * property too many to TypeScript - which is exactly how an app writes its editor's settings, and
+ * what the README tells a host to hand over.
+ *
+ * The other two have no op to govern, and are taken and left unread. `replaceKeepsLength` decides
+ * what the Replace GESTURE does to a segment somebody already sized, and `replaceClipSource` is not
+ * that gesture: its caller states the length outright (see the note on the op). `pictures` decides
+ * what the clip pickers offer, and there is no picker here: `insertClip` and `addVideoTrack` put a
+ * source down by its key, as footage. `zoom` is different in kind: it decides whether a post may
+ * hold a kind of edit at all, and on this server, off, the answer is that it may not.
+ */
+export type McpEditingOptions = EditorEditingOptions;
+
+export interface EditOpsOptions {
+  /**
+   * The host's settings. Absent, or a field absent, is the editor's own default: every op is there.
+   *
+   * `zoom: false` refuses the five zoom ops, and that is all it does here. The manifest the ops are
+   * applied to is not judged: a zoom already in it comes back where it was, untouched. The server
+   * never hands this function such a manifest, because its tools refuse one at the door before an
+   * op runs - but that door is in `tools.ts`, not here. A host that builds a tool of its own on
+   * this function, with Zoom off, has to refuse a manifest that holds a zoom itself: `refuseZooms`,
+   * exported from `capacitor-video-kit/mcp` beside this, is the tools' own door, for it to call on
+   * the normalised manifest before handing it over.
+   */
+  editing?: McpEditingOptions;
+}
+
+/**
+ * The zoom ops, all five, which are the ones an app with Zoom off refuses.
+ *
+ * All five, where the editor takes away only its two ways to ADD one - the Zoom tile, and Duplicate
+ * on a selected zoom's row - and leaves a zoom an old draft carries changeable and deletable. The
+ * editor can afford to: a person can only use the tools on screen, so every zoom in front of them
+ * came from a draft. An agent writes JSON, and a zoom it typed into a manifest is the same object as
+ * one a draft saved, so the tools refuse a manifest that holds any zoom at the door (`tools.ts`
+ * says so at length). With no post on the server holding a zoom, `updateZoom`, `setZoomWindow` and
+ * `deleteZoom` have nothing to act on, and are refused and left out of the list with the other two
+ * rather than offered as ops that can only ever fail.
+ *
+ * No other op can make a zoom. Every other entry in the table answers with a manifest built as
+ * `{ ...manifest, ...what it changed }`, and it gets there one of two ways. Most call the editor
+ * function the editor's own control calls. The five that set something on the whole post -
+ * `setFilter`, `setAdjust`, `setFit`, `setOriginalMuted` and `setOutput` - have no such function in
+ * `edit-ops.ts` to call, so they spread the manifest right here and set the field or two they own
+ * (`setFilter` sets the filter and its intensity), the way the editor's store does for the same
+ * controls. Neither way touches `zooms`: splitting,
+ * duplicating and moving clips copy clips, the layer ops copy layers, the two open-ended patches
+ * land on one layer (`patchOverlay`) or on the music (`patchMusic`), never on the manifest, and the
+ * five each name the fields they set. `zooms` rides through every one of them as the very array
+ * it came in as, which on this server is empty. The tests run every op there is over a post with no
+ * zoom to keep that true, and [applyEditOps] checks it on every op anyway, because a check is what
+ * survives the day somebody adds an op that copies a template's zooms in with its clips.
+ *
+ * Frozen for the reason [OP_NAMES] is, with more riding on it: [applyEditOps] reads this list on
+ * every call to decide what it refuses, so emptied from outside it would let every server in the
+ * process with Zoom off take zoom ops again, while each one's `manifest_edit` description, settled
+ * when its tools were built, still told its agent there were none.
+ */
+export const ZOOM_OPS: readonly string[] = Object.freeze([
+  'addZoom',
+  'deleteZoom',
+  'duplicateZoom',
+  'setZoomWindow',
+  'updateZoom',
+]);
+
+/**
+ * Whether these settings leave Zoom on. Only an explicit `false` takes it away, which is the rule
+ * `resolveEditorHost` applies for the editor: a host that has never heard of the setting keeps what
+ * it has always had.
+ */
+export function zoomOffered(editing?: McpEditingOptions): boolean {
+  return editing?.zoom !== false;
+}
+
+/** The ops these settings leave an agent, sorted: [OP_NAMES] less whatever the host turned off. */
+export function opNamesFor(editing?: McpEditingOptions): readonly string[] {
+  return zoomOffered(editing) ? OP_NAMES : OP_NAMES.filter((name) => !ZOOM_OPS.includes(name));
+}
+
+/*
+ * Written for the agent, which did nothing wrong: the op is a real one, and it is this app that does
+ * not take it. So the message says whose decision it was, and that there is nothing to do about it
+ * but leave zooms out, so the next attempt is not the same op with its values changed.
+ */
+function zoomOffMessage(name: string): string {
+  const why =
+    name === 'addZoom'
+      ? 'none can be added'
+      : name === 'duplicateZoom'
+        ? 'a copy of one would be a new zoom'
+        : `there is no zoom for ${name} to act on`;
+  return (
+    `zoom is turned off for this app, so no post on this server holds a zoom, and ${why}. ` +
+    'Leave zooms out of the edit: the app’s editor offers none.'
+  );
+}
+
+/**
+ * Whether `after` holds a zoom `before` did not, by object rather than by id: an op that is not a
+ * zoom op carries `zooms` through as the same array holding the same objects, so any zoom object
+ * that was not there before is one the op made, whatever id it wears.
+ */
+function gainedZoom(before: EditManifest, after: EditManifest): boolean {
+  const had = new Set<unknown>(before.zooms ?? []);
+  return (after.zooms ?? []).some((zoom) => !had.has(zoom));
+}
 
 /* -------------------------------------------------------------------------------------------- */
 
@@ -861,21 +1009,53 @@ export const OP_NAMES: readonly string[] = Object.keys(OPS).sort();
  * Nothing is applied in place and nothing is applied halfway: a list that fails at op 5 leaves the
  * caller's manifest exactly as it was, because the four that succeeded only ever built new objects
  * on the way to a value this function then does not return.
+ *
+ * `options.editing` is read on every call rather than set anywhere once. The table above is shared
+ * by everything in the process, and two servers in one process - which the tests are, and which a
+ * host serving two apps would be - must not be able to change what the other one allows. A refused
+ * op is refused before any of its values are read, so an agent is never told to fix an id on an op
+ * that was never going to be taken, and it fails the whole list like any other refusal.
+ *
+ * With Zoom off it refuses the zoom ops, and it checks after every other op that the op put no zoom
+ * in ([ZOOM_OPS] says why none can). It does not judge the manifest it is handed: that is the
+ * caller's, and the tools judge it at the door before it gets here. A host calling this directly
+ * with a draft that holds a zoom gets that zoom back where it was, untouched and unreachable - so a
+ * host whose own tool calls this refuses such a draft first, with `refuseZooms` from `tools.ts`
+ * ([EditOpsOptions.editing] has the whole of it).
  */
-export function applyEditOps(manifest: EditManifest, ops: readonly EditOp[]): EditManifest {
+export function applyEditOps(manifest: EditManifest, ops: readonly EditOp[], options: EditOpsOptions = {}): EditManifest {
+  const zoom = zoomOffered(options.editing);
   let current = manifest;
   for (const [index, op] of ops.entries()) {
     const name = typeof op?.op === 'string' ? op.op : '';
-    const apply = OPS[name];
+    // Its own properties only. The table is a plain object, and `constructor` or `toString` is a
+    // property of every one without being an op: looked up as one, the first did nothing and the
+    // second handed back a string as the manifest.
+    const apply = Object.hasOwn(OPS, name) ? OPS[name] : undefined;
     if (!apply) {
-      throw new EditOpError(name || '(missing)', index, `unknown op. The ops there are: ${OP_NAMES.join(', ')}`);
+      // The ops THIS caller has, so an app with Zoom off never lists addZoom as a way out.
+      throw new EditOpError(name || '(missing)', index, `unknown op. The ops there are: ${opNamesFor(options.editing).join(', ')}`);
     }
+    if (!zoom && ZOOM_OPS.includes(name)) throw new EditOpError(name, index, zoomOffMessage(name));
+    let next: EditManifest;
     try {
-      current = apply(current, op as Record<string, unknown>);
+      next = apply(current, op as Record<string, unknown>);
     } catch (error) {
       if (error instanceof EditOpError) throw error;
       throw new EditOpError(name, index, error instanceof Error ? error.message : String(error));
     }
+    // Outside the try, so it is not re-wrapped as though the agent's values were at fault. If this
+    // ever fires, the op table has grown an op that copies zooms in from somewhere, and the list is
+    // refused whole rather than the zoom quietly taken back out of a post the agent will read.
+    if (!zoom && gainedZoom(current, next)) {
+      throw new EditOpError(
+        name,
+        index,
+        'this op put a zoom into the post while Zoom is turned off for this app. That is a bug in ' +
+          'capacitor-video-kit, not in the edit; nothing was applied.',
+      );
+    }
+    current = next;
   }
   return current;
 }

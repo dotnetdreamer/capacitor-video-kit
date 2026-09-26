@@ -22,6 +22,14 @@
  * await server.connect(myTransport);
  * ```
  *
+ * An app that has turned Zoom off in its editor turns it off here with the same setting - over
+ * stdio with `--no-zoom`, in code with `createVideoKitMcpServer({ editing: { zoom: false } })` -
+ * and no post on its server holds a zoom: every zoom op is refused, and so is a manifest handed in
+ * with a zoom in it. That is stricter than the editor, which still shows a zoom an old draft
+ * carries, and `tools.ts` says why and has the whole of what it changes. Refusing the manifest is
+ * the tools' part, not `applyEditOps`'s, so a host that builds a tool of its own on `applyEditOps`
+ * refuses such a manifest itself, with `refuseZooms`.
+ *
  * This entry point is the only one in the package that needs `@modelcontextprotocol/sdk`, which is
  * an OPTIONAL peer dependency. Nothing else here reaches it, `src/mcp` is compiled by a tsconfig of
  * its own that the package build only runs when it is asked to, and a mobile app that never imports
@@ -32,6 +40,24 @@
  * manifest store works.
  */
 export { createVideoKitMcpServer, SERVER_NAME, type VideoKitMcpServerOptions } from './server';
-export { createTools, ToolError, OP_REFERENCE, type JsonSchema, type ToolDefinition, type ToolResult } from './tools';
-export { applyEditOps, EditOpError, OP_NAMES, type EditOp } from './ops';
-export { summariseManifest } from './summary';
+export {
+  createTools,
+  refuseZooms,
+  ToolError,
+  OP_REFERENCE,
+  type JsonSchema,
+  type ToolDefinition,
+  type ToolResult,
+  type VideoKitToolsOptions,
+} from './tools';
+export {
+  applyEditOps,
+  EditOpError,
+  OP_NAMES,
+  ZOOM_OPS,
+  opNamesFor,
+  type EditOp,
+  type EditOpsOptions,
+  type McpEditingOptions,
+} from './ops';
+export { summariseManifest, type SummaryOptions } from './summary';

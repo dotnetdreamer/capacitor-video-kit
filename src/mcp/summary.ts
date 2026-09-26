@@ -30,8 +30,17 @@ import {
 } from '../editor/edit-manifest';
 import { clipDurationMs, overlayEndMs, timelineSlots } from '../editor/edit-ops';
 import type { FilterOp } from '../video-composer/definitions';
+import { zoomOffered, type McpEditingOptions } from './ops';
 
-export function summariseManifest(manifest: EditManifest): string {
+export interface SummaryOptions {
+  /**
+   * The host's settings, as the tools were given them. Only `zoom` is read: off, a post with no
+   * zoom says nothing about zooms at all (the note in the zoom section below says why).
+   */
+  editing?: McpEditingOptions;
+}
+
+export function summariseManifest(manifest: EditManifest, options: SummaryOptions = {}): string {
   const totalMs = totalDurationMs(manifest);
   const lines: string[] = [];
 
@@ -123,10 +132,21 @@ export function summariseManifest(manifest: EditManifest): string {
 
   /* ---- zooms ---- */
 
-  lines.push('');
+  /*
+   * With Zoom off, "Zooms: none" goes, line and gap, for the reason the catalogue's `limits` drops
+   * its zoom limits: no post on such a server has a zoom or can gain one, so the line would be the
+   * same on every answer and would only suggest there was a zoom to have. With Zoom on it stays as
+   * it always was. A manifest that does hold one is still listed whatever the setting - only a host
+   * calling this directly can hand it one with Zoom off - because a summary that left out part of
+   * the post it summarises would be worse than one that said a word too many.
+   */
   if (manifest.zooms.length === 0) {
-    lines.push('Zooms: none');
+    if (zoomOffered(options.editing)) {
+      lines.push('');
+      lines.push('Zooms: none');
+    }
   } else {
+    lines.push('');
     lines.push(`Zooms: ${count(manifest.zooms.length, 'zoom')}`);
     for (const zoom of manifest.zooms) {
       lines.push(

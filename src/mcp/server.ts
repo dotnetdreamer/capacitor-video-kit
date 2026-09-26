@@ -20,15 +20,20 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
-import { ToolError, createTools, type ToolDefinition } from './tools';
+import { ToolError, createTools, type ToolDefinition, type VideoKitToolsOptions } from './tools';
 
 /** What the client sees this server called. The version is the package's, filled in by the build. */
 export const SERVER_NAME = '@capacitor-video-kit/core';
 
-export interface VideoKitMcpServerOptions {
+export interface VideoKitMcpServerOptions extends VideoKitToolsOptions {
   /** Reported to the client on connect. Defaults to the version this was built from. */
   version?: string;
-  /** For a host that wants to add tools of its own, or to take some away. Defaults to all five. */
+  /**
+   * For a host that wants to add tools of its own, or to take some away. Defaults to all five.
+   *
+   * Given, `editing` must not be: it is handed to `createTools`, and tools the host built were
+   * built without it. Pass it to the `createTools` call that made them instead.
+   */
   tools?: ToolDefinition[];
 }
 
@@ -39,7 +44,18 @@ export interface VideoKitMcpServerOptions {
  * host embedding the server in something it already runs will have its own.
  */
 export function createVideoKitMcpServer(options: VideoKitMcpServerOptions = {}): Server {
-  const tools = options.tools ?? createTools();
+  /*
+   * Refused rather than quietly dropped. A host that turned Zoom off here and handed its own tools
+   * would believe its agents could not add a zoom, and they could, which is the one thing the
+   * setting exists to stop - and the first anyone would hear of it is a zoom in a post.
+   */
+  if (options.tools && options.editing) {
+    throw new Error(
+      'createVideoKitMcpServer: "editing" only configures the tools this server builds itself, and "tools" ' +
+        'were given. Pass "editing" to the createTools() call that built them instead.',
+    );
+  }
+  const tools = options.tools ?? createTools({ editing: options.editing });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
   const server = new Server(

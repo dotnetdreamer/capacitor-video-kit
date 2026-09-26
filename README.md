@@ -1222,9 +1222,14 @@ a camera move in the preview that nothing on screen can reach, and dropping it w
 behind the customer's back. The reasons behind each default are written on `EditorEditingOptions` in
 `src/host/host.types.ts`.
 
-`zoom` is the editor's alone. The MCP server has no host and never sees these settings, so its
-`addZoom` and `duplicateZoom` ops still work, and a manifest an agent built with a zoom in it opens
-in an editor with Zoom off as any other manifest holding one does.
+`zoom` holds agents too when the host passes it on, and to a stricter line. The MCP server is never
+handed the editor's host, so it takes the same field for itself:
+`createVideoKitMcpServer({ editing: { zoom: false } })` in code, or `--no-zoom` on the stdio
+process's command line. Off, no post on that server holds a zoom at all: every zoom op is refused,
+and so is a manifest handed in with a zoom in it, a saved draft's included. [No zoom on the server at
+all](#no-zoom-on-the-server-at-all) says why the server goes further than the editor here. A server
+nobody told still adds zooms, and a manifest it built with one in it opens in an editor with Zoom off
+as any other manifest holding one does.
 
 ### A size ceiling is the host's to set
 
@@ -1474,6 +1479,11 @@ manifests under short ids: every tool returns a `manifestId`, and every tool tha
 either that or an inline `manifest`. Inline is not a fallback. It is how a draft the app already has
 gets edited without being imported first, and what comes back is stored either way.
 
+What the server stores is a copy of its own. A host running it in process - calling a tool's `run`
+itself, or through an SDK client on `InMemoryTransport`, which hands objects across as they are -
+holds the very manifest an answer carries, and can change it, or what it sent, without touching the
+post stored under that `manifestId`.
+
 Two things are worth knowing before driving it:
 
 **An op that names something the post does not have is refused, not ignored.** The editor's own
@@ -1521,6 +1531,111 @@ await server.connect(myTransport);
 The doubled `mcp/mcp/` is `tsc` output, not a typo: `src/mcp/` imports the editor core out of
 `src/editor/`, so the common root is `src` and the emitted tree mirrors it, with `mcp/editor/` and
 `mcp/data/` beside the server. That is what makes `mcp/` self-contained and safe to delete whole.
+
+### Turning Zoom off for agents
+
+An app that turns Zoom off in its editor (`editing.zoom`, under [The edits the host
+settles](#the-edits-the-host-settles)) turns it off here with the same setting, and then no post on
+its server holds a zoom. On the stdio process it is one argument:
+
+```json
+{
+  "mcpServers": {
+    "capacitor-video-kit": {
+      "command": "node",
+      "args": ["/absolute/path/to/capacitor-video-kit/mcp/mcp/stdio.js", "--no-zoom"]
+    }
+  }
+}
+```
+
+A client that cannot pass arguments sets `CAPACITOR_VIDEO_KIT_MCP_ZOOM=0` in the entry's `env`
+instead (`false`, `off` and `no` also do). Either one turns Zoom off, neither can turn it back on
+against the other, and the line the server writes to stderr when it starts says which one did.
+
+In code it is the editor's own `editing` type, so a host can pass on the setting it already has,
+held in a variable or written out with the editor's other fields beside `zoom`. Only `zoom` is read
+here; `pictures` and `replaceKeepsLength` are taken and have no op to govern:
+
+```ts
+const server = createVideoKitMcpServer({ version: '1.3.0', editing: { pictures: true, zoom: false } });
+
+// Or, for a host that builds the tool list itself:
+const tools = createTools({ editing: host.editing });
+```
+
+The setting belongs to one server, like its store of manifests: two servers in one process each keep
+their own. Each settles it when its tools are built, so changing the object afterwards changes
+nothing an agent has already been told.
+
+| | Zoom on, the default | Zoom off |
+|---|---|---|
+| `addZoom`, `duplicateZoom`, `updateZoom`, `setZoomWindow`, `deleteZoom` | Applied | Refused with "zoom is turned off for this app", and the list they were in fails whole, as any refused op does |
+| A manifest passed in whole - to `manifest_inspect`, `manifest_validate` or `manifest_edit` - that holds a zoom, whoever put it there | Taken in, zooms kept | Refused before it is stored or any op runs, saying how many zooms it holds and which, and to send `"zooms": []` |
+| A manifest passed in whole with no zoom: no `zooms` at all, `"zooms": []`, or entries the normaliser drops | Taken in | Taken in |
+| `manifest_edit`'s description and op schema, `catalog_list`'s `ops` | Every op | Every op but the five zoom ops, with a line saying Zoom is off |
+| The `manifest` argument's description | As always | Adds that a manifest holding a zoom is refused |
+| `catalog_list`'s `limits` | With the zoom limits | Without any of them, and a line saying why they are missing |
+| The summary in every answer's text, for a post with no zoom | Has a `Zooms: none` line | Says nothing about zooms |
+
+#### No zoom on the server at all
+
+With Zoom off the rule is one sentence: no post on the server holds a zoom. Nothing an agent sends
+can put one there. The zoom ops are refused, and no other op touches a post's zooms - the tests run
+every one of them over a post with none, and each op is checked for it as it runs anyway. Every tool
+that takes a manifest whole judges it after the editor's own normaliser has read it, which is the
+very object the server would store, so whatever the normaliser keeps as a zoom is refused and
+whatever it drops as meaningless was never a zoom. Last, every answer that hands back or stores a
+manifest checks that it holds none. That check cannot fire unless the two before it are broken, so
+when it does it fails the call and says it is a bug, rather than quietly taking a zoom back out of a
+post the agent is about to read.
+
+That is **stricter than the editor**, on purpose. The editor with Zoom off still shows, edits and
+deletes a zoom an old draft carries, and it can afford to: a person can only use the tools on screen,
+so with the Zoom tile gone any zoom in front of them came from a draft. An agent writes JSON. A zoom
+it types into a manifest is the same object as one a draft saved - the same fields, and no history
+to tell the two apart - so a server that kept a draft's zoom would keep the agent's as well. Checking
+afterwards does not close that: comparing the zoom ids that come back with the ones handed out is
+beaten by an agent that reuses an id. Holding no zoom at all is the rule with no such hole in it.
+
+What it costs is a draft saved before the app turned Zoom off that still holds a zoom. Handed to the
+server, it is refused with the zoom's id and the agent is told to send `"zooms": []`, so the post the
+app gets back has none where its editor would have kept one. An app that wants such a draft's zoom
+kept has it edited in the editor, or leaves Zoom on for the server.
+
+#### A tool of your own on `applyEditOps`
+
+Refusing a manifest that already holds a zoom is the server's tools' job, not `applyEditOps`'s.
+Handed `{ editing: { zoom: false } }`, `applyEditOps` refuses the five zoom ops and that is all: a
+zoom already in the manifest it is given comes back where it was, untouched. So a host that builds a
+tool of its own on it has to refuse such a manifest itself, and `refuseZooms` is the check the tools
+make, exported for that. It throws the same `ToolError`, in the same words, the tools answer with:
+
+```ts
+import { applyEditOps, refuseZooms } from 'capacitor-video-kit/mcp';
+import { normaliseManifest } from 'capacitor-video-kit/editor';
+
+const manifest = normaliseManifest(args.manifest); // the manifest the ops will run over
+refuseZooms(manifest); // throws, naming the zooms, when it holds any
+const next = applyEditOps(manifest, args.ops, { editing: { zoom: false } });
+```
+
+Hand it the manifest as `normaliseManifest` leaves it, as the tools do, so that what counts as a
+zoom is the editor's own reading of the field. Handed one that was never normalised it refuses more
+rather than less: any non-empty `zooms` list is refused, entries the normaliser would drop included.
+
+#### Refused rather than guessed at
+
+Two things stop the server rather than starting it wrong, because a wrong guess would start a server
+with Zoom on for a host that asked for it off:
+
+- **Any argument other than `--no-zoom`, and any value of `CAPACITOR_VIDEO_KIT_MCP_ZOOM` that is
+  neither on nor off.** The process does not start: the reason goes to stderr and it exits with
+  status 2, so `--no-zooms` is found the day the configuration is written rather than the day an
+  agent adds a zoom.
+- **`editing` beside `tools` in `createVideoKitMcpServer`.** `editing` configures the tools the
+  server builds itself, and throws when it has nothing to configure. Pass it to the `createTools`
+  call that built your own.
 
 ### Leaving it out
 

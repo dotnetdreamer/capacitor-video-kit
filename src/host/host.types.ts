@@ -86,6 +86,14 @@ export interface EditorEditingOptions {
    * retimed, deleted, undone and rendered exactly as before. Hiding a zoom the post already has would
    * leave the customer a camera move they can see in the preview and have no way to reach, and
    * dropping it would change the post behind their back.
+   *
+   * The editor is not the only way into a post. The MCP server takes this same field, since it is
+   * never handed this host - `createVideoKitMcpServer({ editing })`, or `--no-zoom` on its stdio
+   * process - and off, it draws a STRICTER line than this one: no post on the server holds a zoom at
+   * all. Every zoom op is refused, and so is a manifest handed in with a zoom in it, a saved draft's
+   * included. The editor can keep a draft's zoom because a person can only use the tools on screen;
+   * an agent can write a zoom into the JSON itself, and it would be the same object as a draft's.
+   * `src/mcp/tools.ts` and the README's "No zoom on the server at all" have the whole of it.
    */
   zoom?: boolean;
 }

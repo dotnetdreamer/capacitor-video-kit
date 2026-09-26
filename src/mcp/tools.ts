@@ -34,7 +34,46 @@
  * use.
  *
  * The store is per server instance and lives in memory. It is a working surface, not a database:
- * the manifest that matters is the one the agent has taken away.
+ * the manifest that matters is the one the agent has taken away. What it keeps are copies of its
+ * own, never an object a caller holds, so a host running the server in its own process can do as
+ * it likes with an answer, or with what it sent, without touching the post stored from it
+ * ([ManifestStore] says why the copy is made where it is).
+ *
+ *
+ * WHAT THE HOST HAS TURNED OFF
+ *
+ * An app that turns Zoom off in its editor (`editing.zoom`) turns it off here with the same setting,
+ * and here the rule is one sentence: while Zoom is off, no post on this server holds a zoom.
+ *
+ * Nothing can bring one in. Every zoom op is refused and left out of everything an agent reads about
+ * what it can do - `ops.ts` says why that is all five, and why no other op can make one. Every tool
+ * that takes a manifest whole - `manifest_inspect`, `manifest_validate` and `manifest_edit`, the
+ * three with a `manifest` argument - refuses one that holds a zoom, saying so, before anything is
+ * stored and before any op runs. What is judged is the manifest as `normaliseManifest` leaves it,
+ * the very object the store would keep, so no spelling or shape of the field slips past: no `zooms`
+ * at all, an empty list and entries the normaliser drops as meaningless are all a post with no zoom,
+ * and anything that survives it as a zoom is refused. And every result that hands back or stores a
+ * manifest checks that it holds none. That last one cannot fire unless the two before it are
+ * broken, so when it does it says it is a bug and fails the call, rather than quietly taking the
+ * zoom back out of a post the agent is about to read.
+ *
+ * The door is these tools', not the ops': [applyEditOps] refuses the zoom ops and leaves a zoom it
+ * is handed where it was. A host that builds a tool of its own on `applyEditOps` therefore adds the
+ * door itself, with [refuseZooms], which is exported for that.
+ *
+ * That is STRICTER than the editor, on purpose. The editor with Zoom off takes away its two ways to
+ * add a zoom and still shows, edits and deletes one an old draft carries, and it can afford to: a
+ * person can only use the tools on screen, so any zoom in front of them came from a draft. An agent
+ * writes JSON. A zoom it typed into a manifest is the same object as one a draft saved - the same
+ * fields, and no history to tell the two apart - so a server that kept a draft's zoom would keep the
+ * agent's as well, and all a host could do was compare the zoom ids that came back with the ones it
+ * handed out, which an agent beats by reusing an id. Holding no zoom at all is the rule that has no
+ * such hole. What it costs is a draft saved before the app turned Zoom off that still holds one:
+ * the agent is told to take the zoom out before it can work on the post, where the editor would
+ * have kept it.
+ *
+ * With Zoom on, the default, none of this runs, and a manifest's zooms go through every tool exactly
+ * as they always have. The setting is per set of tools, like the store, and for the same reason.
  */
 import {
   DEFAULT_OUTPUT,
@@ -66,7 +105,7 @@ import { EFFECT_CATEGORIES, EFFECT_PRESETS } from '../editor/effects';
 import { layoutPresets } from '../editor/layout-presets';
 import { DEFAULT_TRANSITION_MS, MAX_TRANSITION_MS, MIN_TRANSITION_MS, TRANSITIONS, TRANSITION_CATEGORIES } from '../editor/transitions';
 import { DEFAULT_TEXT_STYLE_ID, TEXT_STYLES, TEXT_STYLE_CATEGORIES } from '../data/text-styles';
-import { OP_NAMES, applyEditOps, type EditOp } from './ops';
+import { applyEditOps, opNamesFor, zoomOffered, type EditOp, type McpEditingOptions } from './ops';
 import { summariseManifest } from './summary';
 
 /* -------------------------------------------------------------------------------------------- */
@@ -112,13 +151,41 @@ export class ToolError extends Error {
 /* The store                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * The manifests this set of tools holds, each one a copy that nothing outside the store holds.
+ *
+ * Over stdio an answer is text, and nobody can reach back into the store through it. A host that
+ * runs the server in its own process cannot say the same: it calls `run` itself, or goes through an
+ * SDK client on `InMemoryTransport`, which hands objects across as they are, and either way it
+ * holds the very object the call answered with. When that object was the stored one, a host that
+ * changed its answer changed the post under that id, behind every check here - and with Zoom off
+ * could leave a zoom in the store that only [requireNoZoom] would find, a call later, as a bug.
+ *
+ * So [put] keeps a copy, and the copy is made on the way IN rather than on the way out, for the
+ * same price: every answer that carries a manifest also stores it, so either way is one copy per
+ * answer. In is the one that also cuts the store loose from what a caller SENDS, and that is real:
+ * `patchOverlay` and `patchMusic` spread an op's patch onto the post as it was handed over, and the
+ * normaliser carries a few fields through as it finds them, so the manifest a call builds can hold
+ * the caller's own objects. What goes out is then never what is stored. [get] hands the stored copy
+ * to the ops, which build a new manifest rather than change the one they are given, and to
+ * [manifestResult], which puts a fresh copy under the same id as it answers - so the object it
+ * hands back stopped being the store's in the same step.
+ *
+ * Not a frozen copy, which would cost more and give less: it has to be made on every answer just
+ * the same and then walked a second time to freeze it, and it hands an in-process host an answer
+ * that throws the moment the host edits it, when the answer is the host's to edit.
+ *
+ * A JSON copy rather than a structured clone, because a manifest is a JSON document - it is what an
+ * app saves and what stdio carries - and this is the copy that saving and sending make: the store
+ * holds exactly what an agent over the wire would be handed back.
+ */
 class ManifestStore {
   private readonly manifests = new Map<string, EditManifest>();
   private next = 1;
 
   put(manifest: EditManifest, id?: string): string {
     const key = id ?? `m${this.next++}`;
-    this.manifests.set(key, manifest);
+    this.manifests.set(key, JSON.parse(JSON.stringify(manifest)) as EditManifest);
     return key;
   }
 
@@ -144,35 +211,133 @@ class ManifestStore {
 /* -------------------------------------------------------------------------------------------- */
 
 /*
+ * Said wherever an agent is told it may hand a manifest in whole, when Zoom is off, so the first it
+ * hears of the rule is not the refusal.
+ */
+const ZOOM_OFF_MANIFEST =
+  ' Zoom is turned off for this app, so a manifest that holds a zoom is refused: leave "zooms" empty.';
+
+/*
  * The two ways in, on every tool that reads a manifest. Neither is `required`, because exactly one
  * of them is, and JSON Schema says that with `oneOf`, which enough clients render badly that the
  * pair is better spelled out in the description and checked in `resolve` below.
  */
-const MANIFEST_INPUT: Record<string, JsonSchema> = {
-  manifestId: {
-    type: 'string',
-    description: 'An id returned by an earlier call. Use this OR "manifest", not both.',
-  },
-  manifest: {
-    type: 'object',
-    description:
-      'A manifest passed in whole, for one the server has not seen. Any version this package has ' +
-      'ever written is accepted and brought up to date. Use this OR "manifestId".',
-  },
-};
+function manifestInput(editing: McpEditingOptions): Record<string, JsonSchema> {
+  return {
+    manifestId: {
+      type: 'string',
+      description: 'An id returned by an earlier call. Use this OR "manifest", not both.',
+    },
+    manifest: {
+      type: 'object',
+      description:
+        'A manifest passed in whole, for one the server has not seen. Any version this package has ' +
+        'ever written is accepted and brought up to date. Use this OR "manifestId".' +
+        (editing.zoom ? '' : ZOOM_OFF_MANIFEST),
+    },
+  };
+}
 
-/** The id, the manifest and its summary: what every tool that produces a manifest answers with. */
-function manifestResult(store: ManifestStore, manifest: EditManifest, id?: string, note?: string): ToolResult {
+/**
+ * The door, with Zoom off: a manifest handed in whole that holds a zoom goes no further.
+ *
+ * Given the manifest AFTER `normaliseManifest`, never the raw input, because that is the object that
+ * would be stored and edited, and the normaliser is the one place that decides what the field means:
+ * `"zooms": {}`, an entry with no numeric window or one too short to keep are no zoom to it, and are
+ * none here, while an entry with no id, a duplicated id or a scale out of range is read into a zoom
+ * there - so it is one here, and refused. Judging the raw JSON instead would be a second opinion
+ * about what a zoom is, and the two would disagree the first time the normaliser learned a new
+ * spelling.
+ *
+ * The message is written for an agent that may have been handed a draft rather than have written the
+ * zoom itself, so it says whose rule it is and exactly what to change, and nothing about fault.
+ *
+ * Exported, because the door is here and not in [applyEditOps]. With Zoom off that function refuses
+ * the five zoom ops and nothing more: a zoom already in the manifest it is given comes back where it
+ * was. So a host that builds a tool of its own on `applyEditOps` has no door unless it adds one, and
+ * this is the one to add - called on the manifest `normaliseManifest` gives it, the one it is about
+ * to hand `applyEditOps`, it throws the same [ToolError] in the same words as these tools.
+ *
+ * Handed a manifest that was never normalised, it errs the safe way rather than guessing: any
+ * non-empty `zooms` list is refused, entries the normaliser would have dropped included, and
+ * anything that is not a list is let by, which the normaliser reads as no zoom too. So it can refuse
+ * more than the tools would, never less. Read as `unknown` for that reason, and because a host in
+ * plain JavaScript can hand it anything.
+ */
+export function refuseZooms(manifest: EditManifest): void {
+  const zooms: unknown = (manifest as { zooms?: unknown } | null | undefined)?.zooms;
+  if (!Array.isArray(zooms) || zooms.length === 0) return;
+  const count = zooms.length;
+  const ids = zooms
+    .map((zoom: { id?: unknown } | null) => (typeof zoom?.id === 'string' ? `"${zoom.id}"` : 'one with no id'))
+    .join(', ');
+  throw new ToolError(
+    `Zoom is turned off for this app, and this manifest holds ${count === 1 ? '1 zoom' : `${count} zooms`} ` +
+      `(${ids}). Take ${count === 1 ? 'it' : 'them'} out - "zooms": [] - and pass the manifest again: ` +
+      'while Zoom is off no post on this server holds a zoom, and the app’s editor offers none.',
+  );
+}
+
+/**
+ * The same rule checked on the way OUT, as an invariant rather than a door.
+ *
+ * Every manifest a tool answers with came in through [refuseZooms] or was built here from nothing,
+ * and every op that could put a zoom in is refused, so this cannot fire unless one of those is
+ * broken. That is the case it is for: it fails the call and says it is a bug, and the store never
+ * takes the manifest. Stripping the zoom instead would hand the agent a post that differs from the
+ * one its ops made, with nothing to say why, and would hide the bug from whoever could fix it.
+ *
+ * Read as `unknown` because it is a check on what the type promises, not a use of it: a `zooms`
+ * that is not an array at all is not a post with no zoom either.
+ */
+function requireNoZoom(manifest: EditManifest): void {
+  const zooms: unknown = manifest.zooms;
+  const held = Array.isArray(zooms) ? zooms.length : zooms === undefined || zooms === null ? 0 : 1;
+  if (held === 0) return;
+  throw new ToolError(
+    `internal error: this answer would hold ${held === 1 ? 'a zoom' : `${held} zooms`} while Zoom is turned ` +
+      'off for this app, which nothing here should be able to produce. That is a bug in ' +
+      'capacitor-video-kit, not in the request; the manifest was not stored.',
+  );
+}
+
+/**
+ * The id, the manifest and its summary: what every tool that produces a manifest answers with, and
+ * the one place a manifest is stored, so the check on the way out is made here, before `put`.
+ *
+ * It is also the one way a manifest leaves these tools, which is what lets the store's copy be made
+ * once, in `put`: the `manifest` handed back is the one the call built, and the store keeps its own
+ * copy of it, so nothing a caller does to its answer reaches the post under `manifestId`. A tool
+ * added later that answers with a stored manifest has to come through here for that to hold.
+ */
+function manifestResult(
+  store: ManifestStore,
+  editing: McpEditingOptions,
+  manifest: EditManifest,
+  id?: string,
+  note?: string,
+): ToolResult {
+  if (!editing.zoom) requireNoZoom(manifest);
   const manifestId = store.put(manifest, id);
-  const summary = summariseManifest(manifest);
+  const summary = summariseManifest(manifest, { editing });
   return {
     content: [{ type: 'text', text: note ? `${note}\n\n${summary}` : summary }],
     structuredContent: { manifestId, manifest: manifest as unknown as Record<string, unknown> },
   };
 }
 
-/** `manifestId` or `manifest`, and the id to write the answer back to if there was one. */
-function resolve(store: ManifestStore, args: Record<string, unknown>): { manifest: EditManifest; id?: string } {
+/**
+ * `manifestId` or `manifest`, and the id to write the answer back to if there was one.
+ *
+ * Only the inline manifest goes through [refuseZooms]. One named by id is one this set of tools
+ * stored, through [manifestResult], under the same setting it is read with now, and a copy nobody
+ * outside the store has held since ([ManifestStore] says why that matters).
+ */
+function resolve(
+  store: ManifestStore,
+  editing: McpEditingOptions,
+  args: Record<string, unknown>,
+): { manifest: EditManifest; id?: string } {
   const id = args['manifestId'];
   const inline = args['manifest'];
   if (typeof id === 'string' && id.length > 0) {
@@ -184,7 +349,9 @@ function resolve(store: ManifestStore, args: Record<string, unknown>): { manifes
     // Normalised rather than trusted: an inline manifest may be an older version, hand written, or
     // one an agent edited as plain JSON, and `normaliseManifest` is the only thing that knows what
     // each of those has to become.
-    return { manifest: normaliseManifest(inline) };
+    const manifest = normaliseManifest(inline);
+    if (!editing.zoom) refuseZooms(manifest);
+    return { manifest };
   }
   throw new ToolError('one of "manifestId" or "manifest" is needed');
 }
@@ -203,6 +370,11 @@ function resolve(store: ManifestStore, args: Record<string, unknown>): { manifes
  * when it needs it.
  *
  * A test asserts this covers exactly [OP_NAMES]. Adding an op without a line here fails it.
+ *
+ * It is the whole table, whatever a host has turned off. `catalog_list` serves each set of tools a
+ * copy that leaves out the ops its host refuses ([opReferenceFor]), and never touches this one: it
+ * is exported, and a host that turned Zoom off for one server must not take `addZoom`'s line away
+ * from another server in the same process, or from anything else reading it.
  */
 export const OP_REFERENCE: Record<string, string> = {
   /* the base track */
@@ -282,6 +454,11 @@ export const OP_REFERENCE: Record<string, string> = {
     'Anything left out keeps what the post has.',
 };
 
+/** [OP_REFERENCE] as these settings leave it: a copy, in the same order, without the refused ops. */
+function opReferenceFor(opNames: readonly string[]): Record<string, string> {
+  return Object.fromEntries(Object.entries(OP_REFERENCE).filter(([name]) => opNames.includes(name)));
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* The tools                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
@@ -289,14 +466,54 @@ export const OP_REFERENCE: Record<string, string> = {
 const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'layouts', 'textStyles', 'output', 'ops', 'limits'] as const;
 type CatalogSection = (typeof CATALOG_SECTIONS)[number];
 
+/*
+ * What `manifest_edit`'s description and `catalog_list`'s `ops` say with Zoom off, in the same words
+ * in both, since an agent may read either one first and must not come away with two stories.
+ */
+const ZOOM_OFF_OPS =
+  'Zoom is turned off for this app, so there are no zoom ops: no post here holds a zoom, and a ' +
+  'manifest passed in with one is refused.';
+
+export interface VideoKitToolsOptions {
+  /**
+   * The host's editing settings, as its editor takes them - pass the same object, held in a
+   * variable or written out in place with the editor's other fields beside `zoom`. Only `zoom` is
+   * read ([McpEditingOptions] says why the others have nothing to govern here), and it defaults to
+   * on exactly as the editor's does:
+   *
+   * ```ts
+   * createTools({ editing: { pictures: false, zoom: false } });
+   * ```
+   *
+   * Off, no post these tools hold has a zoom. Every zoom op is refused and left out of the op list
+   * in `manifest_edit`'s description and schema and of `catalog_list`, the zoom limits and the
+   * summary's "Zooms: none" go with them, and a manifest handed in whole that holds a zoom is
+   * refused before it is stored - whether a saved draft put the zoom there or the agent wrote it
+   * into the JSON itself, since nothing tells the two apart. That is stricter than the editor, and
+   * the header of this file says why.
+   */
+  editing?: McpEditingOptions;
+}
+
 /**
  * Builds the five tools over a store of their own.
  *
  * A function rather than a constant because the store is state: two servers in one process, which
- * is what the tests are, must not be able to see each other's manifests.
+ * is what the tests are, must not be able to see each other's manifests. What the host has turned
+ * off is held the same way, per call, for the same reason.
  */
-export function createTools(): ToolDefinition[] {
+export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[] {
   const store = new ManifestStore();
+
+  /*
+   * Settled once, here, into an object of this function's own. The op list is written into
+   * `manifest_edit`'s description and schema below, which a client reads at tools/list and keeps,
+   * so a host that changed the object it passed in afterwards would leave an agent reading one list
+   * and being held to another. A copy cannot be changed from outside, and neither can the two lists
+   * in `ops.ts` it is read against, which are frozen for the same reason.
+   */
+  const editing: McpEditingOptions = { zoom: zoomOffered(options.editing) };
+  const opNames = opNamesFor(editing);
 
   return [
     {
@@ -359,7 +576,7 @@ export function createTools(): ToolDefinition[] {
           manifest = insertClip(manifest, defaultClipEdit(raw.clipKey, raw.durationMs, id));
         }
 
-        return manifestResult(store, manifest);
+        return manifestResult(store, editing, manifest);
       },
     },
 
@@ -375,7 +592,12 @@ export function createTools(): ToolDefinition[] {
       annotations: { readOnlyHint: true, idempotentHint: true },
       inputSchema: {
         type: 'object',
-        properties: { manifest: { type: 'object', description: 'The manifest to check, in whole.' } },
+        properties: {
+          manifest: {
+            type: 'object',
+            description: 'The manifest to check, in whole.' + (editing.zoom ? '' : ZOOM_OFF_MANIFEST),
+          },
+        },
         required: ['manifest'],
       },
       run(args) {
@@ -385,6 +607,9 @@ export function createTools(): ToolDefinition[] {
         }
         const raw = input as Record<string, unknown>;
         const manifest = normaliseManifest(raw);
+        // Refused rather than reported in the notes below: a check that answered "this holds a zoom"
+        // and still stored it under an id would have let the zoom onto the server by the side door.
+        if (!editing.zoom) refuseZooms(manifest);
 
         const notes: string[] = [];
         const version = raw['version'];
@@ -403,7 +628,7 @@ export function createTools(): ToolDefinition[] {
         const changed = JSON.stringify(raw) !== JSON.stringify(manifest);
         notes.push(changed ? 'The manifest was changed on the way in; the normalised one is below.' : 'Nothing had to change.');
 
-        return manifestResult(store, manifest, undefined, notes.join(' '));
+        return manifestResult(store, editing, manifest, undefined, notes.join(' '));
       },
     },
 
@@ -416,10 +641,10 @@ export function createTools(): ToolDefinition[] {
         'colour operations the render will actually apply once the filter, its intensity and the ' +
         'Adjust sliders are folded together.',
       annotations: { readOnlyHint: true, idempotentHint: true },
-      inputSchema: { type: 'object', properties: { ...MANIFEST_INPUT } },
+      inputSchema: { type: 'object', properties: manifestInput(editing) },
       run(args) {
-        const { manifest, id } = resolve(store, args);
-        return manifestResult(store, manifest, id);
+        const { manifest, id } = resolve(store, editing, args);
+        return manifestResult(store, editing, manifest, id);
       },
     },
 
@@ -433,20 +658,21 @@ export function createTools(): ToolDefinition[] {
         'Nothing is applied halfway: if any op is refused the whole list is, the manifest is left as it ' +
         'was, and the error names the op and its position in the list. An op that names a clip, layer, ' +
         'track or take the post does not have is refused rather than ignored.\n\n' +
-        `The ops are: ${OP_NAMES.join(', ')}. ` +
+        `The ops are: ${opNames.join(', ')}. ` +
+        (editing.zoom ? '' : `${ZOOM_OFF_OPS} `) +
         'Call catalog_list with section "ops" for what each one reads.',
       annotations: { readOnlyHint: false },
       inputSchema: {
         type: 'object',
         properties: {
-          ...MANIFEST_INPUT,
+          ...manifestInput(editing),
           ops: {
             type: 'array',
             minItems: 1,
             description: 'Applied in order. Each item is {"op": <name>, ...the values that op reads}.',
             items: {
               type: 'object',
-              properties: { op: { type: 'string', enum: [...OP_NAMES] } },
+              properties: { op: { type: 'string', enum: [...opNames] } },
               required: ['op'],
               additionalProperties: true,
             },
@@ -455,18 +681,18 @@ export function createTools(): ToolDefinition[] {
         required: ['ops'],
       },
       run(args) {
-        const { manifest, id } = resolve(store, args);
+        const { manifest, id } = resolve(store, editing, args);
         const ops = args['ops'];
         if (!Array.isArray(ops) || ops.length === 0) throw new ToolError('"ops" must be a non-empty array');
 
         const before = totalDurationMs(manifest);
-        const next = applyEditOps(manifest, ops as EditOp[]);
+        const next = applyEditOps(manifest, ops as EditOp[], { editing });
         const after = totalDurationMs(next);
 
         const note =
           `Applied ${ops.length} op${ops.length === 1 ? '' : 's'}.` +
           (before === after ? '' : ` The post went from ${Math.round(before)}ms to ${Math.round(after)}ms.`);
-        return manifestResult(store, next, id, note);
+        return manifestResult(store, editing, next, id, note);
       },
     },
 
@@ -494,7 +720,7 @@ export function createTools(): ToolDefinition[] {
         const catalog: Record<string, unknown> = {};
         const text: string[] = [];
         for (const section of sections) {
-          const { data, lines } = catalogSection(section);
+          const { data, lines } = catalogSection(section, editing, opNames);
           catalog[section] = data;
           text.push(lines);
         }
@@ -533,26 +759,41 @@ function readSources(value: unknown): SourceInput[] {
   });
 }
 
-function catalogSection(section: CatalogSection): { data: unknown; lines: string } {
+/**
+ * One section of the catalogue, as this set of tools' settings leave it. Only `ops` and `limits`
+ * depend on them; every other section is the same list whatever the host has turned off.
+ */
+function catalogSection(
+  section: CatalogSection,
+  editing: McpEditingOptions,
+  opNames: readonly string[],
+): { data: unknown; lines: string } {
+  /*
+   * The category lists are the editor's own module constants, the ones its sheets draw their tabs
+   * from, so they go out as copies. Handed out as they are, an in-process host that tidied one up in
+   * its answer - sorted it, dropped a tab it does not show - would have changed it for every server
+   * in the process and for the editor itself, which is the sharing [ManifestStore] refuses too.
+   */
+  const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
   switch (section) {
     case 'filters': {
       const data = FILTER_PRESETS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
       return {
-        data: { categories: FILTER_CATEGORIES, presets: data },
+        data: { categories: copy(FILTER_CATEGORIES), presets: data },
         lines: `Filters (setFilter filterId):\n${byCategory(data)}`,
       };
     }
     case 'effects': {
       const data = EFFECT_PRESETS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
       return {
-        data: { categories: EFFECT_CATEGORIES, presets: data },
+        data: { categories: copy(EFFECT_CATEGORIES), presets: data },
         lines: `Full-frame effects (addEffect effectId):\n${byCategory(data)}`,
       };
     }
     case 'transitions': {
       const data = TRANSITIONS.map((preset) => ({ id: preset.id, label: preset.label, category: preset.category }));
       return {
-        data: { categories: TRANSITION_CATEGORIES, presets: data, durationMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS, default: DEFAULT_TRANSITION_MS } },
+        data: { categories: copy(TRANSITION_CATEGORIES), presets: data, durationMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS, default: DEFAULT_TRANSITION_MS } },
         lines:
           `Transitions between base clips (setClipTransition transition.kind), ${MIN_TRANSITION_MS}..${MAX_TRANSITION_MS}ms, ` +
           `default ${DEFAULT_TRANSITION_MS}ms, and never more than half of either clip:\n${byCategory(data)}`,
@@ -570,7 +811,7 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
     case 'textStyles': {
       const data = TEXT_STYLES.map((style) => ({ id: style.id, label: style.label, category: style.category }));
       return {
-        data: { categories: TEXT_STYLE_CATEGORIES, default: DEFAULT_TEXT_STYLE_ID, styles: data },
+        data: { categories: copy(TEXT_STYLE_CATEGORIES), default: DEFAULT_TEXT_STYLE_ID, styles: data },
         lines: `Text styles (addText styleId, default "${DEFAULT_TEXT_STYLE_ID}"):\n${byCategory(data)}`,
       };
     }
@@ -594,14 +835,28 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
       };
     }
     case 'ops': {
+      /*
+       * The line about Zoom goes in the text and not the data, which stays the name-to-line table it
+       * has always been, so a client that reads `ops` as that keeps working. What the data says
+       * about Zoom it says by leaving the zoom ops out.
+       */
+      const reference = opReferenceFor(opNames);
       return {
-        data: OP_REFERENCE,
+        data: reference,
         lines:
           'Edit ops (manifest_edit), each one {"op": <name>, ...}:\n' +
-          OP_NAMES.map((name) => `  ${name} - ${OP_REFERENCE[name]}`).join('\n'),
+          opNames.map((name) => `  ${name} - ${reference[name]}`).join('\n') +
+          (editing.zoom ? '' : `\n${ZOOM_OFF_OPS}`),
       };
     }
     case 'limits': {
+      /*
+       * With Zoom off, every zoom limit goes. Each one only ever answered a question about a zoom a
+       * post has or is gaining - how many, how short, how far in, how fast - and a post here has
+       * none and gains none, so listing them would only suggest there was a zoom to hold to them.
+       * The line that replaces them says why they are missing, so their absence does not read as
+       * "no limit".
+       */
       const data = {
         manifestVersion: MANIFEST_VERSION,
         maxLayers: MAX_LAYERS,
@@ -611,12 +866,20 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
         minLayerMs: MIN_LAYER_MS,
         clipSpeed: { min: 0.25, max: 4 },
         transitionMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS },
-        maxZooms: MAX_ZOOMS,
-        minZoomMs: MIN_ZOOM_MS,
-        zoomScale: { min: MIN_ZOOM_SCALE, max: MAX_ZOOM_SCALE },
-        zoomRampMs: { min: 0, max: MAX_ZOOM_RAMP_MS },
-        zoomChainGapMs: ZOOM_CHAIN_GAP_MS,
+        ...(editing.zoom
+          ? {
+              maxZooms: MAX_ZOOMS,
+              minZoomMs: MIN_ZOOM_MS,
+              zoomScale: { min: MIN_ZOOM_SCALE, max: MAX_ZOOM_SCALE },
+              zoomRampMs: { min: 0, max: MAX_ZOOM_RAMP_MS },
+              zoomChainGapMs: ZOOM_CHAIN_GAP_MS,
+            }
+          : {}),
       };
+      const zooms = editing.zoom
+        ? `  at most ${MAX_ZOOMS} zooms, each at least ${MIN_ZOOM_MS}ms, ${MIN_ZOOM_SCALE}x to ${MAX_ZOOM_SCALE}x, ` +
+          `ramps 0 to ${MAX_ZOOM_RAMP_MS}ms; zooms under ${ZOOM_CHAIN_GAP_MS}ms apart pan from one to the next`
+        : '  no zooms: Zoom is turned off for this app, so a post here holds none and gains none';
       return {
         data,
         lines:
@@ -626,8 +889,7 @@ function catalogSection(section: CatalogSection): { data: unknown; lines: string
           `  a post runs at most ${MAX_POST_MS}ms; a clip at least ${MIN_CLIP_MS}ms and a layer at least ${MIN_LAYER_MS}ms\n` +
           '  clip speed is 0.25x to 4x, with pitch preserved\n' +
           `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins\n` +
-          `  at most ${MAX_ZOOMS} zooms, each at least ${MIN_ZOOM_MS}ms, ${MIN_ZOOM_SCALE}x to ${MAX_ZOOM_SCALE}x, ramps 0 to ${MAX_ZOOM_RAMP_MS}ms; ` +
-          `zooms under ${ZOOM_CHAIN_GAP_MS}ms apart pan from one to the next`,
+          zooms,
       };
     }
   }
