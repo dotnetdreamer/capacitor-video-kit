@@ -119,7 +119,23 @@ class RenderPlan private constructor(
          * keeps their effect chains the ones they always were.
          */
         val zoomed: Boolean = false,
-    )
+    ) {
+
+        /**
+         * True for a VIDEO clip played slower than 1x: the only kind of clip whose frames arrive
+         * further apart than they left the source, and so the only kind that is given
+         * [SlowMotionEffect] to put the missing ones back. A clip at 1x or faster keeps exactly the
+         * effect chain it always had, and so does every picture, which Media3 already emits at the
+         * output's own rate whatever its length.
+         *
+         * Read off the clip rather than stored, so every copy the plan makes of a clip - cut to a
+         * layer's room, led into a transition, supersampled under a zoom - answers the same. The
+         * speed is the one [planClip] timed the clip with, clamp included.
+         */
+        val slowed: Boolean
+            get() = !clip.image &&
+                clip.speed.coerceIn(ComposeSpecParser.MIN_SPEED, ComposeSpecParser.MAX_SPEED) < 1f
+    }
 
     /**
      * One extra layer, already placed at its start time and cut to the base track's length.

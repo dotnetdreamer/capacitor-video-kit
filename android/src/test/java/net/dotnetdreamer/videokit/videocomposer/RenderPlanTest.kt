@@ -95,6 +95,39 @@ class RenderPlanTest {
     }
 
     @Test
+    fun `only a video below 1x is slowed, and every copy of it says so`() {
+        val still = picture("p", outMs = 1_000)
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", speed = 0.25f),
+                    clip("b", speed = 0.999f),
+                    clip("c", speed = 1f),
+                    clip("d", speed = 2f),
+                    still,
+                    // A hand-built picture at half speed is still a picture: Media3 emits a still at
+                    // the output's rate whatever its speed says.
+                    still.copy(key = "q", speed = 0.5f),
+                ),
+                tracks = listOf(track(listOf(clip("e", outMs = 30_000, speed = 0.5f)))),
+            ),
+            mapOf(
+                "file:///a.mp4" to probe(2_000),
+                "file:///b.mp4" to probe(2_000),
+                "file:///c.mp4" to probe(2_000),
+                "file:///d.mp4" to probe(2_000),
+                "file:///e.mp4" to probe(30_000),
+                still.uri to pictureProbe,
+            ),
+        )
+        assertEquals(listOf(true, true, false, false, false, false), plan.clips.map { it.slowed })
+        // The layer clip was cut to the room the base leaves, and the cut copy is still slowed.
+        val layerClip = plan.tracks[0].clips[0]
+        assertTrue(layerClip.outUs < 30_000_000L)
+        assertTrue(layerClip.slowed)
+    }
+
+    @Test
     fun `a picture's length is never clamped to a probed duration, because it has none`() {
         val still = picture("p", outMs = 45_000)
         val plan = RenderPlan.build(spec(listOf(still)), mapOf(still.uri to pictureProbe))

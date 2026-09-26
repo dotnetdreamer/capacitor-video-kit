@@ -1,7 +1,8 @@
-import { loadableUrl } from '../../web-runtime/files';
+import { loadableUrl, resolve } from '../../web-runtime/files';
 import { decodePicture, measurePicture, type DecodedPicture } from '../../web-runtime/picture';
-import type { LayerSource } from './painter';
+import type { FrameTween, LayerSource } from './painter';
 import type { ProbedInput } from './plan';
+import { framePairAt, frameSeekTarget, frameTimes, type SourceWindow } from './slow-motion';
 
 /**
  * The browser's decoder, which is a `<video>` element.
@@ -126,7 +127,21 @@ export interface SourceReader {
   readonly height: number;
   /** Resolves true when there is a frame to draw at `seconds` into the source. */
   seek(seconds: number, frameIntervalSeconds: number): Promise<boolean>;
+  /**
+   * The picture at `seconds` into the source made from the two recorded frames either side of it,
+   * for a clip slowed below 1x that plays `window` of the file - see `slow-motion.ts`. Null wherever that cannot be had, and the
+   * caller then [seek]s and draws [source] exactly as it would at any other speed. Absent on a
+   * reader that has only one frame to give, which is a picture.
+   */
+  tweenAt?(seconds: number, window: SourceWindow): Promise<SynthesisedFrame | null>;
   close(): void;
+}
+
+/** What [SourceReader.tweenAt] hands the painter: frame A, and frame B with how far towards it. */
+export interface SynthesisedFrame {
+  source: LayerSource;
+  /** Null where A is drawn alone: an instant exactly on a frame, or the file's last frame. */
+  tween: FrameTween | null;
 }
 
 /**
@@ -174,21 +189,56 @@ export async function probePicture(uri: string): Promise<ProbedInput> {
   return { durationMs: 0, width: size.width, height: size.height, hasAudio: false, hasVideo: true };
 }
 
+/** What a [FrameReader] is opened with beyond its file. */
+export interface FrameReaderOptions {
+  /**
+   * Hears about every picture the reader lets go of - one frame of a slowed clip that no output
+   * frame will be made from again - before it is closed, so whatever was drawing it can let go too.
+   */
+  onDrop?: (source: LayerSource) => void;
+  /**
+   * The file's frame times, for a slowed clip; see [readFrameTimes]. Handed in rather than read here
+   * so a render that comes back to a file reads them once, not once per visit. Absent is read here,
+   * the first time it is needed.
+   */
+  frameTimes?: () => Promise<Float64Array | null>;
+}
+
 /**
  * One source, seeked frame by frame - the renderer's whole relationship with a decoder.
  *
  * The last time it was asked for is remembered, and a request inside half a frame of it draws
- * nothing new. That is not a micro-optimisation: a clip at 0.5x speed asks for the same source
- * frame twice in a row for every output frame, and without this the render would seek, wait and
- * decode twice for one picture. The same holds for a frame held at the join between two clips.
+ * nothing new. That is not a micro-optimisation: a clip asks for the same source frame twice in a
+ * row whenever two output frames land on it, and without this the render would seek, wait and decode
+ * twice for one picture. The same holds for a frame held at the join between two clips.
+ *
+ * A clip SLOWED below 1x is read differently, through [tweenAt]: there each output frame is made from
+ * the two recorded frames either side of it (see `slow-motion.ts`), so the reader needs two frames at
+ * once where a `<video>` element holds one. It keeps them as bitmaps. Each is taken by seeking the
+ * element to the middle of that frame's time on screen and copying what it shows, which needs the
+ * frames' real timestamps - read from the container once, by [readFrameTimes] - and after that the
+ * pair is kept for as long as output frames are made from it: at 0.3x that is three or four output
+ * frames a pair, and walking forward costs ONE seek per source frame, fewer than the plain path pays.
+ * The element is still the only decoder, so a slowed clip is decoded, oriented and coloured by
+ * exactly what decodes the same file at 1x, and a clip split into a 1x part and a slowed one does not
+ * change colour at the join.
  */
 export class FrameReader implements SourceReader {
   private lastSeconds = Number.NaN;
+  private grid: Promise<Float64Array | null> | null = null;
+  /** Frames of a slowed clip, by index into the frame times: A, B, and nothing else. */
+  private readonly held = new Map<number, ImageBitmap>();
+  /** Set when this browser cannot copy a frame out of the element at all; the plain path from then on. */
+  private cannotCopy = false;
 
-  private constructor(readonly video: HTMLVideoElement) {}
+  private constructor(
+    readonly video: HTMLVideoElement,
+    private readonly uri: string,
+    private readonly options: FrameReaderOptions,
+  ) {}
 
-  static async open(uri: string): Promise<FrameReader> {
-    return new FrameReader(await openVideo(uri));
+  static async open(uri: string, options: FrameReaderOptions = {}): Promise<FrameReader> {
+    return new FrameReader(await openVideo(uri), uri, options);
   }
 
   get source(): LayerSource {
@@ -212,12 +262,99 @@ export class FrameReader implements SourceReader {
    * failed twenty seconds in over one awkward keyframe.
    */
   async seek(seconds: number, frameIntervalSeconds: number): Promise<boolean> {
-    const duration = this.video.duration;
-    const target = Math.max(0, Number.isFinite(duration) && duration > 0 ? Math.min(seconds, duration - 0.001) : seconds);
+    // A plain draw is a layer that has left its slowed clip, or never had one: the frames held for
+    // one will not be drawn again.
+    this.dropHeld();
+    const target = this.clampTarget(seconds);
     if (Number.isFinite(this.lastSeconds) && Math.abs(target - this.lastSeconds) < frameIntervalSeconds / 2) {
       return true;
     }
+    return await this.goTo(target);
+  }
 
+  /**
+   * The picture at `seconds` into the source for a slowed clip: frame A as a bitmap, and frame B with
+   * its weight where the instant is between two frames. Null wherever the two frames cannot be had -
+   * a file whose frame times will not read, a browser that will not copy a frame, a seek that did not
+   * land - and the caller then draws the plain way, which is the stutter this replaces and never
+   * anything worse.
+   */
+  async tweenAt(seconds: number, window: SourceWindow): Promise<SynthesisedFrame | null> {
+    if (this.cannotCopy || typeof createImageBitmap !== 'function') return null;
+    const times = await (this.grid ??= this.options.frameTimes?.() ?? readFrameTimes(this.uri));
+    if (!times) return null;
+    const pair = framePairAt(times, this.clampTarget(seconds), window);
+    if (!pair) return null;
+    // Only A and the frame after it are ever kept, so a slowed clip holds two frames however long it
+    // runs; B is kept even at an instant that does not draw it, because the next instant will.
+    this.keepOnly(pair.a, pair.a + 1);
+    const a = await this.capture(times, pair.a);
+    if (!a) return null;
+    if (pair.b < 0 || !(pair.weight > 0)) return { source: a, tween: null };
+    const b = await this.capture(times, pair.b);
+    return { source: a, tween: b ? { source: b, weight: pair.weight } : null };
+  }
+
+  close(): void {
+    this.dropHeld();
+    closeVideo(this.video);
+  }
+
+  /** A time the element can be put at: inside the file, and a millisecond short of its very end. */
+  private clampTarget(seconds: number): number {
+    const duration = this.video.duration;
+    return Math.max(0, Number.isFinite(duration) && duration > 0 ? Math.min(seconds, duration - 0.001) : seconds);
+  }
+
+  /** Frame `index`, copied out of the element: held already, or seeked to and copied now. */
+  private async capture(times: Float64Array, index: number): Promise<ImageBitmap | null> {
+    const held = this.held.get(index);
+    if (held) return held;
+    if (!(await this.goTo(this.clampTarget(frameSeekTarget(times, index))))) return null;
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(this.video);
+    } catch {
+      // Not a frame that failed but a browser that cannot do this: every later frame would fail the
+      // same way, one seek later.
+      this.cannotCopy = true;
+      return null;
+    }
+    // Drawn with the element's own size, which is what the layer's window is worked out from. A
+    // stream that changes size partway is drawn the plain way across the change.
+    if (bitmap.width !== this.video.videoWidth || bitmap.height !== this.video.videoHeight) {
+      bitmap.close();
+      return null;
+    }
+    this.held.set(index, bitmap);
+    return bitmap;
+  }
+
+  /** Lets go of every held frame but `keepA` and `keepB`. */
+  private keepOnly(keepA: number, keepB: number): void {
+    for (const [index, bitmap] of this.held) {
+      if (index === keepA || index === keepB) continue;
+      this.held.delete(index);
+      this.drop(bitmap);
+    }
+  }
+
+  private dropHeld(): void {
+    if (this.held.size === 0) return;
+    for (const bitmap of this.held.values()) this.drop(bitmap);
+    this.held.clear();
+  }
+
+  private drop(bitmap: ImageBitmap): void {
+    this.options.onDrop?.(bitmap);
+    bitmap.close();
+  }
+
+  /**
+   * Puts the element at `target` and waits for the frame there. Resolves true once it has landed;
+   * see [seek] for why a seek that never lands is a false rather than a failure.
+   */
+  private async goTo(target: number): Promise<boolean> {
     const landed = await new Promise<boolean>(resolve => {
       let settled = false;
       const done = (ok: boolean): void => {
@@ -245,9 +382,53 @@ export class FrameReader implements SourceReader {
     }
     return landed;
   }
+}
 
-  close(): void {
-    closeVideo(this.video);
+/** Past this many frames a file's frame times are not worth holding: over two hours at 60 fps. */
+const MAX_FRAME_TIMES = 500_000;
+
+/**
+ * Every frame's presentation time in a file, in seconds on the timeline a `<video>` element seeks
+ * on, or null where they cannot be read - which is a slowed clip drawn the plain way, never a render
+ * that fails.
+ *
+ * WHY THE CONTAINER, and not the element: a `<video>` says nothing about where its frames are. It
+ * seeks to a time and shows the frame covering it, and the one callback that reports a frame's own
+ * timestamp (`requestVideoFrameCallback`'s `mediaTime`) is not called at all for a paused element
+ * that is not in the document - which is exactly what a render's element is, measured in Chromium.
+ * The container has every frame's time already written down, and a demuxer reads them without
+ * decoding a single one: the packets' METADATA only, which for an MP4 is its sample table, already in
+ * memory once the file is open. The times are the ones the element plays by - both apply the edit
+ * list - and they are the real ones, so footage with a variable frame rate is blended by the time
+ * that actually passed between two frames.
+ *
+ * The demuxer is loaded on first use, as the waveform's is: a post with no slowed clip never loads
+ * it. A file it cannot parse, or one with no video track, is null.
+ */
+export async function readFrameTimes(uri: string): Promise<Float64Array | null> {
+  let input: { dispose(): void } | null = null;
+  try {
+    const url = await loadableUrl(uri);
+    const { ALL_FORMATS, BlobSource, EncodedPacketSink, Input, UrlSource } = await import('mediabunny');
+    // Read by range where it is a URL on the network; a blob is already the file, sliced rather than
+    // copied.
+    const source = /^https?:/i.test(url) ? new UrlSource(url) : new BlobSource(await resolve(url));
+    const reader = new Input({ source, formats: ALL_FORMATS });
+    input = reader;
+    const track = await reader.getPrimaryVideoTrack();
+    if (!track) return null;
+    const stamps: number[] = [];
+    for await (const packet of new EncodedPacketSink(track).packets(undefined, undefined, { metadataOnly: true })) {
+      stamps.push(packet.timestamp);
+      if (stamps.length > MAX_FRAME_TIMES) return null;
+    }
+    const times = frameTimes(stamps);
+    // One frame has nothing to be blended with.
+    return times.length >= 2 ? times : null;
+  } catch {
+    return null;
+  } finally {
+    input?.dispose();
   }
 }
 

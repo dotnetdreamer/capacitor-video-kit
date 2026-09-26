@@ -380,6 +380,16 @@ export interface ComposeOutput {
    * moment, so a lower-rate source has its frames repeated: 24p footage in a 60 fps post is a 60 fps
    * file on those two and a 24 fps one on Android. The picture is the same judder a 24p video has on
    * a 60 Hz screen, and H.264 codes a repeated frame for almost nothing.
+   *
+   * SLOW MOTION IS THE EXCEPTION, on Android and the web (iOS does not yet). A video clip whose
+   * `speed` is below 1 would otherwise run at its source rate times its speed - 30 fps footage at
+   * 0.3x is nine pictures a second - so both engines SYNTHESISE the frames in between at this rate:
+   * each output frame of a slowed clip is its two neighbouring source frames mixed by where the
+   * frame falls between them (Android's `SlowMotionEffect`, the web's `slow-motion.ts` and
+   * `frame-interpolation.ts`). Only frames inside the clip's own trim are used, its first frame is
+   * held from the clip's start and its last to its end, and nothing is mixed across a cut. A clip at
+   * 1x or faster, and a picture, is drawn exactly as described above. Nothing on the wire asks for
+   * it: `speed` below 1 is the whole of the signal, so a spec from any version of the editor gets it.
    */
   fps: number;
   /**

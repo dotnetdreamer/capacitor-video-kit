@@ -488,6 +488,132 @@ class CompositionBuilderTest {
         assertFalse((effects[1] as ProgressTap).isNoOp(720, 1280))
     }
 
+    /* ------------------------------------------------------------------------------------- */
+    /* Slow motion                                                                             */
+    /* ------------------------------------------------------------------------------------- */
+
+    private fun slowMotionOf(item: androidx.media3.transformer.EditedMediaItem): SlowMotionEffect? =
+        item.effects.videoEffects.filterIsInstance<SlowMotionEffect>().singleOrNull()
+
+    @Test
+    fun `a slowed clip synthesises its frames between the grade and the geometry, over its own piece`() {
+        val plan = RenderPlan.build(
+            graded(
+                listOf(
+                    clip("a", outMs = 1_000),
+                    clip("b", outMs = 1_000, speed = 0.5f),
+                    clip("c", outMs = 1_000, speed = 2f),
+                    clip("d", outMs = 900, speed = 0.25f),
+                ),
+            ),
+            probes("a", "b", "c", "d"),
+        )
+        val items = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems
+        for (i in listOf(1, 3)) {
+            val effects = items[i].effects.videoEffects
+            assertEquals(3, effects.size)
+            assertTrue(effects[0] is ColorMatrixEffect)
+            val slow = effects[1] as SlowMotionEffect
+            assertTrue(effects[2] is Presentation)
+            // Its window is the plan's placement of the clip, to the microsecond, at the post's rate.
+            assertEquals(plan.prefixOutUs[i], slow.windowStartUs)
+            assertEquals(plan.prefixOutUs[i] + plan.clips[i].outDurUs, slow.windowEndUs)
+            assertEquals(30, slow.fps)
+        }
+        assertEquals(1_000_000L, slowMotionOf(items[1])!!.windowStartUs)
+        assertEquals(3_000_000L, slowMotionOf(items[1])!!.windowEndUs)
+        assertEquals(3_500_000L, slowMotionOf(items[3])!!.windowStartUs)
+        assertEquals(7_100_000L, slowMotionOf(items[3])!!.windowEndUs)
+        // One effect per item: its window is its own.
+        assertNotSame(slowMotionOf(items[1]), slowMotionOf(items[3]))
+    }
+
+    @Test
+    fun `a clip at 1x or faster, and a picture, keep exactly the chain they always had`() {
+        val plan = RenderPlan.build(
+            graded(
+                listOf(
+                    clip("a", outMs = 1_000),
+                    clip("b", outMs = 1_000, speed = 2f),
+                    clip("p", outMs = 1_000).copy(image = true),
+                    clip("c", outMs = 1_000, speed = 4f),
+                ),
+            ),
+            probes("a", "b", "p", "c"),
+        )
+        val items = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems
+        for (item in items) {
+            assertEquals(null, slowMotionOf(item))
+            assertEquals(2, item.effects.videoEffects.size)
+            // The decimator is every clip's still, slowed or not.
+            assertEquals(30, item.frameRate)
+        }
+        // The same instances, so Media3 still keeps one chain across all of them.
+        assertEquals(items[0].effects.videoEffects, items[1].effects.videoEffects)
+        assertEquals(items[0].effects.videoEffects, items[3].effects.videoEffects)
+    }
+
+    @Test
+    fun `a slowed clip keeps the decimator, which runs ahead of every effect`() {
+        val plan = RenderPlan.build(spec(listOf(clip("a", speed = 0.25f))), probes("a"))
+        val item = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems[0]
+        assertEquals(30, item.frameRate)
+        assertTrue(item.effects.videoEffects[0] is SlowMotionEffect)
+        assertTrue(item.effects.videoEffects[1] is Presentation)
+    }
+
+    @Test
+    fun `a slowed layer clip fills its placement, the gaps around it untouched`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(clip("a", outMs = 2_000)),
+                tracks = listOf(Track("pip", listOf(clip("b", outMs = 300, speed = 0.5f)), 400, 1, 1f)),
+            ),
+            probes("a", "b"),
+        )
+        val layer = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems
+        // Gap, clip, gap.
+        assertEquals(listOf(true, false, true), layer.map { isGap(it) })
+        val slow = slowMotionOf(layer[1])!!
+        val placement = plan.tracks[0].placements[0]
+        assertEquals(placement.startUs, slow.windowStartUs)
+        assertEquals(placement.endUs, slow.windowEndUs)
+        assertEquals(400_000L, slow.windowStartUs)
+        assertEquals(1_000_000L, slow.windowEndUs)
+        assertEquals(null, slowMotionOf(layer[0]))
+        assertEquals(null, slowMotionOf(layer[2]))
+    }
+
+    @Test
+    fun `a slowed outgoing clip is synthesised on its tail too, over the tail's item`() {
+        // `a` at half speed hands its last half second of footage - a whole second of output - to
+        // the transition into `b`; the tail item runs its lead and its window at that speed.
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", outMs = 1_000, speed = 0.5f),
+                    clip("b", outMs = 2_000).copy(
+                        transitionIn = dissolve(clip("a", inMs = 1_000, outMs = 1_250, speed = 0.5f)),
+                    ),
+                ),
+            ),
+            probes("a", "b"),
+        )
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        val tail = plan.tails.single()
+        val tailItem = sequences[1].editedMediaItems.single { !isGap(it) }
+        val slow = slowMotionOf(tailItem)!!
+        assertEquals(tail.itemStartUs, slow.windowStartUs)
+        assertEquals(tail.itemEndUs, slow.windowEndUs)
+        // Before the geometry, which comes before the side: the side is read at every instant.
+        val effects = tailItem.effects.videoEffects
+        assertTrue(effects.indexOf(slow) < effects.indexOfFirst { it is Presentation })
+        assertTrue(effects.last() is TransitionEffect)
+        // The base's own slowed clip has its own, and the incoming clip at 1x has none.
+        assertEquals(0L, slowMotionOf(sequences[0].editedMediaItems[0])!!.windowStartUs)
+        assertEquals(null, slowMotionOf(sequences[0].editedMediaItems[1]))
+    }
+
     @Test
     fun `the progress tap publishes the frame's time and leaves the colour alone`() {
         val tap = AtomicLong(-1L)

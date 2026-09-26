@@ -5,9 +5,11 @@ import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-fr
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
 import { pictureDest } from '../../video-composer/web/geometry';
 import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from '../../video-composer/web/painter';
+import { findClip } from '../../editor';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorStore } from '../../state/editor-store';
 import { ClipMedia } from './clip-media';
+import { PresentedFrames } from './presented-frames';
 
 /**
  * The preview's picture: every video layer composited into ONE canvas by the browser renderer's own
@@ -32,6 +34,12 @@ import { ClipMedia } from './clip-media';
  * Everything that is not picture stays in the DOM above this canvas: the selection box and its
  * handles, the snap guides, the bin, the crop window, the text placeholder, the REC pill, and the
  * layer bitmaps themselves. They need hit testing, or they are chrome, or both.
+ *
+ * A clip slowed below 1x is the one place the preview draws something other than what an element
+ * shows: while it plays, its layer is drawn between the frame its element showed last and the one it
+ * shows now, so slow motion glides at the screen's rate the way the export draws it rather than
+ * stepping at the footage's rate times the speed. See [PresentedFrames] for how, and for the one
+ * source frame it runs behind to do it.
  */
 
 /** The most device pixels a preview is worth. A 4K post composited at 4K for a 400px box is waste. */
@@ -121,6 +129,15 @@ export interface BaseTransitionShot {
   compiled: CompiledTransition;
 }
 
+/**
+ * What is drawn for a layer made from `video`: the layer as made, or - for a slowed clip - the layer
+ * drawn between two of its frames. See [PreviewCanvas.slowMotion].
+ */
+export type SlowMotion = (layer: PreviewVideoLayer, video: PreviewSource, draw: LayerDraw) => LayerDraw;
+
+/** Every layer as it was made: no slow motion anywhere. */
+const asMade: SlowMotion = (_layer, _video, draw) => draw;
+
 /** `readyState >= HAVE_CURRENT_DATA`: the element has a frame that `drawImage` can take. */
 const HAVE_CURRENT_DATA = 2;
 
@@ -170,6 +187,12 @@ export class PreviewCanvas {
   /** The last op list folded into a matrix, and what it folded to. A fold a frame is a fold wasted:
       the list comes off a computed, so an unchanged filter is the very same array. */
   private folded: { ops: unknown; matrix: ColorMatrix | null } | null = null;
+  /**
+   * The frame before the one each slowed element shows, so a slowed clip is drawn moving between
+   * frames rather than stepping from one to the next; see [PresentedFrames]. Every frame it lets go
+   * of takes its texture with it.
+   */
+  private readonly presented = new PresentedFrames(bitmap => this.painter?.forget(bitmap));
 
   constructor(
     private readonly store: EditorStore,
@@ -270,9 +293,9 @@ export class PreviewCanvas {
   request(): void {
     if (this.destroyed || this.pending || this.playing) return;
     this.pending = true;
-    requestAnimationFrame(() => {
+    requestAnimationFrame(time => {
       this.pending = false;
-      this.draw();
+      this.draw(time);
     });
   }
 
@@ -286,6 +309,7 @@ export class PreviewCanvas {
     for (const video of this.baseElements) this.release(video);
     this.baseElements = [];
     this.baseFeed = null;
+    this.presented.destroy();
     this.painter?.dispose();
     this.painter = null;
   }
@@ -309,7 +333,7 @@ export class PreviewCanvas {
    * base track's place whenever the shot has a transition in it. Every other layer is drawn over it
    * exactly as it is over any frame.
    */
-  private draw(): void {
+  private draw(now: number = performance.now()): void {
     if (this.destroyed) return;
     const painter = this.painter;
     if (!painter) return;
@@ -321,6 +345,7 @@ export class PreviewCanvas {
     // The segment the crop sheet is open on. Null whenever that sheet is shut, which is almost always.
     const cropping = cropOpen ? (this.store.cropClip.value?.id ?? null) : null;
     const frameAspect = this.store.frameAspect.value;
+    const slowed = this.slowMotion(now, cropping);
 
     const draws: (LayerDraw | TransitionDraw)[] = [];
     // How many layers the POST says are on screen, whether or not their elements can supply one.
@@ -332,7 +357,7 @@ export class PreviewCanvas {
     const shot = feed ? feed() : null;
     if (shot) {
       onScreen += 1;
-      const base = baseDraw(shot, frameAspect, cropOpen, cropping);
+      const base = baseDraw(shot, frameAspect, cropOpen, cropping, slowed);
       if (base.tailComing) {
         // Hold the frame - bounded - rather than flash the incoming side over black on its way to
         // the blended frame; see [TAIL_WAIT_MS].
@@ -364,7 +389,7 @@ export class PreviewCanvas {
         missing = true;
         continue;
       }
-      draws.push(layerDraw(layer, video, frameAspect, cropping === layer.clipId));
+      draws.push(slowed(layer, video, layerDraw(layer, video, frameAspect, cropping === layer.clipId)));
     }
 
     // Nothing to draw, over a post that should be showing something: KEEP what is on the canvas.
@@ -432,6 +457,31 @@ export class PreviewCanvas {
     }
   }
 
+  /**
+   * What makes a slowed clip's layer move between its frames, for one composited frame at `now`: a
+   * layer of a video clip slower than 1x comes back drawn from the frame its element showed before
+   * the one it shows now, towards that one - see [PresentedFrames], and [LayerDraw.tween] for how the
+   * painter draws it. Every other layer, and a slowed one with no pair to give yet, comes back as it
+   * was: the very object.
+   *
+   * Only while the element is PLAYING: paused, the element's own frame is the exact frame the
+   * playhead is on, and that is what is drawn. Never on the segment the crop tool is open on, which
+   * is drawn as a tool.
+   */
+  private slowMotion(now: number, cropping: string | null): SlowMotion {
+    return (layer, video, draw) => {
+      if (cropping !== null && cropping === layer.clipId) return draw;
+      const element = video instanceof ClipMedia ? (video.isPicture ? null : video.element) : video;
+      if (!element) return draw;
+      const speed = findClip(this.store.manifest.value, layer.clipId)?.speed ?? 1;
+      if (!(speed < 1)) return draw;
+      const pair = this.presented.tween(element, now);
+      if (!pair) return draw;
+      if (!(pair.weight > 0)) return { ...draw, source: pair.from };
+      return { ...draw, source: pair.from, tween: { source: pair.to ?? draw.source, weight: pair.weight } };
+    };
+  }
+
   /** One redraw, `ms` from now, for a wait that no element event may come to end. */
   private retryIn(ms: number): void {
     if (this.retryTimer || this.playing) return;
@@ -456,9 +506,9 @@ export class PreviewCanvas {
 
   private startLoop(): void {
     if (this.rafId) return;
-    const tick = () => {
+    const tick = (time: number) => {
       this.rafId = requestAnimationFrame(tick);
-      this.draw();
+      this.draw(time);
     };
     this.rafId = requestAnimationFrame(tick);
   }
@@ -622,13 +672,23 @@ function warmSide(draw: LayerDraw | TransitionDraw): LayerDraw | null {
  * `tailComing` says the incoming side is ready and the outgoing one is on its way, which is a frame
  * the caller holds for a moment rather than paints; see [TAIL_WAIT_MS]. `cropOpen` draws the base
  * alone whatever the shot says, as the crop tool needs it.
+ *
+ * `slowed` is handed every layer made here, both sides of a transition included - the outgoing side
+ * is a clip playing like any other, and a slowed one steps like any other - and gives back what is
+ * to be drawn for it; see [PreviewCanvas.slowMotion]. Absent, every layer is drawn as it is made.
  */
-export function baseDraw(shot: BaseShot, frameAspect: number, cropOpen: boolean, cropping: string | null): { draw: LayerDraw | TransitionDraw | null; tailComing: boolean } {
-  const to = shot.video ? layerDraw(shot.layer, shot.video, frameAspect, cropping === shot.layer.clipId) : null;
+export function baseDraw(
+  shot: BaseShot,
+  frameAspect: number,
+  cropOpen: boolean,
+  cropping: string | null,
+  slowed: SlowMotion = asMade,
+): { draw: LayerDraw | TransitionDraw | null; tailComing: boolean } {
+  const to = shot.video ? slowed(shot.layer, shot.video, layerDraw(shot.layer, shot.video, frameAspect, cropping === shot.layer.clipId)) : null;
   const transition = cropOpen ? null : shot.transition;
   if (!transition) return { draw: to, tailComing: false };
   if (!to && !shot.lost) return { draw: null, tailComing: false };
-  const from = transition.video ? layerDraw(transition.layer, transition.video, frameAspect) : null;
+  const from = transition.video ? slowed(transition.layer, transition.video, layerDraw(transition.layer, transition.video, frameAspect)) : null;
   if (!to && !from) return { draw: null, tailComing: false };
   return {
     draw: {

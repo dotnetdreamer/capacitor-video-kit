@@ -113,9 +113,7 @@ describe('the base track in a transition', () => {
   const incoming = { videoWidth: 1920, videoHeight: 1080 } as HTMLVideoElement;
   const dissolve = compileTransition('dissolve')!;
 
-  function shot(
-    over: { to?: HTMLVideoElement | null; from?: HTMLVideoElement | null; lost?: boolean; toLost?: boolean } = {},
-  ): BaseShot {
+  function shot(over: { to?: HTMLVideoElement | null; from?: HTMLVideoElement | null; lost?: boolean; toLost?: boolean } = {}): BaseShot {
     return {
       layer: layer({ clipId: 'in', clipKey: 'b', fit: 'cover' }),
       video: over.to === undefined ? incoming : over.to,
@@ -180,6 +178,22 @@ describe('the base track in a transition', () => {
   it('is a plain layer outside a transition', () => {
     const plain: BaseShot = { ...shot(), transition: null };
     expect(baseDraw(plain, 9 / 16, false, null).draw).toEqual(layerDraw(plain.layer, incoming, 9 / 16));
+  });
+
+  it('hands BOTH sides to the slow-motion step, each with its own clip, and draws what comes back', () => {
+    // A slowed clip steps like any other whether it is coming in or going out, so both sides are
+    // offered; this stand-in marks each with the clip it was asked about.
+    const asked: string[] = [];
+    const marked = (seen: PreviewVideoLayer, _video: unknown, made: LayerDraw): LayerDraw => {
+      asked.push(seen.clipId);
+      return { ...made, tween: { source: made.source, weight: seen.clipId === 'in' ? 0.25 : 0.75 } };
+    };
+    const transition = baseDraw(shot(), 9 / 16, false, null, marked).draw as TransitionDraw;
+    expect(asked.sort()).toEqual(['in', 'out']);
+    expect(transition.to?.tween?.weight).toBe(0.25);
+    expect(transition.from?.tween?.weight).toBe(0.75);
+    // With none, every layer is the one it has always been.
+    expect(baseDraw(shot(), 9 / 16, false, null).draw).toEqual(baseDraw(shot(), 9 / 16, false, null, (_l, _v, made) => made).draw);
   });
 });
 
