@@ -44,7 +44,6 @@
  * rather than here.
  */
 
-
 /*
  * What the host supplies. Only the resolver, the browser defaults and the back button over Ionic's
  * `Platform` are values; the rest is the shape a host implements.
@@ -79,14 +78,7 @@ export type {
   VideoEditorResult,
 } from './host/host.types';
 export { RenderFailedError } from './host/host.types';
-export {
-  browserMediaHost,
-  browserSoundLibrary,
-  envSafeAreaInsets,
-  pickMediaFiles,
-  resolveEditorHost,
-  visualViewportKeyboard,
-} from './host/defaults';
+export { browserMediaHost, browserSoundLibrary, envSafeAreaInsets, pickMediaFiles, resolveEditorHost, visualViewportKeyboard } from './host/defaults';
 export { installEditorFonts } from './host/fonts';
 export { registerBackHandlerWith, type PrioritisedBackButton } from './host/back-button';
 
@@ -100,16 +92,18 @@ export { registerBackHandlerWith, type PrioritisedBackButton } from './host/back
 export { readFileBlob, readVoiceTake } from './host/read-file';
 export { filePickerCancelled } from './host/file-picker';
 
+/*
+ * The reader the timeline draws a clip's sound with, for a host that wants to measure a picked
+ * clip's sound itself before the editor opens - where in it the loudest thing happens, say - with
+ * the same reader the timeline uses: one byte per [WAVEFORM_STEP_MS] of source, from the streamed
+ * read of the audio track alone, and null for anything it cannot read. Asked of the URL `EditorMedia`
+ * asks it of (a clip's `playbackUrl`, else `platform.fileUrl` of its `sourcePath`), the answer is the
+ * waveform the timeline will draw.
+ */
+export { extractPeaks, WAVEFORM_STEP_MS, type Peaks } from './web-runtime/waveform';
+
 /* The editor's own state, for a host that wants to read the edit or drive it from outside. */
-export type {
-  EditorPanel,
-  EditorPlayer,
-  EditorSelection,
-  Filmstrip,
-  OverlayBitmap,
-  ToolbarMode,
-  VolumeTarget,
-} from './state/editor.types';
+export type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './state/editor.types';
 export { EditorStore, type PreviewVideoLayer } from './state/editor-store';
 export { EditorMedia } from './state/editor-media';
 export type { EditorContext } from './bridge/editor-context';
@@ -118,22 +112,8 @@ export { createEditorRasterContext } from './state/editor-raster-context';
 export { computedWith } from './state/computed-with';
 
 /* The catalogues the sheets are built from, so a host can search or preselect without the UI. */
-export {
-  STICKERS,
-  STICKER_CATEGORIES,
-  stickerById,
-  stickerUrl,
-  type StickerAsset,
-  type StickerCategory,
-} from './data/stickers';
-export {
-  DEFAULT_TEXT_STYLE_ID,
-  TEXT_STYLES,
-  TEXT_STYLE_CATEGORIES,
-  textStyleById,
-  type TextStyleCategory,
-  type TextStyleEntry,
-} from './data/text-styles';
+export { STICKERS, STICKER_CATEGORIES, stickerById, stickerUrl, type StickerAsset, type StickerCategory } from './data/stickers';
+export { DEFAULT_TEXT_STYLE_ID, TEXT_STYLES, TEXT_STYLE_CATEGORIES, textStyleById, type TextStyleCategory, type TextStyleEntry } from './data/text-styles';
 export { EMOJI_GROUPS, searchEmoji, type EmojiGroup, type EmojiItem } from './data/emoji';
 
 /*
@@ -144,4 +124,3 @@ export { EMOJI_GROUPS, searchEmoji, type EmojiGroup, type EmojiItem } from './da
 export { setEditorAssetPath } from './host/asset-path';
 
 export type * from './components.d.ts';
-
