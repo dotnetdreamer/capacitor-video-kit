@@ -18,14 +18,27 @@ import type { EditorPlayer } from '../../state/editor.types';
 import type { ClipMedia } from './clip-media';
 import { FollowerVideo, type FollowerMedia } from './follower-video';
 import type { BaseShot } from './preview-canvas';
-import { BLANK_POSTER, SEEK_EPSILON_S, applyClipAudio, clipsSilenced, onPageShown, posterFor, previewSrc, startPlayback, volumeIsWritable } from './preview-media';
+import {
+  BLANK_POSTER,
+  SEEK_EPSILON_S,
+  applyClipAudio,
+  applyPitch,
+  clipsSilenced,
+  onPageShown,
+  oneVideoSoundAtATime,
+  posterFor,
+  previewSrc,
+  startPlayback,
+  volumeIsWritable,
+} from './preview-media';
 import { PreviewMixer, levelsInUse, playableHere } from './preview-mixer';
 import {
   MAX_START_LEAD_MS,
   TAIL_SEEK_MS,
+  boundaryAfterSplits,
   boundaryKind,
-  catchUpRate,
   crossfade,
+  easedTailRate,
   nextLeadMs,
   outputMsAt,
   preloadDue,
@@ -102,6 +115,21 @@ const BEHIND_TRIM_MS = 100;
 const DEFAULT_VIDEO_LEAD_MS = 120;
 /** A video start is measured once it has been running this long - well past the stall. */
 const VIDEO_SETTLED_MS = 300;
+
+/**
+ * The clock's position unchanged for this long, while it is meant to be playing, is a STALL - a load,
+ * a seek, a decoder that has fallen behind - and the music and the voiceover are held until it moves
+ * again rather than left to run ahead of a picture that is not moving; see [holdSound]. Well past a
+ * frame on any clock that is actually running: `currentTime` moves on every read of a playing element.
+ */
+const CLOCK_STILL_MS = 200;
+/**
+ * For this long after this player changes the clock's rate, a position BEHIND the segment's in point
+ * is not taken for a trim that moved. With pitch correction on, WebKit flushes a playing element whose
+ * rate changes back to a keyframe - or reports 0 - for a moment (see `applyPitch`), and seeking the
+ * element because of it was a second stall on top of the first.
+ */
+const RATE_FLUSH_MS = 1000;
 
 /** `readyState` values the base elements are judged by. */
 const HAVE_CURRENT_DATA = 2;
@@ -246,6 +274,14 @@ export class PreviewPlayer implements EditorPlayer {
 
   private rafId = 0;
   private lastWriteAt = 0;
+  /** When this player last changed the clock's rate; see [RATE_FLUSH_MS]. */
+  private rateSetAt = Number.NEGATIVE_INFINITY;
+  /**
+   * The clock's position as the frame loop last read it, and when it was last seen to change: what
+   * says the picture is actually moving. See [watchClock].
+   */
+  private clockSec = Number.NaN;
+  private clockMovedAt = Number.NEGATIVE_INFINITY;
 
   /**
    * The wall clock that runs the post's TAIL: the stretch a customer has pulled past the end of the
@@ -267,7 +303,7 @@ export class PreviewPlayer implements EditorPlayer {
   private musicUri: string | null = null;
   private voiceUri: string | null = null;
   /** Audio elements started or seeked and not yet checked: where they were put (ms), and how often. */
-  private readonly settling = new Map<HTMLAudioElement, { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number }>();
+  private readonly settling = new Map<HTMLAudioElement, { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number; learn: boolean }>();
   /** How long each element's clock stands still after a start and after a seek, as last measured. */
   private readonly audioLeadMs = new Map<HTMLAudioElement, Partial<Record<AudioPut, number>>>();
   /** Base elements started from a standing frame and not yet measured; see [DEFAULT_VIDEO_LEAD_MS]. */
@@ -589,7 +625,8 @@ export class PreviewPlayer implements EditorPlayer {
     const playing = this.isPlaying();
     const slot = this.currentSlot();
     if (playing && slot && !this.pendingLoad && slot.clip.clipKey === this.active.key) {
-      this.video.playbackRate = slot.clip.speed || 1;
+      applyPitch(this.video, slot.clip, clipsSilenced(this.store));
+      this.setClockRate(slot.clip.speed || 1);
       this.applyVideoAudio(slot.clip);
       // The edit that changed may well have been the second layer's own.
       this.syncFollower(true);
@@ -602,7 +639,11 @@ export class PreviewPlayer implements EditorPlayer {
   refreshAudio(): void {
     if (this.destroyed) return;
     const slot = this.currentSlot();
-    if (slot) this.applyVideoAudio(slot.clip);
+    if (slot) {
+      // Heard or not decides pitch correction too; see [applyPitch].
+      applyPitch(this.video, slot.clip, clipsSilenced(this.store));
+      this.applyVideoAudio(slot.clip);
+    }
     this.syncAudio(this.store.playheadMs.value, this.isPlaying());
     this.syncFollower(this.isPlaying());
   }
@@ -711,6 +752,7 @@ export class PreviewPlayer implements EditorPlayer {
     const video = deck.video;
     const token = ++this.loadToken;
     this.cancelLoad?.();
+    this.stillClock();
     this.pendingLoad = true;
     this.autoplay = autoplay;
     this.cancelSeek();
@@ -776,9 +818,10 @@ export class PreviewPlayer implements EditorPlayer {
 
   private applyAt(slot: TimelineSlot, ms: number, autoplay: boolean, forceSeek: boolean): void {
     const video = this.video;
-    video.playbackRate = slot.clip.speed || 1;
-    // Some WebViews reset pitch correction on every source change, so it is set each time.
-    video.preservesPitch = true;
+    // Pitch correction before the rate, and read back each time: some WebViews reset it on every
+    // source change. See [applyPitch].
+    applyPitch(video, slot.clip, clipsSilenced(this.store));
+    this.setClockRate(slot.clip.speed || 1);
     this.applyVideoAudio(slot.clip, ms);
 
     const sourceSec = sourceMsAt(slot, ms) / 1000;
@@ -802,6 +845,7 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   private armSeek(): void {
+    this.stillClock();
     this.seekInFlight = true;
     if (this.seekTimer) clearTimeout(this.seekTimer);
     this.seekTimer = setTimeout(() => this.onSeeked(), SEEK_WATCHDOG_MS);
@@ -878,11 +922,11 @@ export class PreviewPlayer implements EditorPlayer {
     spare.wantPlaying = false;
     if (!spare.video.paused) spare.video.pause();
     const index = slotIndexAt(slots, ms);
-    const slot = slots[index];
-    const next = slots[index + 1];
-    if (!slot || !next || !preloadDue(ms, next)) return;
-    const kind = boundaryKind(slot, next);
-    if (kind === 'cut' || kind === 'transition') this.primeNext(next);
+    // Past the steps of a ramp to the boundary that needs the spare; see [boundaryAfterSplits].
+    const ahead = index >= 0 ? boundaryAfterSplits(slots, index) : -1;
+    const next = ahead > 0 ? slots[ahead] : undefined;
+    if (!next || !preloadDue(ms, next)) return;
+    this.primeNext(next);
   }
 
   /**
@@ -958,8 +1002,10 @@ export class PreviewPlayer implements EditorPlayer {
     if (!clip) return;
     const video = deck.video;
     const speed = clip.speed || 1;
+    // By the clip it holds, not by whether it is heard yet: a spare started muted for a clip that
+    // will be heard is already right when it becomes the clock, with no change on a playing element.
+    applyPitch(video, clip, clipsSilenced(this.store));
     if (video.playbackRate !== speed) video.playbackRate = speed;
-    video.preservesPitch = true;
     if (deck.role === 'next') {
       // Not heard until it is the clock; see [preroll].
       if (!video.muted) video.muted = true;
@@ -1052,7 +1098,7 @@ export class PreviewPlayer implements EditorPlayer {
 
   /**
    * Keeps the tail where the clock says it is. Not seeked for a small drift - eased back by a rate a
-   * little off its own; see [catchUpRate] - and stopped on its own out point rather than let run on
+   * little off its own; see [easedTailRate] - and stopped on its own out point rather than let run on
    * into footage the clip was trimmed off.
    */
   private driveTail(window: TransitionWindow): void {
@@ -1077,7 +1123,7 @@ export class PreviewPlayer implements EditorPlayer {
       this.put(deck, window.fromSourceMs);
       return;
     }
-    const rate = speed * catchUpRate(behindMs);
+    const rate = speed * easedTailRate(behindMs, video.playbackRate / speed);
     if (Math.abs(video.playbackRate - rate) > 0.001) {
       video.playbackRate = rate;
       // A start still being measured is measured at the rate it began at. Read across a change of
@@ -1123,6 +1169,8 @@ export class PreviewPlayer implements EditorPlayer {
    */
   private startVideo(video: ClipMedia): void {
     if (!video.paused) return;
+    // The clock, from a standstill: it has to be seen moving before the sound goes with it.
+    if (video === this.video) this.stillClock();
     // A picture starts the instant it is asked to, so there is no stall to measure - and one
     // measured as zero would teach this slot's NEXT video to start late.
     if (!video.isPicture && video.readyState >= HAVE_FUTURE_DATA && !video.seeking) {
@@ -1189,14 +1237,18 @@ export class PreviewPlayer implements EditorPlayer {
       this.followTail();
       return;
     }
+    if (this.destroyed) return;
+    this.watchClock();
+    if (!this.clockMoving()) this.holdSound();
     // While a new source is loading, the element still reports the OLD source's position. Acting on
     // it would compare the previous clip's time against the next clip's trim - and skip the next
     // clip outright whenever it is trimmed shorter.
-    if (this.pendingLoad || this.seekInFlight || this.destroyed) {
+    if (this.pendingLoad || this.seekInFlight) {
       // The clock has stopped: the base is between sources, or settling on a frame it was seeked
       // to. A second layer that ran on through that would come back a load's worth ahead and be
       // yanked back into place, so it waits with the base rather than drifting past it - and so
-      // does a transition's tail, for the same reason.
+      // does a transition's tail, for the same reason. The sound is held above once the clock has
+      // stood still for long enough to be a stall; see [holdSound].
       for (const follower of this.followers.values()) follower.pause();
       const spare = this.spare;
       if (spare.role === 'tail' && !spare.video.paused) spare.video.pause();
@@ -1222,6 +1274,8 @@ export class PreviewPlayer implements EditorPlayer {
 
     const kind = boundaryKind(slot, next);
     if (kind === 'split') {
+      // A step of a ramp: the boundary that needs the spare is past the last step; see [primeAhead].
+      this.primeAhead(slots, index, at);
       if (sourceMs >= slot.clip.outMs) {
         this.advance(index, wasPlaying());
         return;
@@ -1245,10 +1299,85 @@ export class PreviewPlayer implements EditorPlayer {
       }
     }
     if (sourceMs < slot.clip.inMs - BEHIND_TRIM_MS) {
+      // Not a trim that moved while this player has just changed the clock's rate: that is WebKit's
+      // flush back to a keyframe (see [RATE_FLUSH_MS]), and it is waited out rather than seeked.
+      if (performance.now() - this.rateSetAt < RATE_FLUSH_MS) return;
       this.goTo(slot.startMs, true);
       return;
     }
     this.writePlayhead(false);
+  }
+
+  /**
+   * Readies the spare for the cut or transition after the ramp the clock is in, exactly as the frame
+   * loop readies it for one straight after the clock's own segment: put on the incoming clip in good
+   * time, and started a start stall early. The steps of a ramp all play on the one element, so the
+   * spare is free for the whole of it; see [boundaryAfterSplits].
+   */
+  private primeAhead(slots: readonly TimelineSlot[], index: number, at: number): void {
+    const ahead = boundaryAfterSplits(slots, index);
+    const next = ahead > 0 ? slots[ahead] : undefined;
+    if (!next) return;
+    if (preloadDue(at, next)) this.primeNext(next);
+    const spare = this.spare;
+    if (this.spareReadyFor(next) && spare.video.paused && prerollDue(at, next, this.leadFor(spare.video))) this.preroll(spare);
+  }
+
+  /** Sets the clock's rate, and remembers when it did; see [RATE_FLUSH_MS]. */
+  private setClockRate(rate: number): void {
+    if (this.video.playbackRate === rate) return;
+    this.video.playbackRate = rate;
+    this.rateSetAt = performance.now();
+  }
+
+  /**
+   * Notes whether the clock's position has moved since the last frame. Its first reading after
+   * [stillClock] is where it was put, and not a move.
+   */
+  private watchClock(now: number = performance.now()): void {
+    const sec = this.video.currentTime;
+    if (sec === this.clockSec) return;
+    if (!Number.isNaN(this.clockSec)) this.clockMovedAt = now;
+    this.clockSec = sec;
+  }
+
+  /**
+   * The clock is being started, seeked or loaded: it has [CLOCK_STILL_MS] from now to be seen moving
+   * before the sound is held for it. Counted from now rather than from its last move, so a start
+   * still starts the music with it - inside the tap, which is where a browser lets sound start - and
+   * only a start that then does not move is waited for.
+   */
+  private stillClock(): void {
+    this.clockSec = Number.NaN;
+    this.clockMovedAt = performance.now();
+  }
+
+  /**
+   * Whether the picture is actually moving: the clock's position has changed within [CLOCK_STILL_MS].
+   * The tail runs on the wall clock, which is always moving.
+   */
+  private clockMoving(now: number = performance.now()): boolean {
+    return this.tail !== null || now - this.clockMovedAt < CLOCK_STILL_MS;
+  }
+
+  /**
+   * Pauses the music and the voiceover through a stall of the clock, to be started again - with their
+   * lead, see [putAudio] - by the frame loop once the picture moves.
+   *
+   * They used to run on through it. The playhead is read off the clock, so a stalled clock left the
+   * sound running ahead of it, and the frame loop then seeked it BACK by however long the stall had
+   * been: the same stretch of music heard twice at every stall, and over and over through a long one -
+   * on the iOS simulator the music was put back to one spot eight times in four seconds while a
+   * slowed clip stood still. A pause that ends when the picture moves is a gap instead of a repeat.
+   *
+   * What was being measured about them is dropped too: a stall inside the measurement is the
+   * clock's, not theirs, and learned as theirs it would put every later start in the wrong place.
+   */
+  private holdSound(): void {
+    for (const el of [this.musicEl, this.voiceEl]) {
+      this.settling.delete(el);
+      if (!el.paused) el.pause();
+    }
   }
 
   /**
@@ -1362,7 +1491,8 @@ export class PreviewPlayer implements EditorPlayer {
     if (kind === 'split' && next.clip.clipKey === this.active.key && !this.video.ended) {
       // Two halves of a split: the element is already exactly where the next segment begins.
       this.segmentId = next.clip.id;
-      this.video.playbackRate = next.clip.speed || 1;
+      applyPitch(this.video, next.clip, clipsSilenced(this.store));
+      this.setClockRate(next.clip.speed || 1);
       this.applyVideoAudio(next.clip);
       return;
     }
@@ -1510,6 +1640,15 @@ export class PreviewPlayer implements EditorPlayer {
   /** @param running see [syncAudio]. */
   private playAt(el: HTMLAudioElement, positionMs: number, volume: number, running: boolean): void {
     this.mixer.setLevel(el, volume);
+    // Sound goes with a picture that is MOVING. Left to run through a clock that stood still, it ran
+    // ahead of the picture by the length of the stall and was seeked back as soon as the picture
+    // moved - a second of music heard twice on the first play of a template on the iOS simulator. The
+    // frame loop starts it again on the first frame the clock is seen moving; see [holdSound].
+    if (!this.clockMoving()) {
+      if (!el.paused) el.pause();
+      this.settling.delete(el);
+      return;
+    }
     if (el.paused) {
       this.putAudio(el, positionMs, running ? 'warm' : 'cold');
       startPlayback(el);
@@ -1528,7 +1667,7 @@ export class PreviewPlayer implements EditorPlayer {
         this.settling.delete(el);
         // Measured only against a video that is running steadily itself.
         const behindMs = positionMs - atMs;
-        if (running && Math.abs(behindMs) <= MAX_AUDIO_LEAD_MS) {
+        if (running && settling.learn && Math.abs(behindMs) <= MAX_AUDIO_LEAD_MS) {
           const leadMs = clamp(settling.leadMs + behindMs, 0, MAX_AUDIO_LEAD_MS);
           this.leadsFor(el)[settling.kind] = leadMs;
           lastAudioLeadMs = leadMs;
@@ -1536,23 +1675,30 @@ export class PreviewPlayer implements EditorPlayer {
       }
     }
     if (Math.abs(atMs - positionMs) > AUDIO_DRIFT_MS) {
-      if (running) {
-        this.putAudio(el, positionMs, 'seek');
-      } else {
-        // The video is seeking or starting as well; its own stall would be learned as the audio's.
+      if (this.seekInFlight || this.pendingLoad) {
+        // The video is seeking or loading as well, and will stand still for about as long as the
+        // audio does: put exactly, and not measured - its stall would be learned as the audio's.
         el.currentTime = positionMs / 1000;
         this.settling.delete(el);
+      } else {
+        // The clock is running - a cut taken over from the spare, an edit that moved the sound -
+        // so the audio's own seek stall is all there is to lead: put with it, and only measured
+        // when the frame loop is the one asking.
+        this.putAudio(el, positionMs, 'seek', running);
       }
     }
   }
 
-  /** Seeks an audio element to `positionMs` plus the stall it is about to have, and measures it once past it. */
-  private putAudio(el: HTMLAudioElement, positionMs: number, kind: AudioPut): void {
+  /**
+   * Seeks an audio element to `positionMs` plus the stall it is about to have, and - unless `learn`
+   * is false - measures that stall once past it.
+   */
+  private putAudio(el: HTMLAudioElement, positionMs: number, kind: AudioPut, learn = true): void {
     const leadMs = this.leadsFor(el)[kind] ?? lastAudioLeadMs;
     // A negative position is sound that is not due yet (see [syncAudio]); it starts at its beginning.
     const putAtMs = Math.max(0, positionMs + leadMs);
     if (Math.abs(el.currentTime * 1000 - putAtMs) > SEEK_EPSILON_S * 1000) el.currentTime = putAtMs / 1000;
-    this.settling.set(el, { kind, putAtMs, leadMs, wallMs: performance.now() });
+    this.settling.set(el, { kind, putAtMs, leadMs, wallMs: performance.now(), learn });
   }
 
   /** How early sound has to start on this element for it to be heard on time - its longest known stall. */
@@ -1641,7 +1787,10 @@ export class PreviewPlayer implements EditorPlayer {
       this.followers.delete(trackId);
       return;
     }
-    this.followers.set(trackId, new FollowerVideo(this.store, media));
+    // Where only one video may be heard at a time, the layer's sound gets an element of its own;
+    // see [FollowerVideo.sound].
+    const sound = media.sound !== undefined ? media.sound : oneVideoSoundAtATime() ? document.createElement('audio') : null;
+    this.followers.set(trackId, new FollowerVideo(this.store, { ...media, sound }));
     // A track added while the base is still loading its own clip is going to play the moment that
     // lands, so the element is started from what the player is heading for rather than from where
     // the base happens to be sitting.

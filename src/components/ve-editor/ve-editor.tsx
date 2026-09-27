@@ -1,4 +1,5 @@
 import { Component, Element, Event, type EventEmitter, Host, Prop, State } from '@stencil/core';
+import { computed, type ReadonlySignal } from '@preact/signals-core';
 
 import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
@@ -153,6 +154,13 @@ export class VeEditor {
   private store!: EditorStore;
   private media!: EditorMedia;
   /**
+   * The playhead as the transport shows it, which moves once a second. The playhead itself is
+   * written thirty times a second while playing, and read straight in the render it repainted the
+   * whole shell - every vnode, every prop compared - on each of them for a clock that shows whole
+   * seconds; a computed only wakes the render when the text it gives actually changes.
+   */
+  private clockNow!: ReadonlySignal<string>;
+  /**
    * Held only so it can be disposed. It is what keeps every layer's bitmap in step with the
    * manifest, and it works entirely through an effect on the store, so nothing reads it - which is
    * exactly why it is the easy one to leave out. Without it no layer ever gets a bitmap, the
@@ -220,6 +228,8 @@ export class VeEditor {
 
     const host = resolveEditorHost(this.host);
     this.store = new EditorStore(host);
+    const store = this.store;
+    this.clockNow = computed(() => formatClock(store.playheadMs.value));
     this.media = new EditorMedia(this.store, host);
     this.bitmaps = new OverlayBitmaps(this.store, host);
     this.confirm = new EditorConfirm(host.platform);
@@ -1006,11 +1016,11 @@ export class VeEditor {
     const playing = store.playing.value;
     return (
       <div class="ve__transport" key="transport">
-        {/* The playhead is read here and nowhere else in this component, so playback repaints the
-            shell's own thirty vnodes a second and no child: every prop below is unchanged, and an
-            unchanged prop is not written. */}
+        {/* The playhead is read nowhere in this component's render, only through [clockNow], so
+            playback repaints the shell once a second, when the clock's text changes, and no child
+            then either: every prop below is unchanged, and an unchanged prop is not written. */}
         <span class="ve__clock">
-          <span class="ve__clock-now">{formatClock(store.playheadMs.value)}</span>
+          <span class="ve__clock-now">{this.clockNow.value}</span>
           <span class="ve__clock-total">/{formatClock(store.totalMs.value)}</span>
         </span>
 

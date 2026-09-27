@@ -60,6 +60,48 @@ export function catchUpRate(behindMs: number): number {
   return 1 + clamp(behindMs / CATCH_UP_MS, -MAX_CATCH_UP, MAX_CATCH_UP);
 }
 
+/** Once a tail is being eased, it is eased until it is this close, rather than [TAIL_DRIFT_MS]. */
+export const TAIL_SETTLED_MS = 30;
+/** The steps a tail's eased rate moves in, as a multiple of its clip's speed. */
+const CATCH_UP_STEP = 0.05;
+
+/**
+ * [catchUpRate] as a tail running at `current` (a multiple of its clip's speed) should actually be
+ * given it: in steps of [CATCH_UP_STEP], and held until the drift is all but closed.
+ *
+ * The rate itself is cheap to work out and expensive to SET. Straight off [catchUpRate] it is a new
+ * number on every frame - sixty rate changes a second on the element that is on screen - and it
+ * flapped between eased and plain as the drift crossed [TAIL_DRIFT_MS] and back. On iOS every one of
+ * those is a message to the media process, and on an element with pitch correction on AVFoundation
+ * flushes the player back to a keyframe for each (see `applyPitch` in `preview-media.ts`). In steps,
+ * a tail closing a drift writes its rate a few times; with the hold, once it is in step it stays
+ * there instead of being pushed back out over the edge of the band.
+ */
+export function easedTailRate(behindMs: number, current: number): number {
+  const easing = Number.isFinite(current) && Math.abs(current - 1) > 1e-6;
+  if (!Number.isFinite(behindMs) || Math.abs(behindMs) <= (easing ? TAIL_SETTLED_MS : TAIL_DRIFT_MS)) return 1;
+  const eased = catchUpRate(behindMs);
+  // Never rounded back onto 1 while there is still drift to close, which would stop the easing short.
+  const steps = Math.max(1, Math.round(Math.abs(eased - 1) / CATCH_UP_STEP));
+  return 1 + Math.sign(behindMs) * Math.min(steps * CATCH_UP_STEP, MAX_CATCH_UP);
+}
+
+/**
+ * The first boundary at or after `slots[index]`'s end that is not a split: the index of the slot
+ * that STARTS there, or -1 when the base track ends first.
+ *
+ * A ramp is one segment per step, each joined to the next by a split, so the boundary that actually
+ * needs the spare - the cut or the transition after the last step - is several segments away while
+ * the ramp plays. Read from the current segment alone, it only came into view in the last step,
+ * which is often shorter than a load and a seek take, and the cut then waited on both.
+ */
+export function boundaryAfterSplits(slots: readonly TimelineSlot[], index: number): number {
+  for (let at = index; at >= 0 && at < slots.length - 1; at++) {
+    if (boundaryKind(slots[at]!, slots[at + 1]) !== 'split') return at + 1;
+  }
+  return -1;
+}
+
 /**
  * What the base track does where one of its segments ends:
  *

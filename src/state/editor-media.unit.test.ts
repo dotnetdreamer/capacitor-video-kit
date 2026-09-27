@@ -46,9 +46,11 @@ describe('EditorMedia', () => {
    */
   let pictures: { measure: ReturnType<typeof vi.fn>; thumbnail: ReturnType<typeof vi.fn> };
 
-  function open(mediaHost: EditorMediaHost = fakeMedia(), peaks: Peaks | null = null, options: { pictures?: boolean; decodes?: boolean } = {}): void {
+  function open(mediaHost: EditorMediaHost = fakeMedia(), peaks: Peaks | null = null, options: { pictures?: boolean; decodes?: boolean; timeline?: boolean } = {}): void {
     host = resolveEditorHost({ media: mediaHost, editing: { pictures: options.pictures } });
     store = new EditorStore(host);
+    // A timeline on screen, as in the editor, unless a test says there is none; see `waveformViewers`.
+    if (options.timeline !== false) store.waveformViewers.value = 1;
     measure = vi.fn(async () => peaks);
     pictures = {
       measure: vi.fn(async () => (options.decodes === false ? null : { width: 4000, height: 3000 })),
@@ -208,6 +210,18 @@ describe('EditorMedia', () => {
 
     /** Lets the manifest watcher run and the measurement it started settle. */
     const settle = () => new Promise(done => setTimeout(done, 0));
+
+    it('measures nothing while no view draws waveforms, and everything the post has once one does', async () => {
+      open(fakeMedia(), PEAKS, { timeline: false });
+      media.useSound({ id: 's1', uri: 'blob:tune', fileName: 'tune', durationMs: 5000, savedAt: 0 });
+      await settle();
+      expect(measure).not.toHaveBeenCalled();
+      expect(store.waveforms.value.size).toBe(0);
+
+      store.waveformViewers.value = 1;
+      await settle();
+      expect(store.waveforms.value.get('blob:tune')).toEqual(PEAKS);
+    });
 
     it('measures a track as soon as the manifest has one', async () => {
       open(fakeMedia(), PEAKS);

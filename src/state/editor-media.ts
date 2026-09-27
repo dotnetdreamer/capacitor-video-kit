@@ -116,6 +116,9 @@ export class EditorMedia {
      * exact, because the manifest is the only thing that decides which audio the post has.
      */
     this.stopWatchingAudio = effect(() => {
+      // Nothing on screen draws a waveform: nothing is measured, and the first view that does draw
+      // them wakes this again. See [EditorStore.waveformViewers].
+      if (this.store.waveformViewers.value === 0) return;
       const manifest = this.store.manifest.value;
       // Each with its length, so a track too long to decode can be turned down before it is read.
       const audio: { uri: string; key: string; durationMs: number }[] = manifest.music

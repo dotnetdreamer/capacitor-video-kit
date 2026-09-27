@@ -1,7 +1,7 @@
 import { BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from 'mediabunny';
 import { afterEach, describe, expect, it, type TestContext } from 'vitest';
 
-import { PresentedFrames } from './presented-frames';
+import { PresentedFrames, type FrameCopier, type HeldCopy } from './presented-frames';
 
 /**
  * The preview's half of slow motion on a real `<video>`, really playing slowed in a real browser:
@@ -52,6 +52,23 @@ function canDecodeAvc(): boolean {
   return document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"') !== '';
 }
 
+/**
+ * Copies as the painter's 2D path does - the element drawn into a canvas of its own as it is asked -
+ * and records every copy handed back. The GPU path's copies are pinned in `painter-held-frames`.
+ */
+function canvasCopier(released: HeldCopy[] = []): FrameCopier {
+  return {
+    copy: video => {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d')?.drawImage(video, 0, 0);
+      return canvas;
+    },
+    release: copy => released.push(copy),
+  };
+}
+
 const opened: { video: HTMLVideoElement; url: string }[] = [];
 
 /** A muted element in the document on the ramp, loaded and parked on its first frame. */
@@ -83,8 +100,8 @@ afterEach(() => {
 });
 
 interface Answer {
-  from: ImageBitmap;
-  to: ImageBitmap | null;
+  from: HeldCopy;
+  to: HeldCopy | null;
   weight: number;
   fromGrey: number;
   /** Frame B's grey: its copy's, or the element's while there is no copy. */
@@ -103,8 +120,8 @@ function askEveryFrame(frames: PresentedFrames, video: HTMLVideoElement, ms: num
     const tick = (time: number) => {
       const pair = frames.tween(video, time);
       if (pair) {
-        const fromGrey = greyOf(pair.from);
-        const toGrey = greyOf(pair.to ?? video);
+        const fromGrey = greyOf(pair.from as HTMLCanvasElement);
+        const toGrey = greyOf((pair.to as HTMLCanvasElement | null) ?? video);
         answers.push({ ...pair, fromGrey, toGrey, shown: fromGrey * (1 - pair.weight) + toGrey * pair.weight, element: greyOf(video) });
       }
       if (performance.now() - started < ms) requestAnimationFrame(tick);
@@ -119,8 +136,8 @@ describe('the frames a slowed element is drawn between', () => {
     if (!canDecodeAvc()) ctx.skip('this browser cannot decode H.264');
     const video = await element();
     if (typeof video.requestVideoFrameCallback !== 'function') ctx.skip('this browser has no requestVideoFrameCallback');
-    const dropped: ImageBitmap[] = [];
-    const frames = new PresentedFrames(bitmap => dropped.push(bitmap));
+    const dropped: HeldCopy[] = [];
+    const frames = new PresentedFrames(canvasCopier(dropped));
     try {
       video.playbackRate = 0.5;
       await video.play();
@@ -167,7 +184,7 @@ describe('the frames a slowed element is drawn between', () => {
     if (!canDecodeAvc()) ctx.skip('this browser cannot decode H.264');
     const video = await element();
     if (typeof video.requestVideoFrameCallback !== 'function') ctx.skip('this browser has no requestVideoFrameCallback');
-    const frames = new PresentedFrames();
+    const frames = new PresentedFrames(canvasCopier());
     try {
       video.playbackRate = 0.5;
       await video.play();
@@ -184,7 +201,7 @@ describe('the frames a slowed element is drawn between', () => {
     const video = await element();
     // An old WebView: the element simply has no such method.
     Object.defineProperty(video, 'requestVideoFrameCallback', { value: undefined, configurable: true });
-    const frames = new PresentedFrames();
+    const frames = new PresentedFrames(canvasCopier());
     try {
       video.playbackRate = 0.5;
       await video.play();
@@ -202,16 +219,15 @@ describe('the frames a slowed element is drawn between', () => {
     if (!canDecodeAvc()) ctx.skip('this browser cannot decode H.264');
     const video = await element();
     if (typeof video.requestVideoFrameCallback !== 'function') ctx.skip('this browser has no requestVideoFrameCallback');
-    const dropped: ImageBitmap[] = [];
-    const frames = new PresentedFrames(bitmap => dropped.push(bitmap));
+    const dropped: HeldCopy[] = [];
+    const frames = new PresentedFrames(canvasCopier(dropped));
     video.playbackRate = 0.5;
     await video.play();
     const answers = await askEveryFrame(frames, video, 800);
     const held = answers.at(-1)?.from;
     expect(held).toBeDefined();
     frames.destroy();
+    // Handed back to whoever made it, which is what gives the painter its texture back.
     expect(dropped).toContain(held);
-    // Closed, which is how a bitmap says it has let its pixels go.
-    expect(held!.width).toBe(0);
   }, 30_000);
 });

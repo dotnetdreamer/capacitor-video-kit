@@ -71,6 +71,45 @@ export function applyClipAudio(video: { muted: boolean; volume: number }, clip: 
   if (video.volume !== volume) video.volume = volume;
 }
 
+/**
+ * Pitch correction on the element playing `clip`: on where the clip's own sound is heard, off where
+ * it is not. Set it BEFORE the element's rate, so a rate change never meets it on for nothing.
+ *
+ * On, a slowed or sped-up clip's sound keeps its own pitch, as the render has it. Off, nothing
+ * changes for a clip nobody can hear - and on iOS a great deal is saved. WebKit hands the rate of an
+ * element with pitch correction on to AVFoundation's time-pitch algorithm, and every change of rate
+ * on a playing element then flushes the player back to a keyframe and stands its clock still.
+ * Measured in this package's WKWebView on the iOS 26.5 simulator (2026-09-27), eight rate changes on
+ * a playing element: three jumps back to a keyframe and 3.2 s of frozen clock with it on and the
+ * element muted, 8.5 s with it on and heard, and nothing at all with it off, muted or heard. A
+ * template's clips are nearly always muted under its music and its speed ramps change the rate at
+ * every step, so every step was a stall - and the music was seeked back after each one.
+ *
+ * Written only when it differs: each write is a message to the media process, and the spare's is
+ * asked for on every frame it waits. Read back rather than remembered, so a WebView that resets it
+ * with a new source is caught.
+ */
+export function applyPitch(video: { preservesPitch?: boolean }, clip: EditClip, silenced: boolean): void {
+  const keep = !silenced && !clip.muted && clip.volume > 0;
+  if (video.preservesPitch !== keep) video.preservesPitch = keep;
+}
+
+/**
+ * Whether this WebView lets only ONE `<video>` with sound play at a time: iOS, where starting a
+ * second one pauses the first, on the spot and with no error. Measured in this package's WKWebView
+ * on the iOS 26.5 simulator (2026-09-27): two unmuted videos, the second started 800 ms after the
+ * first - the first paused; the second muted - both played; the second an unmuted `<audio>` playing
+ * an MP4 - both played. A post with a layer whose own sound is on over a base clip whose sound is on
+ * therefore could not be played in the preview at all: Play started the base, the layer's start
+ * paused it, and the transport went straight back to Play.
+ *
+ * Told apart by the other thing iOS's WebKit does and nothing else does: a `volume` it will not let
+ * a page set ([volumeIsWritable]). See [FollowerVideo] for what is done about it.
+ */
+export function oneVideoSoundAtATime(): boolean {
+  return !volumeIsWritable();
+}
+
 let volumeWritable: boolean | null = null;
 
 /**

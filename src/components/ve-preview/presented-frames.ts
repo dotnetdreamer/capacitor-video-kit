@@ -1,3 +1,5 @@
+import type { LayerSource } from '../../video-composer/web/painter';
+
 /**
  * Slow motion that moves, in the live preview: the frame a slowed `<video>` showed BEFORE the one it
  * shows now, and how far the element's clock has come from one to the other.
@@ -22,18 +24,42 @@
  * a picture that jumps every ninth of a second is impossible not to. Paused, seeking or scrubbing,
  * nothing here applies and the element's own frame is drawn, exactly as before.
  *
- * WHAT IT COSTS, per slowed layer while it plays: one `createImageBitmap` of each frame the element
- * presents (nine a second in the example above), each uploaded to the GPU once, and one more texture
- * read per pixel of that layer. Against that, the element itself is no longer uploaded on every
- * frame the compositor draws - sixty a second, for a picture that changed nine times - so a slowed
- * layer moves fewer pixels to the GPU than it did when it stepped. Nothing for a clip at 1x or
- * faster, nothing while paused.
+ * WHAT IT COSTS, per slowed layer while it plays: one copy of each frame the element presents (nine
+ * a second in the example above) and one more texture read per pixel of that layer. The copies are
+ * the painter's own ([FrameCopier], `Painter.copyFrame`): on the GPU path the element uploaded
+ * straight into a texture kept for as long as the frame is held, on the 2D path a canvas. Against
+ * that, the element itself is no longer uploaded on every frame the compositor draws - sixty a second,
+ * for a picture that changed nine times - so a slowed layer moves fewer pixels to the GPU than it did
+ * when it stepped. Nothing for a clip at 1x or faster, nothing while paused.
+ *
+ * NOT `createImageBitmap`, which is what this held first. In a WKWebView a bitmap of a playing element
+ * is a read-back out of the GPU process, and uploading it is another: on the iOS simulator, 1080x1920
+ * footage at 0.4x took 37-150 ms per copy, about a second for the first copy on an element, and 60 ms
+ * per upload - slow motion at 8-15 fps, the page frozen as each slowed clip began, and the music pulled
+ * about after a stalling video clock. See `GpuFrame` in `painter.ts` for the numbers.
  *
  * WHAT IT NEEDS: `requestVideoFrameCallback`, which is what says a new frame has been presented and
  * at which media time. A WebView without it (old Android System WebViews) draws slowed clips the way
  * it always did, and nothing here ever waits on anything - it only ever answers with what it already
  * holds, so it cannot stall a frame of playback.
  */
+
+/**
+ * Where the copies of presented frames are made and let go of - the painter the preview draws with,
+ * whose copies are whatever it can draw fastest (see `Painter.copyFrame`).
+ */
+export interface FrameCopier {
+  /**
+   * A copy of the picture `video` shows at this moment, made as this is called; null when none can
+   * be had, and the element then stands in for it where it safely can.
+   */
+  copy(video: HTMLVideoElement): HeldCopy | null;
+  /** Lets go of a copy made by [copy]. */
+  release(copy: HeldCopy): void;
+}
+
+/** A copy of one presented frame: something the painter can draw, of the size it was copied at. */
+export type HeldCopy = LayerSource;
 
 /**
  * Two presented frames further apart than this, in the element's own media seconds, are not a frame
@@ -49,10 +75,10 @@ const MAX_FRAME_GAP_S = 0.25;
  */
 const IDLE_MS = 200;
 
-/** One frame copied out of the element as it was presented, or still being copied. */
+/** One frame copied out of the element as it was presented, or null where no copy could be made. */
 interface HeldFrame {
   mediaTime: number;
-  bitmap: ImageBitmap | null;
+  copy: HeldCopy | null;
 }
 
 /** What is known about one element's recent frames. */
@@ -84,12 +110,12 @@ interface Track {
  */
 export interface PresentedTween {
   /** Frame A: the one the element presented before the one it shows now. */
-  from: ImageBitmap;
+  from: HeldCopy;
   /**
-   * Frame B, the one it shows now, as copied when it was presented - or null while that copy is
-   * still being made, when the element itself is the best there is of it.
+   * Frame B, the one it shows now, as copied when it was presented - or null where no copy of it
+   * could be made, when the element itself is the best there is of it.
    */
-  to: ImageBitmap | null;
+  to: HeldCopy | null;
   /** 0..1 from A towards B; 0 is A alone. */
   weight: number;
 }
@@ -105,18 +131,15 @@ export function tweenWeight(elapsedMs: number, playbackRate: number, intervalSec
   return Math.min(1, ((elapsedMs / 1000) * playbackRate) / intervalSeconds);
 }
 
-function sameSize(bitmap: ImageBitmap, video: HTMLVideoElement): boolean {
-  return bitmap.width === video.videoWidth && bitmap.height === video.videoHeight;
+function sameSize(copy: HeldCopy, video: HTMLVideoElement): boolean {
+  return copy.width === video.videoWidth && copy.height === video.videoHeight;
 }
 
 export class PresentedFrames {
   private readonly tracks = new Map<HTMLVideoElement, Track>();
 
-  /**
-   * @param onDrop hears about every copied frame as it is let go of, before it is closed, so the
-   *   painter can give back the texture it was uploaded into.
-   */
-  constructor(private readonly onDrop: (bitmap: ImageBitmap) => void = () => undefined) {}
+  /** @param copier makes each copy as its frame is presented, and is handed every one back. */
+  constructor(private readonly copier: FrameCopier) {}
 
   /**
    * For an element playing a SLOWED clip: frame A - the frame it presented before the one it shows
@@ -129,7 +152,7 @@ export class PresentedFrames {
    * from there on: one frame held a little longer as slow motion starts, and never a step back.
    */
   tween(video: HTMLVideoElement, now: number = performance.now()): PresentedTween | null {
-    if (typeof video.requestVideoFrameCallback !== 'function' || typeof createImageBitmap !== 'function') return null;
+    if (typeof video.requestVideoFrameCallback !== 'function') return null;
     let track = this.tracks.get(video);
     if (!track) {
       track = { armed: false, src: '', askedAt: now, current: null, latest: null, previous: null };
@@ -144,10 +167,10 @@ export class PresentedFrames {
     if (!current || track.src !== video.currentSrc) return null;
     // A frame of another size is not a frame of this picture: sampled at A's coordinates it would be
     // stretched.
-    const latest = track.latest?.bitmap;
+    const latest = track.latest?.copy;
     const to = latest && sameSize(latest, video) ? latest : null;
     const previous = track.previous;
-    if (!previous?.bitmap || !sameSize(previous.bitmap, video)) {
+    if (!previous?.copy || !sameSize(previous.copy, video)) {
       // The first pair is still being gathered. The last frame reported is held rather than the
       // element drawn, because the pictures that follow run one frame behind the element: drawing
       // the element now and the pair next would step the picture BACK a frame as the blending began.
@@ -156,13 +179,13 @@ export class PresentedFrames {
     }
     const interval = current.mediaTime - previous.mediaTime;
     const elapsedMs = now - current.atMs;
-    // B's copy not made yet: the element stands in for it, but only while it is sure still to be
-    // showing B - the first half of B's expected time on screen. Its picture moves on to the frame
-    // after B one step before that frame is reported, so late in the interval it may already be
-    // there, and mixing A with it would step the picture back a frame when the report came. Past
-    // that, A is held alone: a copy that slow costs one frame held a little longer, never a step back.
-    if (!to && !(elapsedMs < ((interval / video.playbackRate) * 1000) / 2)) return { from: previous.bitmap, to: null, weight: 0 };
-    return { from: previous.bitmap, to, weight: tweenWeight(elapsedMs, video.playbackRate, interval) };
+    // No copy of B: the element stands in for it, but only while it is sure still to be showing B -
+    // the first half of B's expected time on screen. Its picture moves on to the frame after B one
+    // step before that frame is reported, so late in the interval it may already be there, and mixing
+    // A with it would step the picture back a frame when the report came. Past that, A is held alone:
+    // one frame held a little longer, never a step back.
+    if (!to && !(elapsedMs < ((interval / video.playbackRate) * 1000) / 2)) return { from: previous.copy, to: null, weight: 0 };
+    return { from: previous.copy, to, weight: tweenWeight(elapsedMs, video.playbackRate, interval) };
   }
 
   /** Stops following every element and lets every held frame go. */
@@ -181,12 +204,11 @@ export class PresentedFrames {
 
   /**
    * A new frame is on screen. The copy of the last one becomes frame A - if the new one really is
-   * the frame after it - and a copy of the new one is started, to be frame A in its turn.
+   * the frame after it - and a copy of the new one is made, to be frame A in its turn.
    *
    * The copy is taken HERE, in the callback, because it is the one moment the element is known to be
-   * showing exactly this frame; `createImageBitmap` takes its snapshot as it is called and only the
-   * copying is asynchronous. It is never waited for: a copy that has not landed by the time it is
-   * wanted is a frame drawn plain.
+   * showing exactly this frame. It is made as it is asked for, so it is there for the very next frame
+   * the compositor draws.
    */
   private onPresented(video: HTMLVideoElement, track: Track, now: number, mediaTime: number): void {
     track.armed = false;
@@ -212,17 +234,7 @@ export class PresentedFrames {
 
     track.src = src;
     track.current = { mediaTime, atMs: now };
-    const held: HeldFrame = { mediaTime, bitmap: null };
-    track.latest = held;
-    createImageBitmap(video).then(
-      bitmap => {
-        // Kept only while it is still one of the two frames this track holds; a copy that lands after
-        // its frame has already been passed over is let go of at once.
-        if (track.latest === held || track.previous === held) held.bitmap = bitmap;
-        else bitmap.close();
-      },
-      () => undefined,
-    );
+    track.latest = { mediaTime, copy: this.copier.copy(video) };
     this.follow(video, track);
   }
 
@@ -235,10 +247,9 @@ export class PresentedFrames {
   }
 
   private drop(frame: HeldFrame | null): void {
-    const bitmap = frame?.bitmap;
-    if (!frame || !bitmap) return;
-    frame.bitmap = null;
-    this.onDrop(bitmap);
-    bitmap.close();
+    const copy = frame?.copy;
+    if (!frame || !copy) return;
+    frame.copy = null;
+    this.copier.release(copy);
   }
 }

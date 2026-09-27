@@ -270,6 +270,16 @@ export class EditorStore {
    * brings a removed sound back show its picture at once instead of decoding it a second time.
    */
   readonly waveforms = signal<ReadonlyMap<string, Peaks | null>>(new Map());
+  /**
+   * How many views that DRAW [waveforms] are on screen: the timeline, today, which counts itself in
+   * while it is in the document. `EditorMedia` measures sound only while this is above 0.
+   *
+   * Every measurement is a whole file read and its sound decoded, on the thread the preview plays
+   * on. A host that runs the editing core with no timeline - a template studio in front of the
+   * editor - paid for one per clip in the very seconds its preview started playing, for waveforms
+   * nothing ever drew. The first timeline to appear measures everything the post has, as before.
+   */
+  readonly waveformViewers = signal(0);
   readonly maxClips = signal(10);
 
   /* -- the edit ---------------------------------------------------------------------------- */

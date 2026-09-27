@@ -72,6 +72,24 @@ const WAIT_FOR_LAYER_MS = 2000;
 const TAIL_WAIT_MS = 600;
 
 /**
+ * The longest an element playing a new source is left undrawn while it has not shown a frame of it,
+ * from the first frame drawn while it plays; see [PreviewCanvas.framed]. Only a WebView whose frame
+ * callbacks never come waits this long.
+ */
+const FIRST_FRAME_WAIT_MS = 1200;
+
+let appleWebKit: boolean | null = null;
+
+/**
+ * Whether this is Apple's WebKit - Safari, and every WebView on iOS - where reading the first frame
+ * of a playing source blocks the page; see [PreviewCanvas.framed]. Asked once.
+ */
+function waitsForFirstFrame(): boolean {
+  if (appleWebKit === null) appleWebKit = typeof navigator !== 'undefined' && /^Apple/.test(navigator.vendor ?? '');
+  return appleWebKit;
+}
+
+/**
  * How long after Play the compositor may still spend a frame warming a transition up; see
  * [PreviewCanvas.warmUp]. The elements' own clocks stand still for about this long after a start,
  * so a frame spent here is a frame nobody sees go by.
@@ -161,6 +179,11 @@ export class PreviewCanvas {
   private readonly sources = new Map<string | null, Source>();
   private readonly listeners = new Map<PreviewSource, () => void>();
   /**
+   * Per element, on WebKit: the source it holds, whether it has shown a frame of it yet, and since
+   * when it has been waiting to; see [framed].
+   */
+  private readonly starts = new WeakMap<HTMLVideoElement, { src: string; shown: boolean; since: number }>();
+  /**
    * Where the base track is read from: the player's [BaseShot], a whole reading at a time. Its two
    * elements are listened to like any other source, because a seek landing on either one is a frame
    * that has changed with nothing in the store moving.
@@ -192,10 +215,13 @@ export class PreviewCanvas {
   private folded: { ops: unknown; matrix: ColorMatrix | null } | null = null;
   /**
    * The frame before the one each slowed element shows, so a slowed clip is drawn moving between
-   * frames rather than stepping from one to the next; see [PresentedFrames]. Every frame it lets go
-   * of takes its texture with it.
+   * frames rather than stepping from one to the next; see [PresentedFrames]. The copies are the
+   * painter's own - textures on the GPU path - made and handed back through it.
    */
-  private readonly presented = new PresentedFrames(bitmap => this.painter?.forget(bitmap));
+  private readonly presented = new PresentedFrames({
+    copy: video => this.painter?.copyFrame(video) ?? null,
+    release: copy => this.painter?.releaseFrame(copy),
+  });
 
   constructor(
     private readonly store: EditorStore,
@@ -245,9 +271,74 @@ export class PreviewCanvas {
   private listenTo(video: PreviewSource): void {
     const onFrame = () => this.request();
     for (const type of FRAME_EVENTS) video.addEventListener(type, onFrame);
+    // On WebKit each source is followed from the moment it is put on until it has shown a frame;
+    // see [framed].
+    const element = video instanceof ClipMedia ? video.element : video;
+    const onSource = () => this.followStart(element);
+    // Asked to play again before a frame came: the wait is timed afresh from the first draw.
+    const onPlay = () => {
+      const start = this.starts.get(element);
+      if (start && !start.shown) start.since = Number.NaN;
+    };
+    if (waitsForFirstFrame()) {
+      element.addEventListener('loadstart', onSource);
+      element.addEventListener('play', onPlay);
+      // A source already on - the player can point an element before the canvas is handed it.
+      if (element.currentSrc) this.followStart(element);
+    }
     this.listeners.set(video, () => {
       for (const type of FRAME_EVENTS) video.removeEventListener(type, onFrame);
+      element.removeEventListener('loadstart', onSource);
+      element.removeEventListener('play', onPlay);
     });
+  }
+
+  /**
+   * Follows `element`'s current source until it has shown a frame, which its frame callback says.
+   * Asking for the callback is also what has WebKit set up the output a frame is read from, so asked
+   * as the source goes on, that is under way long before anything draws from it.
+   */
+  private followStart(element: HTMLVideoElement): void {
+    const src = element.currentSrc;
+    if (this.starts.get(element)?.src === src) return;
+    // `since` is when a draw first found it playing without a frame; see [framed].
+    const start = { src, shown: false, since: Number.NaN };
+    this.starts.set(element, start);
+    if (!src || typeof element.requestVideoFrameCallback !== 'function') return;
+    element.requestVideoFrameCallback(() => {
+      start.shown = true;
+      this.request();
+    });
+  }
+
+  /**
+   * Whether a frame can be read out of `video` without the browser blocking the page to wait for one.
+   *
+   * WebKit reads a frame out of an element through an output it sets up the first time one is asked
+   * for, and when the element is PLAYING a source it has not shown a frame of yet, it waits for that
+   * output's first frame on the page's own thread - for up to a second, and the whole second when
+   * the frame is stuck behind the wait itself. Measured on the iOS 26.5 simulator (2026-09-27): the
+   * first frame the template studio drew as its stage started spent 1011-1022 ms in `texImage2D` on
+   * every open, with the page frozen and the music let run a second ahead of the picture - and its
+   * `playing` event had come before it, so that is no guide. What is, is the element's frame callback,
+   * which WebKit calls once a frame has come out of that output. So there, an element playing a
+   * source is drawn once it has shown a frame of it, and until then the canvas keeps what it last
+   * drew, as it does for any layer that is not ready. [FIRST_FRAME_WAIT_MS] bounds the wait.
+   *
+   * Nowhere else: Chromium reads a playing element's frame without waiting on it, and never calls the
+   * frame callback of these elements at all - they are laid out one pixel wide and invisible - so
+   * waiting for it held every cut for the whole bound. A picture and a paused element are drawn
+   * exactly as before everywhere.
+   */
+  private framed(video: PreviewSource, now: number): boolean {
+    const element = video instanceof ClipMedia ? (video.isPicture ? null : video.element) : video;
+    if (!element || element.paused) return true;
+    const start = this.starts.get(element);
+    if (!start || start.shown || start.src !== element.currentSrc) return true;
+    // Timed from the first draw that finds it playing, not from the load: a source put on well
+    // before it is played would otherwise have run the bound out by the time it was.
+    if (Number.isNaN(start.since)) start.since = now;
+    return now - start.since >= FIRST_FRAME_WAIT_MS;
   }
 
   /**
@@ -272,6 +363,9 @@ export class PreviewCanvas {
     // old one gives its GL context back first rather than wait to be collected, or a few sheet
     // openings use up every context the page is allowed.
     if (!this.painter?.resize({ width, height })) {
+      // The frames held for slowed clips are the old painter's textures, which go with it: they are
+      // handed back first, and the next frames presented are copied by the new one.
+      this.presented.destroy();
       this.painter?.dispose();
       this.painter = new Painter({ width, height }, this.canvas, { interpolation: PREVIEW_INTERPOLATION });
     }
@@ -357,7 +451,7 @@ export class PreviewCanvas {
 
     // ONE reading of the base track per frame; see [BaseShot].
     const feed = this.baseFeed;
-    const shot = feed ? feed() : null;
+    const shot = feed ? this.framedShot(feed(), now) : null;
     if (shot) {
       onScreen += 1;
       const base = baseDraw(shot, frameAspect, cropOpen, cropping, slowed);
@@ -388,7 +482,7 @@ export class PreviewCanvas {
       if (!source) continue;
       onScreen += 1;
       const video = source.video;
-      if (video.readyState < HAVE_CURRENT_DATA || !(video.videoWidth > 0) || !(video.videoHeight > 0)) {
+      if (video.readyState < HAVE_CURRENT_DATA || !(video.videoWidth > 0) || !(video.videoHeight > 0) || !this.framed(video, now)) {
         missing = true;
         continue;
       }
@@ -479,10 +573,25 @@ export class PreviewCanvas {
       const speed = findClip(this.store.manifest.value, layer.clipId)?.speed ?? 1;
       if (!(speed < 1)) return draw;
       const pair = this.presented.tween(element, now);
-      if (!pair) return draw;
+      // A copy the painter can no longer draw - its context lost since it was made - is no pair.
+      const painter = this.painter;
+      if (!pair || !painter?.canDraw(pair.from) || (pair.to && !painter.canDraw(pair.to))) return draw;
       if (!(pair.weight > 0)) return { ...draw, source: pair.from };
       return { ...draw, source: pair.from, tween: { source: pair.to ?? draw.source, weight: pair.weight } };
     };
+  }
+
+  /**
+   * The base shot with any element that cannot give a frame yet taken out of it - see [framed] - as
+   * though it had not loaded: which is what it is waited for as.
+   */
+  private framedShot(shot: BaseShot | null, now: number): BaseShot | null {
+    if (!shot) return null;
+    const video = shot.video && !this.framed(shot.video, now) ? null : shot.video;
+    const transition = shot.transition;
+    const tail = transition?.video && !this.framed(transition.video, now) ? null : (transition?.video ?? null);
+    if (video === shot.video && tail === (transition?.video ?? null)) return shot;
+    return { ...shot, video, transition: transition ? { ...transition, video: tail } : null };
   }
 
   /** One redraw, `ms` from now, for a wait that no element event may come to end. */

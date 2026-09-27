@@ -1,4 +1,4 @@
-import { findClip } from '../../editor';
+import { findClip, type EditClip } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
@@ -7,6 +7,7 @@ import {
   BLANK_POSTER,
   SEEK_EPSILON_S,
   applyClipAudio,
+  applyPitch,
   clipsSilenced,
   posterFor,
   previewSrc,
@@ -23,8 +24,29 @@ import {
  */
 const DRIFT_MS = 80;
 
+/**
+ * The same for a layer's SOUND where it plays on an element of its own (see [FollowerVideo.sound]),
+ * and wider, as the music's is: a seek of something heard is heard, so only a drift the ear would
+ * catch against the picture is corrected.
+ */
+const SOUND_DRIFT_MS = 200;
+
+/**
+ * How far ahead of the picture the layer's sound is put as it starts: an `<audio>` element's clock
+ * stands still for about this long after `play()` while the phone's audio output starts - the
+ * figure the player starts the music with before it has measured one (`DEFAULT_AUDIO_LEAD_MS`) -
+ * so put where the picture is, the sound was heard that late for the whole play.
+ */
+const SOUND_START_LEAD_MS = 180;
+
 export interface FollowerMedia {
   video: ClipMedia;
+  /**
+   * Where only one `<video>` with sound may play at a time (see `oneVideoSoundAtATime`): the element
+   * this layer's own sound plays on, while its video plays muted. Absent everywhere else, where the
+   * video element is heard itself.
+   */
+  sound?: HTMLAudioElement | null;
 }
 
 /**
@@ -44,6 +66,16 @@ export interface FollowerMedia {
  */
 export class FollowerVideo {
   private readonly video: ClipMedia;
+  /**
+   * The layer's own sound, on an `<audio>` of its own, where the WebView lets only one `<video>` with
+   * sound play at a time - iOS, where the base clip's element is that one, and a layer's element
+   * started with its sound on paused the base on the spot, so a post with a layer's sound on would
+   * not play at all. There the layer's video plays muted and this plays the same file's sound, in
+   * step with it: every layer is still heard, as the render mixes them. Null everywhere else.
+   */
+  private readonly sound: HTMLAudioElement | null;
+  /** The host clip key whose source is on [sound], whether or not it loaded. */
+  private soundKey: string | null = null;
   private readonly unlisten: Array<() => void> = [];
 
   /** The host clip key whose source is on the element, whether or not it loaded. */
@@ -61,6 +93,7 @@ export class FollowerVideo {
     media: FollowerMedia,
   ) {
     this.video = media.video;
+    this.sound = media.sound ?? null;
     // A load lands on the file's first frame until its metadata is in and the position can be
     // clamped against a duration, so where the playhead is gets said again here - and said as a real
     // seek, which is the one thing that makes a freshly loaded element present anything at all.
@@ -96,6 +129,7 @@ export class FollowerVideo {
 
   pause(): void {
     if (!this.video.paused) this.video.pause();
+    if (this.sound && !this.sound.paused) this.sound.pause();
   }
 
   /** A filmstrip arrived; this layer may have been showing the blank poster. */
@@ -124,6 +158,7 @@ export class FollowerVideo {
     this.video.pause();
     this.video.removeAttribute('src');
     this.video.load();
+    this.stripSound();
   }
 
   /* ========================================================================================= */
@@ -159,10 +194,13 @@ export class FollowerVideo {
     if (!clip) return;
     const video = this.video;
     const speed = clip.speed || 1;
+    const silenced = clipsSilenced(this.store);
+    // Pitch correction before the rate, and read back each time: some WebViews reset it on every
+    // source change. On only where the layer's sound is heard; see [applyPitch].
+    applyPitch(video, clip, silenced || this.sound !== null);
     if (video.playbackRate !== speed) video.playbackRate = speed;
-    // Some WebViews reset pitch correction on every source change, so it is set each time.
-    video.preservesPitch = true;
-    applyClipAudio(video, clip, clipsSilenced(this.store));
+    // With a sound element of its own, the picture plays silent: see [sound].
+    applyClipAudio(video, clip, silenced || this.sound !== null);
 
     // Running, the element carries itself between playhead writes and only a drift worth a stall is
     // corrected; stopped, nothing else moves it, so it goes exactly where it is wanted. The source
@@ -183,6 +221,53 @@ export class FollowerVideo {
     } else {
       this.pause();
     }
+    this.applySound(clip, silenced);
+  }
+
+  /**
+   * The layer's sound on [sound]: the same file as the picture, at the clip's speed and pitch, where
+   * the picture is, running when it runs - and nothing at all, not even loaded, while the layer is
+   * not heard.
+   */
+  private applySound(clip: EditClip, silenced: boolean): void {
+    const sound = this.sound;
+    if (!sound) return;
+    const source = this.loadedKey ? this.store.clipByKey(this.loadedKey) : undefined;
+    const heard = !silenced && !clip.muted && clip.volume > 0 && !!source && !this.store.isPictureKey(source.key);
+    if (!heard || !source) {
+      if (!sound.paused) sound.pause();
+      return;
+    }
+    if (this.soundKey !== source.key) {
+      this.soundKey = source.key;
+      sound.src = previewSrc(this.store, source);
+      sound.load();
+    }
+    const speed = clip.speed || 1;
+    applyPitch(sound, clip, silenced);
+    if (sound.playbackRate !== speed) sound.playbackRate = speed;
+    // Stopped, it simply stops: nothing is heard, so nothing is put anywhere until it starts again.
+    if (!this.playing) {
+      if (!sound.paused) sound.pause();
+      return;
+    }
+    const targetSec = this.targetMs / 1000;
+    if (sound.paused) {
+      sound.currentTime = targetSec + (SOUND_START_LEAD_MS * speed) / 1000;
+      startPlayback(sound);
+      return;
+    }
+    if (Math.abs(sound.currentTime - targetSec) > (SOUND_DRIFT_MS * speed) / 1000) sound.currentTime = targetSec;
+  }
+
+  /** Lets go of the sound's decoder, as [destroy] does the picture's. */
+  private stripSound(): void {
+    const sound = this.sound;
+    if (!sound) return;
+    sound.pause();
+    sound.removeAttribute('src');
+    sound.load();
+    this.soundKey = null;
   }
 
   private onError(): void {

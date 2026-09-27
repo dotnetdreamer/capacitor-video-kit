@@ -52,8 +52,9 @@ import { TransitionGl } from './transition-gl';
  * On the GPU that step follows the MOTION between the two frames, which `optical-flow-gl.ts` works out
  * once per pair and the painter keeps for as long as frames are drawn from that pair: before a frame
  * with a slowed layer in it is drawn, every pair it needs that has no flow yet gets one (see
- * [PainterOptions.interpolation]). Only a pair of two held pictures - bitmaps, which cannot change -
- * has its flow kept; a pair whose B is a playing `<video>` is drawn as the cross-fade.
+ * [PainterOptions.interpolation]). Only a pair of two held pictures - bitmaps, or frames copied by
+ * [Painter.copyFrame], which cannot change - has its flow kept; a pair whose B is a playing `<video>`
+ * is drawn as the cross-fade.
  */
 
 /** How the painter is to draw. */
@@ -104,11 +105,39 @@ export function isTransitionDraw(draw: LayerDraw | TransitionDraw): draw is Tran
 }
 
 /**
+ * One frame of a playing `<video>`, copied into a texture of the painter's own as it was presented:
+ * the frames the live preview holds of a slowed clip (see `presented-frames.ts`). Made by
+ * [Painter.copyFrame] and let go of with [Painter.releaseFrame].
+ *
+ * WHY NOT A BITMAP. The preview held `createImageBitmap(video)` copies first, and in a WKWebView both
+ * halves of that are read-backs out of the GPU process. Measured on the iOS 26.5 simulator
+ * (2026-09-27), 1080x1920 footage slowed to 0.4x: 37-150 ms per `createImageBitmap`, about a second
+ * for the first one on an element, and 57-67 ms to upload each bitmap - slow motion drawn at 8-15
+ * fps, the page frozen for a second as each slowed clip began, and the music seeked after a video
+ * clock that kept stalling. Uploading the ELEMENT is WebKit's fast path (about 1.5 ms there), so the
+ * copy is made on the GPU instead: the element uploaded once per presented frame, into a texture kept
+ * for as long as that frame is held.
+ *
+ * Only the painter that made one can draw it, and only while its context lives: a context that is
+ * lost or given back takes the texture with it. [Painter.canDraw] says which.
+ */
+export class GpuFrame {
+  constructor(
+    readonly width: number,
+    readonly height: number,
+  ) {}
+}
+
+/**
  * What a layer can be drawn from. Narrower than `CanvasImageSource` on purpose: `texImage2D` will
  * not take an `SVGImageElement`, so a type that admitted one would compile here and fail at the one
- * line that uploads a frame.
+ * line that uploads a frame. A [GpuFrame] is the one member that is not an image at all: it is drawn
+ * from the texture it already is, and the 2D path, which has no textures, draws nothing for one.
  */
-export type LayerSource = HTMLVideoElement | HTMLCanvasElement | ImageBitmap;
+export type LayerSource = HTMLVideoElement | HTMLCanvasElement | ImageBitmap | GpuFrame;
+
+/** Released copies kept for the next one, per painter: two held frames and one being made, plus one. */
+const MAX_SPARE_COPIES = 4;
 
 export interface LayerDraw {
   /** Whatever the frame reader is holding - a `<video>` the renderer has already seeked. */
@@ -303,6 +332,11 @@ export class Painter {
   private transition2d: Transition2d | null = null;
   /** Where the 2D fallback makes a synthesised frame; built the first time it needs one. */
   private tweenSurface: HTMLCanvasElement | null = null;
+  /** Textures of released [GpuFrame]s, for the next copy; see [copyFrame]. */
+  private spareTextures: WebGLTexture[] = [];
+  /** The 2D path's copies: every canvas [copyFrame] made, and the released ones kept for the next. */
+  private readonly canvasCopies = new WeakSet<HTMLCanvasElement>();
+  private spareCanvases: HTMLCanvasElement[] = [];
   private readonly interpolation: 'flow' | 'blend';
   /** Built the first time a pair needs a flow; null once this context has been found unable to run one. */
   private flowEstimator: FlowEstimator | null | undefined = undefined;
@@ -483,6 +517,95 @@ export class Painter {
   }
 
   /**
+   * A copy of the picture `video` shows at this moment, for a caller that has to hold on to a frame
+   * of an element that is PLAYING - it cannot be seeked back to - and draw it again later: a
+   * [GpuFrame] on the GPU path, a canvas on the 2D path, or null when neither can be had (no picture
+   * yet, a context that has gone, or a WebView that will not let the page read the element).
+   *
+   * The copy is taken as this is called. Each is kept until [releaseFrame], whose texture or canvas
+   * then goes to the next copy, so a slowed clip copying ten frames a second allocates nothing
+   * after its first few.
+   */
+  copyFrame(video: HTMLVideoElement): GpuFrame | HTMLCanvasElement | null {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!(width > 0) || !(height > 0)) return null;
+    const gl = this.gl;
+    if (gl && this.program) {
+      if (gl.isContextLost()) return null;
+      // Unit 0, where every paint binds its layer's texture afresh, so nothing a paint relies on is
+      // disturbed by a copy made between two of them.
+      gl.activeTexture(gl.TEXTURE0);
+      // Any spare will do: `texImage2D` gives it storage of the frame's own size.
+      const texture = this.spareTextures.pop() ?? this.newTexture(gl);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      try {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      } catch {
+        // The one refusal there is, a cross-origin element (see [upload]). No copy, and the element
+        // is drawn as it is - which the shader will refuse too, and say so, on the next paint.
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.deleteTexture(texture);
+        return null;
+      }
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      const frame = new GpuFrame(width, height);
+      this.textures.set(frame, texture);
+      return frame;
+    }
+    const canvas = this.spareCanvases.pop() ?? createCanvas(width, height);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(video, 0, 0, width, height);
+    this.canvasCopies.add(canvas);
+    return canvas;
+  }
+
+  /**
+   * Lets go of a copy [copyFrame] made. Anything else - a copy another painter made, one already let
+   * go of - is ignored, so a caller that outlived a painter can hand back what it holds regardless.
+   */
+  releaseFrame(copy: LayerSource): void {
+    if (copy instanceof GpuFrame) {
+      const texture = this.textures.get(copy);
+      if (!texture) return;
+      this.dropFlowsOf(copy);
+      this.textures.delete(copy);
+      if (this.spareTextures.length < MAX_SPARE_COPIES) this.spareTextures.push(texture);
+      else this.gl?.deleteTexture(texture);
+      return;
+    }
+    if (typeof HTMLCanvasElement !== 'undefined' && copy instanceof HTMLCanvasElement && this.canvasCopies.has(copy)) {
+      this.canvasCopies.delete(copy);
+      if (this.spareCanvases.length < MAX_SPARE_COPIES) this.spareCanvases.push(copy);
+      else {
+        copy.width = 0;
+        copy.height = 0;
+      }
+    }
+  }
+
+  /**
+   * Whether this painter can draw `source` as things stand. Always, for everything but a [GpuFrame],
+   * which only the painter that made it can draw, and only while the texture it is still lives.
+   */
+  canDraw(source: LayerSource): boolean {
+    if (!(source instanceof GpuFrame)) return true;
+    return this.gl !== null && !this.gl.isContextLost() && this.textures.has(source);
+  }
+
+  /** A [GpuFrame] this painter holds no texture for. */
+  private isGone(source: LayerSource): boolean {
+    return source instanceof GpuFrame && !this.textures.has(source);
+  }
+
+  /**
    * Lets go of the texture `source` was uploaded into, for a source that will not be drawn again.
    *
    * [textureFor] keeps one texture per source object for as long as the painter lives, which suits
@@ -496,13 +619,7 @@ export class Painter {
    * that has been lost or given back has already taken every texture with it.
    */
   forget(source: LayerSource): void {
-    // A pair with this frame in it will not be drawn again either, and its flow goes with it.
-    for (let i = this.flows.length - 1; i >= 0; i--) {
-      const kept = this.flows[i]!;
-      if (kept.a !== source && kept.b !== source) continue;
-      this.flows.splice(i, 1);
-      this.flowEstimator?.release(kept.result);
-    }
+    this.dropFlowsOf(source);
     const texture = this.textures.get(source);
     if (!texture) return;
     this.textures.delete(source);
@@ -527,9 +644,15 @@ export class Painter {
       this.tweenSurface.height = 0;
       this.tweenSurface = null;
     }
+    for (const canvas of this.spareCanvases) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+    this.spareCanvases = [];
     const gl = this.gl;
     if (!gl) return;
     for (const texture of this.textures.values()) gl.deleteTexture(texture);
+    for (const spare of this.spareTextures) gl.deleteTexture(spare);
     this.textures.clear();
     this.transitionGl?.dispose();
     this.transitionGl = null;
@@ -547,6 +670,7 @@ export class Painter {
     this.program = null;
     this.uniforms = {};
     this.textures.clear();
+    this.spareTextures = [];
     this.transitionGl = null;
     // Its textures went with the context; the 2D path draws the cross-fade and needs none of it.
     this.flowEstimator = undefined;
@@ -599,6 +723,10 @@ export class Painter {
     };
     const window = sourceWindow(layer.framing, frame, layer.sourceWidth, layer.sourceHeight);
 
+    // A held copy whose texture has gone - let go of, or made by a painter before this one - is not
+    // a picture this painter has. It is left out of this frame rather than taken for a source the
+    // shader refused, which would send every frame after it down the 2D path.
+    if (this.isGone(layer.source)) return true;
     if (!this.upload(gl, layer.source)) {
       gl.disable(gl.BLEND);
       return false;
@@ -606,8 +734,9 @@ export class Painter {
     // Frame B of a synthesised frame goes on unit 1, where only the shader's interpolation reads it.
     // A layer with none leaves unit 1 empty - which is also what keeps a draw into a transition
     // side's target from ever finding that target's own texture bound for sampling - and sets a
-    // weight of 0, which never reads it.
-    const tween = activeTween(layer);
+    // weight of 0, which never reads it. A B that has gone is no B: A is drawn alone.
+    const active = activeTween(layer);
+    const tween = active && !this.isGone(active.source) ? active : null;
     if (tween) {
       gl.activeTexture(gl.TEXTURE1);
       const uploaded = this.upload(gl, tween.source);
@@ -703,6 +832,16 @@ export class Painter {
     }
   }
 
+  /** Lets go of the flow of every pair with `source` in it, which will not be drawn from again. */
+  private dropFlowsOf(source: LayerSource): void {
+    for (let i = this.flows.length - 1; i >= 0; i--) {
+      const kept = this.flows[i]!;
+      if (kept.a !== source && kept.b !== source) continue;
+      this.flows.splice(i, 1);
+      this.flowEstimator?.release(kept.result);
+    }
+  }
+
   /** Lets go of every kept flow. */
   private dropFlows(): void {
     for (const kept of this.flows) this.flowEstimator?.release(kept.result);
@@ -720,6 +859,13 @@ export class Painter {
    * the browser would not let the shader have it.
    */
   private upload(gl: WebGL2RenderingContext, source: LayerSource): boolean {
+    // A copy made by [copyFrame] IS its texture: there is nothing to upload, and nothing to bind once
+    // it has gone (see [drawLayerGl], which never lets one that has gone get this far).
+    if (source instanceof GpuFrame) {
+      const texture = this.textures.get(source);
+      gl.bindTexture(gl.TEXTURE_2D, texture ?? null);
+      return texture !== undefined;
+    }
     // A bitmap cannot change once it is made - a picture on the timeline, decoded once, or one frame
     // of a slowed clip held for the frames made from it - so it is uploaded the first time it is
     // drawn and never again. Anything else is re-uploaded below.
@@ -886,11 +1032,16 @@ export class Painter {
     ctx.globalAlpha = layer.opacity;
     ctx.fillStyle = '#000';
     ctx.fillRect(clipX, clipY, clipW, clipH);
-    if (rects) {
+    // A [GpuFrame] is a texture, which this path has no way to draw: its layer keeps its black. The
+    // preview asks [canDraw] before it hands one over, so only a frame in which the GPU gave up part
+    // way through can meet one here, and the next frame is drawn from the element instead.
+    const source = drawable2d(layer.source);
+    if (rects && source) {
       // A synthesised frame is made first, whole and at the source's own size, and then drawn from
       // exactly as a recorded frame would be - the same rectangles, the same filter, the same tints.
       const tween = activeTween(layer);
-      const picture = tween ? this.interpolated2d(layer.source, tween, layer.sourceWidth, layer.sourceHeight) : layer.source;
+      const frameB = tween ? drawable2d(tween.source) : null;
+      const picture = tween && frameB ? this.interpolated2d(source, frameB, tween.weight, layer.sourceWidth, layer.sourceHeight) : source;
       ctx.globalAlpha = layer.opacity;
       ctx.filter = this.cssFilter;
       ctx.drawImage(picture, rects.sx, rects.sy, rects.sw, rects.sh, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
@@ -910,14 +1061,14 @@ export class Painter {
    * resized only when a source of another size comes along. One surface is enough: a layer is drawn
    * from it completely before the next layer, or the other side of a transition, is made in it.
    */
-  private interpolated2d(frameA: LayerSource, tween: FrameTween, width: number, height: number): HTMLCanvasElement {
+  private interpolated2d(frameA: CanvasImageSource, frameB: CanvasImageSource, weight: number, width: number, height: number): HTMLCanvasElement {
     const surface = this.tweenSurface ?? (this.tweenSurface = createCanvas(width, height));
     if (surface.width !== width || surface.height !== height) {
       surface.width = width;
       surface.height = height;
     }
     const ctx = surface.getContext('2d');
-    if (ctx) interpolateFrames2d(ctx, frameA, tween.source, tween.weight, width, height);
+    if (ctx) interpolateFrames2d(ctx, frameA, frameB, weight, width, height);
     return surface;
   }
 
@@ -925,6 +1076,13 @@ export class Painter {
     const existing = this.textures.get(source);
     if (existing) return existing;
     if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) this.sweepClosedBitmaps(gl);
+    const texture = this.newTexture(gl);
+    this.textures.set(source, texture);
+    return texture;
+  }
+
+  /** A texture set up the way every layer's is, left bound to the active unit. */
+  private newTexture(gl: WebGL2RenderingContext): WebGLTexture {
     const texture = gl.createTexture();
     if (!texture) throw new Error('the GPU would not allocate a texture for the render');
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -934,7 +1092,6 @@ export class Painter {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    this.textures.set(source, texture);
     return texture;
   }
 
@@ -1011,11 +1168,17 @@ function hasPicture(layer: LayerDraw | null): layer is LayerDraw {
 }
 
 /**
- * Whether a source is a picture that cannot change - a bitmap, not yet closed - and so one whose flow
- * can be worked out once and kept. A closed bitmap reports a size of nothing.
+ * Whether a source is a picture that cannot change - a bitmap, not yet closed, or a [GpuFrame] - and
+ * so one whose flow can be worked out once and kept. A closed bitmap reports a size of nothing.
  */
-function isHeldPicture(source: LayerSource): source is ImageBitmap {
+function isHeldPicture(source: LayerSource): source is ImageBitmap | GpuFrame {
+  if (source instanceof GpuFrame) return true;
   return typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap && source.width > 0 && source.height > 0;
+}
+
+/** What the 2D path can draw `source` as: itself, or nothing for a [GpuFrame], which is a texture. */
+function drawable2d(source: LayerSource): CanvasImageSource | null {
+  return source instanceof GpuFrame ? null : source;
 }
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {

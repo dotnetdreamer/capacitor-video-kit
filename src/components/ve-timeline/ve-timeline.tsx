@@ -32,6 +32,7 @@ import {
 } from '../../editor';
 import type { EditorIconName } from '../../icons/icons';
 import { computedWith } from '../../state/computed-with';
+import type { EditorStore } from '../../state/editor-store';
 import { clipWaveKey, type EditorSelection } from '../../state/editor.types';
 import {
   musicEndTrim,
@@ -379,6 +380,8 @@ export class VeTimeline {
   @Element() el!: HTMLElement;
 
   private readonly watcher = new SignalWatcher(this);
+  /** The store this timeline is counted in as drawing waveforms; see [countAsWaveformViewer]. */
+  private waveformStore: EditorStore | null = null;
 
   /**
    * `compact` again, as a signal. A `@Prop` is a plain field: a computed that read `this.compact`
@@ -1273,6 +1276,7 @@ export class VeTimeline {
     // Stencil does not render an element again when one that has already loaded is put back into
     // the document, so a re-attach would otherwise come back with its listeners gone.
     this.ensureBound();
+    this.countAsWaveformViewer(this.ctx.store);
   }
 
   componentWillLoad() {
@@ -1290,6 +1294,20 @@ export class VeTimeline {
   disconnectedCallback() {
     this.teardown();
     this.watcher.stop();
+    this.countAsWaveformViewer(null);
+  }
+
+  /**
+   * Counts this timeline in the store's `waveformViewers` while it is in the document - it draws the
+   * waveforms, and nothing measures them for a post nobody is looking at them in - and out again when
+   * it leaves. The store counted in is remembered, so it is the one counted out.
+   */
+  private countAsWaveformViewer(store: EditorStore | null): void {
+    if (store === this.waveformStore) return;
+    const leaving = this.waveformStore;
+    if (leaving) leaving.waveformViewers.value = Math.max(0, leaving.waveformViewers.value - 1);
+    this.waveformStore = store;
+    if (store) store.waveformViewers.value += 1;
   }
 
   /**

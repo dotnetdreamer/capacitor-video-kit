@@ -5,8 +5,11 @@ import {
   MAX_START_LEAD_MS,
   PRELOAD_AHEAD_MS,
   TAIL_DRIFT_MS,
+  TAIL_SETTLED_MS,
+  boundaryAfterSplits,
   boundaryKind,
   catchUpRate,
+  easedTailRate,
   crossfade,
   nextLeadMs,
   outputMsAt,
@@ -162,5 +165,70 @@ describe('keeping a tail in step', () => {
     expect(catchUpRate(1000)).toBe(1.25);
     expect(catchUpRate(-1000)).toBe(0.75);
     expect(catchUpRate(Number.NaN)).toBe(1);
+  });
+});
+
+describe('easing a tail without setting its rate on every frame', () => {
+  it('leaves a tail that is in step at its own rate', () => {
+    expect(easedTailRate(0, 1)).toBe(1);
+    expect(easedTailRate(TAIL_DRIFT_MS, 1)).toBe(1);
+    expect(easedTailRate(Number.NaN, 1)).toBe(1);
+  });
+
+  it('moves the rate in whole steps, so a drift closing frame by frame changes it only now and then', () => {
+    const rates = new Set<number>();
+    // A tail 200 ms behind, closing a couple of milliseconds a frame.
+    let current = 1;
+    for (let behind = 200; behind > 0; behind -= 2) {
+      current = easedTailRate(behind, current);
+      rates.add(Math.round(current * 1000) / 1000);
+    }
+    expect(rates.size).toBeLessThanOrEqual(6);
+    for (const rate of rates) expect(Math.round(rate * 20) / 20).toBeCloseTo(rate, 9);
+  });
+
+  it('keeps easing a tail it has started easing until the drift is all but gone, rather than flapping at the edge', () => {
+    // Just inside the allowance on its way in: still eased, in the same direction.
+    expect(easedTailRate(TAIL_DRIFT_MS - 10, 1.1)).toBeGreaterThan(1);
+    expect(easedTailRate(-(TAIL_DRIFT_MS - 10), 0.9)).toBeLessThan(1);
+    // Close enough: back to its own rate.
+    expect(easedTailRate(TAIL_SETTLED_MS, 1.05)).toBe(1);
+    // A tail at its own rate is not started on a drift inside the allowance.
+    expect(easedTailRate(TAIL_DRIFT_MS - 10, 1)).toBe(1);
+  });
+
+  it('never moves the rate by more than a quarter, and never rounds a real drift away', () => {
+    expect(easedTailRate(1000, 1)).toBe(1.25);
+    expect(easedTailRate(-1000, 1)).toBe(0.75);
+    expect(easedTailRate(TAIL_SETTLED_MS + 1, 1.05)).toBeCloseTo(1.05, 9);
+  });
+});
+
+describe('the boundary past a ramp', () => {
+  // A ramp is one segment per step of the same file, each picking up where the last left off.
+  const slots = timelineSlots({
+    clips: [
+      clip('a', 'one', 0, 1000),
+      clip('r1', 'two', 0, 400, { speed: 0.5 }),
+      clip('r2', 'two', 400, 800, { speed: 0.25 }),
+      clip('r3', 'two', 800, 1200, { speed: 0.5 }),
+      clip('b', 'three', 0, 1000),
+    ],
+  });
+
+  it('is the next cut when there is no ramp in the way', () => {
+    expect(boundaryAfterSplits(slots, 0)).toBe(1);
+  });
+
+  it('looks past every step of a ramp to the cut after its last one', () => {
+    expect(boundaryAfterSplits(slots, 1)).toBe(4);
+    expect(boundaryAfterSplits(slots, 2)).toBe(4);
+    expect(boundaryAfterSplits(slots, 3)).toBe(4);
+  });
+
+  it('is nothing when the base track ends first', () => {
+    expect(boundaryAfterSplits(slots, 4)).toBe(-1);
+    const ramp = timelineSlots({ clips: [clip('r1', 'two', 0, 400), clip('r2', 'two', 400, 800)] });
+    expect(boundaryAfterSplits(ramp, 0)).toBe(-1);
   });
 });
