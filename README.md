@@ -299,8 +299,8 @@ resolved, loaded and type checked out of an `npm pack` tarball installed into a 
 
 | Specifier | What it is | Needs |
 |---|---|---|
-| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract, the editor's render and media hosts over the composer (`composerRenderHost`, `composerMediaHost`, `probeMediaDuration`) and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
-| `capacitor-video-kit/editor` | The edit contract on its own, reaching no `registerPlugin` call and no Capacitor at all | nothing |
+| `capacitor-video-kit` | Both plugin proxies, their definitions, the edit contract, the editor's render and media hosts over the composer (`composerRenderHost`, `composerMediaHost`, `probeMediaDuration`), `describeMedia` (**Reading what footage shows**) and the glue a native host needs around them (**Native hosts**) | `@capacitor/core` |
+| `capacitor-video-kit/editor` | The edit contract on its own, and the scenes `labelMedia`'s labels are read into (`MEDIA_SCENES`, `scenesFromLabels`, `mergeScenes`), reaching no `registerPlugin` call and no Capacitor at all | nothing |
 | `capacitor-video-kit/ui` | The editor's public surface that is not a component: the host interface, the store, the catalogues, `setEditorAssetPath`, and the host helpers that call no plugin (`readFileBlob`, `readVoiceTake`, `filePickerCancelled`) | `@preact/signals-core` |
 | `capacitor-video-kit/loader` | `defineCustomElements()`, which registers every component at once | `@preact/signals-core` |
 | `capacitor-video-kit/dist/components/<tag>.js` | One component's `defineCustomElement()`, for a host that tree shakes | `@preact/signals-core` |
@@ -1506,6 +1506,10 @@ did not match what the customer saw, which is the one promise the rasteriser exi
 So the line is real rather than a first cut. Everything an edit **is** can be done here; turning it
 into pixels belongs to the device with the screen it was edited on.
 
+It does not read footage either. What a clip shows (**Reading what footage shows**) is the phone's
+image recogniser looking at the file, and a Node process has neither the file nor the recogniser; an
+agent that wants a clip's scenes gets them from the app that holds the clip, as the app's own input.
+
 ### Running it
 
 ```json
@@ -2173,6 +2177,128 @@ iOS: `NSPhotoLibraryUsageDescription` in `Info.plist`, without which the app is 
 access is asked for. The one grant covers pictures and videos alike, so `images` changes nothing
 about the prompt there.
 
+## Reading what footage shows
+
+`labelMedia` asks the phone's own image recogniser what is in a picture, or in a few frames of a
+video, and `describeMedia` reads its answer into **scenes** that are the same on every platform: the
+call an app makes to pick a template by what somebody's clips show, sort a gallery, or tag a post.
+
+```ts
+import { describeMedia, mergeScenes } from 'capacitor-video-kit';
+
+const clip = await describeMedia('file:///.../beach.mov');                 // a video: 5 frames by default
+const photo = await describeMedia(pictureUri, { kind: 'image' });          // a picture: looked at once
+// clip.scenes  -> [{ scene: 'beach', score: 0.71 }, { scene: 'sunset', score: 0.44 }, ...]
+// clip.labels  -> the engine's own labels behind them, averaged over the frames
+// null         -> nothing to ask here (a browser, the iOS simulator, an older native build)
+
+const trip = mergeScenes([clip, photo].flatMap((one) => (one ? [one.scenes] : [])));
+```
+
+Everything happens on the device, with nothing downloaded and no permission asked: Apple's Vision
+(`VNClassifyImageRequest`) on iOS, which is part of the system from iOS 13 and adds nothing to the
+app, and Google's ML Kit image labeling on Android (`com.google.mlkit:image-labeling` 17.0.9, Android
+5.0 and later), whose base model the kit bundles into the app, so it answers offline from the first
+call and on a phone without Play services. The kit adds that dependency itself; a host adds nothing.
+
+**What ML Kit weighs, and how to leave it out.** It is the heaviest thing the kit puts in an Android
+app: a native library for each CPU a build carries (11.0 MB for arm64-v8a, 6.9 MB for armeabi-v7a,
+12.5 and 12.1 MB for x86 and x86_64) and a 3.0 MB model. On an arm64 phone installing from an app
+bundle, which Play splits by CPU, that is about 14 MB installed and 6.4 MB downloaded; a universal APK
+carries all four libraries. A host that never asks what footage shows leaves it out in its
+`variables.gradle`:
+
+```groovy
+ext {
+    videokitImageLabeling = false   // or -PvideokitImageLabeling=false on the command line
+}
+```
+
+and the build has no ML Kit in it at all: `labelMedia` refuses as `unsupported`, as a browser does,
+and `describeMedia` answers null.
+
+| Scene | What it means |
+|---|---|
+| `screen` | a screen recording or a screenshot: a game, an app |
+| `game` | a game, on a screen or on a table: a video game, a board game, cards, chess |
+| `sport` | sport, fitness, and anything done on a board, a bike or skis |
+| `food` | food and drink, a meal, a coffee |
+| `party` | a night out, a concert, dancing, fireworks, a festive day |
+| `birthday` | a birthday cake, candles, balloons, presents |
+| `love` | a wedding, a couple (Vision sees a wedding and not a couple; ML Kit sees both) |
+| `fashion` | what somebody is wearing: an outfit, shoes, a bag |
+| `pet` | a dog, a cat, a pet of any kind |
+| `kids` | a baby, a child, a playground, toys |
+| `people` | people, a face, a selfie, a crowd: counted low, since somebody is in most footage |
+| `home` | indoors at home: a living room, a bedroom, a kitchen |
+| `sunset` | a sunset or a sunrise, the light of golden hour |
+| `beach` | a beach, the sea, surfing, swimming |
+| `nature` | landscape: mountains, forests, lakes, snow, fields |
+| `city` | a city: buildings, skylines, streets |
+| `travel` | being on the way: planes, luggage, roads, boats |
+| `night` | the night sky, the moon, neon |
+
+**Two vocabularies, one set of scenes.** Vision knows 1303 things and names them in `snake_case`
+(`birthday_cake`); ML Kit knows 447 and names them in English (`Cake`). They score differently too:
+Vision gives a parent label its child's confidence, so one cake is `food`, `dessert`, `baked_goods`
+and `cake` at once, and ML Kit hands a few labels to nearly anything - `Dog` at 0.79 on a city bridge
+at night, `Event` at 0.94 on a sunset. `src/video-composer/scenes.ts` holds one table per engine: a
+label says a scene with a weight, and a label that is right when it is sure and wrong when it is not
+has a floor below which it counts for nothing (ML Kit's `Dog` below 0.9, where `Pet` is the label that
+tells a pet from a picture it merely thinks has a dog in it). In a frame a scene is as strong as its
+strongest label, never the sum of them, and across frames it is the mean, so a scene in the whole
+clip beats a stronger one in a single frame. `mergeScenes` averages a set the same way.
+
+The tables were tuned against both engines' real answers for 90 photographs of the themes a video
+app gets (beaches, parties, food, pets, sport, cities, couples, outfits) and the frames of eight
+screen-recorded games: Vision's two classifier revisions run on macOS, and the exact model file ML Kit
+bundles, run with its own score calibration. The strongest scene is the one a person names for the
+picture in 82% of them for Vision revision 2, 80% for revision 1 and 82% for ML Kit; most of the rest
+are pictures a person would call ambiguous too - an empty basketball court, a birthday cake that is
+also food. The same photographs and captures were then run through `labelMedia` itself on an iPhone
+14 Pro Max with iOS 26.6.2: Vision answered in about 23 ms a picture and under 0.7 s a video, its top
+label matched the Mac's for 80 of the 90 photographs, and lighsnip's One tap chose the same templates
+from its answers as from the Mac's (86% of random groups of one theme's photos, against 86%). A test holds every label in both tables against the engine's own vocabulary, so a
+misspelt label cannot quietly never match.
+
+**Frames.** A video is looked at in 5 frames unless `frames` (1 to 20) or `timesMs` says otherwise,
+each in the middle of its own share of the clip, so none is the first or the last, where a camera is
+being raised or lowered. The two phones then cut them the way their decoders make cheap:
+
+- **iOS** cuts every one, letting its image generator snap to a keyframe no further than half the gap
+  to the next time: with no limit, the frames of a screen recording, whose encoder writes a keyframe
+  every few seconds, came back as one picture four times out of five. Past a keyframe it decodes
+  forward on the hardware decoder, which costs next to nothing.
+- **Android** takes each time at its nearest keyframe, looked up in the index first (`MediaExtractor`,
+  which decodes nothing), two times at one keyframe being one frame, and cuts an exact frame only
+  while that leaves fewer than three different ones. `MediaMetadataRetriever` decodes in software: on
+  the Pixel 7 Pro emulator an exact frame of a 1080x1920 screen recording took 5.5 s against 0.7 s for
+  a keyframe, and five exact frames made eight seconds of game take twenty to read. Now it takes about
+  3 s there for a clip of any length, and a picture about 0.6 s. A phone's own video, with a keyframe
+  every second or two, still gives every frame asked for.
+
+`timeMs` on each frame is the frame the decoder actually handed over. A picture is decoded at 720
+pixels on its long edge and turned upright by its orientation tag.
+
+**The iOS simulator refuses, with `unsupported`.** Vision's classifier does not run there and does not
+say so: on the simulator's CPU it answers every picture with the same labels - a skateboarder and a
+black square both "outdoor, night_sky, moon" on iOS 26.1 and 18.5, and just as wrong on 16.4 - and it
+cannot open the simulator's GPU at all. Labels that look like an answer would steer a host wrong, so
+the simulator refuses as a browser does, once the file has been read. Test scene logic on a device,
+or on the Android emulator, where ML Kit runs on the CPU as it does on a phone.
+
+**What leaves the phone.** No picture, no frame and no label: both engines work on the device. ML Kit
+does send Google metrics about how the API performs and is used, and Google asks every app that ships
+it to say so to its users; see [ML Kit's data disclosure](https://developers.google.com/ml-kit/terms)
+and its [Google Play data safety guidance](https://developers.google.com/ml-kit/android-data-disclosure).
+Vision sends nothing.
+
+`labelMedia` rejects `invalid_spec` without a `uri` or with a `kind` that is neither `video` nor
+`image`, `unreadable_input` for a file that will not open, a picture that will not decode and a video
+with no frame, `unsupported` in a browser and in the iOS simulator, and `unknown` when the engine
+itself fails. `describeMedia` answers null for `unsupported` and for an app whose native build is older
+than the call (`UNIMPLEMENTED`), and rejects for the rest.
+
 ## Keeping picked media
 
 What a native picker hands over is good for the launch that picked it. A host that keeps picks past
@@ -2485,6 +2611,9 @@ size it stopped at. The code is the answer and the numbers are for the log.
 
 `saveToGallery`: `invalid_spec`, `permission_denied`, `unreadable_input`, `no_space`, `unsupported`
 (web only), `unknown`.
+
+`labelMedia`: `invalid_spec`, `unreadable_input`, `unsupported` (web and the iOS simulator),
+`unknown`.
 
 Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancelled`, `unknown` - each with `phase`, an optional `httpStatus`, and `retryable`.
 

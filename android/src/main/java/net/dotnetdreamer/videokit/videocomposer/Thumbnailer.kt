@@ -316,6 +316,22 @@ object Thumbnailer {
 
     /* ---------------------------------------------------------------------------------------- */
 
+    /**
+     * A retriever on `uri`, opened the way every call here opens one, for [MediaLabels], which cuts
+     * frames of its own. The caller closes it with [closeRetriever].
+     */
+    internal fun openRetriever(ctx: Context, uri: String): MediaMetadataRetriever =
+        MediaMetadataRetriever().also { retriever ->
+            try {
+                retriever.open(ctx, uri)
+            } catch (e: Exception) {
+                retriever.closeQuietly()
+                throw e
+            }
+        }
+
+    internal fun closeRetriever(retriever: MediaMetadataRetriever) = retriever.closeQuietly()
+
     private fun MediaMetadataRetriever.open(ctx: Context, uri: String) {
         val parsed = Uri.parse(uri)
         when (parsed.scheme) {

@@ -851,6 +851,57 @@ class VideoComposerPlugin : Plugin() {
     }
 
     /* ======================================================================================== */
+    /* labelMedia                                                                                */
+    /* ======================================================================================== */
+
+    /**
+     * ML Kit's labels for a picture or a few frames of a video ([MediaLabels]). The numbers are
+     * brought into range rather than refused, as [thumbnails] treats its times and as iOS does:
+     * `frames` to 1..20, `minConfidence` to 0..1, a time that is not a number to the first frame. A
+     * `kind` that is neither of the two is refused, because it is a caller's mistake with no reading
+     * to fall back on. On [pluginScope], because a frame is a decode and a label is an inference.
+     */
+    @PluginMethod
+    fun labelMedia(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        val kindName = call.getString("kind")
+        val kind = kindName?.let { MediaLabels.Kind.of(it) }
+        if (kindName != null && kind == null) {
+            call.reject("kind must be 'video' or 'image'", INVALID_SPEC)
+            return
+        }
+        val timesArray = call.getArray("timesMs")
+        val times = ArrayList<Long>()
+        if (timesArray != null) {
+            for (i in 0 until timesArray.length()) {
+                // iOS rounds a fractional time and reads anything that is not a number as 0.
+                val value = timesArray.optDouble(i, 0.0)
+                times += if (value.isFinite()) max(0L, Math.round(value)) else 0L
+            }
+        }
+        val frames = (call.getInt("frames") ?: MediaLabels.DEFAULT_FRAMES).coerceIn(1, MediaLabels.MAX_FRAMES)
+        val asked = call.getDouble("minConfidence")?.toFloat()
+        val minConfidence = if (asked != null && asked.isFinite()) asked.coerceIn(0f, 1f) else MediaLabels.DEFAULT_MIN_CONFIDENCE
+
+        pluginScope.launch {
+            try {
+                call.resolve(MediaLabels.label(context.applicationContext, uri, kind, times, frames, minConfidence).toJson())
+            } catch (e: MediaLabels.UnreadableException) {
+                call.reject(e.message, FailureCodes.UNREADABLE_INPUT)
+            } catch (e: MediaLabels.UnsupportedException) {
+                call.reject(e.message, FailureCodes.UNSUPPORTED)
+            } catch (e: Exception) {
+                // ML Kit itself failing, which is not the file's fault: the platform's own words.
+                call.reject(ErrorMapping.describe(e), FailureCodes.UNKNOWN)
+            }
+        }
+    }
+
+    /* ======================================================================================== */
     /* Sound library                                                                             */
     /* ======================================================================================== */
 

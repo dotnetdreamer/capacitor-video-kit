@@ -1093,6 +1093,82 @@ export interface ThumbnailsResult {
   uris: string[];
 }
 
+/**
+ * The phone's own image recogniser that read a picture: Apple's Vision on iOS
+ * (`VNClassifyImageRequest`), Google's ML Kit image labeling on Android, its on-device model
+ * bundled with the app. Each names things in its own words - `sunset_sunrise` and `Sunset`,
+ * `birthday_cake` and `Cake` - so a caller that reads the labels themselves needs to know which
+ * vocabulary it is reading. [scenesFromLabels] reads both into one.
+ */
+export type LabelEngine = 'vision' | 'mlkit';
+
+/** A picture or a video to be looked at, and how closely. */
+export interface LabelMediaOptions {
+  /** `file://`, `content://` or an absolute path: anything `probe` and `thumbnails` open. */
+  uri: string;
+  /**
+   * What the file holds. Absent is read off the file: a picture decoder that opens it makes it a
+   * picture, and anything else is read as a video. A host that knows - a picked picture comes back
+   * with `kind: 'image'` on its source - saves that look.
+   */
+  kind?: 'video' | 'image';
+  /**
+   * Source-relative times to look at a video's frames, in ms. Absent is [frames] of them, spread
+   * evenly through the clip. Ignored for a picture, which has one.
+   */
+  timesMs?: number[];
+  /**
+   * How many frames of a video to look at when `timesMs` is absent: 1 to 20, and 5 when absent.
+   * Each is taken at the middle of its own share of the clip, so 5 frames of a 10 second clip are
+   * at 1, 3, 5, 7 and 9 seconds, and none at the first or last frame, which is where a camera is
+   * still being raised or already lowered.
+   */
+  frames?: number;
+  /**
+   * The lowest confidence a label is reported at, 0 to 1. Absent is 0.1. Both engines score every
+   * label they know on every picture, most of them near nothing, and a low floor keeps the answer
+   * small without losing the weak labels that still say something together.
+   */
+  minConfidence?: number;
+}
+
+/** One thing an engine saw, and how sure it was. */
+export interface MediaLabel {
+  /**
+   * The engine's own name for it, exactly as the engine gives it: Vision's `snake_case`
+   * identifiers, ML Kit's English names (`Fast food`). See [LabelEngine].
+   */
+  label: string;
+  /** 0 to 1. */
+  confidence: number;
+}
+
+/** What the engine saw in one frame of a video, or in a picture. */
+export interface LabeledFrame {
+  /**
+   * The source time of the frame looked at, in ms: the frame the decoder actually handed over on
+   * iOS, which is the nearest keyframe and may sit a little way from the time asked for, and the
+   * time asked for on Android. 0 for a picture.
+   */
+  timeMs: number;
+  /** Strongest first, none below [LabelMediaOptions.minConfidence]. */
+  labels: MediaLabel[];
+}
+
+export interface LabelMediaResult {
+  engine: LabelEngine;
+  /**
+   * Which model of the engine answered, where it has more than one: Vision's classifier revision,
+   * 1 on iOS 16 and 2 from iOS 17. The two know the same labels and score them differently. Absent
+   * for ML Kit, whose model is the one the kit is built with.
+   */
+  revision?: number;
+  /** Whether the file was read as a picture or as a video. */
+  kind: 'video' | 'image';
+  /** One entry per frame looked at, in time order: one for a picture. */
+  frames: LabeledFrame[];
+}
+
 export interface StartVoiceRecordingOptions {
   /**
    * When known, the take is written straight into the job folder. The editor usually has no batch

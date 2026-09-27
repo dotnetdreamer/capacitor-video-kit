@@ -20,6 +20,8 @@ import type {
   GalleryAccessResult,
   GalleryThumbnailResult,
   JobIdOptions,
+  LabelMediaOptions,
+  LabelMediaResult,
   ListGalleryVideosResult,
   JobState,
   ListSoundsResult,
@@ -122,6 +124,18 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
     } catch (error) {
       throw coded(describe(error), 'unreadable_input');
     }
+  }
+
+  /*
+   * A page has no image recogniser to ask. The phones each ship one - Vision in iOS, the ML Kit
+   * model the kit bundles into an Android app - and a browser offers nothing of the kind to a
+   * page, so this refuses with the code the other calls use for what a platform cannot do, after
+   * the same check of the call a phone makes first. [describeMedia] reads the refusal as "nothing
+   * to say here" and answers null, so a host carries on without scenes.
+   */
+  async labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult> {
+    required(options?.uri, 'uri');
+    throw coded('a browser has no image recogniser a page can reach', 'unsupported');
   }
 
   async thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult> {

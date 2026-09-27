@@ -56,6 +56,13 @@ export { RenderFailedError } from './host/host.types';
 export { composerMediaHost, probeMediaDuration } from './video-composer/media-host';
 export type { ComposerMediaHostOptions, ComposerMediaPickers } from './video-composer/media-host';
 
+// What a picture or a clip shows, asked of the phone's own image recogniser and read into the kit's
+// scenes: here because it calls the plugin. The scenes themselves - `MEDIA_SCENES`,
+// `scenesFromLabels`, `mergeScenes` - are pure and come in with the editor's core below, which is
+// where a host without Capacitor reaches them.
+export { describeMedia } from './video-composer/media-scenes';
+export type { DescribeMediaOptions, MediaDescription } from './video-composer/media-scenes';
+
 // The URL the WebView loads a device file by, which the editor's `/ui` defaults use as its
 // `platform.fileUrl` and a Capacitor host wants for everything else it shows: a done screen's
 // render, a poster. It reads Capacitor's global rather than importing it, so it lives beside those

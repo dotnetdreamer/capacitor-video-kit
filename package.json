@@ -96,6 +96,8 @@
     "Package.swift",
     "CapacitorVideoKit.podspec",
     "android/src/main/",
+    "android/src/labeling/",
+    "android/src/nolabeling/",
     "android/build.gradle",
     "android/proguard-rules.pro",
     "mcp/**",

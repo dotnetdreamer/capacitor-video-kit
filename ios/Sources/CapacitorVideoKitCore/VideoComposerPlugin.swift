@@ -5,7 +5,7 @@ import UIKit
 /// The bridge surface of the video composer. Argument reading, rejections and event forwarding
 /// only: every decision lives in `ComposeSpecParser`, `JobRegistry`, `JobFolders`, `Thumbnailer`,
 /// `Gallery`, `GalleryLibrary`, `RetainedMedia`, `StagedRenderInputs`, `AudioFilePicker`,
-/// `EncodeSupport` or `VoiceRecorder`, so this file stays readable next to the Kotlin it mirrors.
+/// `EncodeSupport`, `MediaLabels` or `VoiceRecorder`, so this file stays readable next to the Kotlin it mirrors.
 ///
 /// Capacitor calls each `@objc func` on its own serial queue, shared with every other plugin in the
 /// app and never main, so nothing here does file or AV work inline: a method either answers from
@@ -17,7 +17,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "VideoComposerPlugin"
     public let jsName = "VideoComposer"
 
-    /// Twenty-eight entries. A method missing from this list is rejected by the bridge before this class
+    /// Twenty-nine entries. A method missing from this list is rejected by the bridge before this class
     /// is consulted, which is exactly what used to happen to `systemInsets`: the `@objc func` alone
     /// changes nothing. `addListener` / `removeListener` / `removeAllListeners` are special-cased
     /// by `CapacitorBridge.handleJSCall` before the list is read and stay off it.
@@ -27,6 +27,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getState", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "probe", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "thumbnails", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "labelMedia", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "extractAudio", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
@@ -200,6 +201,52 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve(["uris": urls.map { $0.absoluteString }])
             } catch {
                 call.reject(ErrorMapping.describe(error), Reject.unreadableInput)
+            }
+        }
+    }
+
+    // MARK: - labelMedia
+
+    /// Vision's labels for a picture or a few frames of a video (`MediaLabels`). The numbers are
+    /// brought into range rather than refused, as `thumbnails` treats its times: `frames` to 1...20,
+    /// `minConfidence` to 0...1, and a time that is not a number to the first frame. A `kind` that is
+    /// neither of the two is refused, because it is a caller's mistake with no reading to fall back on.
+    @objc func labelMedia(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), !uri.isEmpty else {
+            call.reject("uri is required", Reject.invalidSpec)
+            return
+        }
+        var kind: MediaLabelsResult.Kind?
+        if let named = call.getString("kind") {
+            guard let known = MediaLabelsResult.Kind(rawValue: named) else {
+                call.reject("kind must be 'video' or 'image'", Reject.invalidSpec)
+                return
+            }
+            kind = known
+        }
+        guard let url = JobFolders.fileURL(from: uri) else {
+            call.reject("unreadable uri \(uri)", Reject.unreadableInput)
+            return
+        }
+        let timesMs: [Int64] = (call.getArray("timesMs") ?? []).map { value in
+            guard let number = value as? NSNumber, number.doubleValue.isFinite else { return 0 }
+            return max(0, Int64(number.doubleValue.rounded()))
+        }
+        let frames = min(MediaLabels.maxFrames, max(1, call.getInt("frames") ?? MediaLabels.defaultFrames))
+        let asked = call.getDouble("minConfidence").map { Float($0) } ?? MediaLabels.defaultMinConfidence
+        let minConfidence = asked.isFinite ? min(1, max(0, asked)) : MediaLabels.defaultMinConfidence
+        let options = MediaLabels.Options(kind: kind, timesMs: timesMs, frames: frames, minConfidence: minConfidence)
+
+        Task {
+            do {
+                call.resolve(try await MediaLabels.label(url, options: options).json)
+            } catch let MediaLabels.LabelError.unreadable(message) {
+                call.reject(message, Reject.unreadableInput)
+            } catch let MediaLabels.LabelError.unsupported(message) {
+                call.reject(message, ComposeFailureCode.unsupported.rawValue)
+            } catch {
+                // Vision itself failing, which is not the file's fault: the platform's own words.
+                call.reject(ErrorMapping.describe(error), ComposeFailureCode.unknown.rawValue)
             }
         }
     }

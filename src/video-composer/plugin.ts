@@ -21,6 +21,8 @@ import type {
   GalleryAccessResult,
   GalleryThumbnailOptions,
   GalleryThumbnailResult,
+  LabelMediaOptions,
+  LabelMediaResult,
   ListGalleryVideosOptions,
   ListGalleryVideosResult,
   ListSoundsResult,
@@ -73,6 +75,33 @@ export interface VideoComposerPlugin {
   probe(options: ProbeOptions): Promise<ProbeResult>;
 
   thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult>;
+
+  /**
+   * What the phone's own image recogniser sees in a picture, or in a few frames of a video: its
+   * labels, each with a confidence, frame by frame.
+   *
+   * On the device and nowhere else, with nothing downloaded and nothing sent: Apple's Vision
+   * (`VNClassifyImageRequest`) on iOS, which is part of the system, and Google's ML Kit image
+   * labeling on Android, whose model the kit bundles into the app, so it works offline on the first
+   * call. Neither needs a permission. A frame is cut from the video the way [thumbnails] cuts one,
+   * at the nearest keyframe, and looked at small: what an image classifier reads is the whole of
+   * the picture, not its detail.
+   *
+   * The two engines name things in their own words and score them their own way, which is why the
+   * answer says which one read it ([LabelEngine]). [describeMedia] is the call most hosts want
+   * instead: it asks this, and reads either vocabulary into the same scenes ([MediaScene]).
+   *
+   * Rejects `invalid_spec` without a `uri`, and `unreadable_input` for a file that will not open,
+   * a picture that will not decode and a video with no frame to give; `unknown`, in the platform's
+   * own words, when the engine itself fails. A number out of range is brought into it rather than
+   * refused: `frames` to 1..20, `minConfidence` to 0..1, a negative time to the first frame and a
+   * time past the end to the last. The web rejects with `unsupported`, because a browser has no
+   * image recogniser a page can reach, and so does the iOS SIMULATOR, once it has read the file:
+   * Vision's classifier does not run there, and rather than fail it answers every picture with the
+   * same few labels - a black square and a skateboarder both "outdoor, night_sky, moon" - which
+   * would steer a host exactly as wrong as a real answer steers it right. On a device it runs.
+   */
+  labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult>;
 
   /**
    * Pulls a video's audio track out into a file of its own and, by default, keeps it in the sound

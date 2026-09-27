@@ -7,6 +7,7 @@ ext {
     workManagerVersion = project.hasProperty('workManagerVersion') ? rootProject.ext.workManagerVersion : '2.11.2'
     okhttpVersion = project.hasProperty('okhttpVersion') ? rootProject.ext.okhttpVersion : '4.12.0'
     kotlinxCoroutinesVersion = project.hasProperty('kotlinxCoroutinesVersion') ? rootProject.ext.kotlinxCoroutinesVersion : '1.10.2'
+    mlkitImageLabelingVersion = project.hasProperty('mlkitImageLabelingVersion') ? rootProject.ext.mlkitImageLabelingVersion : '17.0.9'
 }
 
 buildscript {
@@ -25,6 +26,17 @@ buildscript {
 
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
+
+/*
+ * labelMedia's engine, ML Kit image labeling, is ON unless the host turns it off with
+ * `videokitImageLabeling = false` in its variables.gradle (or `-PvideokitImageLabeling=false`). It is
+ * the heaviest thing the kit adds to an app: a native library of about 11 MB for each CPU a build
+ * carries (arm64-v8a; 7 MB for armeabi-v7a, 12 MB each for x86 and x86_64) and a 3 MB model, which
+ * is 14 MB installed and about 6.4 MB downloaded on an arm64 phone from an app bundle, which Play
+ * splits by CPU. A host that never asks what footage shows leaves it out; labelMedia then refuses as
+ * `unsupported`, as a browser does. The switch picks one of the two `SceneLabeler.kt` files.
+ */
+def imageLabeling = (project.findProperty('videokitImageLabeling') ?: true).toString() != 'false'
 
 android {
     // One module, two Capacitor plugin classes. The Kotlin packages stay separate
@@ -50,6 +62,11 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
+    }
+    sourceSets {
+        main {
+            java.srcDirs += imageLabeling ? 'src/labeling/java' : 'src/nolabeling/java'
+        }
     }
     testOptions {
         // The pure classes (colour matrices, the render plan, the gain ramp, the parsers) touch
@@ -88,6 +105,15 @@ dependencies {
     implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
 
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$kotlinxCoroutinesVersion"
+
+    // --- VideoComposer: labelMedia ---
+    // ML Kit image labeling with its base model BUNDLED rather than the Play services one that is
+    // downloaded on first use: labelMedia answers offline from the first call, and on a phone without
+    // Play services. Its size, and how a host leaves it out, is under `imageLabeling` above. iOS
+    // needs nothing: Vision is part of the OS.
+    if (imageLabeling) {
+        implementation "com.google.mlkit:image-labeling:$mlkitImageLabelingVersion"
+    }
 
     testImplementation "junit:junit:$junitVersion"
     // The real org.json: the android.jar stub returns null from every getter once

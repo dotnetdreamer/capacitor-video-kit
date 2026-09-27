@@ -107,3 +107,19 @@ describe('the native-only calls, in a browser', () => {
     await expect(plugin.releaseRenderInputs({ uris: [] })).rejects.toMatchObject({ code: 'UNIMPLEMENTED' });
   });
 });
+
+/*
+ * A page has no image recogniser: the call is checked the way a phone checks it, and then refused
+ * with the code a host reads as "not on this platform", which `describeMedia` turns into null.
+ */
+describe('labelMedia, in a browser', () => {
+  const plugin: VideoComposerPlugin = new VideoComposerWeb();
+
+  it('refuses a call without a file as a phone does, and every other call as unsupported', async () => {
+    await expect(plugin.labelMedia({ uri: '' })).rejects.toMatchObject({ code: 'invalid_spec', message: 'uri is required' });
+    await expect(plugin.labelMedia({} as never)).rejects.toMatchObject({ code: 'invalid_spec' });
+    await expect(plugin.labelMedia({ uri: 'blob:https://example.test/a', kind: 'image' })).rejects.toMatchObject({
+      code: 'unsupported',
+    });
+  });
+});

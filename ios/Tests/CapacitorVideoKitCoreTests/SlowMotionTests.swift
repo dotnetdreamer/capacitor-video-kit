@@ -1,3 +1,4 @@
+import simd
 import XCTest
 @testable import CapacitorVideoKitCore
 
