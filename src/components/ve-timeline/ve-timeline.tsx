@@ -15,6 +15,7 @@ import {
   findOverlay,
   findVideoTrack,
   moveLayerTo,
+  musicMovedTo,
   musicSectionMs,
   musicSourceMsAt,
   musicWindow,
@@ -249,10 +250,6 @@ interface ClipHandlesView extends TrimHandlesView {
   trackId: string | null;
 }
 
-interface MusicHandlesView extends EdgeHandlesView {
-  canTrimEnd: boolean;
-}
-
 interface LayerLaneView {
   id: string;
   kind: OverlayKind;
@@ -272,7 +269,6 @@ interface MusicLaneView {
   w: number;
   label: string;
   selected: boolean;
-  canTrimEnd: boolean;
 }
 
 /**
@@ -731,13 +727,13 @@ export class VeTimeline {
     return lane ? { id: lane.id, ...edgeHandles(lane.x, lane.w) } : null;
   });
 
-  /** The sound bar's, when it is selected. A looping track has no end to catch. */
-  private readonly musicHandles = computedWith<MusicHandlesView | null>(
+  /** The sound bar's, when it is selected. A looping track's end handle sets where the repeats stop. */
+  private readonly musicHandles = computedWith<EdgeHandlesView | null>(
     () => {
       const music = this.musicLane.value;
-      return music?.selected ? { canTrimEnd: music.canTrimEnd, ...edgeHandles(music.x, music.w) } : null;
+      return music?.selected ? edgeHandles(music.x, music.w) : null;
     },
-    (a, b) => a === b || (!!a && !!b && a.inX === b.inX && a.outX === b.outX && a.canTrimEnd === b.canTrimEnd),
+    (a, b) => a === b || (!!a && !!b && a.inX === b.inX && a.outX === b.outX),
   );
 
   /** One lane per layer, FRONT-MOST FIRST: the top lane is the layer drawn on top. */
@@ -803,10 +799,9 @@ export class VeTimeline {
         w: Math.max(MIN_ITEM_PX, ((endMs - startMs) / 1000) * pps),
         label: music.fileName || 'Sound',
         selected: store.selection.value?.kind === 'music',
-        canTrimEnd: !music.loop,
       };
     },
-    (a, b) => a === b || (!!a && !!b && a.x === b.x && a.w === b.w && a.label === b.label && a.selected === b.selected && a.canTrimEnd === b.canTrimEnd),
+    (a, b) => a === b || (!!a && !!b && a.x === b.x && a.w === b.w && a.label === b.label && a.selected === b.selected),
   );
 
   /** TikTok's "Add sound" bar runs the length of the video, but never shorter than its label. */
@@ -859,6 +854,7 @@ export class VeTimeline {
       music.inMs,
       music.outMs,
       music.startMs,
+      music.endMs,
       music.loop ? 1 : 0,
       music.sourceDurationMs,
       store.totalMs.value,
@@ -2396,7 +2392,7 @@ export class VeTimeline {
   private startMusicDrag(base: DragBase, mode: MusicDrag['mode']): void {
     const store = this.ctx.store;
     const music = store.manifest.value.music;
-    if (!music || (mode === 'end' && music.loop)) return;
+    if (!music) return;
     store.beginGesture();
     this.beginDrag({
       ...base,
@@ -2804,17 +2800,17 @@ export class VeTimeline {
     } else {
       const hi = Math.max(0, total - MIN_LAYER_MS);
       let start = clamp(music0.startMs + deltaMs, 0, hi);
-      // A looping track always ends with the video, and so does one the bar had to cut off - one
-      // whose length is unknown, or longer than what is left of the video. The bar's right edge is
-      // then the video's end rather than the sound's, and snapping to it would hold the whole bar
-      // against a line that is not the sound's at all. Only a section that is known, and really does
-      // stop before the video, has an end edge worth offering.
-      const section = musicSectionMs(music0);
-      const hasEnd = !music0.loop && section > 0 && start + section < total;
-      const hit = nearestSnap(hasEnd ? [start, start + section] : [start], targets, pps);
+      // A looping track with no stop always ends with the video, and so does one the bar had to cut
+      // off - one whose length is unknown, or longer than what is left of the video. The bar's right
+      // edge is then the video's end rather than the sound's, and snapping to it would hold the whole
+      // bar against a line that is not the sound's at all. Only an end the sound really has before
+      // the video's - its section running out, or the stop it was given - is worth offering.
+      const end = musicWindow({ ...music0, ...musicMovedTo(music0, start, total) }, total).endMs;
+      const hit = nearestSnap(end < total ? [start, end] : [start], targets, pps);
       if (hit) start = clamp(start + hit.shiftMs, 0, hi);
       this.noteSnap(drag, hit?.target ?? null);
-      store.previewMusic({ startMs: start });
+      // The stop travels with the bar, so what is heard keeps its length.
+      store.previewMusic(musicMovedTo(music0, start, total));
     }
   }
 
@@ -3640,7 +3636,7 @@ export class VeTimeline {
               </span>
             </div>,
             handles ? <span class="handle handle--in" key="music-in" data-hit="music-start" style={{ left: `${handles.inX}px` }}></span> : null,
-            handles?.canTrimEnd ? <span class="handle handle--out" key="music-out" data-hit="music-end" style={{ left: `${handles.outX}px` }}></span> : null,
+            handles ? <span class="handle handle--out" key="music-out" data-hit="music-end" style={{ left: `${handles.outX}px` }}></span> : null,
           ]
         ) : (
           <button

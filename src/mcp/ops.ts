@@ -747,6 +747,7 @@ const OPS: Record<string, Apply> = {
       inMs: optionalNum(raw, 'inMs', 0),
       outMs: optionalNum(raw, 'outMs', 0),
       startMs: optionalNum(raw, 'startMs', 0),
+      endMs: optionalNum(raw, 'endMs', 0),
       volume: optionalNum(raw, 'volume', 1),
       loop: optionalBool(raw, 'loop', false),
       fadeOutMs: optionalNum(raw, 'fadeOutMs', 0),

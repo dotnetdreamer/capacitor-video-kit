@@ -1724,7 +1724,9 @@ the first clip and then fails the whole export at the first item boundary. (It d
 
 **Music repeats explicitly.** `setIsLooping` repeats the whole sequence including its leading gap,
 so a track starting three seconds in would go silent for three seconds on every repeat. The plan
-lays out numbered repetitions and clips the last one, in microseconds, to the video's exact end.
+lays out numbered repetitions and clips the last one, in microseconds, to the video's exact end -
+or to `ComposeMusic.endMs`, when the music was given a stop before that (the editor's end handle on
+a looping sound sets it; `EditMusic.endMs` of 0 means "until the end").
 
 **Fades multiply, they do not replace.** Media3's `DefaultGainProvider.addFadeAt` overrides the
 default gain inside the fade window, so a 60 %-volume track would ramp to 100 % and then drop.

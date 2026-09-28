@@ -16,7 +16,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 11;
+export const MANIFEST_VERSION = 12;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -292,8 +292,13 @@ export interface EditMusic {
   outMs: number;
   /** Where the track starts on the OUTPUT timeline. */
   startMs: number;
+  /**
+   * Where the sound stops on the OUTPUT timeline. 0 means "until the end" - the end of the video for
+   * a looping track, the end of the section for one that plays once, whichever comes first.
+   */
+  endMs: number;
   volume: number;
-  /** Repeat the section until the video ends. */
+  /** Repeat the section until the video ends, or until `endMs` when it is set. */
   loop: boolean;
   fadeOutMs: number;
 }
@@ -1590,6 +1595,10 @@ export function emptyManifest(): EditManifest {
  * older manifest: a version-10 layer has no `animation`, which is a cut in, a cut out and still, and
  * [toComposeSpec] sends it with no `motion` - byte for byte the spec version 10 produced. Bumped for
  * the reason version 10 was: an older build reading a version-11 draft drops every layer's moves.
+ *
+ * Version 11 to version 12 adds the music's [EditMusic.endMs], read as 0 from an older manifest:
+ * "until the end", which is where every sound stopped before - byte for byte the spec version 11
+ * produced. Bumped because an older build reading a version-12 draft plays a stopped sound to the end.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1689,6 +1698,7 @@ export function normaliseManifest(input: unknown): EditManifest {
         inMs: Math.max(0, num(m.inMs, 0)),
         outMs: Math.max(0, num(m.outMs, 0)),
         startMs: Math.max(0, num(m.startMs, 0)),
+        endMs: Math.max(0, num(m.endMs, 0)),
         volume: clamp(num(m.volume, 0.6), 0, 1),
         loop: m.loop ?? true,
         fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),

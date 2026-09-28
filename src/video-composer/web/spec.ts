@@ -251,6 +251,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
             startMs: Math.max(0, finite(music.startMs, 0)),
             inMs: Math.max(0, finite(music.inMs, 0)),
             outMs: Math.max(0, finite(music.outMs, 0)),
+            ...(finite(music.endMs, 0) > 0 ? { endMs: finite(music.endMs, 0) } : {}),
             volume: clamp(finite(music.volume, 1), 0, 1),
             loop: music.loop === true,
             fadeInMs: Math.max(0, finite(music.fadeInMs, 0)),

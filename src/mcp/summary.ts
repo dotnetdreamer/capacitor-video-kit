@@ -109,9 +109,12 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
   if (manifest.music) {
     const music = manifest.music;
     const section = music.outMs > 0 ? `${time(music.inMs)}..${time(music.outMs)}` : `from ${time(music.inMs)}`;
+    const stop = music.endMs > 0 ? `, stopping at ${time(music.endMs)}` : '';
     const loop = music.loop ? ', looped' : '';
     const fade = music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '';
-    sound.push(`Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post, ` + `${percent(music.volume)}${loop}${fade}`);
+    sound.push(
+      `Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ` + `${percent(music.volume)}${loop}${fade}`,
+    );
   } else {
     sound.push('Music: none');
   }

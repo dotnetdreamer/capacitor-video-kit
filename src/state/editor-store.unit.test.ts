@@ -70,6 +70,7 @@ const MUSIC: EditMusic = {
   inMs: 0,
   outMs: 0,
   startMs: 0,
+  endMs: 0,
   volume: 0.6,
   loop: true,
   fadeOutMs: 400,

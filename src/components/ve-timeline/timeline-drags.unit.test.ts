@@ -12,6 +12,7 @@ function track(over: Partial<EditMusic> = {}): EditMusic {
     inMs: 0,
     outMs: 0,
     startMs: 0,
+    endMs: 0,
     volume: 1,
     loop: false,
     fadeOutMs: 0,
@@ -68,35 +69,67 @@ describe('musicStartTrim', () => {
   it('answers in whole milliseconds', () => {
     expect(musicStartTrim(track(), 2000.6, 20_000)).toEqual({ startMs: 2001, inMs: 2001 });
   });
+
+  it('leaves some sound before the stop, when the track has one', () => {
+    const music = track({ loop: true, startMs: 0, inMs: 0, endMs: 6000 });
+    expect(musicStartTrim(music, 9000, 20_000)).toEqual({ startMs: 6000 - MIN_LAYER_MS, inMs: 6000 - MIN_LAYER_MS });
+  });
 });
 
 describe('musicEndTrim', () => {
   it('sets how long the section runs, from where the bar starts', () => {
     const music = track({ startMs: 1000, inMs: 2000 });
-    expect(musicEndTrim(music, 6000, 20_000)).toEqual({ outMs: 7000 });
+    expect(musicEndTrim(music, 6000, 20_000)).toEqual({ outMs: 7000, endMs: 0 });
   });
 
   it('never runs the bar past the video', () => {
     const music = track({ startMs: 1000, inMs: 2000 });
-    expect(musicEndTrim(music, 25_000, 20_000)).toEqual({ outMs: 21_000 });
+    expect(musicEndTrim(music, 25_000, 20_000)).toEqual({ outMs: 21_000, endMs: 0 });
   });
 
   it('never runs the section past the end of the track', () => {
     const music = track({ startMs: 0, inMs: 25_000 });
-    expect(musicEndTrim(music, 50_000, 60_000)).toEqual({ outMs: 30_000 });
+    expect(musicEndTrim(music, 50_000, 60_000)).toEqual({ outMs: 30_000, endMs: 0 });
   });
 
   it('keeps a section of at least MIN_LAYER_MS when the handle is dragged onto the start', () => {
     const music = track({ startMs: 5000 });
-    expect(musicEndTrim(music, 5000, 20_000)).toEqual({ outMs: MIN_LAYER_MS });
+    expect(musicEndTrim(music, 5000, 20_000)).toEqual({ outMs: MIN_LAYER_MS, endMs: 0 });
   });
 
   it('is held only by the video when the track length could not be read', () => {
     const music = track({ sourceDurationMs: 0 });
-    expect(musicEndTrim(music, 50_000, 8000)).toEqual({ outMs: 8000 });
+    expect(musicEndTrim(music, 50_000, 8000)).toEqual({ outMs: 8000, endMs: 0 });
   });
 
   it('answers in whole milliseconds', () => {
-    expect(musicEndTrim(track(), 4000.6, 20_000)).toEqual({ outMs: 4001 });
+    expect(musicEndTrim(track(), 4000.6, 20_000)).toEqual({ outMs: 4001, endMs: 0 });
+  });
+
+  it('clears a stop left over from looping, so the bar follows the handle', () => {
+    const music = track({ startMs: 1000, endMs: 8000 });
+    expect(musicEndTrim(music, 12_000, 20_000)).toEqual({ outMs: 11_000, endMs: 0 });
+  });
+
+  describe('on a looping track', () => {
+    it('sets where the repeats stop and leaves the section alone', () => {
+      const music = track({ loop: true, startMs: 1000, inMs: 2000, outMs: 6000 });
+      expect(musicEndTrim(music, 14_000, 20_000)).toEqual({ endMs: 14_000 });
+    });
+
+    it('goes back to "until the end" at the end of the video, and past it', () => {
+      const music = track({ loop: true, endMs: 9000 });
+      expect(musicEndTrim(music, 20_000, 20_000)).toEqual({ endMs: 0 });
+      expect(musicEndTrim(music, 26_000, 20_000)).toEqual({ endMs: 0 });
+    });
+
+    it('keeps at least MIN_LAYER_MS of sound when the handle is dragged onto the start', () => {
+      const music = track({ loop: true, startMs: 5000 });
+      expect(musicEndTrim(music, 3000, 20_000)).toEqual({ endMs: 5000 + MIN_LAYER_MS });
+    });
+
+    it('answers in whole milliseconds', () => {
+      expect(musicEndTrim(track({ loop: true }), 4000.6, 20_000)).toEqual({ endMs: 4001 });
+    });
   });
 });

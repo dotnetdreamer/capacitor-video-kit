@@ -981,7 +981,8 @@ class RenderPlan private constructor(
          * Music is laid out as explicit repetitions rather than with `setIsLooping`, which repeats
          * the WHOLE sequence: a track that starts three seconds in would go silent for three
          * seconds on every repeat. Explicit items also let the last one be clipped exactly to the
-         * end of the video, so the audio sequence can never outlast (and therefore extend) it.
+         * end of the video, so the audio sequence can never outlast (and therefore extend) it - or
+         * to the music's own stop, when it has one before that.
          */
         private fun planMusic(
             music: Music?,
@@ -1000,7 +1001,9 @@ class RenderPlan private constructor(
             if (trackLenUs <= 0L) return null
 
             val startUs = music.startMs * 1000L
-            val availableUs = totalUs - startUs
+            // The end of the video, or the music's own stop when it has one before that.
+            val stopUs = if (music.endMs > 0L) min(totalUs, music.endMs * 1000L) else totalUs
+            val availableUs = stopUs - startUs
             if (availableUs <= 0L) return null
 
             var reps = if (music.loop) {

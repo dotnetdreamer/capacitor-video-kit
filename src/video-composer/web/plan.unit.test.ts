@@ -266,6 +266,48 @@ describe('music', () => {
     );
     expect(plan.music?.items).toHaveLength(1);
   });
+
+  it('stops repeating at its own stop, cut and faded there rather than at the end of the video', () => {
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: 5000 })],
+        audio: {
+          originalMuted: false,
+          originalVolume: 1,
+          voiceover: [],
+          music: {
+            uri: 'file:///m.mp3',
+            startMs: 0,
+            inMs: 0,
+            outMs: 1000,
+            endMs: 1700,
+            volume: 1,
+            loop: true,
+            fadeInMs: 0,
+            fadeOutMs: 500,
+          },
+        },
+      }),
+      new Map(),
+    );
+    const items = plan.music?.items ?? [];
+    expect(items).toHaveLength(2);
+    expect(items[1]?.atUs).toBe(1_000_000);
+    expect((items[1]?.outUs ?? 0) - (items[1]?.inUs ?? 0)).toBe(700_000);
+    expect(items[1]?.fadeOutStartUs).toBe(200_000);
+  });
+
+  it('cuts a section that plays once at its stop, and ignores a stop past the end of the video', () => {
+    const music = { uri: 'file:///m.mp3', startMs: 0, inMs: 0, outMs: 4000, volume: 1, loop: false, fadeInMs: 0, fadeOutMs: 0 };
+    const at = (endMs: number) =>
+      buildPlan(spec({ clips: [clip({ outMs: 3000 })], audio: { originalMuted: false, originalVolume: 1, voiceover: [], music: { ...music, endMs } } }), new Map())
+        .music?.items ?? [];
+    const early = at(1200);
+    expect(early).toHaveLength(1);
+    expect((early[0]?.outUs ?? 0) - (early[0]?.inUs ?? 0)).toBe(1_200_000);
+    const late = at(9000);
+    expect((late[0]?.outUs ?? 0) - (late[0]?.inUs ?? 0)).toBe(3_000_000);
+  });
 });
 
 describe('voiceovers', () => {

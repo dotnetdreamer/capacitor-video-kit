@@ -235,7 +235,7 @@ describe('EditorMedia', () => {
       open(fakeMedia(), PEAKS);
       store.commit('Seed', m => ({
         ...m,
-        music: { uri: 'blob:saved', fileName: 'saved', sourceDurationMs: 9000, inMs: 0, outMs: 0, startMs: 0, volume: 1, loop: true, fadeOutMs: 0 },
+        music: { uri: 'blob:saved', fileName: 'saved', sourceDurationMs: 9000, inMs: 0, outMs: 0, startMs: 0, endMs: 0, volume: 1, loop: true, fadeOutMs: 0 },
       }));
       await settle();
 

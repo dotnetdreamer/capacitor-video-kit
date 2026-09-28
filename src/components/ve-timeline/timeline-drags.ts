@@ -1,4 +1,4 @@
-import { MIN_LAYER_MS, clamp, type ClipDropTarget, type EditMusic } from '../../editor';
+import { MIN_LAYER_MS, clamp, musicStopMs, type ClipDropTarget, type EditMusic } from '../../editor';
 import type { CoalesceKey } from '../../state/editor-store';
 
 import type { DropRow } from './timeline-geometry';
@@ -296,13 +296,13 @@ export type TimelineDrag =
  * The music's left handle trims the START of what is heard: the track's in point and its place on
  * the timeline move together, so the sound that was under the handle stays where it was on the
  * video. It can go neither before the start of the video nor before the start of the track, and
- * must leave at least [MIN_LAYER_MS] of section.
+ * must leave at least [MIN_LAYER_MS] of section, and of sound before its stop.
  */
 export function musicStartTrim(music0: EditMusic, newStartMs: number, totalMs: number): Partial<EditMusic> {
   const out = music0.outMs > 0 ? music0.outMs : music0.sourceDurationMs;
   const minDelta = Math.max(-music0.startMs, -music0.inMs);
   const maxDelta = Math.min(
-    totalMs - MIN_LAYER_MS - music0.startMs,
+    musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs,
     out > 0 ? out - MIN_LAYER_MS - music0.inMs : Number.POSITIVE_INFINITY,
   );
   const delta = Math.round(clamp(newStartMs - music0.startMs, minDelta, Math.max(minDelta, maxDelta)));
@@ -310,14 +310,25 @@ export function musicStartTrim(music0: EditMusic, newStartMs: number, totalMs: n
 }
 
 /**
- * The right handle sets how long the section runs. The bar can never run past the video, and the
- * section never past the end of the track. (A looping track has no end handle at all: it always
- * plays to the end of the video.)
+ * The right handle.
+ *
+ * On a track that plays once it sets how long the section runs. The bar can never run past the
+ * video, and the section never past the end of the track. The section is then the only thing that
+ * ends the sound, so a stop left over from looping is cleared rather than left to hold the bar back.
+ *
+ * On a looping track the section keeps repeating, and the handle sets where the repeats STOP,
+ * anywhere from [MIN_LAYER_MS] after the start to the end of the video. At the end of the video
+ * it goes back to "until the end", so a post that is made longer later keeps its music to the
+ * last frame.
  */
 export function musicEndTrim(music0: EditMusic, newEndMs: number, totalMs: number): Partial<EditMusic> {
+  if (music0.loop) {
+    const end = Math.round(clamp(newEndMs, music0.startMs + MIN_LAYER_MS, totalMs));
+    return { endMs: end >= totalMs ? 0 : end };
+  }
   const maxLength = music0.sourceDurationMs > 0 ? music0.sourceDurationMs - music0.inMs : Number.POSITIVE_INFINITY;
   const length = clamp(Math.min(newEndMs, totalMs) - music0.startMs, MIN_LAYER_MS, Math.max(MIN_LAYER_MS, maxLength));
-  return { outMs: Math.round(music0.inMs + length) };
+  return { outMs: Math.round(music0.inMs + length), endMs: 0 };
 }
 
 /**

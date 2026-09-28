@@ -688,7 +688,7 @@ describe('the waveform on an audio bar', () => {
   };
 
   function music(over: Partial<EditMusic> = {}): EditMusic {
-    return { uri: 'blob:tune', fileName: 'tune.mp3', sourceDurationMs: 20_000, inMs: 0, outMs: 0, startMs: 0, volume: 0.8, loop: true, fadeOutMs: 0, ...over };
+    return { uri: 'blob:tune', fileName: 'tune.mp3', sourceDurationMs: 20_000, inMs: 0, outMs: 0, startMs: 0, endMs: 0, volume: 0.8, loop: true, fadeOutMs: 0, ...over };
   }
 
   function wave(tl: HTMLElement): SVGPathElement | null {
@@ -833,6 +833,42 @@ describe('the waveform on an audio bar', () => {
     expect(views.musicHandles.value).toBe(handles);
     expect(renders()).toBe(before);
     store.endGesture('Move');
+  });
+
+  /*
+   * A sound goes on looping, and a looping one had no end handle at all: its bar always ran to the
+   * end of the video, so the only trim anyone could make was at the start. The handle now sets
+   * where the repeats STOP, and leaves the section being repeated as it was.
+   */
+  it('gives a looping track an end handle that sets where it stops', async () => {
+    const { store, tl } = await withMusic({ loop: true });
+    // The end of the video, 12 s, two seconds right of the centre line and inside the viewport.
+    store.seek(10_000);
+    await frames(3);
+    store.select({ kind: 'music' });
+    await until('the end handle', () => root(tl).querySelector('[data-hit="music-end"]') !== null);
+    const bar = root(tl).querySelector<HTMLElement>('[data-hit="music"]')!;
+    const widthBefore = bar.getBoundingClientRect().width;
+
+    const handle = root(tl).querySelector<HTMLElement>('[data-hit="music-end"]')!;
+    const rect = handle.getBoundingClientRect();
+    const from = { x: rect.left + 20, y: rect.top + rect.height / 2 };
+    const scroller = root(tl).querySelector('.tl__scroller')!;
+    pointer(handle, 'pointerdown', from.x, from.y);
+    pointer(scroller, 'pointermove', from.x - 64, from.y);
+    await frames(3);
+    pointer(scroller, 'pointerup', from.x - 64, from.y);
+    await frames(2);
+
+    // A second earlier at 64 px a second, still looping, the section untouched.
+    const after = store.manifest.value.music!;
+    expect(after.endMs).toBeCloseTo(11_000, -2);
+    expect(after.loop).toBe(true);
+    expect(after.outMs).toBe(0);
+    await until('the bar to follow the handle', () => Math.abs(bar.getBoundingClientRect().width - (widthBefore - 64)) < 2);
+
+    store.undo();
+    expect(store.manifest.value.music!.endMs).toBe(0);
   });
 
   it('draws a measured silence as a hairline rather than as nothing', async () => {

@@ -3,7 +3,7 @@ import { Component, Element, Host, Prop } from '@stencil/core';
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { MAX_LAYERS } from '../../editor';
+import { MAX_LAYERS, musicMovedTo } from '../../editor';
 import type { EditorIconName } from '../../icons/icons';
 import type { EditorPanel } from '../../state/editor.types';
 
@@ -786,7 +786,7 @@ export class VeToolbar {
           id: 'start-here',
           label: 'Start here',
           icon: 'play-skip-back-outline',
-          run: () => store.commitMusic({ startMs: Math.round(store.playheadMs.value) }, 'Move sound'),
+          run: () => this.startSoundHere(),
         },
         {
           id: 'replace',
@@ -858,6 +858,14 @@ export class VeToolbar {
       return;
     }
     this.ctx.store.openPanel(panel);
+  }
+
+  /** The sound moved whole to the playhead: a stop it has moves with it, so it keeps its length. */
+  private startSoundHere(): void {
+    const store = this.ctx.store;
+    const music = store.manifest.value.music;
+    if (!music) return;
+    store.commitMusic(musicMovedTo(music, store.playheadMs.value, store.totalMs.value), 'Move sound');
   }
 
   /** Read at tap time, not from the row, so a double tap between frames still flips it twice. */

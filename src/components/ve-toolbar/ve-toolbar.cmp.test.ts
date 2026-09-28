@@ -81,6 +81,7 @@ function fixture(): EditManifest {
       inMs: 0,
       outMs: 0,
       startMs: 0,
+      endMs: 0,
       volume: 0.45,
       loop: true,
       fadeOutMs: 0,

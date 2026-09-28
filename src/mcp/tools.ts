@@ -429,7 +429,10 @@ export const OP_REFERENCE: Record<string, string> = {
   splitOverlay: 'id, atMs, newId - two layers where there was one; the first keeps the animation’s in, the second its out, both its loop.',
 
   /* sound */
-  setMusic: 'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, volume?, loop?, fadeOutMs?}) or null.',
+  setMusic:
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, volume?, loop?, fadeOutMs?}) or null. ' +
+    'inMs..outMs is the section of the track, startMs where it starts on the post, and endMs where it stops ' +
+    '(0: until the end); a looping section repeats until endMs, or until the video ends.',
   patchMusic: 'patch - any of the music fields. Fails when the post has no music yet.',
   addVoiceover: 'id, uri, startMs, durationMs, volume? - takes never overlap.',
   patchVoiceover: 'id, volume.',

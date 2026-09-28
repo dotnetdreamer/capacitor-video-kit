@@ -1203,12 +1203,29 @@ export function musicSectionMs(music: EditMusic): number {
   return out > 0 ? Math.max(0, out - music.inMs) : 0;
 }
 
+/** The latest the music can be heard until: its own stop when it has one, or the end of the video. */
+export function musicStopMs(music: Pick<EditMusic, 'endMs'>, totalMs: number): number {
+  return music.endMs > 0 ? Math.min(music.endMs, totalMs) : totalMs;
+}
+
 /** Where the music is heard on the output timeline. */
 export function musicWindow(music: EditMusic, totalMs: number): { startMs: number; endMs: number } {
   const section = musicSectionMs(music);
   const startMs = Math.min(music.startMs, totalMs);
-  const endMs = music.loop || section === 0 ? totalMs : Math.min(totalMs, music.startMs + section);
+  const stopMs = musicStopMs(music, totalMs);
+  const endMs = music.loop || section === 0 ? stopMs : Math.min(stopMs, music.startMs + section);
   return { startMs, endMs: Math.max(startMs, endMs) };
+}
+
+/**
+ * The music moved whole to `startMs`. A stop it has moves with it, so what is heard keeps its length,
+ * and a stop carried to the end of the video or past it becomes "until the end" again.
+ */
+export function musicMovedTo(music: EditMusic, startMs: number, totalMs: number): Pick<EditMusic, 'startMs' | 'endMs'> {
+  const start = Math.round(startMs);
+  if (!(music.endMs > 0)) return { startMs: start, endMs: 0 };
+  const end = Math.round(music.endMs + start - music.startMs);
+  return { startMs: start, endMs: end >= totalMs ? 0 : end };
 }
 
 /** Position inside the TRACK for an output time, or null when the music is silent there. */
@@ -1231,7 +1248,10 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
   next.inMs = Math.max(0, Math.round(next.inMs));
   next.outMs = Math.max(0, Math.round(next.outMs));
   next.startMs = Math.max(0, Math.round(next.startMs));
+  // `|| 0` for music a host built before the field existed.
+  next.endMs = Math.max(0, Math.round(next.endMs || 0));
   if (next.outMs > 0 && next.outMs - next.inMs < MIN_LAYER_MS) return manifest;
+  if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;
   return { ...manifest, music: next };
 }

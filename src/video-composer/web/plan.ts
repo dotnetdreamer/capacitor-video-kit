@@ -486,7 +486,7 @@ function cutTo(item: PlannedClip, roomUs: number): PlannedClip | null {
 /**
  * Music as explicit repetitions rather than a looping source, so a track that starts three seconds
  * in does not go silent for three seconds on every repeat, and so the last repetition can be cut
- * exactly at the end of the video.
+ * exactly at the end of the video - or at the music's own stop, when it has one before that.
  */
 function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, ProbedInput>, totalUs: number): MusicPlan | null {
   if (!music) return null;
@@ -496,7 +496,8 @@ function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, Probe
   if (trackLenUs <= 0) return null;
 
   const startUs = Math.max(0, Math.round(music.startMs * 1000));
-  const availableUs = totalUs - startUs;
+  const stopUs = music.endMs !== undefined && music.endMs > 0 ? Math.min(totalUs, Math.round(music.endMs * 1000)) : totalUs;
+  const availableUs = stopUs - startUs;
   if (availableUs <= 0) return null;
 
   const reps = music.loop ? Math.max(1, Math.ceil(availableUs / trackLenUs)) : 1;

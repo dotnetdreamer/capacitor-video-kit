@@ -578,9 +578,15 @@ export interface ComposeMusic {
    */
   inMs: number;
   outMs: number;
+  /**
+   * Where the music stops on the OUTPUT timeline, when that is before the end of the video. Absent
+   * (or 0): it plays to the end of the video, or once through the trimmed section when it does not
+   * loop, whichever comes first. The last repetition is cut there and the fade-out ends there.
+   */
+  endMs?: number;
   /** 0..1. */
   volume: number;
-  /** Repeat the trimmed section until the video ends. */
+  /** Repeat the trimmed section until the video ends, or until `endMs`. */
   loop: boolean;
   /**
    * Up from silence at the start of the FIRST repetition, linear in amplitude at a slope of

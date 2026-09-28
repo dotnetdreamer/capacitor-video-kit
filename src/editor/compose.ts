@@ -174,6 +174,9 @@ export async function toComposeSpec(
             startMs: Math.max(0, Math.round(music.startMs)),
             inMs: Math.max(0, Math.round(music.inMs)),
             outMs: Math.round(music.outMs > 0 ? music.outMs : music.sourceDurationMs > 0 ? music.sourceDurationMs : UNKNOWN_TRACK_END_MS),
+            // Only a stop that cuts the music short, for the reason `tracks` is left off: music that
+            // plays to the end is the spec this package has always produced, byte for byte.
+            ...(music.endMs > 0 && music.endMs < totalMs ? { endMs: Math.round(music.endMs) } : {}),
             volume: music.volume,
             loop: music.loop,
             fadeInMs: 0,

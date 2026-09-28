@@ -48,6 +48,7 @@ function manifest(clips: number, level = START_LEVEL, muted = false): EditManife
       inMs: 0,
       outMs: 0,
       startMs: 0,
+      endMs: 0,
       volume: START_LEVEL,
       loop: true,
       fadeOutMs: 0,

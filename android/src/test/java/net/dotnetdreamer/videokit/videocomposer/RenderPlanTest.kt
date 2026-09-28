@@ -827,6 +827,30 @@ class RenderPlanTest {
     }
 
     @Test
+    fun `a looping track stops at its own stop, the last repetition clipped there`() {
+        val music = Music("file:///m.m4a", 1_000, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 400, endMs = 7_500)
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 10_000)), audio = Audio(false, 1f, music, emptyList())),
+            mapOf("file:///a.mp4" to probe(10_000), "file:///m.m4a" to probe(3_000)),
+        )
+        val items = plan.music!!.items
+        // 1 s to 7.5 s under ten seconds of video: two whole repetitions and half of a third.
+        assertEquals(3, items.size)
+        assertEquals(500_000L, items.last().outUs - items.last().inUs)
+        assertEquals(6_500_000L, items.sumOf { it.outUs - it.inUs })
+    }
+
+    @Test
+    fun `a stop past the end of the video changes nothing`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0, endMs = 60_000)
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 10_000)), audio = Audio(false, 1f, music, emptyList())),
+            mapOf("file:///a.mp4" to probe(10_000), "file:///m.m4a" to probe(3_000)),
+        )
+        assertEquals(10_000_000L, plan.music!!.items.sumOf { it.outUs - it.inUs })
+    }
+
+    @Test
     fun `a track that starts late gets a leading gap and covers only the rest`() {
         val music = Music("file:///m.m4a", 4_000, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)
         val plan = RenderPlan.build(

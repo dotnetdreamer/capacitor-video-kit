@@ -312,6 +312,11 @@ data class Music(
     val loop: Boolean,
     val fadeInMs: Long,
     val fadeOutMs: Long,
+    /**
+     * Where the music stops on the OUTPUT timeline; 0 plays it to the end of the video (or once
+     * through the trimmed section, when it does not loop).
+     */
+    val endMs: Long = 0L,
 )
 
 data class Voiceover(

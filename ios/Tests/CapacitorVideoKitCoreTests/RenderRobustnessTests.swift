@@ -129,6 +129,25 @@ final class RenderRobustnessTests: RenderTestCase {
         XCTAssertFalse(probed.hasAudio, "a silent video with its music dropped has nothing to mix")
     }
 
+    func testLoopedMusicStopsAtItsOwnStop() async throws {
+        let video = try await TestMedia.video(file("red.mp4"), durationMs: 2000, color: .red, audio: false)
+        let music = try RobustnessSupport.wav(file("tone.wav"), durationMs: 500)
+        // A half-second piece repeating from the start, told to stop at 1.2 s of a two-second post.
+        let options = TestSpecs.spec([TestSpecs.clip("v", video, outMs: 2000)], [
+            "audio": ["originalMuted": false, "originalVolume": 1, "voiceover": [Any](),
+                      "music": ["uri": music.absoluteString, "startMs": 0, "inMs": 0, "outMs": 500, "endMs": 1200,
+                                "volume": 1, "loop": true, "fadeInMs": 0, "fadeOutMs": 0]],
+        ])
+        let (out, _) = try await TestRender.render(options, to: file("out.mp4"))
+
+        let probed = try await TestMedia.probe(out)
+        XCTAssertEqual(Double(probed.durationMs), 2000, accuracy: 70, "the stop shortens the music, never the video")
+        let repeating = try await RobustnessSupport.rms(of: out, from: 0.6, to: 1.1)
+        XCTAssertGreaterThan(repeating, 0.05, "the second pass should be heard")
+        let after = try await RobustnessSupport.rms(of: out, from: 1.4, to: 1.9)
+        XCTAssertLessThan(after, 0.01, "nothing should be heard past the stop")
+    }
+
     func testMusicThatWillNotOpenStillFailsNamingTheMusic() async throws {
         let video = try await TestMedia.video(file("red.mp4"), durationMs: 500, color: .red, audio: false)
         let junk = file("music.wav")

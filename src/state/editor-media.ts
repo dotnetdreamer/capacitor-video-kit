@@ -715,6 +715,7 @@ export class EditorMedia {
         inMs: 0,
         outMs: 0,
         startMs: 0,
+        endMs: 0,
         volume: existing?.volume ?? 0.8,
         loop: true,
         fadeOutMs: 400,

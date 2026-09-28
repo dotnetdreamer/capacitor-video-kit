@@ -667,8 +667,28 @@ class ComposeSpecParserTest {
         assertEquals(0.5f, audio.originalVolume, 1e-6f)
         assertEquals(true, audio.music!!.loop)
         assertEquals(400L, audio.music!!.fadeOutMs)
+        // No stop on the wire: it plays to the end of the video.
+        assertEquals(0L, audio.music!!.endMs)
         assertEquals(1, audio.voiceover.size)
         assertEquals(1500L, audio.voiceover[0].durationMs)
+    }
+
+    @Test
+    fun `music keeps the stop it was given`() {
+        val json = minimalJson().apply {
+            put(
+                "audio",
+                JSONObject(
+                    """
+                    { "originalMuted": false, "originalVolume": 1,
+                      "music": { "uri": "file:///m.m4a", "startMs": 0, "inMs": 0, "outMs": 5000, "endMs": 7250,
+                                 "volume": 1, "loop": true, "fadeInMs": 0, "fadeOutMs": 0 },
+                      "voiceover": [] }
+                    """.trimIndent(),
+                ),
+            )
+        }
+        assertEquals(7250L, ComposeSpecParser.parse(json).audio.music!!.endMs)
     }
 
     @Test

@@ -1149,9 +1149,11 @@ enum CompositionBuilder {
                                  to comp: AVMutableComposition,
                                  total: CMTime,
                                  batchId: String) async throws -> AVMutableAudioMixInputParameters? {
+        // Where the music has to be quiet by: the end of the video, or its own stop before that.
+        let stop = m.endMs > 0 ? CMTimeMinimum(total, ms(m.endMs)) : total
         // Music that starts after the video ends is not an error, it is a manifest whose timeline
         // got shorter after the track was picked. Android's planMusic returns null for it too.
-        guard m.startMs < msOf(total) else { return nil }
+        guard m.startMs < msOf(stop) else { return nil }
 
         let src = try await audioSource(m.uri, key: "music", batchId: batchId)
         // The lab deliberately sends `outMs: 600000` against a track of a few seconds, so this
@@ -1180,10 +1182,10 @@ enum CompositionBuilder {
         var last: CMTimeRange?
         var slices = 0
         repeat {
-            let room = total - at
+            let room = stop - at
             guard room > .zero else { break }
-            // The last pass is clipped to the room left, never allowed past the end of the video.
-            // That is Android's `lastLenUs = available - (reps - 1) * trackLen`.
+            // The last pass is clipped to the room left, never allowed past the end of the video or
+            // the stop. That is Android's `lastLenUs = available - (reps - 1) * trackLen`.
             let slice = CMTimeRange(start: piece.start, duration: CMTimeMinimum(piece.duration, room))
             do {
                 try track.insertTimeRange(slice, of: src.track, at: at)
@@ -1195,7 +1197,7 @@ enum CompositionBuilder {
             last = placed
             at = placed.end
             slices += 1
-        } while m.loop && at < total && slices < maxMusicSlices
+        } while m.loop && at < stop && slices < maxMusicSlices
 
         guard let first, let last else { return nil }
 
