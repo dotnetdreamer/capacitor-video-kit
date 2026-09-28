@@ -146,7 +146,8 @@ Everything happens on the device, with nothing downloaded and no permission aske
 app, and Google's ML Kit image labeling on Android (`com.google.mlkit:image-labeling` 17.0.9, Android
 5.0 and later), whose base model the kit bundles into the app by default, so it answers offline from
 the first call and on a phone without Play services. The kit adds that dependency itself; a host adds
-nothing, unless it picks the lighter Play services form below.
+nothing, unless it picks the lighter Play services form below. A browser has no recogniser, so there the
+kit brings one, which the host serves; see **In a browser** below.
 
 **What ML Kit weighs, and the lighter ways to have it.** It is the heaviest thing the kit puts in an
 Android app: a native library for each CPU a build carries (11.0 MB for arm64-v8a, 6.9 MB for
@@ -176,6 +177,50 @@ ext {
   `describeMedia` answers null.
 
 Any other value fails the build rather than quietly bundling.
+
+**In a browser**, where there is no recogniser to ask, the kit brings one: MediaPipe's image classifier
+(`@mediapipe/tasks-vision`) running EfficientNet-Lite0 on the CPU through WebAssembly, so a picture
+never leaves the page there either. All of it comes from files the host serves beside its page, fetched
+at the first call and cached by the browser after that:
+
+| File | From | Size |
+|---|---|---|
+| `labeling/vision_bundle.mjs` | `node_modules/@mediapipe/tasks-vision/` | 155 KB |
+| `labeling/wasm/vision_wasm_internal.js`, `.wasm` and `vision_wasm_nosimd_internal.js`, `.wasm` | `node_modules/@mediapipe/tasks-vision/wasm/` | 11.8 MB (the browser fetches one of the two) |
+| `labeling/efficientnet_lite0.tflite` | `node_modules/capacitor-video-kit/web-assets/labeling/` | 5.3 MB |
+
+**None of it is in the host's bundle.** The kit imports MediaPipe's JavaScript from its URL, never
+through the bundler, so a build of the app carries only the kit's loader for it (under 2 KB gzipped)
+- which matters for a host whose web build is also what its phone apps are made from. For the same
+reason the files belong in what is DEPLOYED, not in any build's output: an Angular `assets` entry
+puts them in `www/`, and `cap sync` would put their 28 MB into both phone apps, which never load them.
+LightSnip copies them into the folder it uploads (`tools/deploy/deploy-web.mjs`, `addLabeling`). `.mjs`
+has to be served as JavaScript, or the browser refuses to import it.
+
+A host that serves them elsewhere - a CDN, another folder - says where once, before the first call:
+
+```ts
+import { configureWebLabeling } from 'capacitor-video-kit';
+
+configureWebLabeling({
+  runtimeUrl: '/static/mediapipe/vision_bundle.mjs',
+  wasmBaseUrl: '/static/mediapipe/wasm',
+  modelUrl: '/static/efficientnet_lite0.tflite',
+});
+```
+
+`prepareWebLabeling()` starts the download early - LightSnip calls it as One tap's picker opens - and
+the calls keep the phones' pace: two at a time, and a video looked at for 8 s at most before the frames
+read so far are the answer.
+
+The model knows ImageNet's 1000 classes (`golden retriever`, `seashore`, `web site`), so `engine` is
+`'mediapipe'` and the labels are ImageNet's. Its scores are one softmax, so a picture's confidence is
+split between the classes that fit it and `minConfidence` defaults to 0.02 here, not 0.1. It sees food,
+pets, birthdays, travel, cities, homes, nature, beaches and screen-recorded games well, and has no class
+at all for a person, a sunset or the night sky: in a browser `people` and `sunset` never come back, and
+a sunset over the water reads as a beach. Where it cannot start - no WebAssembly, or the files are not
+where it looks - `labelMedia` refuses as `unsupported` and `describeMedia` answers null, as everywhere a
+recogniser is missing.
 
 | Scene | What it means |
 |---|---|

@@ -6,8 +6,19 @@ import { describe, expect, it, vi } from 'vitest';
  */
 vi.mock('@capacitor/core', () => ({ WebPlugin: class {} }));
 
+/*
+ * The recogniser itself runs in a real browser (`web/labels.cmp.test.ts`); here it answers whatever a
+ * test says, so what the plugin does around it - checking the call, naming the failure - is what runs.
+ */
+vi.mock('./web/labels', async importOriginal => ({
+  ...(await importOriginal<typeof import('./web/labels')>()),
+  labelMediaInBrowser: vi.fn(),
+}));
+
+import type { LabelMediaResult } from './definitions';
 import type { VideoComposerPlugin } from './plugin';
 import { VideoComposerWeb } from './web';
+import { labelMediaInBrowser, LabelingUnavailableError, LabelingUnreadableError } from './web/labels';
 
 /*
  * A browser's job folders are IndexedDB keys, which nothing climbs out of, but a batch id a phone
@@ -75,7 +86,7 @@ describe('keeping picked media, in a browser', () => {
    * delete what it was there to keep, wherever deleting happens. A null names nothing, and is read as
    * left out, as Android reads it and as Capacitor's getters read a JSON null on both phones.
    */
-  it('takes a release\'s keep list, reads a null one as left out, and refuses one that is not a list', async () => {
+  it("takes a release's keep list, reads a null one as left out, and refuses one that is not a list", async () => {
     await expect(plugin.releaseMedia({ uris: ['blob:https://example.test/a'], keep: ['blob:https://example.test/a'] })).resolves.toBeUndefined();
     await expect(plugin.releaseMedia({ uris: [], keep: undefined })).resolves.toBeUndefined();
     await expect(plugin.releaseMedia({ uris: [], keep: null } as never)).resolves.toBeUndefined();
@@ -109,17 +120,42 @@ describe('the native-only calls, in a browser', () => {
 });
 
 /*
- * A page has no image recogniser: the call is checked the way a phone checks it, and then refused
- * with the code a host reads as "not on this platform", which `describeMedia` turns into null.
+ * A page brings its own recogniser (`web/labels.ts`). The call is checked the way a phone checks it
+ * before anything loads, and each way the recogniser can fail is named as a phone names it: one that
+ * cannot start is `unsupported`, which `describeMedia` turns into null, and a file that will not open
+ * is `unreadable_input`.
  */
 describe('labelMedia, in a browser', () => {
   const plugin: VideoComposerPlugin = new VideoComposerWeb();
+  const engine = vi.mocked(labelMediaInBrowser);
 
-  it('refuses a call without a file as a phone does, and every other call as unsupported', async () => {
+  it('refuses a call without a file, or with a kind it cannot be, as a phone does and before loading anything', async () => {
+    engine.mockClear();
     await expect(plugin.labelMedia({ uri: '' })).rejects.toMatchObject({ code: 'invalid_spec', message: 'uri is required' });
     await expect(plugin.labelMedia({} as never)).rejects.toMatchObject({ code: 'invalid_spec' });
-    await expect(plugin.labelMedia({ uri: 'blob:https://example.test/a', kind: 'image' })).rejects.toMatchObject({
-      code: 'unsupported',
+    await expect(plugin.labelMedia({ uri: 'blob:https://example.test/a', kind: 'audio' as never })).rejects.toMatchObject({
+      code: 'invalid_spec',
+    });
+    expect(engine).not.toHaveBeenCalled();
+  });
+
+  it("answers with the recogniser's labels, under its own engine's name", async () => {
+    const answer: LabelMediaResult = {
+      engine: 'mediapipe',
+      kind: 'image',
+      frames: [{ timeMs: 0, labels: [{ label: 'golden retriever', confidence: 0.61 }] }],
+    };
+    engine.mockResolvedValueOnce(answer);
+    await expect(plugin.labelMedia({ uri: 'blob:https://example.test/a', kind: 'image' })).resolves.toEqual(answer);
+    expect(engine).toHaveBeenLastCalledWith({ uri: 'blob:https://example.test/a', kind: 'image' });
+  });
+
+  it('is unsupported where the recogniser will not start, and unreadable where the file will not open', async () => {
+    engine.mockRejectedValueOnce(new LabelingUnavailableError('no WebAssembly'));
+    await expect(plugin.labelMedia({ uri: 'blob:https://example.test/a' })).rejects.toMatchObject({ code: 'unsupported' });
+    engine.mockRejectedValueOnce(new LabelingUnreadableError('not a picture or a video'));
+    await expect(plugin.labelMedia({ uri: 'blob:https://example.test/a' })).rejects.toMatchObject({
+      code: 'unreadable_input',
     });
   });
 });

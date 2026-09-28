@@ -841,6 +841,20 @@ export interface PreviewProxyResult {
   cached: boolean;
 }
 
+/** Which preview copies are still wanted; see [VideoComposerPlugin.dropPreviewProxies]. */
+export interface DropPreviewProxiesOptions {
+  /**
+   * The clips whose copies are still wanted, as the `uri`s `previewProxy` was given. Every other copy
+   * not made yet is dropped. None, by default: every copy not made yet is dropped.
+   */
+  keep?: string[];
+}
+
+export interface DropPreviewProxiesResult {
+  /** How many copies were dropped, whether waiting their turn or being made. */
+  dropped: number;
+}
+
 /**
  * A video whose audio track is wanted on its own, and where the result should be kept.
  *
@@ -1126,13 +1140,14 @@ export interface ThumbnailsResult {
 }
 
 /**
- * The phone's own image recogniser that read a picture: Apple's Vision on iOS
- * (`VNClassifyImageRequest`), Google's ML Kit image labeling on Android, its on-device model
- * bundled with the app. Each names things in its own words - `sunset_sunrise` and `Sunset`,
- * `birthday_cake` and `Cake` - so a caller that reads the labels themselves needs to know which
- * vocabulary it is reading. [scenesFromLabels] reads both into one.
+ * The image recogniser that read a picture: Apple's Vision on iOS (`VNClassifyImageRequest`),
+ * Google's ML Kit image labeling on Android (its model bundled with the app, or from Play services),
+ * and in a browser MediaPipe's image classifier with EfficientNet-Lite0, which the kit brings (see
+ * `web/labels.ts`). Each names things in its own words - `sunset_sunrise` and `Sunset`,
+ * `birthday_cake` and `Cake`, ImageNet's `golden retriever` - so a caller that reads the labels
+ * themselves needs to know which vocabulary it is reading. [scenesFromLabels] reads all three into one.
  */
-export type LabelEngine = 'vision' | 'mlkit';
+export type LabelEngine = 'vision' | 'mlkit' | 'mediapipe';
 
 /** A picture or a video to be looked at, and how closely. */
 export interface LabelMediaOptions {

@@ -107,6 +107,14 @@ class VideoComposerPlugin : Plugin() {
      */
     private val recorderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
 
+    /**
+     * [labelMedia]'s work, [MediaLabels.AT_ONCE] calls at a time; the rest wait their turn. Each call
+     * holds a retriever decoding frames and a labeler, and a page cannot take a call back: one that
+     * stopped waiting (a timeout) and asked about the next clip would otherwise add a decoder for every
+     * clip that ran late. Here the page's patience changes nothing about how much runs at once.
+     */
+    private val labelScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(MediaLabels.AT_ONCE))
+
     @Volatile private var voiceRecorder: VoiceRecorder? = null
 
     override fun load() {
@@ -864,7 +872,8 @@ class VideoComposerPlugin : Plugin() {
      * brought into range rather than refused, as [thumbnails] treats its times and as iOS does:
      * `frames` to 1..20, `minConfidence` to 0..1, a time that is not a number to the first frame. A
      * `kind` that is neither of the two is refused, because it is a caller's mistake with no reading
-     * to fall back on. On [pluginScope], because a frame is a decode and a label is an inference.
+     * to fall back on. On [labelScope], because a frame is a decode and a label is an inference, and
+     * only a few of those may run at once.
      */
     @PluginMethod
     fun labelMedia(call: PluginCall) {
@@ -892,9 +901,11 @@ class VideoComposerPlugin : Plugin() {
         val asked = call.getDouble("minConfidence")?.toFloat()
         val minConfidence = if (asked != null && asked.isFinite()) asked.coerceIn(0f, 1f) else MediaLabels.DEFAULT_MIN_CONFIDENCE
 
-        pluginScope.launch {
+        // From now, not from when a turn comes: the page has been waiting since it asked.
+        val deadline = MediaLabels.lookDeadline()
+        labelScope.launch {
             try {
-                call.resolve(MediaLabels.label(context.applicationContext, uri, kind, times, frames, minConfidence).toJson())
+                call.resolve(MediaLabels.label(context.applicationContext, uri, kind, times, frames, minConfidence, deadline).toJson())
             } catch (e: MediaLabels.UnreadableException) {
                 call.reject(e.message, FailureCodes.UNREADABLE_INPUT)
             } catch (e: MediaLabels.UnsupportedException) {
@@ -935,6 +946,8 @@ class VideoComposerPlugin : Plugin() {
                 // This clip only - too long, or no room - so never `unsupported`, which the page
                 // reads as "no copies on this platform at all".
                 call.reject(e.message, e.code)
+            } catch (e: PreviewProxy.DroppedException) {
+                call.reject(e.message, FailureCodes.CANCELLED)
             } catch (e: Exception) {
                 // A clip Media3 cannot copy - an unknown codec, a broken file - is this clip's failure
                 // too, so it is never reported as `unsupported` either.
@@ -943,6 +956,24 @@ class VideoComposerPlugin : Plugin() {
                 call.reject(mapped.message, code)
             }
         }
+    }
+
+    /**
+     * Drops every preview copy asked for and not made yet whose clip is not among `keep`
+     * ([PreviewProxy.dropAllBut]); their `previewProxy` calls reject with `cancelled`. Answers at
+     * once with how many were dropped.
+     */
+    @PluginMethod
+    fun dropPreviewProxies(call: PluginCall) {
+        val keep = HashSet<String>()
+        val asked = call.getArray("keep")
+        if (asked != null) {
+            for (i in 0 until asked.length()) {
+                val uri = asked.optString(i, "")
+                if (uri.isNotEmpty()) keep += uri
+            }
+        }
+        call.resolve(JSObject().put("dropped", PreviewProxy.dropAllBut(keep)))
     }
 
     /* ======================================================================================== */

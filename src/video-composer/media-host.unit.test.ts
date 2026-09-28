@@ -4,6 +4,8 @@ import type { EditorMediaHost, EditorSource, EditorVoiceHost, ThumbnailRequest }
 
 import type {
   DeleteSoundOptions,
+  DropPreviewProxiesOptions,
+  DropPreviewProxiesResult,
   ExtractAudioOptions,
   ExtractAudioResult,
   ListSoundsResult,
@@ -44,6 +46,7 @@ const kit = vi.hoisted(() => {
       probe: vi.fn<(options: ProbeOptions) => Promise<ProbeResult>>(),
       thumbnails: vi.fn<(options: ThumbnailsOptions) => Promise<ThumbnailsResult>>(),
       previewProxy: vi.fn<(options: PreviewProxyOptions) => Promise<PreviewProxyResult>>(),
+      dropPreviewProxies: vi.fn<(options: DropPreviewProxiesOptions) => Promise<DropPreviewProxiesResult>>(),
       listSounds: vi.fn<() => Promise<ListSoundsResult>>(),
       extractAudio: vi.fn<(options: ExtractAudioOptions) => Promise<ExtractAudioResult>>(),
       deleteSound: vi.fn<(options: DeleteSoundOptions) => Promise<void>>(),
@@ -425,6 +428,27 @@ describe('preview copies on a phone', () => {
     await expect(copier(composerMediaHost())(CLIP)).resolves.toBeNull();
   });
 
+  /* Moved on to other clips, or left: copies nobody will play stop, and the next ones do not queue behind them. */
+  it('drops every copy not made yet but those of the clips still wanted, named by their files', async () => {
+    kit.composer.dropPreviewProxies.mockResolvedValue({ dropped: 3 });
+    const picked: EditorSource = { key: 'web-1', fileName: 'a.mp4', playbackUrl: 'blob:capacitor://localhost/a' };
+
+    await expect(composerMediaHost().dropPreviewProxies?.([CLIP, picked])).resolves.toBeUndefined();
+    expect(kit.composer.dropPreviewProxies).toHaveBeenCalledWith({ keep: [CLIP.sourcePath] });
+  });
+
+  it('is null for a copy that was dropped, as for any other copy not made', async () => {
+    kit.composer.previewProxy.mockRejectedValue(coded('cancelled'));
+
+    await expect(copier(composerMediaHost())(CLIP)).resolves.toBeNull();
+  });
+
+  it('never rejects a drop: one that fails leaves the copies being made, as before drops existed', async () => {
+    kit.composer.dropPreviewProxies.mockRejectedValue(new Error('bridge went away'));
+
+    await expect(composerMediaHost().dropPreviewProxies?.([])).resolves.toBeUndefined();
+  });
+
   /*
    * A platform that makes no copies says so once, and every source after that - on every host this
    * page builds - is the clip itself without another trip across the bridge. That is remembered for
@@ -472,6 +496,7 @@ describe('preview copies on a phone', () => {
     const { host } = build();
 
     expect('previewProxy' in host).toBe(false);
+    expect('dropPreviewProxies' in host).toBe(false);
     expect(kit.composer.previewProxy).not.toHaveBeenCalled();
   });
 });

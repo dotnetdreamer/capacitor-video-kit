@@ -229,6 +229,15 @@ export interface EditorMediaHost {
   previewProxy?(source: EditorSource): Promise<string | null>;
 
   /**
+   * Stops the copies [previewProxy] was asked for and has not made yet, all but those of `keep`: for
+   * a host whose customer moved on to other clips, or left, so copies nobody will play stop holding
+   * the phone's decoder and the next ones do not wait behind them. Their `previewProxy` calls answer
+   * null. Copies already made are kept. Never rejects. Optional; `composerMediaHost()` has one on
+   * Android.
+   */
+  dropPreviewProxies?(keep: readonly EditorSource[]): Promise<void>;
+
+  /**
    * The sounds this customer has kept, and how one more gets in there.
    *
    * Absent, there is no Sound sheet at all: "Add sound" opens `pickAudio` directly, which is what

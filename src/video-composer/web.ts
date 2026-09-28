@@ -31,6 +31,7 @@ import type {
   PrepareJobResult,
   PreviewProxyOptions,
   PreviewProxyResult,
+  DropPreviewProxiesResult,
   ProbeOptions,
   ProbeResult,
   ReleaseMediaOptions,
@@ -52,6 +53,7 @@ import { batchIdRefusal } from './batch-id';
 import type { VideoComposerPlugin } from './plugin';
 import { encodableAt, webCapabilities } from './web/capabilities';
 import { cancelJob, cleanupBatch, jobState, startJob, sweepJobs } from './web/jobs';
+import { labelMediaInBrowser, LabelingUnavailableError, LabelingUnreadableError } from './web/labels';
 import { probeMedia } from './web/media';
 import { validateSpec } from './web/spec';
 import { thumbnails as cutThumbnails } from './web/thumbnails';
@@ -129,15 +131,25 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
   }
 
   /*
-   * A page has no image recogniser to ask. The phones each ship one - Vision in iOS, the ML Kit
-   * model the kit bundles into an Android app - and a browser offers nothing of the kind to a
-   * page, so this refuses with the code the other calls use for what a platform cannot do, after
-   * the same check of the call a phone makes first. [describeMedia] reads the refusal as "nothing
-   * to say here" and answers null, so a host carries on without scenes.
+   * A browser offers a page no image recogniser, so the kit brings one: MediaPipe's classifier,
+   * loaded on the first call from files the host serves (see `web/labels.ts`). Where it cannot
+   * start - no WebAssembly, or the files are not there - this refuses as `unsupported`, the code the
+   * other calls use for what a platform cannot do, and [describeMedia] reads that as "nothing to
+   * say here" and answers null, so a host carries on without scenes. A file that will not open is
+   * `unreadable_input`, as it is on a phone.
    */
   async labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult> {
-    required(options?.uri, 'uri');
-    throw coded('a browser has no image recogniser a page can reach', 'unsupported');
+    const uri = required(options?.uri, 'uri');
+    if (options.kind !== undefined && options.kind !== 'video' && options.kind !== 'image') {
+      throw coded("kind must be 'video' or 'image'", 'invalid_spec');
+    }
+    try {
+      return await labelMediaInBrowser({ ...options, uri });
+    } catch (error) {
+      if (error instanceof LabelingUnavailableError) throw coded(error.message, 'unsupported');
+      if (error instanceof LabelingUnreadableError) throw coded(error.message, 'unreadable_input');
+      throw coded(describe(error), 'unknown');
+    }
   }
 
   /*
@@ -149,6 +161,11 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
   async previewProxy(options: PreviewProxyOptions): Promise<PreviewProxyResult> {
     required(options?.uri, 'uri');
     throw coded('a browser plays the clip itself', 'unsupported');
+  }
+
+  /* No copy is made in a page, so there is none to drop. */
+  async dropPreviewProxies(): Promise<DropPreviewProxiesResult> {
+    return { dropped: 0 };
   }
 
   async thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult> {

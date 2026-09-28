@@ -87,6 +87,7 @@
   },
   "files": [
     "docs/",
+    "web-assets/",
     "CANVAS-PREVIEW.md",
     "SLOW-MOTION-PHASE2.md",
     "ios/PICTURES.md",
@@ -102,6 +103,7 @@
     "CapacitorVideoKit.podspec",
     "android/src/main/",
     "android/src/labeling/",
+    "android/src/labelingplay/",
     "android/src/nolabeling/",
     "android/build.gradle",
     "android/proguard-rules.pro",
@@ -172,15 +174,15 @@
     "vitest": "^4.0.0"
   },
   "peerDependencies": {
+    "@angular/common": "^19.0.0 || ^20.0.0 || ^21.0.0 || ^22.0.0",
+    "@angular/core": "^19.0.0 || ^20.0.0 || ^21.0.0 || ^22.0.0",
     "@capacitor/core": ">=8.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@preact/signals-core": "^1.14.4",
     "@stencil/core": "^4.45.0",
-    "@angular/common": "^19.0.0 || ^20.0.0 || ^21.0.0 || ^22.0.0",
-    "@angular/core": "^19.0.0 || ^20.0.0 || ^21.0.0 || ^22.0.0",
-    "rxjs": "^7.8.0",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0",
+    "rxjs": "^7.8.0",
     "vue": "^3.4.38"
   },
   "peerDependenciesMeta": {
@@ -219,6 +221,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
     "mediabunny": "^1.58.0",
     "tslib": "^2.8.1"
   }

@@ -124,6 +124,7 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
           probeDuration: (source: EditorSource) => probeNatively(source, browser),
           thumbnails: (request: ThumbnailRequest) => nativeThumbnails(request, browser),
           previewProxy: (source: EditorSource) => nativePreviewProxy(source),
+          dropPreviewProxies: (keep: readonly EditorSource[]) => nativeDropPreviewProxies(keep),
         }
       : {}),
     sounds: soundLibrary(options.sounds, browser, native),
@@ -243,8 +244,25 @@ async function nativePreviewProxy(source: EditorSource): Promise<string | null> 
     // one clip, and the next is still asked.
     const code = (error as { code?: unknown } | null)?.code;
     if (code === 'UNIMPLEMENTED') previewProxiesRefused = true;
-    else debugWarn('[composer previewProxy] no copy', source.key, error);
+    // Dropped ([nativeDropPreviewProxies]) is what the page asked for, not a failure.
+    else if (code !== 'cancelled') debugWarn('[composer previewProxy] no copy', source.key, error);
     return null;
+  }
+}
+
+/**
+ * [EditorMediaHost.dropPreviewProxies] on a phone: the copies not made yet, all but `keep`'s, dropped
+ * by the files they are made of. Quiet: a platform that makes no copies has none to drop, and a drop
+ * that fails leaves the copies being made, which is all that happened before it existed.
+ */
+async function nativeDropPreviewProxies(keep: readonly EditorSource[]): Promise<void> {
+  if (previewProxiesRefused) return;
+  try {
+    await VideoComposer.dropPreviewProxies({ keep: keep.flatMap(source => (source.sourcePath ? [source.sourcePath] : [])) });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === 'UNIMPLEMENTED') previewProxiesRefused = true;
+    else debugWarn('[composer dropPreviewProxies]', error);
   }
 }
 

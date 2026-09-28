@@ -38,6 +38,8 @@ import type {
   SweepMediaOptions,
   SweepMediaResult,
   CleanupOptions,
+  DropPreviewProxiesOptions,
+  DropPreviewProxiesResult,
   ComposeCompletedEvent,
   ComposeFailedEvent,
   ComposeProgressEvent,
@@ -91,6 +93,18 @@ export interface VideoComposerPlugin {
    * plays the clip, as it always has.
    */
   previewProxy(options: PreviewProxyOptions): Promise<PreviewProxyResult>;
+
+  /**
+   * Drops every preview copy asked for and not made yet whose clip is not among `keep`: one waiting
+   * its turn is never started, the one being made is stopped, and their `previewProxy` calls reject
+   * with `cancelled`. For a page that has moved on to other clips, or left: copies nobody will play
+   * stop holding the phone's decoder, and the copies it asks for next do not wait behind them.
+   * Copies already made stay in the cache, and a clip asked for again before its copy was stopped is
+   * made after all.
+   *
+   * Android only, as `previewProxy` is: a browser answers `{ dropped: 0 }`, and iOS `UNIMPLEMENTED`.
+   */
+  dropPreviewProxies(options?: DropPreviewProxiesOptions): Promise<DropPreviewProxiesResult>;
 
   thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult>;
 

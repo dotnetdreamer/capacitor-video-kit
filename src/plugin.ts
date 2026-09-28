@@ -39,12 +39,7 @@ export { RenderInputError, withNativeRenderInputs } from './video-composer/rende
 // `readRenderFile` and `containerOf` are for such a hook too: the render read into a `File`, and
 // the extension that says whether it is the MP4 every native engine writes or a browser's WebM.
 export { composerRenderHost, containerOf, readRenderFile } from './video-composer/render-host';
-export type {
-  ComposedRender,
-  ComposerRenderHost,
-  ComposerRenderHostOptions,
-  DiscardPreviousRenders,
-} from './video-composer/render-host';
+export type { ComposedRender, ComposerRenderHost, ComposerRenderHostOptions, DiscardPreviousRenders } from './video-composer/render-host';
 export { RenderFailedError } from './host/host.types';
 
 // The editor's media host over the composer - the browser defaults with the probe, the filmstrip,
@@ -62,6 +57,9 @@ export type { ComposerMediaHostOptions, ComposerMediaPickers } from './video-com
 // where a host without Capacitor reaches them.
 export { describeMedia } from './video-composer/media-scenes';
 export type { DescribeMediaOptions, MediaDescription } from './video-composer/media-scenes';
+// Where a browser's recogniser - which the kit brings, as a browser has none - finds its files.
+export { configureWebLabeling, prepareWebLabeling } from './video-composer/web/labels';
+export type { WebLabelingFiles } from './video-composer/web/labels';
 
 // The URL the WebView loads a device file by, which the editor's `/ui` defaults use as its
 // `platform.fileUrl` and a Capacitor host wants for everything else it shows: a done screen's

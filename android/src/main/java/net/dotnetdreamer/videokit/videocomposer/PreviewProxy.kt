@@ -124,14 +124,23 @@ object PreviewProxy {
     /** The copy being made was stopped for a render; it is made again once the render is done. */
     private class YieldedException : Exception("stopped for a render")
 
+    /** Nobody wants this copy any more ([dropAllBut]): it was never started, or it was stopped. */
+    class DroppedException : Exception("the copy is no longer wanted")
+
     /** One copy at a time, in the order they were asked for. */
     private val queue = Mutex()
 
     /** A copy being made, by its file name, so a second request for the same clip joins the first. */
     private val inFlight = HashMap<String, CompletableDeferred<Result>>()
 
+    /** The clip each copy in [inFlight] is made of, by the same name. Guarded by [inFlight]. */
+    private val pending = HashMap<String, String>()
+
+    /** Those of [pending] that [dropAllBut] dropped and nobody has asked for since. Guarded by [inFlight]. */
+    private val dropped = HashSet<String>()
+
     /** The export being made right now, so a render can stop it; see [yieldToRender]. */
-    private class Running(val main: Handler) {
+    private class Running(val main: Handler, val name: String) {
         val done = CompletableDeferred<ExportResult>()
 
         @Volatile
@@ -160,10 +169,34 @@ object PreviewProxy {
     }
 
     /**
+     * Drops every copy asked for and not made yet whose clip is not in `keep`, as the same strings
+     * [make] was given: a page that has moved on to other clips, or left, stops paying for copies
+     * nobody is going to play, and the copies it asks for next do not wait behind them. One waiting
+     * its turn is never started; the one being made is stopped and its half-written file deleted.
+     * Their requests fail with [DroppedException]. Copies already made stay in the cache, and a clip
+     * asked for again before its turn came is made after all. Answers how many were dropped.
+     */
+    fun dropAllBut(keep: Set<String>): Int {
+        val names = synchronized(inFlight) {
+            pending.filterValues { it !in keep }.keys.toSet().also { dropped += it }
+        }
+        val current = running
+        // Asked for again since the lock was let go, and so no longer dropped: leave it running.
+        if (current != null && current.name in names && isDropped(current.name)) {
+            current.done.completeExceptionally(DroppedException())
+            current.main.post { current.transformer?.cancel() }
+        }
+        if (names.isNotEmpty()) Log.i(TAG, "dropped ${names.size} copies nobody wants any more, keeping ${keep.size} clips")
+        return names.size
+    }
+
+    private fun isDropped(name: String): Boolean = synchronized(inFlight) { name in dropped }
+
+    /**
      * The copy of `uri`, made if it is not in the cache already. Suspends until it exists; call off
      * the main thread. Throws [UnreadableException] for a clip that cannot be opened,
-     * [DeclinedException] for one no copy is made of, and whatever Media3 threw for one it could not
-     * copy.
+     * [DeclinedException] for one no copy is made of, [DroppedException] for one [dropAllBut] dropped
+     * before it was made, and whatever Media3 threw for one it could not copy.
      */
     suspend fun make(ctx: Context, uri: String, shortSide: Int = DEFAULT_SHORT_SIDE, maxFps: Int = DEFAULT_MAX_FPS): Result {
         val app = ctx.applicationContext
@@ -177,15 +210,21 @@ object PreviewProxy {
 
         val (deferred, owner) = synchronized(inFlight) {
             val running = inFlight[name]
-            if (running != null) running to false
-            else CompletableDeferred<Result>().also { inFlight[name] = it } to true
+            if (running != null) {
+                // Wanted again, so a drop that has not reached it yet no longer applies.
+                dropped.remove(name)
+                running to false
+            } else {
+                pending[name] = uri
+                CompletableDeferred<Result>().also { inFlight[name] = it } to true
+            }
         }
         if (!owner) return deferred.await()
 
         try {
             val result = queue.withLock {
                 // Made while this request waited its turn, by an earlier run of the app.
-                cached(file) ?: makeBetweenRenders(app, uri, file, side, fpsCap)
+                cached(file) ?: if (isDropped(name)) throw DroppedException() else makeBetweenRenders(app, uri, file, side, fpsCap, name)
             }
             deferred.complete(result)
             return result
@@ -193,16 +232,24 @@ object PreviewProxy {
             deferred.completeExceptionally(e)
             throw e
         } finally {
-            synchronized(inFlight) { inFlight.remove(name) }
+            synchronized(inFlight) {
+                inFlight.remove(name)
+                pending.remove(name)
+                dropped.remove(name)
+            }
         }
     }
 
     /** [transcode], started only while no render runs, and started again if one stops it. */
-    private suspend fun makeBetweenRenders(ctx: Context, uri: String, target: File, shortSide: Int, maxFps: Int): Result {
+    private suspend fun makeBetweenRenders(ctx: Context, uri: String, target: File, shortSide: Int, maxFps: Int, name: String): Result {
         while (true) {
-            while (JobRegistry.active().isNotEmpty()) delay(RENDER_POLL_MS)
+            while (JobRegistry.active().isNotEmpty()) {
+                if (isDropped(name)) throw DroppedException()
+                delay(RENDER_POLL_MS)
+            }
+            if (isDropped(name)) throw DroppedException()
             try {
-                return transcode(ctx, uri, target, shortSide, maxFps)
+                return transcode(ctx, uri, target, shortSide, maxFps, name)
             } catch (e: YieldedException) {
                 Log.i(TAG, "${target.name} stopped for a render; made again after it")
             }
@@ -267,7 +314,7 @@ object PreviewProxy {
         }
     }
 
-    private suspend fun transcode(ctx: Context, uri: String, target: File, shortSide: Int, maxFps: Int): Result {
+    private suspend fun transcode(ctx: Context, uri: String, target: File, shortSide: Int, maxFps: Int, name: String): Result {
         val source = read(ctx, uri)
         if (!source.hasVideo || source.width <= 0 || source.height <= 0) throw UnreadableException("the clip has no picture")
         if (source.durationMs > MAX_SOURCE_MS) {
@@ -308,14 +355,14 @@ object PreviewProxy {
         val partial = File(folder, target.name + ".part")
         val started = System.nanoTime()
         try {
-            run(ctx, composition, partial, bitrate, portrait = true)
+            run(ctx, composition, partial, bitrate, portrait = true, name = name)
         } catch (e: ExportException) {
             // Only an encoder that will not take the frame upright is asked again, on its side, as
             // Media3 codes it by default: slower for the preview to draw (see [run]), and still far
             // better than the clip. Any other failure would only fail the same way twice.
             if (!refusedByEncoder(e)) throw e
             Log.w(TAG, "upright encode refused (${e.errorCodeName}); coding ${target.name} on its side")
-            run(ctx, composition, partial, bitrate, portrait = false)
+            run(ctx, composition, partial, bitrate, portrait = false, name = name)
         }
         if (!partial.renameTo(target)) {
             partial.delete()
@@ -342,16 +389,18 @@ object PreviewProxy {
      * 1.1 s of the GPU thread's time, against 20 and 0.1 s for the same copy coded upright - the
      * difference between the preview's frames keeping up and not.
      */
-    private suspend fun run(ctx: Context, composition: Composition, partial: File, bitrate: Int, portrait: Boolean): ExportResult {
+    private suspend fun run(ctx: Context, composition: Composition, partial: File, bitrate: Int, portrait: Boolean, name: String): ExportResult {
         partial.delete()
         val main = Handler(Looper.getMainLooper())
-        val current = Running(main)
+        val current = Running(main, name)
         running = current
+        // Dropped between the check before this copy and here, where [dropAllBut] could not see it.
+        if (isDropped(name)) current.done.completeExceptionally(DroppedException())
         // Transformer must be built, started and cancelled on one Looper thread; the export uses the
         // main one, and so does this.
         main.post {
-            // Stopped for a render before it could start: nothing to start.
-            if (current.yielded) return@post
+            // Stopped for a render, or dropped, before it could start: nothing to start.
+            if (current.yielded || current.done.isCompleted) return@post
             try {
                 val settings = VideoEncoderSettings.Builder()
                     .setBitrate(bitrate)
@@ -384,7 +433,13 @@ object PreviewProxy {
         try {
             return current.done.await()
         } catch (e: Throwable) {
-            main.post { current.transformer?.cancel() }
+            // Deleted again once cancel() has returned, which is once Media3 has let the file go: it
+            // creates the file only as the first frame comes out, so one stopped just after it started
+            // could otherwise write a half-copy after the delete here and leave it in the cache.
+            main.post {
+                current.transformer?.cancel()
+                partial.delete()
+            }
             partial.delete()
             throw e
         } finally {

@@ -53,6 +53,23 @@ object MediaLabels {
     const val MAX_FRAMES = 20
     const val DEFAULT_MIN_CONFIDENCE = 0.1f
 
+    /** How many [label] calls run at once, the rest waiting their turn: each holds a decoder. */
+    const val AT_ONCE = 2
+
+    /**
+     * How long a video is looked at before the frames read so far are the answer. An exact frame of
+     * phone footage can cost seconds (see KEYFRAMES FIRST above), and a page asking about a clip waits
+     * for a while and then gives up on it - lighsnip's One tap after 15 s. The answer has to come
+     * before that: past this no new frame is started, so a call ends within this and one frame more,
+     * with the frames it has. The first frame is always read, however long it takes. Counted from
+     * when the call was made, its wait for a turn ([AT_ONCE]) included, since the page's own wait
+     * began then too.
+     */
+    const val LOOK_BUDGET_MS = 8_000L
+
+    /** When a call made now has looked long enough; see [LOOK_BUDGET_MS]. */
+    fun lookDeadline(): Long = System.nanoTime() + LOOK_BUDGET_MS * 1_000_000L
+
     /**
      * The longest edge a picture or a frame is decoded at. ML Kit scales everything it is given down
      * to its model's 224 pixel input, so this is about the cost of the decode, not about detail.
@@ -104,7 +121,15 @@ object MediaLabels {
     /** One frame to cut: at the keyframe it was matched to, or exactly at `timeMs` when that is null. */
     data class Cut(val timeMs: Long, val keyframeMs: Long?)
 
-    fun label(ctx: Context, uri: String, kind: Kind?, timesMs: List<Long>, frames: Int, minConfidence: Float): Result {
+    fun label(
+        ctx: Context,
+        uri: String,
+        kind: Kind?,
+        timesMs: List<Long>,
+        frames: Int,
+        minConfidence: Float,
+        deadline: Long = lookDeadline(),
+    ): Result {
         if (!SceneLabeler.AVAILABLE) {
             throw UnsupportedException("this app was built without image labeling (videokitImageLabeling = false)")
         }
@@ -121,7 +146,7 @@ object MediaLabels {
                         bitmap.recycle()
                     }
                 }
-                Kind.VIDEO -> Result(Kind.VIDEO, videoFrames(ctx, uri, labeler, timesMs, frames, minConfidence))
+                Kind.VIDEO -> Result(Kind.VIDEO, videoFrames(ctx, uri, labeler, timesMs, frames, minConfidence, deadline))
             }
         }
     }
@@ -222,7 +247,23 @@ object MediaLabels {
             // A format ExifInterface cannot read (HEIF below API 28) carries no tag it can see.
             ExifInterface.ORIENTATION_NORMAL
         }
-        return bitmap to rotationFor(orientation)
+        return forLabeler(bitmap) to rotationFor(orientation)
+    }
+
+    /**
+     * `bitmap` as the labeler is handed it: ARGB_8888, and nothing else. Play services' classifier
+     * (`videokitImageLabeling = 'playServices'`) takes no other layout, and it does not refuse one: it
+     * throws inside a JNI call, which aborts the whole app rather than failing the call. A frame from
+     * [MediaMetadataRetriever] is RGB_565 unless asked otherwise, and a 16-bit PNG or a 10-bit HEIF
+     * decodes to RGBA_F16 or RGBA_1010102, so any of those is copied once here - at [LOOK_SIZE], a few
+     * milliseconds. `bitmap` is recycled when a copy replaces it.
+     */
+    fun forLabeler(bitmap: Bitmap): Bitmap {
+        val config = bitmap.config
+        if (config == Bitmap.Config.ARGB_8888) return bitmap
+        val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        bitmap.recycle()
+        return copy ?: throw UnreadableException("a $config picture would not convert to ARGB_8888")
     }
 
     /** The largest power of two that still leaves the long edge at least `target`: BitmapFactory's own rule for `inSampleSize`. */
@@ -248,6 +289,7 @@ object MediaLabels {
         timesMs: List<Long>,
         frames: Int,
         minConfidence: Float,
+        deadline: Long,
     ): List<Frame> {
         val retriever = try {
             Thumbnailer.openRetriever(ctx, uri)
@@ -262,6 +304,10 @@ object MediaLabels {
             val plan = plan(durationMs, timesMs, frames)
             val out = ArrayList<Frame>(plan.times.size)
             for (cut in cuts(plan.times, keyframesAt(ctx, uri, plan.times))) {
+                if (out.isNotEmpty() && System.nanoTime() > deadline) {
+                    Log.i(TAG, "looked at $uri for ${LOOK_BUDGET_MS} ms; answering with ${out.size} frames")
+                    break
+                }
                 val atKeyframe = cut.keyframeMs != null
                 // At a keyframe the seek is to the keyframe itself, so the frame is the one looked up.
                 val seekMs = cut.keyframeMs ?: cut.timeMs
@@ -319,7 +365,10 @@ object MediaLabels {
         }
     }
 
-    /** One frame, no longer than [LOOK_SIZE] on its long edge, scaled as it is decoded where the platform can. */
+    /**
+     * One frame, no longer than [LOOK_SIZE] on its long edge, scaled as it is decoded where the platform
+     * can, and in the layout the labeler takes ([forLabeler]).
+     */
     private fun grab(retriever: MediaMetadataRetriever, timeMs: Long, option: Int): Bitmap? = try {
         if (Build.VERSION.SDK_INT >= 27) {
             retriever.getScaledFrameAtTime(timeMs * 1000L, option, LOOK_SIZE, LOOK_SIZE)
@@ -339,7 +388,7 @@ object MediaLabels {
                     scaled
                 }
             }
-        }
+        }?.let(::forLabeler)
     } catch (e: Exception) {
         Log.w(TAG, "no frame at ${timeMs}ms: ${e.message}")
         null
