@@ -131,6 +131,7 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
       ? {
           probeDuration: (source: EditorSource) => probeNatively(source, browser),
           thumbnails: (request: ThumbnailRequest) => nativeThumbnails(request, browser),
+          previewProxy: (source: EditorSource) => nativePreviewProxy(source),
         }
       : {}),
     sounds: soundLibrary(options.sounds, browser, native),
@@ -224,6 +225,35 @@ async function nativeThumbnails(request: ThumbnailRequest, browser: EditorMediaH
   if (!source.sourcePath) return await browser.thumbnails(request);
   const { uris } = await VideoComposer.thumbnails({ uri: source.sourcePath, timesMs: [...timesMs], maxHeight, precise });
   return uris.map(webViewUrl);
+}
+
+/**
+ * Set once the bridge has said the composer makes no preview copies on this platform - iOS, where
+ * the call does not exist, answers `UNIMPLEMENTED` - so no other source asks again for the life of
+ * the page.
+ */
+let previewProxiesRefused = false;
+
+/**
+ * [EditorMediaHost.previewProxy] on a phone: the composer's copy of `sourcePath`, as a URL the
+ * WebView may load ([webViewUrl]). Null for a source with no path, on a platform that makes no
+ * copies, and for a clip the composer could not copy - the preview then plays the clip itself, which
+ * is all it ever did.
+ */
+async function nativePreviewProxy(source: EditorSource): Promise<string | null> {
+  if (previewProxiesRefused || !source.sourcePath) return null;
+  try {
+    const { uri } = await VideoComposer.previewProxy({ uri: source.sourcePath });
+    return uri ? webViewUrl(uri) : null;
+  } catch (error) {
+    // Only the bridge's own answer is about the platform: iOS has no such call. Anything the
+    // composer itself says - a clip it could not open, one too long to copy, no room - is about that
+    // one clip, and the next is still asked.
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === 'UNIMPLEMENTED') previewProxiesRefused = true;
+    else debugWarn('[composer previewProxy] no copy', source.key, error);
+    return null;
+  }
 }
 
 /** [ComposerMediaHostOptions.sounds], as the library the editor is handed. */

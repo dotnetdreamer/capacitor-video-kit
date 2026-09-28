@@ -32,12 +32,19 @@ export const BLANK_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5B
 /**
  * Where a source's file is, as something this WebView can play.
  *
+ * The source's preview copy first, where the host has made one ([EditorStore.previewUrls]): the same
+ * footage on the same timeline, which a cut seeks at once. Read with `peek`, so a view that resolves
+ * a source inside an effect does not start re-running whenever a copy lands - the preview reloads its
+ * elements onto a copy deliberately, from where they are (see [PreviewPlayer.refreshSources]).
+ *
  * `playbackUrl` is already loadable by contract; anything else goes through the host, which is the
  * one place in the package that knows how this app turns a path into a URL. A source with neither
  * is a host that handed over nothing to play, and the element is pointed at the empty string rather
  * than at the page itself, which is what a bare `src=""` resolves to.
  */
 export function previewSrc(store: EditorStore, source: EditorSource): string {
+  const copy = store.previewUrls.peek().get(source.key);
+  if (copy) return copy;
   if (source.playbackUrl) return source.playbackUrl;
   if (source.sourcePath) return store.host.platform.fileUrl(source.sourcePath);
   return '';

@@ -1002,4 +1002,64 @@ describe('EditorStore', () => {
     });
   });
 
+  describe('preview copies', () => {
+    /*
+     * The preview's own copy of a source, which it plays in the source's place until the element
+     * says it cannot - and then the copy is forgotten, so the source plays itself. An element reads
+     * its `src` back resolved and escaped, so the URL it hands back can differ from the one it was
+     * given in spelling alone, and a copy that has been replaced since must not be forgotten for a
+     * failure of the one before it.
+     */
+    it('forgets a copy only when it is the one the preview was given, and says whether it did', () => {
+      const copies = new Map([
+        ['a', 'http://localhost/copies/a%20one.mp4'],
+        ['b', 'file:///copy-b.mp4'],
+      ]);
+      store.previewUrls.value = copies;
+
+      // Another copy of the same source, and a source with none: nothing forgotten, nothing written.
+      expect(store.dropPreviewUrl('a', 'http://localhost/copies/older.mp4')).toBe(false);
+      expect(store.dropPreviewUrl('c', 'http://localhost/copies/a%20one.mp4')).toBe(false);
+      expect(store.dropPreviewUrl('a', '')).toBe(false);
+      expect(store.previewUrls.value).toBe(copies);
+
+      // The same copy, as an element spells it back.
+      expect(store.dropPreviewUrl('a', 'HTTP://LOCALHOST/copies/a one.mp4')).toBe(true);
+      expect([...store.previewUrls.value]).toEqual([['b', 'file:///copy-b.mp4']]);
+      // A new map, so whoever watches the copies hears of it; the one it replaced is left as it was.
+      expect(copies.size).toBe(2);
+
+      // Gone already: said once.
+      expect(store.dropPreviewUrl('a', 'http://localhost/copies/a%20one.mp4')).toBe(false);
+      expect(store.dropPreviewUrl('b', 'file:///copy-b.mp4')).toBe(true);
+      expect(store.previewUrls.value.size).toBe(0);
+    });
+
+    /*
+     * Two elements on one copy - a template cutting the same clip twice in a row - both fail on it,
+     * and the second finds it already forgotten. It has to be told the copy was given up on, or it
+     * takes its own failure for a real one and the stage stops; and nothing that was never a copy may
+     * be told so, or an element failing on its own clip would be loaded again for ever.
+     */
+    it('remembers the copies it forgot, and only those', () => {
+      store.previewUrls.value = new Map([['a', 'file:///copy-a.mp4']]);
+      expect(store.isDroppedPreviewUrl('a', 'file:///copy-a.mp4')).toBe(false);
+
+      store.dropPreviewUrl('a', 'file:///copy-a.mp4');
+      expect(store.isDroppedPreviewUrl('a', 'file:///copy-a.mp4')).toBe(true);
+      expect(store.isDroppedPreviewUrl('a', 'content://media/a')).toBe(false);
+      expect(store.isDroppedPreviewUrl('b', 'file:///copy-a.mp4')).toBe(false);
+    });
+
+    /* The template studio loads every template over the same clips, and a copy is seconds of work. */
+    it('keeps the copies across a load', () => {
+      store.previewUrls.value = new Map([['a', 'file:///copy-a.mp4']]);
+
+      load({ clips: [clip('b', 0, 2000), clip('a', 0, 1000)] });
+      store.load([...sources, { key: 'c', fileName: 'c.mp4' }], new Map([['c', 3000]]), { ...emptyManifest(), clips: [clip('c', 0, 3000)] });
+
+      expect([...store.previewUrls.value]).toEqual([['a', 'file:///copy-a.mp4']]);
+    });
+  });
+
 });

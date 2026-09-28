@@ -212,6 +212,23 @@ export interface EditorMediaHost {
   thumbnails(request: ThumbnailRequest): Promise<string[]>;
 
   /**
+   * A lighter copy of a VIDEO source for the live preview to play in its place: a URL the WebView
+   * can load, of the same footage on the same timeline, or null when there is none to be had.
+   *
+   * The preview seeks at every cut, and a seek decodes from the keyframe before it; phone footage at
+   * 1080p and above, keyed every few seconds, seeks for seconds on a phone that is not new. A small,
+   * densely keyed copy seeks at once. Only the preview ever plays it - the source keeps its own
+   * `playbackUrl` and `sourcePath`, and every render, filmstrip and waveform still reads those - so
+   * the copy's quality is a preview's, and nothing a customer posts is made from it.
+   *
+   * Resolves when the copy exists, which may be seconds; the preview plays the source itself until
+   * then. Never rejects on purpose: a copy that could not be made is null, and the source plays.
+   * Optional; absent, every source plays itself, as before this existed. `composerMediaHost()` has
+   * one on Android.
+   */
+  previewProxy?(source: EditorSource): Promise<string | null>;
+
+  /**
    * The sounds this customer has kept, and how one more gets in there.
    *
    * Absent, there is no Sound sheet at all: "Add sound" opens `pickAudio` directly, which is what

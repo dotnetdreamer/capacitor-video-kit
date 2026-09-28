@@ -890,6 +890,15 @@ export class VePreview implements EditorPlayer {
         () => this.player?.refreshPoster(),
       ),
     );
+
+    // A source's preview copy landed (or was given up on): its elements take it up from where they
+    // are. See [EditorStore.previewUrls]. The end of a voiceover take too, which the player waits for.
+    this.disposers.push(
+      deferredEffect(
+        () => [store.previewUrls.value, this.recording.value] as const,
+        () => this.player?.refreshSources(),
+      ),
+    );
   }
 
   /**

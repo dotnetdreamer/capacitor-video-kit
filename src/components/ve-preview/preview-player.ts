@@ -15,6 +15,7 @@ import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
+import { sameUrl } from '../../state/same-url';
 import type { ClipMedia } from './clip-media';
 import { FollowerVideo, type FollowerMedia } from './follower-video';
 import type { BaseShot } from './preview-canvas';
@@ -660,6 +661,53 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   /**
+   * A source's preview copy has landed - or been given up on - since its elements were pointed at
+   * it: see [EditorStore.previewUrls]. Every element holding that source is loaded again, onto what
+   * [previewSrc] names now, from exactly where the playhead is, playing if it was playing.
+   *
+   * The copy is the same footage on the same timeline, so nothing about the edit moves; what changes
+   * is that every seek after this lands at once instead of decoding seconds of full-size footage. The
+   * load itself costs one short hold, the same as any source change, over the last frame the canvas
+   * drew. Elements whose source has not changed are left alone, which is every element on most calls.
+   */
+  refreshSources(): void {
+    if (this.destroyed) return;
+    // Never under a voiceover take: its sound is being laid against this clock, and a reload would
+    // stand the clock still under the customer's voice. The component asks again once the take ends.
+    if (this.store.recordingFromMs.peek() !== null) return;
+    let stale = false;
+    for (const deck of this.decks) {
+      if (!deck.key || this.store.isPictureKey(deck.key)) continue;
+      const source = this.store.clipByKey(deck.key);
+      if (!source || sameUrl(deck.video.src, previewSrc(this.store, source))) continue;
+      // Forgotten, as [revive] forgets a source: `goTo` and `hold` then load it afresh.
+      deck.key = null;
+      deck.hasMeta = false;
+      deck.failed = false;
+      stale = true;
+    }
+    for (const follower of this.followers.values()) follower.refreshSource();
+    if (!stale) return;
+    // Through `seek`, which waits out a load or a seek already in flight rather than cutting it off.
+    this.seek(this.store.playheadMs.value);
+  }
+
+  /**
+   * The element could not play `key`'s preview copy: the copy is forgotten, so the source plays itself
+   * from now on (see [EditorStore.dropPreviewUrl]). True when that is what happened - false for a
+   * source that was playing itself already, whose failure is a real one.
+   *
+   * Also true for an element still on a copy the OTHER element has already given up on: both base
+   * elements hold the same copy whenever a template cuts one clip twice in a row, and the second to
+   * fail finds the copy gone from the store. Its failure is the same one, and the answer the same -
+   * load what the source plays now.
+   */
+  private dropFailedCopy(key: string | null, video: ClipMedia): boolean {
+    if (!key || this.store.isPictureKey(key)) return false;
+    return this.store.dropPreviewUrl(key, video.src) || this.store.isDroppedPreviewUrl(key, video.src);
+  }
+
+  /**
    * Puts the picture back after the page has been away; [onPageShown] is where what takes it is
    * written down.
    *
@@ -765,6 +813,14 @@ export class PreviewPlayer implements EditorPlayer {
       const queued = this.queuedMs;
       this.queuedMs = null;
       if (!ok) {
+        // A preview copy this WebView would not play: the clip plays itself instead, from wherever
+        // this load was going.
+        if (this.dropFailedCopy(clip.key, video)) {
+          debugWarn('[ve-preview] preview copy could not be loaded; playing the clip itself', clip.key, video.error);
+          deck.key = null;
+          this.goTo(queued ?? ms, this.autoplay);
+          return;
+        }
         debugWarn('[ve-preview] clip could not be loaded', clip.key, video.error);
         // Forgotten, so the next attempt loads it again rather than seeking a source that is not there.
         deck.key = null;
@@ -1068,7 +1124,18 @@ export class PreviewPlayer implements EditorPlayer {
   }
 
   private onDeckError(deck: BaseDeck): void {
-    // The clock's own loads have a handler of their own, which also reports it.
+    // The clock's own LOADS have a handler of their own, which also reports it - and falls back from
+    // a preview copy the same way this does. A copy that fails the clock once it is past its load -
+    // a decode error part way in - is this handler's, or the clock would wait on it for good.
+    const clockLoading = deck === this.active && this.pendingLoad;
+    if (!clockLoading && !this.destroyed && this.dropFailedCopy(deck.key, deck.video)) {
+      debugWarn('[ve-preview] preview copy could not be loaded; playing the clip itself', deck.key, deck.video.error);
+      deck.key = null;
+      deck.failed = false;
+      // Put back where the playhead wants it, on the clip itself this time.
+      this.seek(this.store.playheadMs.value);
+      return;
+    }
     deck.failed = true;
     if (deck !== this.active) debugWarn('[ve-preview] the next clip could not be loaded', deck.key, deck.video.error);
   }

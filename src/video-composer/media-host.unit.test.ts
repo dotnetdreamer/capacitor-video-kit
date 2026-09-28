@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { EditorSource, EditorVoiceHost, ThumbnailRequest } from '../host/host.types';
+import type { EditorMediaHost, EditorSource, EditorVoiceHost, ThumbnailRequest } from '../host/host.types';
 
 import type {
   DeleteSoundOptions,
   ExtractAudioOptions,
   ExtractAudioResult,
   ListSoundsResult,
+  PreviewProxyOptions,
+  PreviewProxyResult,
   ProbeOptions,
   ProbeResult,
   ThumbnailsOptions,
@@ -41,6 +43,7 @@ const kit = vi.hoisted(() => {
     composer: {
       probe: vi.fn<(options: ProbeOptions) => Promise<ProbeResult>>(),
       thumbnails: vi.fn<(options: ThumbnailsOptions) => Promise<ThumbnailsResult>>(),
+      previewProxy: vi.fn<(options: PreviewProxyOptions) => Promise<PreviewProxyResult>>(),
       listSounds: vi.fn<() => Promise<ListSoundsResult>>(),
       extractAudio: vi.fn<(options: ExtractAudioOptions) => Promise<ExtractAudioResult>>(),
       deleteSound: vi.fn<(options: DeleteSoundOptions) => Promise<void>>(),
@@ -363,6 +366,113 @@ describe('filmstrip frames on a phone', () => {
     kit.composer.thumbnails.mockRejectedValue(coded('unreadable_input'));
 
     await expect(build().host.thumbnails(frames(CLIP))).rejects.toThrow('unreadable_input');
+  });
+});
+
+/*
+ * The preview's own copy of a clip: small and keyed densely, so a cut's seek lands at once. What the
+ * editor is handed is a URL the WebView may load, or null - never a rejection - and null is the
+ * preview playing the clip itself, which is all it ever did before copies existed.
+ */
+describe('preview copies on a phone', () => {
+  const COPY = 'file:///data/user/0/app/cache/preview-proxies/5f0c.mp4';
+
+  function copied(uri = COPY): PreviewProxyResult {
+    return { uri, width: 540, height: 960, durationMs: 4200, cached: false };
+  }
+
+  /** The host's `previewProxy`, which a phone always has. */
+  function copier(host: EditorMediaHost): (source: EditorSource) => Promise<string | null> {
+    const previewProxy = host.previewProxy;
+    if (!previewProxy) throw new Error('no preview copies on a phone');
+    return previewProxy;
+  }
+
+  beforeEach(() => {
+    kit.native = true;
+  });
+
+  it('asks the composer to copy the file itself, and hands the copy back as a URL the WebView may load', async () => {
+    kit.composer.previewProxy.mockResolvedValue(copied());
+    const previewProxy = copier(composerMediaHost());
+
+    await expect(previewProxy(CLIP)).resolves.toBe('capacitor://localhost/_capacitor_file_/data/user/0/app/cache/preview-proxies/5f0c.mp4');
+    // The path, never the URL the preview plays it by: the composer opens files, not the local server.
+    expect(kit.composer.previewProxy).toHaveBeenCalledWith({ uri: CLIP.sourcePath });
+  });
+
+  it('is null for a source with no path, and asks the composer nothing', async () => {
+    const previewProxy = copier(composerMediaHost());
+    const picked: EditorSource = { key: 'web-1', fileName: 'a.mp4', playbackUrl: 'blob:capacitor://localhost/a' };
+
+    await expect(previewProxy(picked)).resolves.toBeNull();
+    expect(kit.composer.previewProxy).not.toHaveBeenCalled();
+  });
+
+  /* One clip the composer could not copy says nothing about the next one. */
+  it('is null for a clip the composer could not copy, and still asks about the next clip', async () => {
+    kit.composer.previewProxy.mockRejectedValueOnce(coded('unreadable_input')).mockResolvedValue(copied());
+    const previewProxy = copier(composerMediaHost());
+
+    await expect(previewProxy(CLIP)).resolves.toBeNull();
+    await expect(previewProxy({ ...CLIP, key: 'clip-2', sourcePath: 'file:///app/clip-2.mp4' })).resolves.toMatch(/^capacitor:/);
+    expect(kit.composer.previewProxy).toHaveBeenCalledTimes(2);
+  });
+
+  it('is null for an answer with no file in it', async () => {
+    kit.composer.previewProxy.mockResolvedValue(copied(''));
+
+    await expect(copier(composerMediaHost())(CLIP)).resolves.toBeNull();
+  });
+
+  /*
+   * A platform that makes no copies says so once, and every source after that - on every host this
+   * page builds - is the clip itself without another trip across the bridge. That is remembered for
+   * the life of the module, so each case here imports a module of its own, and no case after it
+   * inherits a refusal.
+   */
+  describe('on a platform that makes none', () => {
+    async function freshModule(): Promise<typeof import('./media-host')> {
+      vi.resetModules();
+      return await import('./media-host');
+    }
+
+    for (const code of ['UNIMPLEMENTED']) {
+      it(`stops asking the composer once it has answered ${code}`, async () => {
+        const fresh = await freshModule();
+        kit.composer.previewProxy.mockRejectedValue(coded(code));
+        const previewProxy = copier(fresh.composerMediaHost());
+
+        await expect(previewProxy(CLIP)).resolves.toBeNull();
+        await expect(previewProxy({ ...CLIP, key: 'clip-2', sourcePath: 'file:///app/clip-2.mp4' })).resolves.toBeNull();
+        // Nor for a host built afterwards: the platform has not changed under the page.
+        kit.composer.previewProxy.mockResolvedValue(copied());
+        await expect(copier(fresh.composerMediaHost())(CLIP)).resolves.toBeNull();
+        expect(kit.composer.previewProxy).toHaveBeenCalledTimes(1);
+      });
+    }
+
+    /* Every code the composer itself answers with is about one clip: too long, no room, a codec. */
+    for (const code of ['encoder', 'unsupported', 'too_large', 'no_space']) {
+      it(`keeps asking after ${code}, a failure about the clip rather than the platform`, async () => {
+        const fresh = await freshModule();
+        kit.composer.previewProxy.mockRejectedValueOnce(coded(code)).mockResolvedValue(copied());
+        const previewProxy = copier(fresh.composerMediaHost());
+
+        await expect(previewProxy(CLIP)).resolves.toBeNull();
+        await expect(previewProxy(CLIP)).resolves.toMatch(/^capacitor:/);
+        expect(kit.composer.previewProxy).toHaveBeenCalledTimes(2);
+      });
+    }
+  });
+
+  /* A page's only transcoder is no quicker than the seeks it would save; see `VideoComposerWeb.previewProxy`. */
+  it('is not offered in a page at all, where the preview plays every clip itself', () => {
+    kit.native = false;
+    const { host } = build();
+
+    expect('previewProxy' in host).toBe(false);
+    expect(kit.composer.previewProxy).not.toHaveBeenCalled();
   });
 });
 

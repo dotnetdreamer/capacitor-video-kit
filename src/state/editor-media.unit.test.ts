@@ -673,4 +673,152 @@ describe('EditorMedia', () => {
       expect(store.toast.value?.text).toBe("That file can't be used. Try another one");
     });
   });
+
+  describe('preview copies', () => {
+    /** A host that makes copies, each answered when the test says. */
+    function copyingMedia() {
+      const asked: string[] = [];
+      const answers = new Map<string, (url: string | null) => void>();
+      const previewProxy = vi.fn(
+        (source: EditorSource) =>
+          new Promise<string | null>(resolve => {
+            asked.push(source.key);
+            answers.set(source.key, resolve);
+          }),
+      );
+      const answer = async (key: string, url: string | null) => {
+        answers.get(key)?.(url);
+        // The answer lands on the next microtasks, and the next ask goes out after it.
+        await Promise.resolve();
+        await Promise.resolve();
+      };
+      return { host: fakeMedia({ previewProxy }), previewProxy, asked, answer };
+    }
+
+    it('asks for every video source at once, and each only once, recording each copy as it lands', async () => {
+      const copies = copyingMedia();
+      open(copies.host);
+      expect(copies.asked).toEqual(['a', 'b']);
+
+      // Answered in any order; a copy already made comes back without waiting for another.
+      await copies.answer('b', 'file:///copy-b.mp4');
+      expect([...store.previewUrls.value]).toEqual([['b', 'file:///copy-b.mp4']]);
+      await copies.answer('a', 'file:///copy-a.mp4');
+      expect(store.previewUrls.value.get('a')).toBe('file:///copy-a.mp4');
+
+      // An edit after that asks for nothing more.
+      store.manifest.value = { ...base, clips: [clip('b', 0, 1000), clip('a', 0, 500)] };
+      expect(copies.previewProxy).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks for the clips the edit plays first, in the order it plays them, and the rest after', async () => {
+      const copies = copyingMedia();
+      open(copies.host);
+      store.clips.value = [...store.clips.value, { key: 'c', fileName: 'c.mp4' }, { key: 'd', fileName: 'd.mp4' }];
+      expect(copies.asked).toEqual(['a', 'b', 'c', 'd']);
+
+      // An edit already playing clips it has no source for yet asks for those first when they arrive.
+      const next = copyingMedia();
+      open(next.host);
+      store.manifest.value = { ...base, clips: [clip('d', 0, 1000), clip('b', 0, 1000), clip('d', 1000, 2000)] };
+      store.clips.value = [...store.clips.value, { key: 'c', fileName: 'c.mp4' }, { key: 'd', fileName: 'd.mp4' }];
+      expect(next.asked).toEqual(['a', 'b', 'd', 'c']);
+    });
+
+    it('never asks for a picture, and does not ask again for a clip that got no copy', async () => {
+      const copies = copyingMedia();
+      open(copies.host, null, { pictures: true });
+      const photo: EditorSource = { key: 'photo', fileName: 'photo.jpg', playbackUrl: 'blob:photo', kind: 'image' };
+      store.clips.value = [...store.clips.value, photo];
+      store.manifest.value = { ...base, clips: [{ ...clip('photo', 0, 3000), image: true }, clip('a', 0, 1000)] };
+
+      await copies.answer('a', null);
+      await copies.answer('b', null);
+
+      expect(copies.asked).toEqual(['a', 'b']);
+      expect(store.previewUrls.value.size).toBe(0);
+      store.clips.value = [...store.clips.value];
+      expect(copies.previewProxy).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks for a clip that would not open once it opens again', () => {
+      const copies = copyingMedia();
+      open(copies.host);
+      store.unreadable.value = new Set(['c']);
+      store.clips.value = [...store.clips.value, { key: 'c', fileName: 'c.mp4' }];
+      expect(copies.asked).toEqual(['a', 'b']);
+
+      store.unreadable.value = new Set();
+      expect(copies.asked).toEqual(['a', 'b', 'c']);
+    });
+
+    it('carries on with the next clip when a copy is refused', async () => {
+      const previewProxy = vi.fn(async (source: EditorSource) => {
+        if (source.key === 'a') throw new Error('no encoder');
+        return `file:///copy-${source.key}.mp4`;
+      });
+      open(fakeMedia({ previewProxy }));
+      await vi.waitFor(() => expect(previewProxy).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect([...store.previewUrls.value.keys()]).toEqual(['b']));
+    });
+
+    it('copies a clip added to the edit later', async () => {
+      const copies = copyingMedia();
+      open(copies.host);
+      await copies.answer('a', 'file:///copy-a.mp4');
+      await copies.answer('b', 'file:///copy-b.mp4');
+
+      store.clips.value = [...store.clips.value, { key: 'c', fileName: 'c.mp4' }];
+      expect(copies.asked).toEqual(['a', 'b', 'c']);
+    });
+
+    it('asks for nothing on a host that makes no copies, and has nothing to wait for there', async () => {
+      await expect(media.whenCopied(['a', 'b'])).resolves.toBeUndefined();
+      expect(store.previewUrls.value.size).toBe(0);
+    });
+
+    it('takes nothing that lands, and asks for nothing more, once the editor has gone', async () => {
+      const copies = copyingMedia();
+      open(copies.host);
+      media.dispose();
+      await copies.answer('a', 'file:///copy-a.mp4');
+      store.clips.value = [...store.clips.value, { key: 'c', fileName: 'c.mp4' }];
+
+      expect(copies.asked).toEqual(['a', 'b']);
+      expect(store.previewUrls.value.size).toBe(0);
+    });
+
+    describe('whenCopied', () => {
+      it('resolves once every clip named has had its answer, a copy or none', async () => {
+        const copies = copyingMedia();
+        open(copies.host);
+        let settled = false;
+        void media.whenCopied(['a', 'b']).then(() => (settled = true));
+
+        await copies.answer('a', 'file:///copy-a.mp4');
+        expect(settled).toBe(false);
+        await copies.answer('b', null);
+        await vi.waitFor(() => expect(settled).toBe(true));
+      });
+
+      it('has nothing to wait for on a picture, a file that would not open, or a key with no source', async () => {
+        const copies = copyingMedia();
+        open(copies.host, null, { pictures: true });
+        const photo: EditorSource = { key: 'photo', fileName: 'photo.jpg', playbackUrl: 'blob:photo', kind: 'image' };
+        store.clips.value = [...store.clips.value, photo];
+        store.unreadable.value = new Set(['b']);
+
+        await copies.answer('a', 'file:///copy-a.mp4');
+        await expect(media.whenCopied(['a', 'b', 'photo', 'gone'])).resolves.toBeUndefined();
+      });
+
+      it('lets go of a wait when the editor goes away', async () => {
+        const copies = copyingMedia();
+        open(copies.host);
+        const waiting = media.whenCopied(['a']);
+        media.dispose();
+        await expect(waiting).resolves.toBeUndefined();
+      });
+    });
+  });
 });

@@ -46,6 +46,8 @@ import type {
   JobState,
   PrepareJobOptions,
   PrepareJobResult,
+  PreviewProxyOptions,
+  PreviewProxyResult,
   ProbeOptions,
   ProbeResult,
   SaveToGalleryOptions,
@@ -73,6 +75,22 @@ export interface VideoComposerPlugin {
   getState(options: JobIdOptions): Promise<JobState>;
 
   probe(options: ProbeOptions): Promise<ProbeResult>;
+
+  /**
+   * A small, densely keyed copy of a clip for the live preview to play instead of the clip, on the
+   * same timeline; made once and kept in the app's cache, so asking again for the same clip answers
+   * at once. Resolves when the copy exists - for a clip not copied before, a transcode of the whole
+   * clip, one at a time.
+   *
+   * Why it exists: the preview's every cut is an exact seek, which decodes from the keyframe before
+   * it, and phone footage keyed every few seconds at 1080p and above seeks for SECONDS on a phone
+   * that is not new - so a template played as a string of freezes. See `PreviewProxy.kt`.
+   *
+   * Android only. A browser refuses with `unsupported`, and iOS - whose own player seeks the clip
+   * itself quickly enough - answers `UNIMPLEMENTED` from the bridge; either way the preview simply
+   * plays the clip, as it always has.
+   */
+  previewProxy(options: PreviewProxyOptions): Promise<PreviewProxyResult>;
 
   thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult>;
 

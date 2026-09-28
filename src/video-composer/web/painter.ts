@@ -66,6 +66,20 @@ export interface PainterOptions {
    * render targets - draws the blend whatever this says, and the 2D fallback always does.
    */
   interpolation?: 'flow' | 'blend';
+  /**
+   * Leaves a PLAYING `<video>`'s texture as it is when the element is still showing the frame the
+   * texture was last filled with, rather than uploading the same picture again. For the preview,
+   * which paints every animation frame whatever the footage does: at 60 paints a second, a 30 fps
+   * clip - or any clip slowed down - shows each of its frames for two paints or more, and every
+   * upload of a phone's video frame into WebGL is a copy the GPU is short of time for (2.4 ms of the
+   * page's own thread each on a Galaxy A13, 2026-09-28). The frame is told apart by its media
+   * timestamp, which `new VideoFrame(video)` reads for 0.25 ms without copying it.
+   *
+   * Off by default: the export seeks its elements to every frame it draws, so it never paints one
+   * twice. The preview turns it off on WebKit, where reading the frame of a playing element can wait
+   * on it (see `PreviewCanvas`).
+   */
+  skipUnchangedVideo?: boolean;
 }
 
 /**
@@ -327,6 +341,13 @@ export class Painter {
   /** Where the quad's corners are bound, which the transition programs are linked to read too. */
   private position = 0;
   private readonly textures = new Map<LayerSource, WebGLTexture>();
+  /**
+   * The frame each playing video's texture was last filled with: the element's source and the
+   * frame's media timestamp. Keyed by the TEXTURE, so a texture made afresh - after [forget], a lost
+   * context - has no entry and is always filled. See [PainterOptions.skipUnchangedVideo].
+   */
+  private readonly videoFrames = new WeakMap<WebGLTexture, VideoStamp>();
+  private readonly skipUnchangedVideo: boolean;
   /** Built the first time a frame has a transition in it, and never for a post that has none. */
   private transitionGl: TransitionGl | null = null;
   private transition2d: Transition2d | null = null;
@@ -357,6 +378,7 @@ export class Painter {
   constructor(output: Frame, onto?: HTMLCanvasElement, options: PainterOptions = {}) {
     this.output = output;
     this.interpolation = options.interpolation ?? 'flow';
+    this.skipUnchangedVideo = options.skipUnchangedVideo ?? false;
     this.canvas = onto ?? createCanvas(output.width, output.height);
     this.canvas.width = output.width;
     this.canvas.height = output.height;
@@ -871,12 +893,24 @@ export class Painter {
     // drawn and never again. Anything else is re-uploaded below.
     const still = typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap;
     const uploaded = still && this.textures.has(source);
-    gl.bindTexture(gl.TEXTURE_2D, this.textureFor(gl, source));
+    const texture = this.textureFor(gl, source);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    // A playing video still on the frame its texture holds keeps it; see [PainterOptions.skipUnchangedVideo].
+    // Read BEFORE the upload, so the frame recorded is never newer than the one uploaded: a frame that
+    // moves on in between is simply uploaded again next paint.
+    const stamp = this.skipUnchangedVideo && !still ? playingFrameStamp(source) : null;
+    if (stamp) {
+      const held = this.videoFrames.get(texture);
+      if (held && held.src === stamp.src && held.timestamp === stamp.timestamp) return true;
+    }
     try {
       // Re-uploaded every frame because the source is a `<video>` whose picture has moved on; the
       // texture object itself is kept, which is what saves the allocation.
       if (!uploaded) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      if (stamp) this.videoFrames.set(texture, stamp);
+      else this.videoFrames.delete(texture);
     } catch {
+      this.videoFrames.delete(texture);
       // Not uploaded after all, so a bitmap must not be taken for one that was on its next frame.
       if (still) this.textures.delete(source);
       // A cross-origin `<video>` does not merely TAINT a GL texture the way it taints a 2D
@@ -1179,6 +1213,35 @@ function isHeldPicture(source: LayerSource): source is ImageBitmap | GpuFrame {
 /** What the 2D path can draw `source` as: itself, or nothing for a [GpuFrame], which is a texture. */
 function drawable2d(source: LayerSource): CanvasImageSource | null {
   return source instanceof GpuFrame ? null : source;
+}
+
+/** Which frame a video's texture holds: see [PainterOptions.skipUnchangedVideo]. */
+interface VideoStamp {
+  src: string;
+  timestamp: number;
+}
+
+/**
+ * The frame a PLAYING `<video>` is showing, as its source and the frame's media timestamp; null for
+ * anything else - a picture, a copy, a paused or seeking element, one with no frame yet, a browser
+ * with no `VideoFrame` - which is then uploaded as it always was. Paused, the preview only paints when
+ * something has moved, so there is nothing to save there, and a paused element is the one case where
+ * a frame could come back to a timestamp its texture was last filled near.
+ */
+function playingFrameStamp(source: LayerSource): VideoStamp | null {
+  if (typeof HTMLVideoElement === 'undefined' || !(source instanceof HTMLVideoElement)) return null;
+  if (typeof VideoFrame !== 'function' || source.paused || source.seeking || source.readyState < 2) return null;
+  let frame: VideoFrame;
+  try {
+    frame = new VideoFrame(source);
+  } catch {
+    return null;
+  }
+  try {
+    return { src: source.currentSrc, timestamp: frame.timestamp };
+  } finally {
+    frame.close();
+  }
 }
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {

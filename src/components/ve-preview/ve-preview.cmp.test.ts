@@ -1881,3 +1881,192 @@ const TRANSPARENT_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABC
 function layerImg(preview: HTMLElement): HTMLImageElement | null {
   return preview.querySelector('img.pv__layer');
 }
+
+/* ============================================================================================ */
+/* Preview copies                                                                               */
+/* ============================================================================================ */
+
+/**
+ * [standInForFiles], with each file in `broken` answering its load with an `error` rather than its
+ * metadata: a preview copy this WebView will not play.
+ */
+function standInWithBroken(...broken: string[]): ReturnType<typeof standInForFiles> {
+  const files = standInForFiles();
+  const proto = HTMLMediaElement.prototype;
+  const standIn = proto.load;
+  proto.load = function (this: HTMLMediaElement) {
+    const one = files.of(this);
+    if (!broken.includes(one.src)) return standIn.call(this);
+    one.loads.push(one.position);
+    queueMicrotask(() => this.dispatchEvent(new Event('error')));
+  };
+  // Put back before the stand-in is, which then puts back the element's own.
+  standIns.push({ restore: () => (proto.load = standIn) }, files);
+  return files;
+}
+
+describe('ve-preview taking up a preview copy', () => {
+  /*
+   * A host's copy of a clip - the same footage on the same timeline, small and keyed densely, so a
+   * cut's seek lands at once - arrives while the preview is open: `EditorMedia` asks for it as the
+   * editor opens, and a copy is seconds of work (see [EditorStore.previewUrls]). Every element on
+   * that clip is loaded onto the copy from exactly where the playhead is, paused or playing, and
+   * nothing else is touched. A copy the WebView will not play is given up, and the clip plays
+   * itself from the same place, which is all the preview ever did before copies existed.
+   *
+   * The stand-in's elements say what was asked of them - which file, and where; the last case reads
+   * the picture off real footage.
+   */
+  it('loads the paused base element onto the copy, at the frame it was parked on', async () => {
+    const files = standInForFiles();
+    standIns.push(files);
+    const { store, preview } = await mount(false, { a: 'stand-in:a', b: 'stand-in:b' });
+    const baseEl = sources(preview)[0];
+    await until('the base to settle on its clip', () => files.of(baseEl).at.length > 0);
+    store.seek(1500);
+    await until('the base to be parked a second and a half in', () => files.of(baseEl).at.at(-1) === 1.5);
+    await frames(3);
+    const settled = { loads: files.of(baseEl).loads.length, at: files.of(baseEl).at.length };
+
+    store.previewUrls.value = new Map([['clip-a', 'stand-in:copy-a']]);
+
+    await until('the base to be pointed at the copy', () => files.of(baseEl).src === 'stand-in:copy-a');
+    await until('the copy to be asked for a frame', () => files.of(baseEl).at.length > settled.at);
+    await frames(3);
+    expect(files.of(baseEl).loads.length).toBe(settled.loads + 1);
+    // Where it was parked, and parked still.
+    expect(files.of(baseEl).at.slice(settled.at).every(seconds => seconds === 1.5)).toBe(true);
+    expect(store.playheadMs.value).toBe(1500);
+    expect(store.playing.value).toBe(false);
+    expect(files.of(baseEl).paused).toBe(true);
+    // The preview's alone: the source every render reads is the clip, as it was.
+    expect(store.clipByKey('clip-a')?.playbackUrl).toBe('stand-in:a');
+
+    // A copy of a clip nothing is showing, alongside the one already taken up, loads nothing.
+    const after = files.of(baseEl).loads.length;
+    store.previewUrls.value = new Map([...store.previewUrls.value, ['clip-c', 'stand-in:copy-c']]);
+    await frames(5);
+    expect(files.of(baseEl).loads.length).toBe(after);
+    expect(files.of(baseEl).src).toBe('stand-in:copy-a');
+  });
+
+  it('loads a playing base element onto the copy from where the playhead is, and plays on', async () => {
+    const files = standInForFiles();
+    standIns.push(files);
+    const { store, preview } = await mount(false, { a: 'stand-in:a', b: 'stand-in:b' });
+    const baseEl = sources(preview)[0];
+    await until('the base to settle on its clip', () => files.of(baseEl).at.length > 0);
+    await frames(3);
+    store.seek(500);
+    store.play();
+    await until('playback to start', () => store.playing.value, 3000);
+    await until('playback to be under way', () => store.playheadMs.value > 900, 3000);
+
+    // In one task, so the frame loop cannot move the playhead in between.
+    const settled = files.of(baseEl).at.length;
+    const atMs = store.playheadMs.value;
+    store.previewUrls.value = new Map([['clip-a', 'stand-in:copy-a']]);
+
+    await until('the base to be pointed at the copy', () => files.of(baseEl).src === 'stand-in:copy-a');
+    await until('the copy to be put somewhere', () => files.of(baseEl).at.length > settled);
+    expect(files.of(baseEl).at[settled]).toBeCloseTo(atMs / 1000, 3);
+    // And on from there, on the copy, with the transport never having stopped for the customer.
+    await until('the playhead to run on past where the copy was taken up', () => store.playheadMs.value > atMs + 400, 3000);
+    expect(store.playing.value).toBe(true);
+    expect(files.of(baseEl).paused).toBe(false);
+    expect(files.of(baseEl).src).toBe('stand-in:copy-a');
+    store.pause();
+  }, 15_000);
+
+  it('plays the clip itself, from the same frame, when the copy will not load', async () => {
+    const files = standInWithBroken('stand-in:broken-a');
+    const { store, preview } = await mount(false, { a: 'stand-in:a', b: 'stand-in:b' });
+    const baseEl = sources(preview)[0];
+    await until('the base to settle on its clip', () => files.of(baseEl).at.length > 0);
+    store.seek(1500);
+    await until('the base to be parked a second and a half in', () => files.of(baseEl).at.at(-1) === 1.5);
+    await frames(3);
+    const settled = { loads: files.of(baseEl).loads.length, at: files.of(baseEl).at.length };
+
+    store.previewUrls.value = new Map([['clip-a', 'stand-in:broken-a']]);
+
+    await until('the copy to be given up', () => !store.previewUrls.value.has('clip-a'));
+    await until('the base to be pointed at the clip again', () => files.of(baseEl).src === 'stand-in:a');
+    await until('the clip to be asked for a frame', () => files.of(baseEl).at.length > settled.at);
+    await frames(5);
+    // The copy once and the clip once, and the clip where the copy would have been.
+    expect(files.of(baseEl).loads.length).toBe(settled.loads + 2);
+    expect(files.of(baseEl).at.at(-1)).toBe(1.5);
+    expect(store.playheadMs.value).toBe(1500);
+    // Given up for good: it is not tried again on the next paint.
+    expect(files.of(baseEl).src).toBe('stand-in:a');
+  });
+
+  it('loads a second layer onto its copy, from where it is, and leaves the base alone', async () => {
+    const files = standInForFiles();
+    standIns.push(files);
+    const { store, preview } = await mount(true, { a: 'stand-in:a', b: 'stand-in:b' });
+    const [baseEl, extraEl] = sources(preview);
+    await until('the base to settle on its clip', () => files.of(baseEl).at.length > 0);
+    await until('the second layer to settle on its clip', () => files.of(extraEl).at.length > 0);
+    store.seek(1000);
+    await until('the second layer to be put a second in', () => files.of(extraEl).at.at(-1) === 1);
+    await frames(3);
+    const base = { loads: files.of(baseEl).loads.length, src: files.of(baseEl).src };
+    const settled = files.of(extraEl).at.length;
+
+    store.previewUrls.value = new Map([['clip-b', 'stand-in:copy-b']]);
+
+    await until('the second layer to be pointed at its copy', () => files.of(extraEl).src === 'stand-in:copy-b');
+    await until('the copy to be asked for a frame', () => files.of(extraEl).at.length > settled);
+    await frames(3);
+    expect(files.of(extraEl).at.at(-1)).toBe(1);
+    expect(files.of(baseEl).loads.length).toBe(base.loads);
+    expect(files.of(baseEl).src).toBe(base.src);
+  });
+
+  it("plays the second layer's clip itself when its copy will not load", async () => {
+    const files = standInWithBroken('stand-in:broken-b');
+    const { store, preview } = await mount(true, { a: 'stand-in:a', b: 'stand-in:b' });
+    const extraEl = sources(preview)[1];
+    await until('the second layer to settle on its clip', () => files.of(extraEl).at.length > 0);
+    store.seek(1000);
+    await until('the second layer to be put a second in', () => files.of(extraEl).at.at(-1) === 1);
+    await frames(3);
+    const settled = files.of(extraEl).at.length;
+
+    store.previewUrls.value = new Map([['clip-b', 'stand-in:broken-b']]);
+
+    await until('the copy to be given up', () => !store.previewUrls.value.has('clip-b'));
+    await until('the second layer to be pointed at its clip again', () => files.of(extraEl).src === 'stand-in:b');
+    await until('the clip to be asked for a frame', () => files.of(extraEl).at.length > settled);
+    await frames(3);
+    expect(files.of(extraEl).at.at(-1)).toBe(1);
+  });
+
+  it(
+    'shows the copy once it has loaded, and the clip again when a copy will not play',
+    async (ctx) => {
+      needs(ctx, canDecodeAvc(), 'this browser has no H.264 decoder');
+      const files = { a: await makeSourceVideo('#ff0000'), b: await makeSourceVideo('#ff0000') };
+      // Told apart from the clip by its colour alone; a real copy is the same picture, smaller.
+      const copy = await makeSourceVideo('#0000ff');
+      // Bytes no decoder will take: what a WebView does with a copy it cannot play is a real `error`.
+      const broken = URL.createObjectURL(new Blob([new Uint8Array(256).fill(7)], { type: 'video/mp4' }));
+      revoke.push(broken);
+      const { store, preview } = await mount(false, files);
+      const baseEl = sources(preview)[0];
+      await until('the clip to be composited', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+
+      store.previewUrls.value = new Map([['clip-a', copy]]);
+      await until('the copy to be composited', () => colourAt(preview, 0.5, 0.5) === 'blue', PIXEL_TIMEOUT_MS);
+      expect(baseEl.src).toBe(copy);
+
+      store.previewUrls.value = new Map([['clip-a', broken]]);
+      await until('the broken copy to be given up', () => !store.previewUrls.value.has('clip-a'), PIXEL_TIMEOUT_MS);
+      await until('the clip to be composited again', () => colourAt(preview, 0.5, 0.5) === 'red', PIXEL_TIMEOUT_MS);
+      expect(baseEl.src).toBe(files.a);
+    },
+    PIXEL_TIMEOUT_MS * 2,
+  );
+});

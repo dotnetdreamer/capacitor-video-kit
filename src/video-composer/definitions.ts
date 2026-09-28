@@ -810,6 +810,32 @@ export interface ProbeResult {
 }
 
 /**
+ * A clip to make a preview copy of; see [VideoComposerPlugin.previewProxy].
+ */
+export interface PreviewProxyOptions {
+  /** `file://` or `content://`, or a bare path: the clip, as `compose` reads one. */
+  uri: string;
+  /** The copy's shorter side in pixels, never more than the clip's own. 540 by default. */
+  shortSide?: number;
+  /** The most frames a second the copy keeps. 60 by default. */
+  maxFps?: number;
+}
+
+/**
+ * A clip's preview copy: the same footage on the same timeline - a frame at `t` in the clip is at `t`
+ * in the copy - small, and keyed densely enough that the preview can seek it anywhere at once.
+ */
+export interface PreviewProxyResult {
+  /** `file://` in the app's cache. Played by the preview only: a render reads the clip itself. */
+  uri: string;
+  width: number;
+  height: number;
+  durationMs: number;
+  /** It was already there from an earlier request, so nothing was transcoded for this one. */
+  cached: boolean;
+}
+
+/**
  * A video whose audio track is wanted on its own, and where the result should be kept.
  *
  * The extraction is a REMUX wherever the platform can manage one - the compressed audio is lifted

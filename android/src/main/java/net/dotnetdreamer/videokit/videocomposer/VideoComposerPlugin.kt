@@ -173,6 +173,9 @@ class VideoComposerPlugin : Plugin() {
             plan = RenderPlan.build(spec.withoutOverlayPixels(), emptyMap()),
         )
         JobRegistry.register(job)
+        // The codecs are the render's: a preview copy being made stops, and is made again after it.
+        // Registered first, so the copy's queue already sees a render running when it looks.
+        PreviewProxy.yieldToRender()
         call.resolve(JSObject().put("jobId", spec.jobId))
 
         // Asked for now, while the Activity is certainly visible: from API 31 a foreground service
@@ -897,6 +900,45 @@ class VideoComposerPlugin : Plugin() {
             } catch (e: Exception) {
                 // ML Kit itself failing, which is not the file's fault: the platform's own words.
                 call.reject(ErrorMapping.describe(e), FailureCodes.UNKNOWN)
+            }
+        }
+    }
+
+    /* ======================================================================================== */
+    /* previewProxy                                                                              */
+    /* ======================================================================================== */
+
+    /**
+     * A light copy of a clip for the live preview to play ([PreviewProxy]), made once and kept in the
+     * cache. Resolves when the copy exists, which for a clip not copied before is a transcode of the
+     * whole clip - seconds, one clip at a time. On [pluginScope]: the wait is a coroutine, the work
+     * Media3's own.
+     */
+    @PluginMethod
+    fun previewProxy(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        val shortSide = call.getInt("shortSide") ?: PreviewProxy.DEFAULT_SHORT_SIDE
+        val maxFps = call.getInt("maxFps") ?: PreviewProxy.DEFAULT_MAX_FPS
+
+        pluginScope.launch {
+            try {
+                call.resolve(PreviewProxy.make(context.applicationContext, uri, shortSide, maxFps).toJson())
+            } catch (e: PreviewProxy.UnreadableException) {
+                call.reject(e.message, FailureCodes.UNREADABLE_INPUT)
+            } catch (e: PreviewProxy.DeclinedException) {
+                // This clip only - too long, or no room - so never `unsupported`, which the page
+                // reads as "no copies on this platform at all".
+                call.reject(e.message, e.code)
+            } catch (e: Exception) {
+                // A clip Media3 cannot copy - an unknown codec, a broken file - is this clip's failure
+                // too, so it is never reported as `unsupported` either.
+                val mapped = ErrorMapping.map(e)
+                val code = if (mapped.code == FailureCodes.UNSUPPORTED) FailureCodes.UNREADABLE_INPUT else mapped.code
+                call.reject(mapped.message, code)
             }
         }
     }

@@ -1,5 +1,14 @@
-import { effect, signal } from '@preact/signals-core';
-import { MAX_LAYERS, MAX_VIDEO_TRACKS, PICTURE_SOURCE_MS, defaultClipEdit, defaultPictureEdit, insertClip, replaceClipSource } from '../editor';
+import { effect, signal, untracked } from '@preact/signals-core';
+import {
+  MAX_LAYERS,
+  MAX_VIDEO_TRACKS,
+  PICTURE_SOURCE_MS,
+  defaultClipEdit,
+  defaultPictureEdit,
+  insertClip,
+  replaceClipSource,
+  uniqueClipKeys,
+} from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
@@ -94,6 +103,11 @@ export class EditorMedia {
   private waveformQueue: Promise<void> = Promise.resolve();
   private readonly waveformsPending = new Map<string, Promise<void>>();
   private stopWatchingAudio: (() => void) | null = null;
+  /** See [watchForCopies]: the sources a copy has been asked for. */
+  private stopWatchingCopies: (() => void) | null = null;
+  private readonly copiesAsked = new Set<string>();
+  /** The sources whose copy has had its answer, a copy or none; what [whenCopied] waits on. */
+  private readonly copiesAnswered = signal<ReadonlySet<string>>(new Set());
   private destroyed = false;
 
   constructor(
@@ -150,6 +164,8 @@ export class EditorMedia {
       const known = this.store.waveforms.value;
       for (const { uri, key, durationMs } of audio) if (uri && !known.has(key)) void this.loadWaveform(uri, durationMs, key);
     });
+
+    this.watchForCopies();
   }
 
   /** Called by the shell when the editor leaves the document. */
@@ -157,6 +173,104 @@ export class EditorMedia {
     this.destroyed = true;
     this.stopWatchingAudio?.();
     this.stopWatchingAudio = null;
+    this.stopWatchingCopies?.();
+    this.stopWatchingCopies = null;
+    // Wakes every [whenCopied] still waiting, which resolves on finding this destroyed.
+    this.copiesAnswered.value = new Set(this.copiesAnswered.peek());
+  }
+
+  /* ========================================================================================= */
+  /* Preview copies                                                                            */
+  /* ========================================================================================= */
+
+  /**
+   * Asks the host for each video source's preview copy ([EditorMediaHost.previewProxy]) and puts
+   * each one that comes back into [EditorStore.previewUrls], where the preview takes it up.
+   *
+   * Every source not asked for yet goes out at once, the ones the EDIT uses first, in the order it
+   * plays them: the host makes its copies one at a time in the order asked, and answers one it has
+   * already made at once - so a clip copied on an earlier visit is back straight away rather than
+   * waiting behind another clip's transcode. Each source is asked for once for the life of this
+   * object, whatever came of it: a copy the host could not make is not asked for again on every edit.
+   */
+  private watchForCopies(): void {
+    if (!this.host.media.previewProxy) return;
+    this.stopWatchingCopies = effect(() => {
+      // Read here so a source added or replaced, or one that opens again, wakes this; the asking
+      // itself peeks. Read INTO something: a bare `void signal.value` is a read whose value goes
+      // nowhere, which the production minifier drops as free of side effects - and the effect is then
+      // subscribed to nothing and never runs again.
+      const sources = this.store.clips.value.length + uniqueClipKeys(this.store.manifest.value).length + this.store.unreadable.value.size;
+      if (sources > 0) untracked(() => this.askForCopies());
+    });
+  }
+
+  private askForCopies(): void {
+    const ask = this.host.media.previewProxy;
+    if (this.destroyed || !ask) return;
+    for (const source of this.notAskedFor()) {
+      this.copiesAsked.add(source.key);
+      ask
+        .call(this.host.media, source)
+        .catch((error: unknown) => {
+          debugWarn('[EditorMedia] preview copy failed', source.key, error);
+          return null;
+        })
+        .then(url => {
+          if (this.destroyed) return;
+          if (url) this.store.previewUrls.value = new Map(this.store.previewUrls.peek()).set(source.key, url);
+          this.copiesAnswered.value = new Set(this.copiesAnswered.peek()).add(source.key);
+        });
+    }
+  }
+
+  /**
+   * Resolves once each of `keys` that can have a preview copy has had its answer - a copy in
+   * [EditorStore.previewUrls], or none to be had - and at once on a host that makes none. A key that
+   * is a picture, an unreadable file or no source at all has nothing to wait for. Never rejects.
+   *
+   * For a host that would rather its preview STARTED on the copies than switched to them mid-play -
+   * the template studio, whose every cut is a seek. It bounds the wait itself: a long clip's copy can
+   * take longer than anyone should look at a still frame for, and the preview plays the clip itself
+   * until its copy lands, as it always could.
+   */
+  whenCopied(keys: readonly string[]): Promise<void> {
+    if (!this.host.media.previewProxy) return Promise.resolve();
+    return new Promise<void>(resolve => {
+      let stop: (() => void) | null = null;
+      let done = false;
+      const finish = () => {
+        done = true;
+        stop?.();
+        resolve();
+      };
+      stop = effect(() => {
+        const answered = this.copiesAnswered.value;
+        const unreadable = this.store.unreadable.value;
+        const waiting = keys.some(key => {
+          const source = this.store.clipByKey(key);
+          return !!source && !isPictureSource(source) && !this.store.isPictureKey(key) && !unreadable.has(key) && !answered.has(key);
+        });
+        if (!waiting || this.destroyed) untracked(finish);
+      });
+      // The effect's first run can finish before `stop` is assigned; it is stopped here then.
+      if (done) stop();
+    });
+  }
+
+  /** The video sources no copy has been asked for: the edit's own, in the order it plays them, then the rest. */
+  private notAskedFor(): EditorSource[] {
+    const clips = this.store.clips.peek();
+    const unreadable = this.store.unreadable.peek();
+    const byKey = new Map(clips.map(source => [source.key, source] as const));
+    const wanted: EditorSource[] = [];
+    for (const key of new Set([...uniqueClipKeys(this.store.manifest.peek()), ...byKey.keys()])) {
+      if (this.copiesAsked.has(key) || unreadable.has(key)) continue;
+      const source = byKey.get(key);
+      if (!source || isPictureSource(source) || this.store.isPictureKey(key)) continue;
+      wanted.push(source);
+    }
+    return wanted;
   }
 
   /* ========================================================================================= */
