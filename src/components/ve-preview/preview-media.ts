@@ -103,8 +103,10 @@ export function applyPitch(video: { preservesPitch?: boolean }, clip: EditClip, 
  * therefore could not be played in the preview at all: Play started the base, the layer's start
  * paused it, and the transport went straight back to Play.
  *
- * Told apart by the other thing iOS's WebKit does and nothing else does: a `volume` it will not let
- * a page set ([volumeIsWritable]). See [FollowerVideo] for what is done about it.
+ * Told apart by the other thing only iOS's WebKit does: a `volume` it will not let a page set
+ * ([volumeIsWritable]). See [FollowerVideo] for what is done about it; the base track's own two
+ * elements never start with their sound on at once (the spare is started muted, and a transition's
+ * tail is not heard where the volume cannot fade it).
  */
 export function oneVideoSoundAtATime(): boolean {
   return !volumeIsWritable();
@@ -115,24 +117,45 @@ let volumeWritable: boolean | null = null;
 /**
  * Whether this WebView lets a page set a media element's `volume` at all.
  *
- * iOS does not: the volume is the hardware buttons' alone, and `volume` reads back 1 whatever was
- * written to it. Everything that FADES a clip's own sound - a transition's crossfade - has to know,
- * because a fade written to an element that ignores it is two clips at full volume at once. So do
- * the music and the voiceover, which are heard at their levels there through [PreviewMixer]
- * instead. Asked of a detached element once and remembered; the answer cannot change while the page
- * is up.
+ * iOS does not: the volume is the hardware buttons' alone. Everything that FADES a clip's own sound -
+ * a transition's crossfade - has to know, because a fade written to an element that ignores it is
+ * two clips at full volume at once. So do the music and the voiceover, which are heard at their
+ * levels there through [PreviewMixer] instead. Worked out once and remembered; the answer cannot
+ * change while the page is up.
+ *
+ * An iPhone or an iPad is taken for what it is ([appleTouchWebKit]) before anything is asked of an
+ * element. Asking one is what this did alone, and iOS used to answer it by reading back 1 whatever
+ * was written; iOS 26's WebKit reads back what was written to an element that is not playing, and
+ * puts it back to 1 the moment the element plays (measured on the iOS 26.5 simulator, 2026-09-28).
+ * The probe said "writable" there, and every one of the things above quietly took the path for a
+ * WebView where volume works: the music's level and fade-out unheard, and a transition's two clips
+ * both left sounding.
  */
 export function volumeIsWritable(): boolean {
   if (volumeWritable === null) {
-    try {
-      const probe = document.createElement('video');
-      probe.volume = 0.5;
-      volumeWritable = Math.abs(probe.volume - 0.5) < 0.01;
-    } catch {
+    if (appleTouchWebKit()) {
       volumeWritable = false;
+    } else {
+      try {
+        const probe = document.createElement('video');
+        probe.volume = 0.5;
+        volumeWritable = Math.abs(probe.volume - 0.5) < 0.01;
+      } catch {
+        volumeWritable = false;
+      }
     }
   }
   return volumeWritable;
+}
+
+/**
+ * Apple's WebKit on a touch screen: every WebView on an iPhone, and on an iPad, which calls itself a
+ * Mac but has a touch screen no Mac has. Where the two restrictions above - `volume` ignored, one
+ * `<video>` with sound at a time - are iOS's own.
+ */
+function appleTouchWebKit(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /^Apple/.test(navigator.vendor ?? '') && (navigator.maxTouchPoints ?? 0) > 1;
 }
 
 /**
