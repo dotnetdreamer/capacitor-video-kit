@@ -33,7 +33,7 @@
  * This entry point is the only one in the package that needs `@modelcontextprotocol/sdk`, which is
  * an OPTIONAL peer dependency. Nothing else here reaches it, `src/mcp` is compiled by a tsconfig of
  * its own that the package build only runs when it is asked to, and a mobile app that never imports
- * this path never sees any of it. `README.md` has the whole of what to leave out and how.
+ * this path never sees any of it. `docs/mcp.md` has the whole of what to leave out and how.
  *
  * `tools.ts` is worth reading before the rest: it says what these tools do, what they deliberately
  * do not do - they do not render, and why that is a real line rather than a first cut - and how the

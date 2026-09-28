@@ -88,15 +88,15 @@ A spec with no picture in it never creates `pictures/` and reads no byte more th
 - `requestGalleryAccess` accepts `images` and changes nothing: the one photo library grant covers
   photos and videos alike.
 - A photo stays a copy, like a video, until the host lets it go with `releaseMedia` or `sweepMedia`
-  (README, **Keeping picked media**). One picked through the system picker rather than this gallery
+  ([Keeping picked media](../docs/media.md#keeping-picked-media)). One picked through the system picker rather than this gallery
   is kept with `retainMedia`, which moves it out of Caches into `videokit-picked/` under its own
   extension, so a HEIC stays a HEIC there too; `requestMediaAccess` answers granted without a prompt
   whatever `images` says. `gallerySource` and `retainPickedFile`, from `capacitor-video-kit`, are
-  that glue for a host, the first marking a listed photo `kind: 'image'` (README, **Native hosts**).
+  that glue for a host, the first marking a listed photo `kind: 'image'` ([Native hosts](../docs/native-hosts.md#native-hosts)).
 
 ## How it is checked
 
-In the package's own test target, on the iOS Simulator (`README.md`, **Build and test**).
+In the package's own test target, on the iOS Simulator ([Build and test](../docs/development.md#build-and-test)).
 `PicturesParserTests` covers a picture on the base track, on a layer and as a transition's side, a
 clip without the key, and what a picture keeps. `PicturesRenderTests` renders real files and reads
 frames and sound back:

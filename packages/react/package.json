@@ -3,7 +3,7 @@
   "version": "1.3.0",
   "description": "React bindings for the Capacitor Video Kit editor, published as capacitor-video-kit/react",
   "license": "UNLICENSED",
-  "author": "Globaegis Limited FZE",
+  "author": "dotnetdreamer (https://github.com/dotnetdreamer)",
   "type": "module",
   "scripts": {
     "build": "rimraf ../../react .build && tsc --project tsconfig.json && rollup --config rollup.config.mjs",

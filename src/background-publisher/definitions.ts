@@ -29,7 +29,7 @@
  * handler to `PublisherSession.handleEvents(identifier:completionHandler:)`, which calls that
  * handler once everything has been delivered. Without them a finalize call that falls due while the
  * app is in the background waits until the customer next opens it, and iOS, never told that the app
- * has dealt with a wake, may hold back the ones that follow. The README has the code.
+ * has dealt with a wake, may hold back the ones that follow. `docs/installation.md` has the code.
  */
 import type { PluginListenerHandle } from '@capacitor/core';
 
