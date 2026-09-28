@@ -20,12 +20,13 @@ import kotlin.math.roundToLong
 
 /**
  * The phone's own image recogniser, asked what it sees: ML Kit's image labeling, with the base model
- * bundled into the app (`com.google.mlkit:image-labeling`), so it runs offline from the first call
- * and downloads nothing. It needs no permission, and the pictures never leave the device; ML Kit
- * itself sends Google metrics about how the API performs, which the README's **Reading what footage
- * shows** says a host has to tell its users about. Everything that touches ML Kit is in
- * [SceneLabeler], which a host can leave out of its build (`videokitImageLabeling = false`), and then
- * this refuses every call as unsupported.
+ * bundled into the app (`com.google.mlkit:image-labeling`) by default, so it runs offline from the
+ * first call and downloads nothing. It needs no permission, and the pictures never leave the device;
+ * ML Kit itself sends Google metrics about how the API performs, which the README's **Reading what
+ * footage shows** says a host has to tell its users about. Everything that touches ML Kit is in
+ * [SceneLabeler], which a host can take from Google Play services instead
+ * (`videokitImageLabeling = 'playServices'`: this refuses as unsupported until its model has
+ * downloaded) or leave out of its build (`false`: this refuses every call as unsupported).
  *
  * iOS's `MediaLabels.swift` answers the same shape from Vision. The frames of a video are chosen by
  * the same [plan], and a picture is read upright by its orientation tag, as iOS reads one.
@@ -107,6 +108,8 @@ object MediaLabels {
         if (!SceneLabeler.AVAILABLE) {
             throw UnsupportedException("this app was built without image labeling (videokitImageLabeling = false)")
         }
+        // Before any decode: the Play services engine's model may not have arrived yet.
+        SceneLabeler.notReadyReason(ctx)?.let { throw UnsupportedException(it) }
         val resolved = kind ?: kindOf(ctx, uri)
         SceneLabeler(minConfidence).use { labeler ->
             return when (resolved) {

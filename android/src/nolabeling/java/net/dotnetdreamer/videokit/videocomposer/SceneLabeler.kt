@@ -1,5 +1,6 @@
 package net.dotnetdreamer.videokit.videocomposer
 
+import android.content.Context
 import android.graphics.Bitmap
 
 /**
@@ -13,6 +14,12 @@ internal class SceneLabeler(@Suppress("UNUSED_PARAMETER") minConfidence: Float) 
     companion object {
         /** Whether this build has an engine at all. */
         const val AVAILABLE = false
+
+        /** Nothing to fetch: there is no engine. */
+        fun prepare(ctx: Context) = Unit
+
+        /** Never asked: [MediaLabels] refuses on [AVAILABLE] first. */
+        fun notReadyReason(ctx: Context): String? = null
     }
 
     fun classify(bitmap: Bitmap, rotation: Int, minConfidence: Float): List<MediaLabels.Label> =

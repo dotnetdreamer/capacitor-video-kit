@@ -1,5 +1,6 @@
 package net.dotnetdreamer.videokit.videocomposer
 
+import android.content.Context
 import android.graphics.Bitmap
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
@@ -10,16 +11,22 @@ import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 /**
  * `labelMedia`'s engine: ML Kit image labeling, with its base model bundled into the app.
  *
- * One of two files of this name, and the build compiles one: this one by default, and
- * `src/nolabeling`'s when the host sets `videokitImageLabeling = false`, which leaves ML Kit out of
- * the app altogether (see `build.gradle`). Everything ML Kit is here, so the rest of [MediaLabels]
- * compiles either way.
+ * One of three files of this name, and the build compiles one: this one by default,
+ * `src/labelingplay`'s when the host sets `videokitImageLabeling = 'playServices'`, and
+ * `src/nolabeling`'s when it sets `false`, which leaves ML Kit out of the app altogether (see
+ * `build.gradle`). Everything ML Kit is here, so the rest of [MediaLabels] compiles either way.
  */
 internal class SceneLabeler(minConfidence: Float) : AutoCloseable {
 
     companion object {
         /** Whether this build has an engine at all. */
         const val AVAILABLE = true
+
+        /** Nothing to fetch: the model is in the app. */
+        fun prepare(ctx: Context) = Unit
+
+        /** Always ready: the model is in the app. */
+        fun notReadyReason(ctx: Context): String? = null
     }
 
     private val labeler = ImageLabeling.getClient(

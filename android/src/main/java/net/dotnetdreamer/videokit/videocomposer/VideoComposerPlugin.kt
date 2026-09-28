@@ -115,6 +115,8 @@ class VideoComposerPlugin : Plugin() {
         JobRegistry.emitter = WeakReference(this)
         voiceRecorder = VoiceRecorder(appContext)
         RenderNotification.ensureChannel(appContext)
+        // labelMedia's model, where it comes from Play services, on its way before anything asks.
+        SceneLabeler.prepare(appContext)
         pluginScope.launch {
             JobFolders.sweep(appContext, System.currentTimeMillis())
             JobRegistry.sweep(android.os.SystemClock.elapsedRealtime())

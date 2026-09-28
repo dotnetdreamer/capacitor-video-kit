@@ -144,24 +144,38 @@ const trip = mergeScenes([clip, photo].flatMap((one) => (one ? [one.scenes] : []
 Everything happens on the device, with nothing downloaded and no permission asked: Apple's Vision
 (`VNClassifyImageRequest`) on iOS, which is part of the system from iOS 13 and adds nothing to the
 app, and Google's ML Kit image labeling on Android (`com.google.mlkit:image-labeling` 17.0.9, Android
-5.0 and later), whose base model the kit bundles into the app, so it answers offline from the first
-call and on a phone without Play services. The kit adds that dependency itself; a host adds nothing.
+5.0 and later), whose base model the kit bundles into the app by default, so it answers offline from
+the first call and on a phone without Play services. The kit adds that dependency itself; a host adds
+nothing, unless it picks the lighter Play services form below.
 
-**What ML Kit weighs, and how to leave it out.** It is the heaviest thing the kit puts in an Android
-app: a native library for each CPU a build carries (11.0 MB for arm64-v8a, 6.9 MB for armeabi-v7a,
-12.5 and 12.1 MB for x86 and x86_64) and a 3.0 MB model. On an arm64 phone installing from an app
-bundle, which Play splits by CPU, that is about 14 MB installed and 6.4 MB downloaded; a universal APK
-carries all four libraries. A host that never asks what footage shows leaves it out in its
-`variables.gradle`:
+**What ML Kit weighs, and the lighter ways to have it.** It is the heaviest thing the kit puts in an
+Android app: a native library for each CPU a build carries (11.0 MB for arm64-v8a, 6.9 MB for
+armeabi-v7a, 12.5 and 12.1 MB for x86 and x86_64) and a 3.0 MB model. On an arm64 phone installing
+from an app bundle, which Play splits by CPU, that is about 14 MB installed and 6.4 MB downloaded; a
+universal APK carries all four libraries. A host picks another form in its `variables.gradle`:
 
 ```groovy
 ext {
-    videokitImageLabeling = false   // or -PvideokitImageLabeling=false on the command line
+    videokitImageLabeling = 'playServices'   // or false; -PvideokitImageLabeling=... on the command line
 }
 ```
 
-and the build has no ML Kit in it at all: `labelMedia` refuses as `unsupported`, as a browser does,
-and `describeMedia` answers null.
+- **`'playServices'`** takes ML Kit from Google Play services
+  (`com.google.android.gms:play-services-mlkit-image-labeling` 16.0.8): about 200 KB in the app, and
+  Play services downloads the model and library itself. The kit asks for them when the plugin loads;
+  a host that also wants them fetched when the app is installed from Play adds this to its
+  `AndroidManifest.xml`, inside `<application>`:
+
+  ```xml
+  <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="ica" />
+  ```
+
+  Until the model has arrived, and on a phone without Play services, `labelMedia` refuses as
+  `unsupported` and `describeMedia` answers null, so a host carries on without scenes, as in a browser.
+- **`false`** leaves ML Kit out altogether: `labelMedia` always refuses as `unsupported`, and
+  `describeMedia` answers null.
+
+Any other value fails the build rather than quietly bundling.
 
 | Scene | What it means |
 |---|---|

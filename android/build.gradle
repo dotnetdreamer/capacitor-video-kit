@@ -8,6 +8,7 @@ ext {
     okhttpVersion = project.hasProperty('okhttpVersion') ? rootProject.ext.okhttpVersion : '4.12.0'
     kotlinxCoroutinesVersion = project.hasProperty('kotlinxCoroutinesVersion') ? rootProject.ext.kotlinxCoroutinesVersion : '1.10.2'
     mlkitImageLabelingVersion = project.hasProperty('mlkitImageLabelingVersion') ? rootProject.ext.mlkitImageLabelingVersion : '17.0.9'
+    mlkitPlayServicesImageLabelingVersion = project.hasProperty('mlkitPlayServicesImageLabelingVersion') ? rootProject.ext.mlkitPlayServicesImageLabelingVersion : '16.0.8'
 }
 
 buildscript {
@@ -28,15 +29,27 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
 /*
- * labelMedia's engine, ML Kit image labeling, is ON unless the host turns it off with
- * `videokitImageLabeling = false` in its variables.gradle (or `-PvideokitImageLabeling=false`). It is
- * the heaviest thing the kit adds to an app: a native library of about 11 MB for each CPU a build
- * carries (arm64-v8a; 7 MB for armeabi-v7a, 12 MB each for x86 and x86_64) and a 3 MB model, which
- * is 14 MB installed and about 6.4 MB downloaded on an arm64 phone from an app bundle, which Play
- * splits by CPU. A host that never asks what footage shows leaves it out; labelMedia then refuses as
- * `unsupported`, as a browser does. The switch picks one of the two `SceneLabeler.kt` files.
+ * labelMedia's engine, ML Kit image labeling, comes in the form the host picks with
+ * `videokitImageLabeling` in its variables.gradle (or `-PvideokitImageLabeling=...`):
+ *
+ *   true            the default: BUNDLED. The heaviest thing the kit adds to an app: a native library
+ *                   of about 11 MB for each CPU a build carries (arm64-v8a; 7 MB for armeabi-v7a, 12 MB
+ *                   each for x86 and x86_64) and a 3 MB model, which is 14 MB installed and about
+ *                   6.4 MB downloaded on an arm64 phone from an app bundle, which Play splits by CPU.
+ *                   Answers offline from the first call, and on a phone without Play services.
+ *   'playServices'  the copy in Google Play services: about 200 KB in the app, and Play services
+ *                   downloads the model, which the kit asks for when the plugin loads. Until it has
+ *                   arrived, and on a phone without Play services, labelMedia refuses as `unsupported`.
+ *   false           left out: labelMedia refuses as `unsupported`, as a browser does.
+ *
+ * The switch picks one of the three `SceneLabeler.kt` files.
  */
-def imageLabeling = (project.findProperty('videokitImageLabeling') ?: true).toString() != 'false'
+def labelingMode = (project.findProperty('videokitImageLabeling') ?: true).toString()
+if (!(labelingMode in ['true', 'false', 'playServices'])) {
+    throw new GradleException("videokitImageLabeling must be true, false or 'playServices', not '$labelingMode'")
+}
+def imageLabeling = labelingMode != 'false'
+def playServicesLabeling = labelingMode == 'playServices'
 
 android {
     // One module, two Capacitor plugin classes. The Kotlin packages stay separate
@@ -65,7 +78,9 @@ android {
     }
     sourceSets {
         main {
-            java.srcDirs += imageLabeling ? 'src/labeling/java' : 'src/nolabeling/java'
+            java.srcDirs += !imageLabeling ? 'src/nolabeling/java'
+                : playServicesLabeling ? 'src/labelingplay/java'
+                : 'src/labeling/java'
         }
     }
     testOptions {
@@ -107,11 +122,12 @@ dependencies {
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$kotlinxCoroutinesVersion"
 
     // --- VideoComposer: labelMedia ---
-    // ML Kit image labeling with its base model BUNDLED rather than the Play services one that is
-    // downloaded on first use: labelMedia answers offline from the first call, and on a phone without
-    // Play services. Its size, and how a host leaves it out, is under `imageLabeling` above. iOS
-    // needs nothing: Vision is part of the OS.
-    if (imageLabeling) {
+    // ML Kit image labeling, BUNDLED by default: labelMedia answers offline from the first call, and
+    // on a phone without Play services. What each form weighs, and how a host picks the Play services
+    // one or leaves it out, is under `labelingMode` above. iOS needs nothing: Vision is part of the OS.
+    if (playServicesLabeling) {
+        implementation "com.google.android.gms:play-services-mlkit-image-labeling:$mlkitPlayServicesImageLabelingVersion"
+    } else if (imageLabeling) {
         implementation "com.google.mlkit:image-labeling:$mlkitImageLabelingVersion"
     }
 
