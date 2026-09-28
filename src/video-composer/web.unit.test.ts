@@ -123,3 +123,22 @@ describe('labelMedia, in a browser', () => {
     });
   });
 });
+
+/*
+ * A page makes no preview copy: its only transcoder decodes no faster, on the phones a copy is for,
+ * than the seeks it would be saving. The call is checked as Android checks it, and then refused with
+ * the code `composerMediaHost` reads as "not on this platform", so the preview plays the clip itself.
+ */
+describe('previewProxy, in a browser', () => {
+  const plugin: VideoComposerPlugin = new VideoComposerWeb();
+
+  it('refuses a call without a clip as a phone does, and every other call as unsupported', async () => {
+    await expect(plugin.previewProxy({ uri: '' })).rejects.toMatchObject({ code: 'invalid_spec', message: 'uri is required' });
+    await expect(plugin.previewProxy({} as never)).rejects.toMatchObject({ code: 'invalid_spec', message: 'uri is required' });
+    await expect(plugin.previewProxy(undefined as never)).rejects.toMatchObject({ code: 'invalid_spec' });
+    await expect(plugin.previewProxy({ uri: 'blob:https://example.test/a' })).rejects.toMatchObject({ code: 'unsupported' });
+    await expect(plugin.previewProxy({ uri: 'file:///clip.mp4', shortSide: 360, maxFps: 30 })).rejects.toMatchObject({
+      code: 'unsupported',
+    });
+  });
+});

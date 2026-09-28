@@ -111,6 +111,7 @@ import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
 import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './editor.types';
+import { sameUrl } from './same-url';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
 interface CompiledMotion {
@@ -253,6 +254,18 @@ export class EditorStore {
   readonly unreadable = signal<ReadonlySet<string>>(new Set());
   /** Filmstrip frames per clip key, filled in as they are cut. */
   readonly filmstrips = signal<ReadonlyMap<string, Filmstrip>>(new Map());
+  /**
+   * The preview's own copy of a video source, by clip key: a URL the preview plays in the source's
+   * place - the same footage on the same timeline, small and densely keyed, so a cut's seek lands at
+   * once rather than decoding seconds of full-size footage. See [EditorMediaHost.previewProxy].
+   *
+   * Filled in by `EditorMedia` as the host's copies land, and read by the preview alone (see
+   * `previewSrc`), so no render, draft or result ever carries one: the source objects are not
+   * touched. No entry is "play the source itself" - every source until its copy is ready, and every
+   * source on a host that makes none. Not reset by [load], which the template studio calls again for
+   * every template over the same clips.
+   */
+  readonly previewUrls = signal<ReadonlyMap<string, string>>(new Map());
   /**
    * Peak amplitudes per audio URI - the music track and every voiceover take - as they are measured.
    *
@@ -594,6 +607,33 @@ export class EditorStore {
   clipByKey(key: string): EditorSource | undefined {
     return this.clips.value.find(clip => clip.key === key);
   }
+
+  /**
+   * Forgets a source's preview copy when the preview could not play it, so the source plays itself
+   * from then on. True when there was one to forget - `url` being the copy the preview was given,
+   * rather than one that has already been replaced.
+   */
+  dropPreviewUrl(key: string, url: string): boolean {
+    const known = this.previewUrls.value.get(key);
+    if (!known || !sameUrl(known, url)) return false;
+    const next = new Map(this.previewUrls.value);
+    next.delete(key);
+    this.droppedPreviewUrls.set(key, known);
+    this.previewUrls.value = next;
+    return true;
+  }
+
+  /**
+   * Whether `url` is a preview copy of `key` that [dropPreviewUrl] has already given up on: what an
+   * element that was on the same copy as another one finds when its own failure arrives second.
+   */
+  isDroppedPreviewUrl(key: string, url: string): boolean {
+    const dropped = this.droppedPreviewUrls.get(key);
+    return !!dropped && sameUrl(dropped, url);
+  }
+
+  /** The copies given up on, by key; see [isDroppedPreviewUrl]. */
+  private readonly droppedPreviewUrls = new Map<string, string>();
 
   /**
    * Whether the source behind a clip key is a picture. Read off the source the host handed over and,

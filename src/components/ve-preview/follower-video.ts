@@ -2,6 +2,7 @@ import { findClip, type EditClip } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
+import { sameUrl } from '../../state/same-url';
 import type { ClipMedia } from './clip-media';
 import {
   BLANK_POSTER,
@@ -150,6 +151,21 @@ export class FollowerVideo {
     this.sync(this.layer, this.playing);
   }
 
+  /**
+   * The source on this element has a preview copy now, or has lost the one it had; see
+   * [PreviewPlayer.refreshSources], the only caller. Forgetting the source makes [sync] load what
+   * [previewSrc] names now, from where the playhead is. Nothing happens for a source that has not
+   * changed.
+   */
+  refreshSource(): void {
+    if (this.destroyed || !this.loadedKey || this.store.isPictureKey(this.loadedKey)) return;
+    const source = this.store.clipByKey(this.loadedKey);
+    if (!source || sameUrl(this.video.src, previewSrc(this.store, source))) return;
+    this.loadedKey = null;
+    this.soundKey = null;
+    this.sync(this.layer, this.playing);
+  }
+
   destroy(): void {
     this.destroyed = true;
     for (const off of this.unlisten) off();
@@ -271,6 +287,16 @@ export class FollowerVideo {
   }
 
   private onError(): void {
+    // A preview copy this WebView would not play: forgotten, so the store's change has the layer
+    // loaded again on the clip itself (see [refreshSource]). A real failure is below.
+    const key = this.loadedKey;
+    const src = this.video.src;
+    // Or a copy some other element has already given up on, whose failure is the same one.
+    if (key && !this.store.isPictureKey(key) && (this.store.dropPreviewUrl(key, src) || this.store.isDroppedPreviewUrl(key, src))) {
+      debugWarn('[ve-preview] preview copy could not be loaded; playing the clip itself', key, this.video.error);
+      this.refreshSource();
+      return;
+    }
     debugWarn('[ve-preview] second layer could not be loaded', this.loadedKey, this.video.error);
     // `loadedKey` is deliberately left where it is. Forgetting it would point the element at the
     // same unreadable file again on the very next playhead write, and again on the one after that;

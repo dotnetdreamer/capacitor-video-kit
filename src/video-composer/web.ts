@@ -29,6 +29,8 @@ import type {
   PickAudioFileResult,
   PrepareJobOptions,
   PrepareJobResult,
+  PreviewProxyOptions,
+  PreviewProxyResult,
   ProbeOptions,
   ProbeResult,
   ReleaseMediaOptions,
@@ -136,6 +138,17 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
   async labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult> {
     required(options?.uri, 'uri');
     throw coded('a browser has no image recogniser a page can reach', 'unsupported');
+  }
+
+  /*
+   * No copy is made in a page. The only transcoder a page has is WebCodecs, and on the phones this
+   * exists for it decodes no faster than the `<video>` seeks it would be saving - measured on a
+   * Galaxy A13 (2026-09-28), 18 s to copy an 8 s 1080p clip - while a desktop browser seeks the
+   * clip itself quickly. The preview plays the clip, as it always has.
+   */
+  async previewProxy(options: PreviewProxyOptions): Promise<PreviewProxyResult> {
+    required(options?.uri, 'uri');
+    throw coded('a browser plays the clip itself', 'unsupported');
   }
 
   async thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult> {

@@ -89,6 +89,22 @@ function waitsForFirstFrame(): boolean {
   return appleWebKit;
 }
 
+let blink: boolean | null = null;
+
+/**
+ * Whether `new VideoFrame(video)` on a PLAYING element names the frame it shows right now, which is
+ * what the painter's `skipUnchangedVideo` tells frames apart by: Chromium's engine - Chrome, Edge and
+ * every Android WebView, the phones the saving is for. Not Firefox, whose frame of a playing element
+ * keeps one timestamp for about a second at a time, so a texture would be held on one picture that
+ * long; not WebKit, where reading a playing element's frame can wait on it (see [framed]). Asked once.
+ */
+function readsPlayingFrames(): boolean {
+  // `Chrome/` is in every Chromium engine's name - Chrome, HeadlessChrome, Edge, an Android WebView -
+  // and in no other: Chrome on iOS, which is WebKit, calls itself `CriOS`.
+  if (blink === null) blink = typeof navigator !== 'undefined' && /Chrome\/\d/.test(navigator.userAgent ?? '') && !waitsForFirstFrame();
+  return blink;
+}
+
 /**
  * How long after Play the compositor may still spend a frame warming a transition up; see
  * [PreviewCanvas.warmUp]. The elements' own clocks stand still for about this long after a start,
@@ -367,7 +383,12 @@ export class PreviewCanvas {
       // handed back first, and the next frames presented are copied by the new one.
       this.presented.destroy();
       this.painter?.dispose();
-      this.painter = new Painter({ width, height }, this.canvas, { interpolation: PREVIEW_INTERPOLATION });
+      // Each frame of a playing clip uploaded once rather than on every paint that shows it, where the
+      // engine can say which frame that is; see [readsPlayingFrames].
+      this.painter = new Painter({ width, height }, this.canvas, {
+        interpolation: PREVIEW_INTERPOLATION,
+        skipUnchangedVideo: readsPlayingFrames(),
+      });
     }
     // Cold again either way. The programs survive a resize but the transitions' frame targets do
     // not, and warming is what makes them at the new size on a paused frame rather than on the first
