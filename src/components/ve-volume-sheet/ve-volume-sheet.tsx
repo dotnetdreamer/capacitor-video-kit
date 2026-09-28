@@ -14,9 +14,9 @@ const DEFAULT_RESTORE_VOLUME = 0.8;
 
 /**
  * Volume for whatever the store's `volumeTarget` names - a clip segment, the music or a voiceover
- * take - as a mute button beside a percentage slider. The music also gets a switch each for its fade
- * in and fade out, with a slider for the fade's length under a switch that is on; no engine fades a
- * voiceover or a clip.
+ * take - as a mute button beside a percentage slider. The music also gets a row each for its fade in
+ * and fade out, a switch with a slider for the fade's length beside it; no engine fades a voiceover
+ * or a clip.
  *
  * The clips' own sound is not one of the targets: the voiceover sheet and the timeline's speaker
  * switch it in place, which is one tap instead of a sheet.
@@ -191,44 +191,59 @@ export class VeVolumeSheet {
   }
 
   /**
-   * One fade: a switch row that reads its length while it is on, and the slider that sets that
-   * length under it. The whole row is the switch, so the target is the full width rather than the
-   * small track.
+   * One fade, as one row of the sheet's grid: its name, the slider that sets its length with the
+   * length beside it, and the switch. A fade that is off keeps its slider in place, dimmed and out of
+   * reach at the length switching it on would bring back - the transition sheet's plain cut - so the
+   * row says there is a length to set, and the sheet does not change height under the finger.
+   *
+   * One row rather than a switch row with the slider under it: stacked, the two fades made the sheet
+   * taller than a compact sheet may be on the A13, and the fade out's slider went below the fold.
    *
    * The length is in the switch's NAME as well as on screen, for two reasons. A slider reaches the
-   * A13's WebView tree with no name or value at all, so the row is the one place a test can read
+   * A13's WebView tree with no name or value at all, so the switch is the one place a test can read
    * what the slider was dragged to. And on that WebView a changed `aria-checked` inside a shadow root
    * is not passed on while a changed name is, so the name is also what says the fade is on.
    */
-  private fade(label: string, ms: number, onToggle: () => void, onLive: (event: CustomEvent<number>) => void) {
+  private fade(key: string, label: string, ms: number, restoreMs: number, onToggle: () => void, onLive: (event: CustomEvent<number>) => void) {
     const on = ms > 0;
-    const length = durationChip(ms);
-    return (
-      <div class="vol__fade-group">
-        <button type="button" role="switch" class="vol__fade" aria-checked={String(on)} aria-label={on ? `${label} ${length}` : label} onClick={onToggle}>
-          <span class="vol__fade-label">{label}</span>
-          {on ? <span class="vol__fade-value">{length}</span> : null}
-          <span class={{ 'vol__switch': true, 'vol__switch--on': on }} aria-hidden="true">
-            <span class="vol__switch-knob"></span>
-          </span>
-        </button>
-        {on ? (
-          <ve-slider
-            class="vol__fade-slider"
-            ctx={this.ctx}
-            value={ms}
-            min={MIN_MUSIC_FADE_MS}
-            max={MAX_MUSIC_FADE_MS}
-            step={MUSIC_FADE_STEP_MS}
-            label={`${label} duration`}
-            // The row above already reads the length, and two numbers chasing each other is noise.
-            pin="none"
-            format={durationChip}
-            onVeLive={onLive}
-          ></ve-slider>
-        ) : null}
-      </div>
-    );
+    const length = durationChip(on ? ms : restoreMs);
+    return [
+      <span key={`${key}-label`} class="vol__fade-label" aria-hidden="true">
+        {label}
+      </span>,
+      <div key={`${key}-length`} class={{ 'vol__fade-length': true, 'vol__fade-length--off': !on }}>
+        <ve-slider
+          class="vol__fade-slider"
+          ctx={this.ctx}
+          value={on ? ms : restoreMs}
+          min={MIN_MUSIC_FADE_MS}
+          max={MAX_MUSIC_FADE_MS}
+          step={MUSIC_FADE_STEP_MS}
+          label={`${label} duration`}
+          disabled={!on}
+          // The length is read out beside it, and two numbers chasing each other is noise.
+          pin="none"
+          format={durationChip}
+          onVeLive={onLive}
+        ></ve-slider>
+        <span class="vol__fade-value" aria-hidden="true">
+          {length}
+        </span>
+      </div>,
+      <button
+        key={`${key}-switch`}
+        type="button"
+        role="switch"
+        class="vol__fade-switch"
+        aria-checked={String(on)}
+        aria-label={on ? `${label} ${length}` : label}
+        onClick={onToggle}
+      >
+        <span class={{ 'vol__switch': true, 'vol__switch--on': on }}>
+          <span class="vol__switch-knob"></span>
+        </span>
+      </button>,
+    ];
   }
 
   render() {
@@ -277,8 +292,8 @@ export class VeVolumeSheet {
 
               {music ? (
                 <div class="vol__fades">
-                  {this.fade('Fade in', music.fadeInMs ?? 0, this.toggleFadeIn, this.onFadeInLive)}
-                  {this.fade('Fade out', music.fadeOutMs, this.toggleFadeOut, this.onFadeOutLive)}
+                  {this.fade('in', 'Fade in', music.fadeInMs ?? 0, this.restoreFade.fadeInMs, this.toggleFadeIn, this.onFadeInLive)}
+                  {this.fade('out', 'Fade out', music.fadeOutMs, this.restoreFade.fadeOutMs, this.toggleFadeOut, this.onFadeOutLive)}
                 </div>
               ) : null}
             </div>

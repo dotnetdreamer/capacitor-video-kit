@@ -107,15 +107,23 @@ function applyToAll(sheet: HTMLElement): HTMLButtonElement | null {
   return sheet.shadowRoot?.querySelector<HTMLButtonElement>('.sheet__apply-all') ?? null;
 }
 
-/** The music's fade switch whose label reads `label`, found by its words as someone finds it. */
+/**
+ * The music's fade switch named `label`, alone ("Fade in", off) or with its length ("Fade in 1.0s",
+ * on) - the name a screen reader and a Maestro flow find it by.
+ */
 function fadeSwitch(sheet: HTMLElement, label: string): HTMLButtonElement | null {
   const all = sheet.shadowRoot?.querySelectorAll<HTMLButtonElement>('[role="switch"]') ?? [];
-  return [...all].find(button => button.querySelector('.vol__fade-label')?.textContent === label) ?? null;
+  return [...all].find(button => new RegExp(`^${label}( \\d+\\.\\ds)?$`).test(button.getAttribute('aria-label') ?? '')) ?? null;
 }
 
-/** The length slider under that switch, which is only there while the fade is on. */
+/** The length slider in that fade's row, there whether the fade is on or not. */
 function fadeSlider(sheet: HTMLElement, label: string): HTMLElement | null {
   return sheet.shadowRoot?.querySelector<HTMLElement>(`ve-slider[aria-label="${label} duration"]`) ?? null;
+}
+
+/** The length read out beside that slider. */
+function fadeValue(sheet: HTMLElement, label: string): string | null {
+  return fadeSlider(sheet, label)?.parentElement?.querySelector('.vol__fade-value')?.textContent ?? null;
 }
 
 /** A drag of `target` from one end of its bar PAST the other, which lands on that end wherever the bar is. */
@@ -295,21 +303,21 @@ describe('ve-volume-sheet', () => {
     expect(store.manifest.value.music?.fadeOutMs).toBe(0);
   });
 
-  it('reads a fade’s length in its switch, and sets it with the slider under it, one drag one step', async () => {
+  it('reads a fade’s length in its switch, and sets it with the slider beside it, one drag one step', async () => {
     const { store, sheet } = await mount({ kind: 'music' });
-    // Off: no length and no slider, and the name says so on its own.
+    // Off: the name alone, and the slider out of reach at the length switching it on brings.
     expect(fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-label')).toBe('Fade in');
-    expect(fadeSlider(sheet, 'Fade in')).toBe(null);
+    expect(fadeSlider(sheet, 'Fade in')?.getAttribute('aria-disabled')).toBe('true');
+    expect(fadeValue(sheet, 'Fade in')).toBe('1.0s');
 
     fadeSwitch(sheet, 'Fade in')!.click();
-    await until('the slider to come', () => fadeSlider(sheet, 'Fade in') !== null);
+    await until('the slider to wake', () => fadeSlider(sheet, 'Fade in')?.getAttribute('aria-disabled') !== 'true');
     expect(fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-label')).toBe('Fade in 1.0s');
-    await (fadeSlider(sheet, 'Fade in') as StencilElement).componentOnReady?.();
 
     dragPastEnd(fadeSlider(sheet, 'Fade in')!, 'max');
     expect(store.manifest.value.music?.fadeInMs).toBe(MAX_MUSIC_FADE_MS);
     await until('the name to follow', () => fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-label') === 'Fade in 10.0s');
-    expect(fadeSwitch(sheet, 'Fade in')?.querySelector('.vol__fade-value')?.textContent).toBe('10.0s');
+    expect(fadeValue(sheet, 'Fade in')).toBe('10.0s');
 
     dragPastEnd(fadeSlider(sheet, 'Fade in')!, 'min');
     expect(store.manifest.value.music?.fadeInMs).toBe(MIN_MUSIC_FADE_MS);
@@ -327,13 +335,17 @@ describe('ve-volume-sheet', () => {
   it('brings a fade switched off and on again back at the length it was set to', async () => {
     const { store, sheet } = await mount({ kind: 'music' });
     fadeSwitch(sheet, 'Fade out')!.click();
-    await until('the slider to come', () => fadeSlider(sheet, 'Fade out') !== null);
-    await (fadeSlider(sheet, 'Fade out') as StencilElement).componentOnReady?.();
+    await until('the slider to wake', () => fadeSlider(sheet, 'Fade out')?.getAttribute('aria-disabled') !== 'true');
     dragPastEnd(fadeSlider(sheet, 'Fade out')!, 'max');
 
     fadeSwitch(sheet, 'Fade out')!.click();
     expect(store.manifest.value.music?.fadeOutMs).toBe(0);
-    await until('the slider to go', () => fadeSlider(sheet, 'Fade out') === null);
+    // Off, the slider stays where it was left, dimmed and out of reach, and so does its length.
+    await until('the slider to sleep', () => fadeSlider(sheet, 'Fade out')?.getAttribute('aria-disabled') === 'true');
+    expect(fadeSwitch(sheet, 'Fade out')?.getAttribute('aria-label')).toBe('Fade out');
+    expect(fadeValue(sheet, 'Fade out')).toBe('10.0s');
+    dragPastEnd(fadeSlider(sheet, 'Fade out')!, 'min');
+    expect(store.manifest.value.music?.fadeOutMs).toBe(0);
 
     fadeSwitch(sheet, 'Fade out')!.click();
     expect(store.manifest.value.music?.fadeOutMs).toBe(MAX_MUSIC_FADE_MS);

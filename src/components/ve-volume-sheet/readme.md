@@ -8,9 +8,9 @@
 ## Overview
 
 Volume for whatever the store's `volumeTarget` names - a clip segment, the music or a voiceover
-take - as a mute button beside a percentage slider. The music also gets a switch each for its fade
-in and fade out, with a slider for the fade's length under a switch that is on; no engine fades a
-voiceover or a clip.
+take - as a mute button beside a percentage slider. The music also gets a row each for its fade in
+and fade out, a switch with a slider for the fade's length beside it; no engine fades a voiceover
+or a clip.
 
 The clips' own sound is not one of the targets: the voiceover sheet and the timeline's speaker
 switch it in place, which is one tap instead of a sheet.
