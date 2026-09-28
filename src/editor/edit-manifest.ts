@@ -300,6 +300,12 @@ export interface EditMusic {
   volume: number;
   /** Repeat the section until the video ends, or until `endMs` when it is set. */
   loop: boolean;
+  /**
+   * Up from silence at the start of the sound. Absent is no fade in, which is every sound added
+   * before there was one - and every template's score, which comes in on the beat.
+   */
+  fadeInMs?: number;
+  /** Down to silence at the end of what is heard. */
   fadeOutMs: number;
 }
 
@@ -696,6 +702,17 @@ export const MIN_CLIP_MS = 200;
 
 /** The shortest a layer, a music section or a voiceover may become. */
 export const MIN_LAYER_MS = 100;
+
+/**
+ * How long a sound's fade in or fade out is when the volume sheet's switch turns it on, and the fade
+ * out a newly added sound starts with. A second: long enough to hear as a fade rather than a soft
+ * edge, short enough not to bury the first beat of a short post.
+ */
+export const MUSIC_FADE_MS = 1000;
+/** The shortest and longest the volume sheet's fade slider sets, and its step. */
+export const MIN_MUSIC_FADE_MS = 100;
+export const MAX_MUSIC_FADE_MS = 10_000;
+export const MUSIC_FADE_STEP_MS = 100;
 
 export const MIN_SCALE = 0.2;
 export const MAX_SCALE = 6;
@@ -1701,6 +1718,8 @@ export function normaliseManifest(input: unknown): EditManifest {
         endMs: Math.max(0, num(m.endMs, 0)),
         volume: clamp(num(m.volume, 0.6), 0, 1),
         loop: m.loop ?? true,
+        // Only when there is one, so a sound saved before fades in existed reads back as it was.
+        ...(num(m.fadeInMs, 0) > 0 ? { fadeInMs: num(m.fadeInMs, 0) } : {}),
         fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
       }
     : null;

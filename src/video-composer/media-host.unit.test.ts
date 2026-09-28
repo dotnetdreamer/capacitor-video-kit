@@ -59,7 +59,7 @@ vi.mock('@capacitor/core', () => ({
   WebPlugin: class {},
 }));
 
-vi.mock('../host/defaults', async (importOriginal) => {
+vi.mock('../host/defaults', async importOriginal => {
   const actual = await importOriginal<typeof import('../host/defaults')>();
   return {
     ...actual,
@@ -337,7 +337,7 @@ describe('filmstrip frames on a phone', () => {
     kit.native = true;
   });
 
-  it('hands the composer\'s files back as URLs the WebView is allowed to load', async () => {
+  it("hands the composer's files back as URLs the WebView is allowed to load", async () => {
     kit.composer.thumbnails.mockResolvedValue({ uris: ['file:///app/Library/Caches/thumbs/0.jpg', 'file:///app/Library/Caches/thumbs/1000.jpg'] });
     const { host, browser } = build();
     const request = frames(CLIP);
@@ -481,7 +481,7 @@ describe('the voiceover recorder on a phone', () => {
     kit.native = true;
   });
 
-  it('is the composer\'s, started as it is, with the codes the editor reads passed straight on', async () => {
+  it("is the composer's, started as it is, with the codes the editor reads passed straight on", async () => {
     const voice = build().host.voice;
     if (!voice) throw new Error('no recorder on a phone');
 
@@ -511,7 +511,7 @@ describe('the voiceover recorder on a phone', () => {
     expect(take).toEqual({ uri: expect.stringMatching(/^blob:/), durationMs: 4200 });
     expect(read).toHaveBeenCalledWith('capacitor://localhost/_capacitor_file_/app/Library/Caches/video-composer/voice/vo-1.m4a');
     // The type a render names its staged copy after: `m4a`.
-    expect(minted.map((blob) => blob.type)).toEqual(['audio/mp4']);
+    expect(minted.map(blob => blob.type)).toEqual(['audio/mp4']);
   });
 
   /* The file still plays and still renders today; only a draft reopened after a day loses it. */
@@ -541,12 +541,22 @@ describe('the voiceover recorder on a phone', () => {
     vi.useFakeTimers();
     kit.composer.stopVoiceRecording.mockResolvedValue({ uri: TAKE, durationMs: 4200 });
     let arrive: (response: unknown) => void = () => undefined;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise((settle) => { arrive = settle; })));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise(settle => {
+            arrive = settle;
+          }),
+      ),
+    );
     const mint = vi.spyOn(URL, 'createObjectURL');
     const { host } = build();
 
     let settled = false;
-    const stopped = host.voice?.stop().finally(() => { settled = true; });
+    const stopped = host.voice?.stop().finally(() => {
+      settled = true;
+    });
     await vi.advanceTimersByTimeAsync(2999);
     expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
@@ -592,7 +602,7 @@ describe('the voiceover recorder on a phone', () => {
   });
 });
 
-describe('a recorder of the host\'s own', () => {
+describe("a recorder of the host's own", () => {
   const own: EditorVoiceHost = { start: async () => undefined, stop: async () => ({ uri: 'blob:own', durationMs: 1 }) };
 
   it('is used on a phone', () => {
@@ -606,13 +616,13 @@ describe('a recorder of the host\'s own', () => {
 });
 
 describe('the sound library', () => {
-  it('is the browser\'s by default, on a phone too', () => {
+  it("is the browser's by default, on a phone too", () => {
     kit.native = true;
     const { host, browser } = build();
     expect(host.sounds).toBe(browser.sounds);
   });
 
-  it('is the host\'s own when it brings one, on either platform', () => {
+  it("is the host's own when it brings one, on either platform", () => {
     const own = { list: async () => [], extract: async () => null, remove: async () => undefined };
     expect(build({ sounds: own }).host.sounds).toBe(own);
     kit.native = true;
@@ -620,7 +630,7 @@ describe('the sound library', () => {
   });
 });
 
-describe('the composer\'s sound library on a phone', () => {
+describe("the composer's sound library on a phone", () => {
   beforeEach(() => {
     kit.native = true;
   });
@@ -631,7 +641,7 @@ describe('the composer\'s sound library on a phone', () => {
     return sounds;
   }
 
-  it('lists the composer\'s sounds as it reports them, naming one it could not name', async () => {
+  it("lists the composer's sounds as it reports them, naming one it could not name", async () => {
     kit.composer.listSounds.mockResolvedValue({
       sounds: [
         { id: 's2', uri: 'file:///app/sounds/s2.m4a', fileName: '', durationMs: 0, savedAt: 20 },
@@ -645,7 +655,7 @@ describe('the composer\'s sound library on a phone', () => {
     ]);
   });
 
-  it('extracts from the file itself, under the video\'s name without its extension', async () => {
+  it("extracts from the file itself, under the video's name without its extension", async () => {
     kit.composer.extractAudio.mockResolvedValue({
       hasAudio: true,
       id: 's1',
@@ -716,7 +726,7 @@ describe('the composer\'s sound library on a phone', () => {
   });
 });
 
-describe('the host\'s pickers', () => {
+describe("the host's pickers", () => {
   /** A service that passes itself, as an Angular host would, and reads its own state in each pick. */
   class Pickers {
     readonly clip: EditorSource = { key: 'own-1', fileName: 'own.mp4', sourcePath: 'file:///own.mp4' };
@@ -744,14 +754,14 @@ describe('the host\'s pickers', () => {
   });
 
   /* So that with pictures on, the editor's clip pickers fall back on the host's own `pickVideo`. */
-  it('leave out the browser\'s mixed picker for a host that brought a video picker and no other', () => {
+  it("leave out the browser's mixed picker for a host that brought a video picker and no other", () => {
     kit.native = true;
     const { host } = build({ pickers: { pickVideo: async () => null } });
 
     expect(host.pickMedia).toBeUndefined();
   });
 
-  it('leave the browser\'s mixed picker to a host that brought no video picker', async () => {
+  it("leave the browser's mixed picker to a host that brought no video picker", async () => {
     const pickImage = vi.fn(async () => null);
     const { host, browser } = build({ pickers: { pickImage } });
 
@@ -761,7 +771,7 @@ describe('the host\'s pickers', () => {
     expect(browser.pickImage).not.toHaveBeenCalled();
   });
 
-  it('keep the browser\'s video picker for a host that brought only a mixed one', async () => {
+  it("keep the browser's video picker for a host that brought only a mixed one", async () => {
     kit.native = true;
     const pickMedia = vi.fn(async (): Promise<EditorSource | null> => null);
     const { host, browser } = build({ pickers: { pickMedia } });
@@ -776,7 +786,7 @@ describe('the host\'s pickers', () => {
 describe('giving back what the edit dropped', () => {
   const request = { kept: [CLIP], dropped: [{ key: 'clip-2', fileName: 'b.mp4', playbackUrl: 'blob:b' }] };
 
-  it('runs the host\'s release after the browser host\'s own, with the same lists', () => {
+  it("runs the host's release after the browser host's own, with the same lists", () => {
     for (const native of [true, false]) {
       kit.native = native;
       const release = vi.fn();
@@ -790,7 +800,7 @@ describe('giving back what the edit dropped', () => {
     }
   });
 
-  it('is the browser host\'s alone when the host brought none', () => {
+  it("is the browser host's alone when the host brought none", () => {
     kit.native = true;
     const { host, browser } = build();
     expect(host.release).toBe(browser.release);
@@ -830,7 +840,7 @@ describe('composerMediaHost over the browser host itself', () => {
     return opened;
   }
 
-  it('measures a source with only a path through Capacitor\'s local server when the composer cannot', async () => {
+  it("measures a source with only a path through Capacitor's local server when the composer cannot", async () => {
     kit.composer.probe.mockRejectedValue(coded('unreadable_input'));
     const opened = videosOpen(2.5);
 
@@ -839,7 +849,7 @@ describe('composerMediaHost over the browser host itself', () => {
     expect(opened).toEqual([CLIP.playbackUrl]);
   });
 
-  it('keeps the browser\'s mixed picker, and drops it for a host that brought only a video picker', () => {
+  it("keeps the browser's mixed picker, and drops it for a host that brought only a video picker", () => {
     expect(composerMediaHost().pickMedia).toBeTypeOf('function');
 
     const host = composerMediaHost({ pickers: { pickVideo: async () => null } });

@@ -2,15 +2,7 @@ import { Capacitor } from '@capacitor/core';
 
 import { debugWarn } from '../host/debug';
 import { browserMediaHost, mediaDuration, withoutExtension } from '../host/defaults';
-import type {
-  EditorMediaHost,
-  EditorSoundLibrary,
-  EditorSource,
-  EditorVoiceHost,
-  ReleaseRequest,
-  SavedSound,
-  ThumbnailRequest,
-} from '../host/host.types';
+import type { EditorMediaHost, EditorSoundLibrary, EditorSource, EditorVoiceHost, ReleaseRequest, SavedSound, ThumbnailRequest } from '../host/host.types';
 import { readVoiceTake } from '../host/read-file';
 import { webViewUrl } from '../host/web-view-url';
 
@@ -257,22 +249,15 @@ async function nativePreviewProxy(source: EditorSource): Promise<string | null> 
 }
 
 /** [ComposerMediaHostOptions.sounds], as the library the editor is handed. */
-function soundLibrary(
-  choice: ComposerMediaHostOptions['sounds'],
-  browser: EditorMediaHost,
-  native: boolean,
-): EditorSoundLibrary | undefined {
+function soundLibrary(choice: ComposerMediaHostOptions['sounds'], browser: EditorMediaHost, native: boolean): EditorSoundLibrary | undefined {
   if (typeof choice === 'object') return choice;
   return choice === 'native' && native ? nativeSoundLibrary() : browser.sounds;
 }
 
 /** [ComposerMediaHostOptions.release], after the browser host's own. */
-function releaseWith(
-  browser: EditorMediaHost,
-  release: ComposerMediaHostOptions['release'],
-): ((request: ReleaseRequest) => void) | undefined {
+function releaseWith(browser: EditorMediaHost, release: ComposerMediaHostOptions['release']): ((request: ReleaseRequest) => void) | undefined {
   if (!release) return browser.release;
-  return (request) => {
+  return request => {
     browser.release?.(request);
     release(request);
   };
@@ -296,7 +281,7 @@ function nativeSoundLibrary(): EditorSoundLibrary {
   return {
     async list(): Promise<readonly SavedSound[]> {
       const { sounds } = await VideoComposer.listSounds();
-      return sounds.map((sound) => ({
+      return sounds.map(sound => ({
         id: sound.id,
         uri: sound.uri,
         fileName: sound.fileName || 'Sound',
@@ -406,7 +391,7 @@ async function takeInPage(uri: string): Promise<string> {
     const bytes = await readVoiceTake(uri);
     return late ? uri : URL.createObjectURL(bytes);
   })();
-  const slow = new Promise<string>((settle) => {
+  const slow = new Promise<string>(settle => {
     timer = setTimeout(() => {
       late = true;
       debugWarn('[composerMediaHost] the take was too slow to read into the page, and is kept as its file', uri);

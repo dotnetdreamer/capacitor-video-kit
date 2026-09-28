@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest } from '../../editor';
+import { MAX_MUSIC_FADE_MS, MIN_MUSIC_FADE_MS, MUSIC_FADE_MS, emptyManifest, type EditManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import type { VolumeTarget } from '../../state/editor.types';
@@ -105,6 +105,33 @@ function muteButton(sheet: HTMLElement): HTMLButtonElement | null {
 
 function applyToAll(sheet: HTMLElement): HTMLButtonElement | null {
   return sheet.shadowRoot?.querySelector<HTMLButtonElement>('.sheet__apply-all') ?? null;
+}
+
+/** The music's fade switch whose label reads `label`, found by its words as someone finds it. */
+function fadeSwitch(sheet: HTMLElement, label: string): HTMLButtonElement | null {
+  const all = sheet.shadowRoot?.querySelectorAll<HTMLButtonElement>('[role="switch"]') ?? [];
+  return [...all].find(button => button.querySelector('.vol__fade-label')?.textContent === label) ?? null;
+}
+
+/** The length slider under that switch, which is only there while the fade is on. */
+function fadeSlider(sheet: HTMLElement, label: string): HTMLElement | null {
+  return sheet.shadowRoot?.querySelector<HTMLElement>(`ve-slider[aria-label="${label} duration"]`) ?? null;
+}
+
+/** A drag of `target` from one end of its bar PAST the other, which lands on that end wherever the bar is. */
+function dragPastEnd(target: HTMLElement, toward: 'min' | 'max'): void {
+  const bar = target.shadowRoot!.querySelector('.sl__track')!.getBoundingClientRect();
+  // From the middle, which is a press on the bar and so a jump, then on past the end.
+  const from = bar.left + bar.width / 2;
+  const to = toward === 'max' ? bar.right + 40 : bar.left - 40;
+  pointerId += 1;
+  for (const [type, x] of [
+    ['pointerdown', from],
+    ['pointermove', to],
+    ['pointerup', to],
+  ] as const) {
+    target.dispatchEvent(new PointerEvent(type, { pointerId, isPrimary: true, clientX: x, bubbles: true }));
+  }
 }
 
 let pointerId = 0;
@@ -243,6 +270,83 @@ describe('ve-volume-sheet', () => {
 
     expect(store.canUndo.value).toBe(false);
     expect(store.toast.value?.text).toBe('All clips already have this volume');
+  });
+
+  it('switches the music’s fade in and fade out, each one step with its own name', async () => {
+    const { store, sheet } = await mount({ kind: 'music' });
+    expect(fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-checked')).toBe('false');
+    expect(fadeSwitch(sheet, 'Fade out')?.getAttribute('aria-checked')).toBe('false');
+
+    fadeSwitch(sheet, 'Fade in')!.click();
+    expect(store.manifest.value.music).toMatchObject({ fadeInMs: MUSIC_FADE_MS, fadeOutMs: 0 });
+    await until('the switch to follow', () => fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-checked') === 'true');
+
+    fadeSwitch(sheet, 'Fade out')!.click();
+    expect(store.manifest.value.music).toMatchObject({ fadeInMs: MUSIC_FADE_MS, fadeOutMs: MUSIC_FADE_MS });
+    await until('the switch to follow', () => fadeSwitch(sheet, 'Fade out')?.getAttribute('aria-checked') === 'true');
+
+    fadeSwitch(sheet, 'Fade in')!.click();
+    expect(store.manifest.value.music?.fadeInMs).toBe(0);
+
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Fade in off');
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Fade out on');
+    expect(store.manifest.value.music?.fadeOutMs).toBe(0);
+  });
+
+  it('reads a fade’s length in its switch, and sets it with the slider under it, one drag one step', async () => {
+    const { store, sheet } = await mount({ kind: 'music' });
+    // Off: no length and no slider, and the name says so on its own.
+    expect(fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-label')).toBe('Fade in');
+    expect(fadeSlider(sheet, 'Fade in')).toBe(null);
+
+    fadeSwitch(sheet, 'Fade in')!.click();
+    await until('the slider to come', () => fadeSlider(sheet, 'Fade in') !== null);
+    expect(fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-label')).toBe('Fade in 1.0s');
+    await (fadeSlider(sheet, 'Fade in') as StencilElement).componentOnReady?.();
+
+    dragPastEnd(fadeSlider(sheet, 'Fade in')!, 'max');
+    expect(store.manifest.value.music?.fadeInMs).toBe(MAX_MUSIC_FADE_MS);
+    await until('the name to follow', () => fadeSwitch(sheet, 'Fade in')?.getAttribute('aria-label') === 'Fade in 10.0s');
+    expect(fadeSwitch(sheet, 'Fade in')?.querySelector('.vol__fade-value')?.textContent).toBe('10.0s');
+
+    dragPastEnd(fadeSlider(sheet, 'Fade in')!, 'min');
+    expect(store.manifest.value.music?.fadeInMs).toBe(MIN_MUSIC_FADE_MS);
+
+    // Each drag is its own step, named after the slider; the switch before them is another.
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Fade in duration');
+    expect(store.manifest.value.music?.fadeInMs).toBe(MAX_MUSIC_FADE_MS);
+    store.undo();
+    expect(store.manifest.value.music?.fadeInMs).toBe(MUSIC_FADE_MS);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Fade in on');
+  });
+
+  it('brings a fade switched off and on again back at the length it was set to', async () => {
+    const { store, sheet } = await mount({ kind: 'music' });
+    fadeSwitch(sheet, 'Fade out')!.click();
+    await until('the slider to come', () => fadeSlider(sheet, 'Fade out') !== null);
+    await (fadeSlider(sheet, 'Fade out') as StencilElement).componentOnReady?.();
+    dragPastEnd(fadeSlider(sheet, 'Fade out')!, 'max');
+
+    fadeSwitch(sheet, 'Fade out')!.click();
+    expect(store.manifest.value.music?.fadeOutMs).toBe(0);
+    await until('the slider to go', () => fadeSlider(sheet, 'Fade out') === null);
+
+    fadeSwitch(sheet, 'Fade out')!.click();
+    expect(store.manifest.value.music?.fadeOutMs).toBe(MAX_MUSIC_FADE_MS);
+  });
+
+  it('offers fades on the music only, since no engine fades a clip or a take', async () => {
+    const clip = await mount({ kind: 'clip', id: 'seg-0' });
+    expect(fadeSwitch(clip.sheet, 'Fade in')).toBe(null);
+    expect(fadeSwitch(clip.sheet, 'Fade out')).toBe(null);
+
+    const voice = await mount({ kind: 'voice', id: 'vo-1' });
+    expect(fadeSwitch(voice.sheet, 'Fade in')).toBe(null);
+    expect(fadeSwitch(voice.sheet, 'Fade out')).toBe(null);
   });
 
   it('draws no control with no target, and asks the shell to close', async () => {

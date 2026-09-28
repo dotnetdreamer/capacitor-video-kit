@@ -83,11 +83,11 @@ let tookSession = false;
 
 /**
  * Whether the post has a level for its music or a voiceover other than full: a volume under 1, or
- * the music's fade-out, which a track has unless somebody took it off.
+ * one of the music's fades - the fade-out a track has unless somebody took it off, or a fade-in.
  */
 export function levelsInUse(manifest: EditManifest): boolean {
   const music = manifest.music;
-  if (music && (music.volume < 1 || music.fadeOutMs > 0)) return true;
+  if (music && (music.volume < 1 || music.fadeOutMs > 0 || (music.fadeInMs ?? 0) > 0)) return true;
   return manifest.voiceovers.some(take => take.volume < 1);
 }
 

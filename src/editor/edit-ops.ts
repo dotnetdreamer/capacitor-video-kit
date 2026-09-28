@@ -1237,6 +1237,33 @@ export function musicSourceMsAt(music: EditMusic, outputMs: number, totalMs: num
   return music.inMs + (section > 0 && music.loop ? into % section : into);
 }
 
+/**
+ * What the music's fades leave of its level at an output time, 0..1: up from silence over the start
+ * of the FIRST repetition and down over the end of the LAST, the ramps [ComposeMusic] describes and
+ * every engine draws. The preview multiplies by this, so a fade is heard before it is rendered.
+ */
+export function musicFadeAt(music: EditMusic, outputMs: number, totalMs: number): number {
+  const { startMs, endMs } = musicWindow(music, totalMs);
+  const heardMs = endMs - startMs;
+  if (heardMs <= 0) return 1;
+  const section = musicSectionMs(music);
+  const repeats = music.loop && section > 0;
+  const firstEndMs = repeats ? startMs + Math.min(section, heardMs) : endMs;
+  const lastStartMs = repeats ? startMs + (Math.ceil(heardMs / section) - 1) * section : startMs;
+
+  let gain = 1;
+  const fadeInMs = music.fadeInMs ?? 0;
+  if (fadeInMs > 0 && outputMs < firstEndMs) gain *= clamp((outputMs - startMs) / fadeInMs, 0, 1);
+  // From `fadeOutMs` before the end or the last repetition's start, whichever is later: a last
+  // repetition shorter than the fade ends above silence, as it does in the render.
+  const fadeOutMs = music.fadeOutMs;
+  if (fadeOutMs > 0) {
+    const fromMs = Math.max(lastStartMs, endMs - fadeOutMs);
+    if (outputMs >= fromMs) gain *= Math.max(0, 1 - (outputMs - fromMs) / fadeOutMs);
+  }
+  return gain;
+}
+
 export function setMusic(manifest: EditManifest, music: EditMusic | null): EditManifest {
   return { ...manifest, music };
 }
@@ -1250,6 +1277,9 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
   next.startMs = Math.max(0, Math.round(next.startMs));
   // `|| 0` for music a host built before the field existed.
   next.endMs = Math.max(0, Math.round(next.endMs || 0));
+  next.fadeOutMs = Math.max(0, Math.round(next.fadeOutMs || 0));
+  // Left absent on music that never had one, so a patch of something else is not a change.
+  if (next.fadeInMs !== undefined) next.fadeInMs = Math.max(0, Math.round(next.fadeInMs || 0));
   if (next.outMs > 0 && next.outMs - next.inMs < MIN_LAYER_MS) return manifest;
   if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;

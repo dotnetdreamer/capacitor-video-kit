@@ -8,7 +8,9 @@
 ## Overview
 
 Volume for whatever the store's `volumeTarget` names - a clip segment, the music or a voiceover
-take - as a mute button beside a percentage slider.
+take - as a mute button beside a percentage slider. The music also gets a switch each for its fade
+in and fade out, with a slider for the fade's length under a switch that is on; no engine fades a
+voiceover or a clip.
 
 The clips' own sound is not one of the targets: the voiceover sheet and the timeline's speaker
 switch it in place, which is one tap instead of a sheet.
@@ -32,16 +34,16 @@ zero, and nothing in the manifest remembers where it came from.
 
 ### Depends on
 
+- [ve-slider](../ve-slider)
 - [ve-sheet](../ve-sheet)
 - [ve-icon](../ve-icon)
-- [ve-slider](../ve-slider)
 
 ### Graph
 ```mermaid
 graph TD;
+  ve-volume-sheet --> ve-slider
   ve-volume-sheet --> ve-sheet
   ve-volume-sheet --> ve-icon
-  ve-volume-sheet --> ve-slider
   ve-sheet --> ve-icon
   ve-editor --> ve-volume-sheet
   style ve-volume-sheet fill:#f9f,stroke:#333,stroke-width:4px

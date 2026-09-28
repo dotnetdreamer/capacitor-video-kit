@@ -1,5 +1,6 @@
 /*
- * A mute button beside the slider, and the quiet "apply to all" under the pair.
+ * A mute button beside the slider, and under the pair either the quiet "apply to all" (a clip) or
+ * the two fade switches (the music), each with its length slider under it while it is on.
  *
  * Everything that centres the block in the sheet is in `sheet-common.css`, which this file is
  * listed after. 20px at the sides is the sheet's gutter, which the slider's own edge inset is
@@ -62,4 +63,97 @@
 /* The space above it belongs to the sheet, which is why `sheet-common.css` leaves the margin out. */
 .sheet__apply-all {
   margin-top: 14px;
+}
+
+/* ------------------------------------------------------------------------------ fade switches */
+
+/*
+ * The voiceover sheet's switch, drawn the same so the editor has one switch. The rows keep the
+ * content's side gutter and add none, so each label starts under the mute button.
+ */
+.vol__fades {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+}
+
+/*
+ * `font` is named because this is a `<button>` inside a shadow root: a form control does not inherit
+ * the page's font, and no reset stylesheet reaches in here to make it.
+ */
+.vol__fade {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+
+.vol__fade:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/* Takes the room, so the length and the switch sit together at the right. */
+.vol__fade-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Dim beside the white label: it is the setting's value, and the slider under it is how to change it. */
+.vol__fade-value {
+  flex: 0 0 auto;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 14px;
+  /* Proportional digits make the row twitch while the knob moves. */
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * No value above the knob (`pin="none"`), so it is the 44px of finger alone. The bar's ends come in
+ * to the knob's radius rather than the default 20px, so it starts nearly under the label it sets.
+ */
+.vol__fade-slider {
+  --ve-slider-edge: 12px;
+}
+
+.vol__switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--ve-raised-2, #3a3a3c);
+  transition: background-color 160ms ease-out;
+}
+
+.vol__switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 160ms ease-out;
+}
+
+.vol__switch--on {
+  background: var(--ve-accent, #a6ff2e);
+}
+
+.vol__switch--on .vol__switch-knob {
+  transform: translateX(18px);
 }

@@ -1,14 +1,5 @@
 import { effect, signal, untracked } from '@preact/signals-core';
-import {
-  MAX_LAYERS,
-  MAX_VIDEO_TRACKS,
-  PICTURE_SOURCE_MS,
-  defaultClipEdit,
-  defaultPictureEdit,
-  insertClip,
-  replaceClipSource,
-  uniqueClipKeys,
-} from '../editor';
+import { MAX_LAYERS, MAX_VIDEO_TRACKS, MUSIC_FADE_MS, PICTURE_SOURCE_MS, defaultClipEdit, defaultPictureEdit, insertClip, replaceClipSource, uniqueClipKeys } from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
@@ -478,9 +469,7 @@ export class EditorMedia {
       this.landOpenTextEdit();
       this.store.clips.value = [...this.store.clips.value, source];
       // The segment is looked up again by id: it may have been deleted while the picker was open.
-      const replaced = this.store.commit('Replace', m =>
-        replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength, isPictureSource(source)),
-      );
+      const replaced = this.store.commit('Replace', m => replaceClipSource(m, target.id, source.key, durationMs, this.host.editing.replaceKeepsLength, isPictureSource(source)));
       if (!replaced) {
         this.dropUnusedSource(source);
         return;
@@ -701,12 +690,13 @@ export class EditorMedia {
   /**
    * Puts a track on the post, from wherever it came from.
    *
-   * The volume is the one thing carried over from a track being replaced: it is the only field of
-   * the six the customer sets by hand, and having it reset to 80% every time a different song is
-   * tried is the difference between comparing two tracks and setting the level twice.
+   * The volume and the two fades are what is carried over from a track being replaced: they are the
+   * fields the volume sheet sets by hand, and having them reset every time a different song is tried
+   * is the difference between comparing two tracks and setting the sound up twice.
    */
   private useTrack(uri: string, fileName: string, sourceDurationMs: number): void {
     const existing = this.store.manifest.value.music;
+    const fadeInMs = existing?.fadeInMs ?? 0;
     this.store.setMusic(
       {
         uri,
@@ -718,7 +708,8 @@ export class EditorMedia {
         endMs: 0,
         volume: existing?.volume ?? 0.8,
         loop: true,
-        fadeOutMs: 400,
+        ...(fadeInMs > 0 ? { fadeInMs } : {}),
+        fadeOutMs: existing ? existing.fadeOutMs : MUSIC_FADE_MS,
       },
       existing ? 'Replace sound' : 'Add sound',
     );

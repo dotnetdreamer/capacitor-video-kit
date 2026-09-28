@@ -169,9 +169,9 @@ graph TD;
   ve-quality-sheet --> ve-sheet
   ve-speed-sheet --> ve-sheet
   ve-speed-sheet --> ve-slider
+  ve-volume-sheet --> ve-slider
   ve-volume-sheet --> ve-sheet
   ve-volume-sheet --> ve-icon
-  ve-volume-sheet --> ve-slider
   ve-opacity-sheet --> ve-sheet
   ve-opacity-sheet --> ve-slider
   ve-voiceover-sheet --> ve-sheet

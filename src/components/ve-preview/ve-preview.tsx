@@ -601,10 +601,7 @@ export class VePreview implements EditorPlayer {
    * readers look at where a layer has got to in its file, and the player's elements, which do, read
    * the store's own list.
    */
-  private readonly shownExtras = computedWith<readonly PreviewVideoLayer[]>(
-    () => this.ctx.store.previewLayers.value.filter(layer => layer.trackId !== null),
-    sameLayerStack,
-  );
+  private readonly shownExtras = computedWith<readonly PreviewVideoLayer[]>(() => this.ctx.store.previewLayers.value.filter(layer => layer.trackId !== null), sameLayerStack);
 
   /**
    * Every extra track, bottom to top: which of its layers is under the playhead and where that
@@ -818,14 +815,7 @@ export class VePreview implements EditorPlayer {
       deferredEffect(
         // The zoom camera redraws a paused frame too: a zoom edited, and the camera switching on
         // and off as the zoom sheet opens, closes and plays.
-        () =>
-          [
-            store.previewLayers.value,
-            store.filterOps.value,
-            store.frameAspect.value,
-            store.camera.value,
-            store.cameraLive.value,
-          ] as const,
+        () => [store.previewLayers.value, store.filterOps.value, store.frameAspect.value, store.camera.value, store.cameraLive.value] as const,
         () => this.canvas?.request(),
       ),
     );
@@ -1119,15 +1109,7 @@ export class VePreview implements EditorPlayer {
 
               {this.layers.value.map(layer =>
                 layer.effect ? (
-                  <img
-                    key={layer.id}
-                    class="pv__effect"
-                    alt=""
-                    draggable={false}
-                    src={layer.png}
-                    ref={this.motion.refFor(layer.id)}
-                    style={{ opacity: String(layer.opacity) }}
-                  />
+                  <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} ref={this.motion.refFor(layer.id)} style={{ opacity: String(layer.opacity) }} />
                 ) : (
                   <img
                     key={layer.id}
@@ -1196,13 +1178,7 @@ export class VePreview implements EditorPlayer {
                 by its name and read the level off it.
               */}
               {zoom && (
-                <div
-                  key="zoom"
-                  class={{ 'pv__zoom': true, 'pv__zoom--ghost': zoom.ghost }}
-                  role="img"
-                  aria-label="Zoom area"
-                  style={boxStyle(zoom.box)}
-                >
+                <div key="zoom" class={{ 'pv__zoom': true, 'pv__zoom--ghost': zoom.ghost }} role="img" aria-label="Zoom area" style={boxStyle(zoom.box)}>
                   <span class="pv__zoom-corner pv__zoom-corner--tl"></span>
                   <span class="pv__zoom-corner pv__zoom-corner--tr"></span>
                   <span class="pv__zoom-corner pv__zoom-corner--bl"></span>

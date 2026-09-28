@@ -779,9 +779,11 @@ describe('playableHere', () => {
 });
 
 describe('levelsInUse', () => {
-  it('is a music volume or fade-out, or a take below full', () => {
+  it('is a music volume or fade, or a take below full', () => {
     expect(levelsInUse(post())).toBe(false);
     expect(levelsInUse(post({ music: { ...MUSIC, volume: 1, fadeOutMs: 0 } }))).toBe(false);
+    expect(levelsInUse(post({ music: { ...MUSIC, volume: 1, fadeOutMs: 0, fadeInMs: 0 } }))).toBe(false);
+    expect(levelsInUse(post({ music: { ...MUSIC, volume: 1, fadeOutMs: 0, fadeInMs: 1000 } }))).toBe(true);
     expect(levelsInUse(post({ music: { ...MUSIC, volume: 1 } }))).toBe(true);
     expect(levelsInUse(post({ music: { ...MUSIC, fadeOutMs: 0 } }))).toBe(true);
     expect(levelsInUse(post({ voiceovers: [{ ...TAKE, volume: 1 }] }))).toBe(false);

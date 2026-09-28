@@ -4,16 +4,7 @@ import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
 import { sameUrl } from '../../state/same-url';
 import type { ClipMedia } from './clip-media';
-import {
-  BLANK_POSTER,
-  SEEK_EPSILON_S,
-  applyClipAudio,
-  applyPitch,
-  clipsSilenced,
-  posterFor,
-  previewSrc,
-  startPlayback,
-} from './preview-media';
+import { BLANK_POSTER, SEEK_EPSILON_S, applyClipAudio, applyPitch, clipsSilenced, posterFor, previewSrc, startPlayback } from './preview-media';
 
 /**
  * How far out of step with the base the second element is left alone, in OUTPUT milliseconds.

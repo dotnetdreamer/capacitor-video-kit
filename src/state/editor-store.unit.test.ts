@@ -88,11 +88,18 @@ describe('EditorStore', () => {
 
   function load(extra: Partial<EditManifest> = {}): EditManifest {
     base = { ...emptyManifest(), clips: [clip('a', 0, 4000), clip('b', 0, 2000)], ...extra };
-    store.load(sources, new Map([['a', 4000], ['b', 2000]]), base);
+    store.load(
+      sources,
+      new Map([
+        ['a', 4000],
+        ['b', 2000],
+      ]),
+      base,
+    );
     return base;
   }
 
-  const clipIds = () => store.manifest.value.clips.map((c) => c.id);
+  const clipIds = () => store.manifest.value.clips.map(c => c.id);
   const undoAll = () => {
     let steps = 0;
     while (store.canUndo.value) {
@@ -120,14 +127,14 @@ describe('EditorStore', () => {
   describe('commit', () => {
     it('does nothing for a change that is not possible or not a change', () => {
       expect(store.commit('Nothing', () => null)).toBe(false);
-      expect(store.commit('Same', (m) => m)).toBe(false);
+      expect(store.commit('Same', m => m)).toBe(false);
       expect(store.manifest.value).toBe(base);
       expect(store.canUndo.value).toBe(false);
       expect(store.dirty.value).toBe(false);
     });
 
     it('makes a real change one undo step', () => {
-      expect(store.commit('Fill frame', (m) => ({ ...m, fit: 'cover' }))).toBe(true);
+      expect(store.commit('Fill frame', m => ({ ...m, fit: 'cover' }))).toBe(true);
       expect(store.manifest.value.fit).toBe('cover');
       expect(store.canUndo.value).toBe(true);
       expect(store.dirty.value).toBe(true);
@@ -161,7 +168,7 @@ describe('EditorStore', () => {
 
     it('records nothing for a gesture that changed nothing', () => {
       store.beginGesture();
-      store.preview((m) => m);
+      store.preview(m => m);
       store.preview(() => null);
       store.endGesture('Nothing');
       expect(store.canUndo.value).toBe(false);
@@ -255,7 +262,7 @@ describe('EditorStore', () => {
 
       store.undo();
       expect(store.canRedo.value).toBe(true);
-      store.commit('Filter', (m) => ({ ...m, filterId: 'noir' }));
+      store.commit('Filter', m => ({ ...m, filterId: 'noir' }));
       expect(store.canRedo.value).toBe(false);
       store.redo();
       expect(store.manifest.value.filterId).toBe('noir');
@@ -264,7 +271,7 @@ describe('EditorStore', () => {
 
     it('keeps the last 50 steps', () => {
       for (let i = 1; i <= 60; i++) {
-        store.commit(`Step ${i}`, (m) => ({ ...m, filterIntensity: i / 100 }));
+        store.commit(`Step ${i}`, m => ({ ...m, filterIntensity: i / 100 }));
       }
       expect(store.manifest.value.filterIntensity).toBe(0.6);
       expect(undoAll()).toBe(50);
@@ -322,11 +329,11 @@ describe('EditorStore', () => {
 
       store.recordingFromMs.value = null;
       store.addVoiceover({ id: 'v2', uri: 'file:///v2.m4a', startMs: 2000, durationMs: 1000, volume: 1 });
-      expect(store.manifest.value.voiceovers.map((take) => take.id)).toEqual(['v1', 'v2']);
+      expect(store.manifest.value.voiceovers.map(take => take.id)).toEqual(['v1', 'v2']);
     });
 
     it('pulls the playhead back inside a shorter video', () => {
-      store.commit('Delete', (m) => removeClip(m, 'a'));
+      store.commit('Delete', m => removeClip(m, 'a'));
       store.playheadMs.value = 1500;
       store.undo();
       store.playheadMs.value = 5500;
@@ -357,7 +364,7 @@ describe('EditorStore', () => {
       store.playheadMs.value = 4500;
       store.splitAtPlayhead();
       const clips = store.manifest.value.clips;
-      expect(clips.map((c) => [c.clipKey, c.inMs, c.outMs])).toEqual([
+      expect(clips.map(c => [c.clipKey, c.inMs, c.outMs])).toEqual([
         ['a', 0, 4000],
         ['b', 0, 500],
         ['b', 500, 2000],
@@ -523,7 +530,7 @@ describe('EditorStore', () => {
       store.previewOverlay(id, { text: 'Hi' });
 
       store.finishText();
-      store.commit('Add clip', (m) => ({ ...m, fit: 'contain' }));
+      store.commit('Add clip', m => ({ ...m, fit: 'contain' }));
 
       expect(store.textEdit.value).toBeNull();
       store.undo();
@@ -691,7 +698,7 @@ describe('EditorStore', () => {
       load({ overlays: [sticker('s1'), sticker('s2')] });
       store.select({ kind: 'overlay', id: 's1' });
       store.deleteSelection();
-      expect(store.manifest.value.overlays.map((o) => o.id)).toEqual(['s2']);
+      expect(store.manifest.value.overlays.map(o => o.id)).toEqual(['s2']);
       expect(store.selection.value).toBeNull();
     });
 
@@ -718,9 +725,7 @@ describe('EditorStore', () => {
     describe('previewLayers', () => {
       it('is the one layer the preview has always drawn when there is no second video', () => {
         store.seek(1000);
-        expect(store.previewLayers.value).toEqual([
-          { trackId: null, clipId: 'a', clipKey: 'a', sourceMs: 1000, rect: null, crop: null, fit: 'cover', opacity: 1, z: 0 },
-        ]);
+        expect(store.previewLayers.value).toEqual([{ trackId: null, clipId: 'a', clipKey: 'a', sourceMs: 1000, rect: null, crop: null, fit: 'cover', opacity: 1, z: 0 }]);
       });
 
       it('is empty with no clips at all, and follows a trim and a speed into the source', () => {
@@ -742,7 +747,7 @@ describe('EditorStore', () => {
         ]);
       });
 
-      it('carries each clip its own framing, and the post\'s fit for a clip without one', () => {
+      it("carries each clip its own framing, and the post's fit for a clip without one", () => {
         const crop = { x: 0.1, y: 0.1, w: 0.5, h: 0.5 };
         const rect = { x: 0, y: 0.5, w: 1, h: 0.5 };
         load({
@@ -765,7 +770,7 @@ describe('EditorStore', () => {
         store.seek(399);
         expect(store.previewLayers.value.length).toBe(1);
         store.seek(400);
-        expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual([null, 'vt']);
+        expect(store.previewLayers.value.map(layer => layer.trackId)).toEqual([null, 'vt']);
       });
 
       it('leaves the base showing once the layer has ended', () => {
@@ -773,7 +778,7 @@ describe('EditorStore', () => {
         store.seek(999);
         expect(store.previewLayers.value.length).toBe(2);
         store.seek(1000);
-        expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual([null]);
+        expect(store.previewLayers.value.map(layer => layer.trackId)).toEqual([null]);
       });
 
       it('GROWS the post for a layer that runs past the base, rather than cutting the layer', () => {
@@ -785,12 +790,12 @@ describe('EditorStore', () => {
 
         // Over the base's own footage, both are on screen.
         store.seek(5500);
-        expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual([null, 'vt']);
+        expect(store.previewLayers.value.map(layer => layer.trackId)).toEqual([null, 'vt']);
 
         // Past it, the base is black and the layer plays on - all the way to its own last frame.
         store.seek(8000);
         const layers = store.previewLayers.value;
-        expect(layers.map((layer) => layer.trackId)).toEqual(['vt']);
+        expect(layers.map(layer => layer.trackId)).toEqual(['vt']);
         expect(layers[0].sourceMs).toBe(3000);
       });
     });
@@ -800,7 +805,7 @@ describe('EditorStore', () => {
         const id = store.addVideoTrack(clip('c', 0, 3000));
 
         expect(id).toBeTruthy();
-        expect(store.videoTrack.value?.clips.map((c) => c.id)).toEqual(['c']);
+        expect(store.videoTrack.value?.clips.map(c => c.id)).toEqual(['c']);
         expect(store.videoTracksFull.value).toBe(false);
         expect(store.selection.value).toEqual({ kind: 'clip', id: 'c' });
         expect(store.selectedClipTrackId.value).toBe(id);
@@ -826,7 +831,7 @@ describe('EditorStore', () => {
         store.addVideoTrack(clip('c', 0, 3000));
         store.addVideoTrack(clip('d', 0, 3000));
 
-        expect(store.manifest.value.videoTracks.map((t) => t.z)).toEqual([1, 2]);
+        expect(store.manifest.value.videoTracks.map(t => t.z)).toEqual([1, 2]);
       });
 
       it('lays the two out, and takes the arrangement away with the layer', () => {
@@ -838,7 +843,7 @@ describe('EditorStore', () => {
         expect(store.manifest.value.videoTracks).toEqual([]);
         // Not "rect is undefined": the key has to be gone, or every engine loses the path it takes
         // for a post nobody has framed.
-        expect(store.manifest.value.clips.every((c) => !('rect' in c))).toBe(true);
+        expect(store.manifest.value.clips.every(c => !('rect' in c))).toBe(true);
         expect(store.selection.value).toBeNull();
         // Add, lay out, remove - and the remove took the layout with it in the one step.
         expect(undoAll()).toBe(3);
@@ -868,7 +873,14 @@ describe('EditorStore', () => {
         // is where the first half ends. That is the drag, and the new row starts there.
         const moved = moveClipToTrack(store.manifest.value, 'b', { kind: 'new', index: 0 }, 4000, 'vt-new');
         expect(moved).not.toBeNull();
-        store.load(sources, new Map([['a', 4000], ['b', 2000]]), moved!);
+        store.load(
+          sources,
+          new Map([
+            ['a', 4000],
+            ['b', 2000],
+          ]),
+          moved!,
+        );
 
         // The base is the first half alone, and the post is still as long as both halves.
         expect(clipsDurationMs(store.manifest.value.clips)).toBe(4000);
@@ -877,7 +889,7 @@ describe('EditorStore', () => {
 
         // And the half on the layer is on screen where it was, rather than off the end of the post.
         store.seek(5000);
-        expect(store.previewLayers.value.map((layer) => layer.trackId)).toEqual(['vt-new']);
+        expect(store.previewLayers.value.map(layer => layer.trackId)).toEqual(['vt-new']);
       });
 
       it('swaps the layers and keeps the post as long as the footage on it', () => {
@@ -885,8 +897,8 @@ describe('EditorStore', () => {
         store.seek(6000);
         store.swapTrackZ('vt');
 
-        expect(store.manifest.value.clips.map((c) => c.id)).toEqual(['c']);
-        expect(store.videoTrack.value?.clips.map((c) => c.id)).toEqual(['a', 'b']);
+        expect(store.manifest.value.clips.map(c => c.id)).toEqual(['c']);
+        expect(store.videoTrack.value?.clips.map(c => c.id)).toEqual(['a', 'b']);
         // The six seconds moved from the base onto the layer; the post is still six seconds long,
         // because a post is as long as the things on it. It used to shrink to the base's three and
         // throw half of what the customer had just moved off the end of its own timeline.
@@ -900,13 +912,13 @@ describe('EditorStore', () => {
         store.select({ kind: 'clip', id: 'b' });
         expect(store.moveClipToTrack('b', { kind: 'new', index: 0 }, 2000)).toBe(true);
 
-        expect(store.manifest.value.clips.map((c) => c.id)).toEqual(['a']);
+        expect(store.manifest.value.clips.map(c => c.id)).toEqual(['a']);
         expect(store.videoTrack.value).toMatchObject({ startMs: 2000, z: 1 });
         // The segment stays selected: the customer put it somewhere and the tools have to follow it.
         expect(store.selection.value).toEqual({ kind: 'clip', id: 'b' });
 
         expect(store.moveClipToTrack('b', { kind: 'base' }, 0)).toBe(true);
-        expect(store.manifest.value.clips.map((c) => c.id)).toEqual(['b', 'a']);
+        expect(store.manifest.value.clips.map(c => c.id)).toEqual(['b', 'a']);
         expect(store.manifest.value.videoTracks).toEqual([]);
         // One undo step each, and nothing else in between.
         expect(undoAll()).toBe(2);
@@ -935,7 +947,7 @@ describe('EditorStore', () => {
         store.deleteSelectedClip();
 
         // The layer stays: only the segment the customer had selected has gone.
-        expect(store.videoTrack.value?.clips.map((c) => c.id)).toEqual(['d']);
+        expect(store.videoTrack.value?.clips.map(c => c.id)).toEqual(['d']);
       });
 
       it('takes the layer and its arrangement off with its last segment', () => {
@@ -947,7 +959,7 @@ describe('EditorStore', () => {
 
         expect(store.manifest.value.videoTracks).toEqual([]);
         // A base left in half the frame with nothing beside it is a black band nobody asked for.
-        expect(store.manifest.value.clips.every((c) => !('rect' in c))).toBe(true);
+        expect(store.manifest.value.clips.every(c => !('rect' in c))).toBe(true);
       });
     });
   });
@@ -1062,5 +1074,4 @@ describe('EditorStore', () => {
       expect([...store.previewUrls.value]).toEqual([['a', 'file:///copy-a.mp4']]);
     });
   });
-
 });

@@ -430,7 +430,7 @@ export const OP_REFERENCE: Record<string, string> = {
 
   /* sound */
   setMusic:
-    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, volume?, loop?, fadeOutMs?}) or null. ' +
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, volume?, loop?, fadeInMs?, fadeOutMs?}) or null. ' +
     'inMs..outMs is the section of the track, startMs where it starts on the post, and endMs where it stops ' +
     '(0: until the end); a looping section repeats until endMs, or until the video ends.',
   patchMusic: 'patch - any of the music fields. Fails when the post has no music yet.',

@@ -750,6 +750,7 @@ const OPS: Record<string, Apply> = {
       endMs: optionalNum(raw, 'endMs', 0),
       volume: optionalNum(raw, 'volume', 1),
       loop: optionalBool(raw, 'loop', false),
+      fadeInMs: optionalNum(raw, 'fadeInMs', 0),
       fadeOutMs: optionalNum(raw, 'fadeOutMs', 0),
     };
     return setMusic(manifest, music);

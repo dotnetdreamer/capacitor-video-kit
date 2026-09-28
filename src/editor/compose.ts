@@ -179,7 +179,7 @@ export async function toComposeSpec(
             ...(music.endMs > 0 && music.endMs < totalMs ? { endMs: Math.round(music.endMs) } : {}),
             volume: music.volume,
             loop: music.loop,
-            fadeInMs: 0,
+            fadeInMs: Math.max(0, Math.round(music.fadeInMs ?? 0)),
             fadeOutMs: Math.max(0, Math.round(music.fadeOutMs)),
           }
         : null,
