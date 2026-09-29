@@ -90,6 +90,28 @@ describe('scenesFromLabels', () => {
     expect(scenes).toEqual([{ scene: 'sunset', score: 1 }]);
   });
 
+  it('lifts a label weighted above 1 over the parents it comes with, and holds its strength at 1', () => {
+    /*
+     * Vision names a birthday cake with its parents, never less sure of them than of it: at a
+     * weight of 1 it tied `food` and lost on MEDIA_SCENES order. Its 1.25 wins at the same
+     * confidence, and a sure one is a whole birthday rather than more than one.
+     */
+    const cake = (confidence: number) =>
+      frame([
+        ['food', confidence],
+        ['dessert', confidence],
+        ['baked_goods', confidence],
+        ['cake', confidence],
+        ['birthday_cake', confidence],
+      ]);
+    expect(scenesFromLabels([cake(0.6)], 'vision')).toEqual([
+      { scene: 'birthday', score: 0.75 },
+      { scene: 'food', score: 0.6 },
+      { scene: 'party', score: 0.36 },
+    ]);
+    expect(scenesFromLabels([cake(0.9)], 'vision')[0]).toEqual({ scene: 'birthday', score: 1 });
+  });
+
   it('answers nothing for no frames, and for an engine it has no table for', () => {
     expect(scenesFromLabels([], 'vision')).toEqual([]);
     expect(scenesFromLabels([frame([['food', 0.9]])], 'someday' as LabelEngine)).toEqual([]);
@@ -338,6 +360,64 @@ describe('scenesFromLabels', () => {
         'vision',
       );
       expect(scenes[0]).toEqual({ scene: 'game', score: 0.781 });
+    });
+
+    it('Vision: a wedding is love first, and the celebration it also names a party only second', () => {
+      /* Vision gives `celebration` and `ceremony` the wedding's own confidence, so they tied once. */
+      const scenes = scenesFromLabels(
+        [
+          frame([
+            ['celebration', 0.944],
+            ['ceremony', 0.944],
+            ['wedding', 0.944],
+            ['clothing', 0.87],
+            ['suit', 0.847],
+            ['groom', 0.825],
+            ['bride', 0.793],
+            ['wedding_dress', 0.776],
+            ['art', 0.77],
+            ['decoration', 0.77],
+            ['flower_arrangement', 0.77],
+            ['bouquet', 0.77],
+            ['people', 0.764],
+            ['adult', 0.764],
+            ['gown', 0.587],
+            ['material', 0.561],
+            ['textile', 0.561],
+            ['structure', 0.128],
+            ['wood_processed', 0.121],
+          ]),
+        ],
+        'vision',
+      );
+      expect(scenes.slice(0, 2)).toEqual([
+        { scene: 'love', score: 0.944 },
+        { scene: 'party', score: 0.755 },
+      ]);
+    });
+
+    it('Vision: a birthday cake with its candles lit is a birthday first, even though it is surer of the food', () => {
+      const scenes = scenesFromLabels(
+        [
+          frame([
+            ['food', 0.904],
+            ['candle', 0.84],
+            ['light', 0.84],
+            ['baked_goods', 0.807],
+            ['birthday_cake', 0.807],
+            ['cake', 0.807],
+            ['dessert', 0.807],
+            ['fire', 0.359],
+            ['flame', 0.359],
+          ]),
+        ],
+        'vision',
+      );
+      expect(scenes).toEqual([
+        { scene: 'birthday', score: 1 },
+        { scene: 'food', score: 0.904 },
+        { scene: 'party', score: 0.484 },
+      ]);
     });
 
     it('ML Kit: a cat is a pet', () => {

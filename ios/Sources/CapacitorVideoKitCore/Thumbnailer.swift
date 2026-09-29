@@ -44,9 +44,24 @@ enum Thumbnailer {
         // Precise timing costs a container scan on a file with no duration atom, which is exactly
         // the case (a still-muxing recording) where the cheap answer is wrong.
         let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
-        let duration = try await asset.load(.duration)
+        var duration = try await asset.load(.duration)
         let video = try await asset.loadTracks(withMediaType: .video).first
         let audio = try await asset.loadTracks(withMediaType: .audio).first
+        // A sound answers where its audio TRACK ends, not the asset's duration, which is short of the
+        // song: AVFoundation reads a 12 s AAC `.m4a` as an asset of 11975 ms whose one track runs the
+        // full 12000 its edit list presents. The render loops music at the track's end
+        // (CompositionBuilder's `audioSource`, which also cuts a voice take there) and the editor lays
+        // a picked sound's loop at this answer, so the two have to be the same number: with the
+        // asset's, the post's loop came round 25 ms a pass ahead of the render's, 125 ms by the end of
+        // a minute. WebKit's `<audio>` still reads the file 11975 ms long, so the preview's element
+        // has nothing to play for the last 25 ms of each pass; `soundPutMs` and the drift check in
+        // `preview-player.ts` keep it on the post's loop across that, and never seek an element that
+        // has run to the end of its file before WebKit has said so, which costs the file its length.
+        // A voice take and a sound library row are measured the same way, as the render reads them.
+        if video == nil, let audio {
+            let range = try await audio.load(.timeRange)
+            if range.end.isNumeric && range.end > .zero { duration = range.end }
+        }
 
         var width = 0
         var height = 0

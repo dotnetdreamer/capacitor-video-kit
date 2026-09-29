@@ -57,7 +57,8 @@ export type { ComposerMediaHostOptions, ComposerMediaPickers } from './video-com
 // where a host without Capacitor reaches them.
 export { describeMedia } from './video-composer/media-scenes';
 export type { DescribeMediaOptions, MediaDescription } from './video-composer/media-scenes';
-// Where a browser's recogniser - which the kit brings, as a browser has none - finds its files.
+// Where a browser's recogniser - which the kit brings, as a browser has none - finds its files, and
+// the call that starts it downloading early and says whether it loaded.
 export { configureWebLabeling, prepareWebLabeling } from './video-composer/web/labels';
 export type { WebLabelingFiles } from './video-composer/web/labels';
 

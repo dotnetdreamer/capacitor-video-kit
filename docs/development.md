@@ -162,7 +162,10 @@ CommonJS as far as Node was concerned, and `export * from ...` threw `SyntaxErro
 
 `scripts/finish-build.mjs` does the other half for the plugin's tree: the sources keep extensionless
 relative imports, because that is what the editors and bundlers here read, and Node ESM needs the
-extension, so it is added to the emitted JavaScript afterwards.
+extension, so it is added to the emitted JavaScript afterwards. It also puts back the one `import()`
+the CommonJS half has to keep: `labelMedia` in a browser imports MediaPipe's runtime from the URL the
+host serves it at, and `tsc` with `module: CommonJS` turns that into a `require()` of a URL, which
+nothing can answer. The build fails if that line is not found exactly once.
 
 ### The wrappers resolve this package through a self link
 
@@ -327,15 +330,17 @@ xcodebuild test -scheme CapacitorVideoKit \
 ```
 
 Add `-only-testing:CapacitorVideoKitCoreTests/<class>` to run one file's class. The 159 cases make
-their own media rather than shipping any: `TestSupport.swift` writes videos, with a tone in them when
-asked, and pictures into a folder per test, renders a spec through the same parser, builder and
-exporter a job uses, and reads the result back as the colour at a point of a frame; the tests about
-sound measure its level over windows of a tenth of a second. That is what they check: pictures on
-every track and as a transition's side, sound levels held to their cuts, music fades, inputs with no
-extension or the wrong one, the encoder's settings and the file they produce, the fallback,
-cancelling and the stall watch, which clip a failure names, the gallery's copy paths and album
-decisions, `encodeSupport` against the real VideoToolbox, `file://` parsing, and the publisher's
-bodies, templates and resend rules.
+their own media rather than shipping any: `TestSupport.swift` writes videos, with a tone in them
+when asked, sounds on their own and pictures into a folder per test, renders a spec through the same
+parser, builder and exporter a job uses, and reads the result back as the colour at a point of a
+frame; the tests about sound measure its level over windows of a tenth of a second. That is what
+they check: pictures on every track and as a transition's side, sound levels held to their cuts,
+music fades, inputs with no extension or the wrong one, the encoder's settings and the file they
+produce, the fallback, cancelling and the stall watch, which clip a failure names, how long `probe`
+says a sound and a video are (a sound to its audio track's end, on a file rewritten the way ffmpeg
+writes an `.m4a`, since one AVFoundation wrote reads the same either way), the gallery's copy paths
+and album decisions, `encodeSupport` against the real VideoToolbox, `file://` parsing, and the
+publisher's bodies, templates and resend rules.
 
 Three things they cannot reach. PhotoKit, because the test runner cannot be granted the photo
 library: the gallery's PhotoKit paths were checked in a throwaway app on the simulator instead. A

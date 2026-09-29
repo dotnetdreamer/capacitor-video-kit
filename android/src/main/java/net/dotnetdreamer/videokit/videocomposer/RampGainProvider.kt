@@ -15,15 +15,26 @@ import kotlin.math.min
  * provider multiplies the level by the ramps instead.
  *
  * Positions are relative to the start of the item being processed: Media3 hands each exported item
- * its own sample positions starting at zero, which is exactly what a per-repetition music fade
- * wants.
+ * its own sample positions starting at zero. A fade that belongs to more than one item - music, whose
+ * fades are the whole window it is heard in and run across the seams between its repetitions - is
+ * given to each item it covers in that item's own terms: [fadeInFromUs] and [fadeOutStartUs] are
+ * where the ramp starts relative to THIS item's first sample, and either is negative for a ramp that
+ * began in an item before it. The line then carries on across the seam as if the items were one.
  */
 @OptIn(UnstableApi::class)
 class RampGainProvider(
     /** 0..1. */
     private val level: Float,
     private val fadeInUs: Long = 0L,
-    /** Relative to the item start; [C.TIME_UNSET] when there is no fade-out. */
+    /**
+     * Where the fade in starts, relative to the item start: 0 for the item it starts in, negative
+     * for a later item it is still running through.
+     */
+    private val fadeInFromUs: Long = 0L,
+    /**
+     * Relative to the item start, and negative for a fade that started in an item before this one;
+     * [C.TIME_UNSET] when there is no fade-out.
+     */
     private val fadeOutStartUs: Long = C.TIME_UNSET,
     private val fadeOutUs: Long = 0L,
     /**
@@ -39,8 +50,8 @@ class RampGainProvider(
         val tUs = toUs(samplePosition, sampleRate)
         if (tUs < silentUntilUs) return 0f
         var gain = level
-        if (fadeInUs > 0L && tUs < fadeInUs) {
-            gain *= tUs.toFloat() / fadeInUs.toFloat()
+        if (fadeInUs > 0L && tUs - fadeInFromUs < fadeInUs) {
+            gain *= (tUs - fadeInFromUs).toFloat() / fadeInUs.toFloat()
         }
         if (fadeOutStartUs != C.TIME_UNSET && fadeOutUs > 0L && tUs >= fadeOutStartUs) {
             gain *= 1f - min(1f, (tUs - fadeOutStartUs).toFloat() / fadeOutUs.toFloat())
@@ -64,7 +75,7 @@ class RampGainProvider(
     override fun isUnityUntil(samplePosition: Long, sampleRate: Int): Long {
         if (getGainFactorAtSamplePosition(samplePosition, sampleRate) != 1f) return C.TIME_UNSET
         val tUs = toUs(samplePosition, sampleRate)
-        if (fadeInUs > 0L && tUs < fadeInUs) return samplePosition + 1
+        if (fadeInUs > 0L && tUs - fadeInFromUs < fadeInUs) return samplePosition + 1
         if (fadeOutStartUs == C.TIME_UNSET || fadeOutUs <= 0L) return C.TIME_END_OF_SOURCE
         if (tUs >= fadeOutStartUs) return samplePosition + 1
         // Flat up to the first sample at or after the fade-out's start, back in sample positions.

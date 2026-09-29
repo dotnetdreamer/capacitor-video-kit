@@ -116,20 +116,43 @@ export interface OverlayPlacement {
   motion: ComposeOverlayMotion | null;
 }
 
+/** One repetition of the music's section. It carries no fade: the fades are the whole window's. */
 export interface MusicItem {
   inUs: number;
   outUs: number;
   /** Where this repetition starts on the OUTPUT timeline. */
   atUs: number;
-  fadeInUs: number;
-  /** Relative to this item's own start; -1 for no fade out. */
-  fadeOutStartUs: number;
-  fadeOutUs: number;
 }
 
+/**
+ * The music as the mix lays it: the section, repeated from `startUs` for as long as it may play, and
+ * one pair of fades over the whole of the time it is heard.
+ *
+ * The fades belong to the window `startUs..stopUs`, not to any repetition: the gain at an output
+ * instant `t` is `volume * clamp((t - startUs) / fadeInUs) * clamp((stopUs - t) / fadeOutUs)`, each
+ * factor 1 when its fade is 0 - [ComposeMusic]'s rule, and `musicFadeAt`'s in the preview. So a loop
+ * seam changes nothing, and a fade out reaches silence exactly at `stopUs` however short the last
+ * repetition is.
+ *
+ * What was asked is kept beside what was laid, because the file's real length is known only once the
+ * mix has decoded it: a spec whose sound is not trimmed at its end asks for the end of the file, and
+ * [musicForSource] lays the repetitions again against the samples there turned out to be.
+ */
 export interface MusicPlan {
   uri: string;
   volume: number;
+  /** The section in the file, as asked - `outUs` held to the probed length when there was one. */
+  inUs: number;
+  outUs: number;
+  loop: boolean;
+  /** Where the music starts on the OUTPUT timeline. */
+  startUs: number;
+  /** The latest it may play until: the end of the video, or its own stop before that. */
+  untilUs: number;
+  /** Where the last repetition stops, which is where the fade out reaches silence. */
+  stopUs: number;
+  fadeInUs: number;
+  fadeOutUs: number;
   items: MusicItem[];
 }
 
@@ -492,38 +515,58 @@ function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, Probe
   if (!music) return null;
   const probed = probes.get(music.uri);
   const outMs = probed && probed.durationMs > 0 ? Math.min(music.outMs, probed.durationMs) : music.outMs;
-  const trackLenUs = Math.round((outMs - music.inMs) * 1000);
-  if (trackLenUs <= 0) return null;
-
   const startUs = Math.max(0, Math.round(music.startMs * 1000));
-  const stopUs = music.endMs !== undefined && music.endMs > 0 ? Math.min(totalUs, Math.round(music.endMs * 1000)) : totalUs;
-  const availableUs = stopUs - startUs;
+  return layMusic({
+    uri: music.uri,
+    volume: clamp(music.volume, 0, 1),
+    inUs: Math.round(music.inMs * 1000),
+    outUs: Math.round(outMs * 1000),
+    loop: music.loop,
+    startUs,
+    untilUs: music.endMs !== undefined && music.endMs > 0 ? Math.min(totalUs, Math.round(music.endMs * 1000)) : totalUs,
+    fadeInUs: Math.max(0, Math.round(music.fadeInMs * 1000)),
+    fadeOutUs: Math.max(0, Math.round(music.fadeOutMs * 1000)),
+  });
+}
+
+/**
+ * [MusicPlan] for a file whose sound runs `sourceUs`, as the mix read it: the same plan when the
+ * section it was laid for fits in the file, and the repetitions laid again, shorter, when the file
+ * ends first - which is every sound not trimmed at its end, whose spec asks for "the end of the
+ * file" in a number longer than any file (see [ComposeMusic.outMs]). Nothing opens the music before
+ * the mix does, which decodes it and reads its container's length together (`soundLengthUs` in
+ * `audio.ts`: the decode, held to what an MP4's edit list presents). Null when the section
+ * starts at or past the end of the file, which leaves the post without its music, as both native
+ * engines leave it.
+ */
+export function musicForSource(music: MusicPlan, sourceUs: number): MusicPlan | null {
+  if (music.outUs <= sourceUs) return music;
+  return layMusic({ ...music, outUs: Math.floor(sourceUs) });
+}
+
+/**
+ * The repetitions of the section, from `startUs`: as many as it takes to reach `untilUs` when the
+ * music loops, the last cut there, and the section once, cut there if it has to be, when it does not.
+ * `stopUs` is where the last one ends. Null when nothing would be heard.
+ */
+function layMusic(ask: Omit<MusicPlan, 'stopUs' | 'items'>): MusicPlan | null {
+  const trackLenUs = ask.outUs - ask.inUs;
+  if (trackLenUs <= 0) return null;
+  const availableUs = ask.untilUs - ask.startUs;
   if (availableUs <= 0) return null;
 
-  const reps = music.loop ? Math.max(1, Math.ceil(availableUs / trackLenUs)) : 1;
-  const lastLenUs = music.loop ? availableUs - (reps - 1) * trackLenUs : Math.min(trackLenUs, availableUs);
+  const reps = ask.loop ? Math.max(1, Math.ceil(availableUs / trackLenUs)) : 1;
+  const lastLenUs = ask.loop ? availableUs - (reps - 1) * trackLenUs : Math.min(trackLenUs, availableUs);
   if (lastLenUs <= 0) return null;
 
-  const inUs = Math.round(music.inMs * 1000);
-  const fadeInUs = Math.max(0, Math.round(music.fadeInMs * 1000));
-  const fadeOutUs = Math.max(0, Math.round(music.fadeOutMs * 1000));
-
   const items: MusicItem[] = [];
-  let atUs = startUs;
+  let atUs = ask.startUs;
   for (let k = 0; k < reps; k++) {
     const lenUs = k === reps - 1 ? lastLenUs : trackLenUs;
-    items.push({
-      inUs,
-      outUs: inUs + lenUs,
-      atUs,
-      // A fade belongs to the start of the track and the end of the video, not to every repetition.
-      fadeInUs: k === 0 ? fadeInUs : 0,
-      fadeOutStartUs: k === reps - 1 && fadeOutUs > 0 ? Math.max(0, lenUs - fadeOutUs) : -1,
-      fadeOutUs: k === reps - 1 ? fadeOutUs : 0,
-    });
+    items.push({ inUs: ask.inUs, outUs: ask.inUs + lenUs, atUs });
     atUs += lenUs;
   }
-  return { uri: music.uri, volume: clamp(music.volume, 0, 1), items };
+  return { ...ask, stopUs: atUs, items };
 }
 
 function planVoice(takes: readonly ComposeVoiceover[], probes: ReadonlyMap<string, ProbedInput>, totalUs: number): VoiceItem[] {

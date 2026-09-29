@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { compileTransition, lookAt } from '../../editor';
-import type { PreviewVideoLayer } from '../../state/editor-store';
+import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
 import type { CameraView } from '../../editor/camera';
 import type { ComposeCamera } from '../../video-composer/definitions';
 import type { LayerDraw, TransitionDraw } from '../../video-composer/web/painter';
@@ -257,5 +257,158 @@ describe('the zoom camera in the preview', () => {
     // Before the zoom starts the track holds identity, which is the null path too.
     expect(previewCamera(true, track, 0)).toBeNull();
     expect(previewCamera(true, null, 1500)).toBeNull();
+  });
+});
+
+/*
+ * The stage after the page has been away - a picker in front of it, the home button - on WebKit, which
+ * takes a hidden page's paused pictures away. The player loads the paused elements again (see
+ * [PreviewPlayer.revive]), and WebKit gives the reloaded element's first frame no event of its own: it
+ * says `seeked` while `drawImage` still gets nothing, and the frame turns up about a second later. What
+ * is pinned here is that the canvas asks to be told when that frame is out, and draws again until it
+ * is. Nothing here draws; a redraw is a request for an animation frame, which is what is counted.
+ */
+
+/** The platform's own `Event`, which the platform `EventTarget` the stand-in below extends accepts. */
+const PLATFORM_EVENT = ((): typeof Event => {
+  const controller = new AbortController();
+  let made: typeof Event | null = null;
+  controller.signal.addEventListener('abort', event => {
+    made = event.constructor as typeof Event;
+  });
+  controller.abort();
+  if (!made) throw new Error('no platform Event');
+  return made;
+})();
+
+/** A paused `<video>` with a file on it, whose frame callbacks are called by hand. */
+class StageVideo extends EventTarget {
+  currentSrc = 'capacitor://localhost/clip.mp4';
+  paused = true;
+  readyState = 4;
+  videoWidth = 1080;
+  videoHeight = 1920;
+  readonly callbacks: Array<() => void> = [];
+
+  requestVideoFrameCallback(callback: () => void): number {
+    this.callbacks.push(callback);
+    return this.callbacks.length;
+  }
+
+  /** WebKit presents a frame: every callback waiting is called, once. */
+  present(): void {
+    for (const callback of this.callbacks.splice(0)) callback();
+  }
+
+  fire(type: string): void {
+    this.dispatchEvent(new PLATFORM_EVENT(type));
+  }
+}
+
+describe('the stage after the page has been away, on WebKit', () => {
+  let frames = 0;
+
+  async function stage(vendor: string): Promise<{ video: StageVideo; destroy: () => void }> {
+    vi.resetModules();
+    Object.defineProperty(navigator, 'vendor', { value: vendor, configurable: true });
+    const { PreviewCanvas } = await import('./preview-canvas');
+    const canvas = new PreviewCanvas({} as EditorStore, document.createElement('canvas'));
+    const video = new StageVideo();
+    canvas.attachBase(() => null, [video as unknown as HTMLVideoElement]);
+    await vi.advanceTimersByTimeAsync(50);
+    return { video, destroy: () => canvas.destroy() };
+  }
+
+  /** The page comes back into view. */
+  function pageShown(): void {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  /** How many redraws are asked for over the next `ms`. */
+  async function redrawsOver(ms: number): Promise<number> {
+    const before = frames;
+    await vi.advanceTimersByTimeAsync(ms);
+    return frames - before;
+  }
+
+  beforeEach(() => {
+    frames = 0;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames += 1;
+      return setTimeout(() => callback(performance.now()), 16);
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: ReturnType<typeof setTimeout>) => clearTimeout(id));
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'vendor');
+    Reflect.deleteProperty(document, 'visibilityState');
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('asks for a frame callback again when an element loads the file it already had', async () => {
+    const { video, destroy } = await stage('Apple Computer, Inc.');
+    expect(video.callbacks).toHaveLength(1);
+    video.present();
+
+    // The player's reload after a picker: the same file, loaded again.
+    video.fire('emptied');
+    video.fire('loadstart');
+    expect(video.callbacks).toHaveLength(1);
+
+    // And the frame coming out of it is drawn, with no other event to say so.
+    await vi.advanceTimersByTimeAsync(50);
+    const before = frames;
+    video.present();
+    expect(frames).toBe(before + 1);
+    destroy();
+  });
+
+  it('keeps drawing a paused stage after the page comes back, until the reloaded element has shown a frame', async () => {
+    const { video, destroy } = await stage('Apple Computer, Inc.');
+    video.present();
+    pageShown();
+    video.fire('emptied');
+    video.fire('loadstart');
+    // The reload lands on its frame a while later, and says so before `drawImage` has the frame.
+    await vi.advanceTimersByTimeAsync(800);
+    video.fire('seeked');
+    video.fire('loadeddata');
+    // Nothing more is said about the element for the second the frame takes, and it is drawn again
+    // all through it.
+    expect(await redrawsOver(1000)).toBeGreaterThanOrEqual(3);
+
+    // Its frame is out: one draw for it, and the redraws stop.
+    video.present();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await redrawsOver(3000)).toBe(0);
+    destroy();
+  });
+
+  it('stops a few seconds after the last event of the reload even when no frame callback ever comes', async () => {
+    const { video, destroy } = await stage('Apple Computer, Inc.');
+    pageShown();
+    video.fire('loadstart');
+    await vi.advanceTimersByTimeAsync(500);
+    video.fire('seeked');
+    expect(await redrawsOver(2500)).toBeGreaterThanOrEqual(8);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await redrawsOver(5000)).toBe(0);
+    destroy();
+  });
+
+  it('does none of it on Chromium, which keeps a paused picture and never calls these elements back', async () => {
+    const { video, destroy } = await stage('Google Inc.');
+    expect(video.callbacks).toHaveLength(0);
+    pageShown();
+    video.fire('loadstart');
+    video.fire('seeked');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(video.callbacks).toHaveLength(0);
+    expect(await redrawsOver(3000)).toBe(0);
+    destroy();
   });
 });

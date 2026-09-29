@@ -1,4 +1,4 @@
-import { clamp, type EditClip } from '../../editor';
+import { clamp, musicSectionMs, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore } from '../../state/editor-store';
@@ -174,6 +174,238 @@ export function startPlayback(el: { play(): Promise<void> }): void {
   el.play().catch((error: unknown) => {
     if ((error as DOMException)?.name !== 'AbortError') debugWarn('[ve-preview] play failed', error);
   });
+}
+
+/* ============================================================================================ */
+/* The music and the voiceover                                                                  */
+/* ============================================================================================ */
+
+/**
+ * On Apple's WebKit, an audio element that is still playing this close to the end of its FILE is not
+ * moved: it is left to reach the end and say so itself, and is put where it is wanted once it has.
+ *
+ * WebKit ends an element in two steps. Its clock gets to the end first, and from then the element
+ * reads its duration back as its `currentTime`, `ended` true and `paused` still false; the media
+ * process's own notice that the file has played out comes a moment later - 22 ms, measured in this
+ * package's WKWebView on the iOS 26.5 simulator (2026-09-28) - and on its way through
+ * (`MediaPlayerPrivateAVFoundation::didEnd`) it takes wherever the player is AT THAT MOMENT as the
+ * file's real length, because the length AVFoundation gave at the start is sometimes an estimate. A
+ * seek that lands in between is where the player is when the notice arrives. That is exactly what a
+ * loop's seam used to be: the music at the end of its file and the preview putting it back to the
+ * start of the next pass. The 12-second track's length became 0.121 s at the second seam of both
+ * runs, every play of it ended the moment it began, and the preview put it back on every frame for
+ * the rest of the play (716 seeks in 36 s) while nothing was heard. Pausing it first and then putting
+ * it is not relied on: nothing in a pause calls back a notice that is already on its way. Once the
+ * element has said it has ended, the notice has been and gone - its duration is the true one - and it
+ * is put like any paused element.
+ *
+ * Nothing is lost by waiting: there is no more than this left of the file to play, and a repeating
+ * section is sent round before it gets here (see [PreviewPlayer.playAt]).
+ *
+ * Only there. No other engine has been seen to do it: Chromium stops an element at the end of its file
+ * with `paused` and `ended` together and keeps the length it read. Elsewhere the guard is `ended`
+ * alone, and a section can be sent round right up to its end; see [audioEndGuardMs].
+ */
+export const AUDIO_END_GUARD_MS = 50;
+
+/**
+ * How close to the end of its file a playing audio element may be moved: not within
+ * [AUDIO_END_GUARD_MS] on Apple's WebKit - every iOS WebView, and Safari - and anywhere short of the
+ * end elsewhere. Asked each time rather than remembered: it is one comparison.
+ */
+export function audioEndGuardMs(): number {
+  if (typeof navigator === 'undefined') return 0;
+  return /^Apple/.test(navigator.vendor ?? '') ? AUDIO_END_GUARD_MS : 0;
+}
+
+/**
+ * The stretch of a sound file one `<audio>` element plays, and for how much longer: the music's
+ * section, which may repeat, or a voiceover take. `inMs` and `outMs` are positions in the FILE; `outMs`
+ * is Infinity when the length of the file is not known, and then nothing below reads it.
+ */
+export interface SoundSpan {
+  inMs: number;
+  outMs: number;
+  /** The stretch starts again from `inMs` when it reaches `outMs`, for as long as the sound goes on. */
+  loop: boolean;
+  /** How much longer the sound goes on from this instant, in OUTPUT milliseconds. */
+  leftMs: number;
+}
+
+/** The music's section, heard for `leftMs` more of the post; see [musicSectionMs]. */
+export function musicSpan(music: EditMusic, leftMs: number): SoundSpan {
+  const section = musicSectionMs(music);
+  return { inMs: music.inMs, outMs: section > 0 ? music.inMs + section : Infinity, loop: music.loop && section > 0, leftMs };
+}
+
+/** A voiceover take, from its first moment to its last, with the playhead at `outputMs`. */
+export function takeSpan(take: EditVoiceover, outputMs: number): SoundSpan {
+  return { inMs: 0, outMs: take.durationMs > 0 ? take.durationMs : Infinity, loop: false, leftMs: take.startMs + take.durationMs - outputMs };
+}
+
+/** How long one pass of the span is; 0 when the file's length is not known. */
+export function passMs(span: SoundSpan): number {
+  return Number.isFinite(span.outMs) ? Math.max(0, span.outMs - span.inMs) : 0;
+}
+
+/** Whether a position is on the span itself, its out point included. */
+function onSpan(ms: number, span: SoundSpan): boolean {
+  return ms >= span.inMs && ms <= span.outMs;
+}
+
+/**
+ * Where on its pass an element at `atMs` is, for telling WHICH pass it is on: where it is, or the out
+ * point for one that has played on past it. An element there was not seen coming up to the seam in
+ * time to be sent round (see [PreviewPlayer.playAt]) and is at the end of its pass all the same - not
+ * somewhere on the next one, which is what its position read straight made of it, and the playhead
+ * that had already gone round was then taken to be a whole pass ahead of it.
+ */
+function passPositionMs(atMs: number, span: SoundSpan): number {
+  return Math.min(atMs, span.outMs);
+}
+
+/**
+ * The furthest into its file an element can be put on the pass it is on: short of the span's out
+ * point, and short of the end of its file by the end guard (see [audioEndGuardMs]) - or, where there
+ * is none, by as much as makes a seek worth making ([SEEK_EPSILON_S]). An element that has ended sits
+ * at the end of its file, a put that close to it is not made (see [PreviewPlayer.seekAudio]), and
+ * `play()` then takes the element back to the start of the file, which is the very restart this is
+ * all here to keep out.
+ */
+function putLimitMs(span: SoundSpan, fileEndMs: number, guardMs: number): number {
+  return Math.min(span.outMs, fileEndMs - Math.max(guardMs, SEEK_EPSILON_S * 1000));
+}
+
+/**
+ * How far an element at `atMs` in its file is AHEAD of `wantMs` (negative: behind), measured round
+ * the loop when the span repeats and both are on it.
+ *
+ * Round the loop because at a seam the two are on different passes for a moment: the playhead is at
+ * the start of the next pass while the element is still finishing this one, or the element has been
+ * sent on to the next pass (see [wrapAimMs]) while the playhead finishes this one. Taken straight,
+ * either is a whole section of drift, and the element was pulled back across the seam it had just
+ * been sent over - a second seek and a second stall at every seam.
+ */
+export function soundOffsetMs(atMs: number, wantMs: number, span: SoundSpan): number {
+  const offset = atMs - wantMs;
+  const pass = passMs(span);
+  if (!span.loop || pass <= 0 || !onSpan(atMs, span) || !onSpan(wantMs, span)) return offset;
+  if (offset > pass / 2) return offset - pass;
+  if (offset < -pass / 2) return offset + pass;
+  return offset;
+}
+
+/**
+ * Whether another pass of the span follows the one the element at `atMs` is on before the sound
+ * stops. The element's pass is the playhead's, or the one before it when the playhead has already
+ * gone round the seam and the element has not - see [soundOffsetMs] - or the one after it when the
+ * element has and the playhead has not. An element past the out point is at the end of its pass; see
+ * [passPositionMs].
+ */
+export function passFollows(atMs: number, positionMs: number, span: SoundSpan): boolean {
+  const pass = passMs(span);
+  if (!span.loop || pass <= 0) return false;
+  const passAtMs = passPositionMs(atMs, span);
+  let endsInMs = span.outMs - positionMs;
+  if (onSpan(passAtMs, span) && onSpan(positionMs, span)) {
+    const offset = passAtMs - positionMs;
+    if (offset > pass / 2) endsInMs -= pass;
+    else if (offset < -pass / 2) endsInMs += pass;
+  }
+  return endsInMs < span.leftMs;
+}
+
+/**
+ * Where to put an element that is to be heard at `positionMs` once the stall of `leadMs` that putting
+ * it costs is over - a paused one about to be started, or a playing one that has drifted: `leadMs`
+ * further on, and round onto the next pass of a repeating span when that carries it past the out
+ * point, or past the end of its file (`fileEndMs`) where that comes first.
+ *
+ * Null when it is not to be put anywhere yet, and not started. Where no pass follows this one, that is
+ * because what is left of the sound is shorter than the stall: started, it would play what lies past
+ * the out point, or, at the end of its file, go back to the start of it, which is what `play()` does
+ * to an element that has ended. Where one does, it is because the put would land on the last stretch
+ * of this pass, where the element would have to be put again as soon as it came out of this stall:
+ * within `zoneMs` of the end of the pass (its out point, or the end of the file where that comes
+ * first) - the stretch in which a playing element is sent round (see [PreviewPlayer.playAt]), which
+ * cost the seam a second stall straight after the first - or past the point it can be put at all
+ * ([putLimitMs]) but short of the end. Sent round from there it would have to go before the in point,
+ * where there is nothing to put it on, and start the next pass early and stay that far ahead. Asked
+ * again at the next check, with the playhead that much nearer the seam, it goes round onto the next
+ * pass exactly; the tail of this pass it misses is shorter than the stall.
+ *
+ * Also null past the end of the file but short of the out point, where the file ends no more than
+ * `zoneMs` before it: WebKit reads a 12 s AAC `.m4a` as 11.975 s, where iOS's composer - the render,
+ * and `probe` with it - reads its audio track to 12.000 s, and a sound picked on iOS gets that as its
+ * section. The element has nothing to play for the last 25 ms of each pass; sent round from there it
+ * too would go before the in point and start the next pass that much early, where waiting a check
+ * lets it go round exactly, on the pass the render is on. It is left paused where it is: one that has
+ * played that far sits at the end of its file, and is only asked about once WebKit has said it has
+ * got there (see [AUDIO_END_GUARD_MS]), so the one seek it is ever given is the one onto the next
+ * pass, and no seek lands between the end of the file and that notice. A file that ends further
+ * short of the out point than that is not a file read a little short but a length that is wrong -
+ * a sound replaced under the post - and it goes round at the end of the file at once, which is where
+ * the render loops it too: never past the end of its audio track.
+ */
+export function soundPutMs(positionMs: number, leadMs: number, span: SoundSpan, fileEndMs = Infinity, guardMs = 0, zoneMs = 0): number | null {
+  const putMs = positionMs + leadMs;
+  const limitMs = putLimitMs(span, fileEndMs, guardMs);
+  const pass = passMs(span);
+  const follows = span.loop && pass > 0 && span.outMs - positionMs < span.leftMs;
+  if (!follows) return putMs < limitMs ? Math.max(0, putMs) : null;
+  const endMs = Math.min(span.outMs, fileEndMs);
+  if (putMs < Math.min(limitMs, endMs - zoneMs)) return Math.max(0, putMs);
+  if (putMs < (span.outMs - endMs <= zoneMs ? span.outMs : endMs)) return null;
+  return clamp(putMs - pass, span.inMs, span.outMs);
+}
+
+/**
+ * Where a PLAYING element about to reach a repeating span's out point - or just past it; see
+ * [passPositionMs] - would have to be put for it to come out of the seek stall of `leadMs` that
+ * putting it costs exactly where the playhead will be by then, on the next pass. The playhead is
+ * still on the element's pass, short of the seam, or has already gone round it; see [soundOffsetMs].
+ *
+ * Before the in point when the element is being sent round further ahead of the seam than its stall
+ * - an element running ahead of the playhead, or a stall shorter than the checks are apart. There is
+ * nothing before the in point to play, so it is put ON the in point, and starts the next pass that
+ * much early; see [PreviewPlayer.wrapAudio].
+ */
+export function wrapAimMs(atMs: number, positionMs: number, leadMs: number, span: SoundSpan): number {
+  const pass = passMs(span);
+  const passAtMs = passPositionMs(atMs, span);
+  const playheadRound = onSpan(passAtMs, span) && onSpan(positionMs, span) && passAtMs - positionMs > pass / 2;
+  return positionMs + leadMs - (playheadRound ? 0 : pass);
+}
+
+/**
+ * Whether a STOPPED element at `atMs` has played the last of the sound out, and is no more than
+ * `slackMs` ahead of the playhead getting there: it is at the span's out point, or as far into its
+ * file as it can be put ([putLimitMs]), with no pass after this one.
+ *
+ * Such an element is left where it is. It ran ahead of the playhead - Chromium's by 60-90 ms in the
+ * web editor, and by however much a lead measured too long put it - and has already played what the
+ * playhead has still to reach; put back where the playhead is, as any other stopped element is, it
+ * played that stretch a second time: the last tenth of a second of a trimmed sound, a take or the
+ * last pass of a track, heard twice.
+ */
+export function playedOut(atMs: number, positionMs: number, span: SoundSpan, fileEndMs = Infinity, guardMs = 0, slackMs = 0): boolean {
+  if (atMs < putLimitMs(span, fileEndMs, guardMs) || passFollows(atMs, positionMs, span)) return false;
+  const aheadMs = atMs - positionMs;
+  return aheadMs >= 0 && aheadMs <= slackMs;
+}
+
+/** The end of the element's file, in ms; Infinity while its length is not known. */
+export function fileEndMs(el: { duration: number }): number {
+  const ms = el.duration * 1000;
+  return Number.isFinite(ms) && ms > 0 ? ms : Infinity;
+}
+
+/**
+ * Whether the element has ended, or is within `guardMs` of the end of its file; see
+ * [AUDIO_END_GUARD_MS].
+ */
+export function atFileEnd(el: { ended: boolean; duration: number; currentTime: number }, guardMs: number): boolean {
+  return el.ended || fileEndMs(el) - el.currentTime * 1000 < guardMs;
 }
 
 /**

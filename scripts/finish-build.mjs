@@ -57,3 +57,32 @@ for (const file of files) {
 }
 
 console.log(`finish-build: added extensions in ${rewritten} files under ${treeArg}`);
+
+/*
+ * The one `import()` the CommonJS build has to keep. `labelMedia` in a browser imports MediaPipe's
+ * runtime from the URL the host serves it at (`src/video-composer/web/labels.ts`), never through the
+ * bundler, and `tsc` with `module: CommonJS` turns every `import()` into a `require()` - here a
+ * `require()` of a URL, which no bundler can answer, so a host bundled from the `require` entry was
+ * refused as `unsupported` on every call. `tsc` cannot be told to leave one `import()` alone, and the
+ * setting that leaves them all (`Node16`) changes the rest of the CommonJS output as well, so that one
+ * line is put back here. A real `import()` is legal in a CommonJS file, and Node and every bundler load
+ * one from it. The build fails where the line is not found exactly once, rather than shipping a
+ * recogniser that refuses every call without a word, when `tsc` or `labels.ts` writes it differently.
+ *
+ * Only the plugin's build has a CommonJS half; `build-mcp.mjs`'s run over `mcp` has none.
+ */
+if (treeArg === 'plugin/esm') {
+  const labels = resolve(packageDir, 'plugin/cjs/video-composer/web/labels.js');
+  const required = 'await Promise.resolve(`${runtimeUrl(url)}`).then(s => __importStar(require(s)))';
+  const imported = 'await import(/* @vite-ignore */ /* webpackIgnore: true */ runtimeUrl(url))';
+  const source = readFileSync(labels, 'utf8');
+  const count = text => source.split(text).length - 1;
+  // Run again over a tree it has already finished, it finds the import() it put there and leaves it.
+  if (!(count(required) === 0 && count(imported) === 1)) {
+    if (count(required) !== 1) {
+      throw new Error(`${relative(packageDir, labels)} requires MediaPipe's runtime ${count(required)} times where it should once; see finish-build.mjs`);
+    }
+    writeFileSync(labels, source.replace(required, imported));
+  }
+  console.log(`finish-build: kept the import() of MediaPipe's runtime in ${relative(packageDir, labels)}`);
+}

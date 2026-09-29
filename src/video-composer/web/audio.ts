@@ -1,6 +1,6 @@
 import { resolve } from '../../web-runtime/files';
 
-import type { MusicItem, PlannedClip, RenderPlan, VoiceItem } from './plan';
+import { musicForSource, type MusicItem, type MusicPlan, type PlannedClip, type RenderPlan, type VoiceItem } from './plan';
 import { timeStretch } from './time-stretch';
 
 /**
@@ -18,8 +18,9 @@ import { timeStretch } from './time-stretch';
  * out, so everything below is at one rate with one channel count and nothing has to negotiate.
  *
  * The layout mirrors the plan exactly - each clip at its place on the output timeline, each music
- * repetition at its own start with its own fade, each voiceover take at the instant it was recorded
- * against - so the sound and the picture are cut from the same numbers.
+ * repetition at its own start under the one pair of fades the music's whole window has, each
+ * voiceover take at the instant it was recorded against - so the sound and the picture are cut from
+ * the same numbers.
  */
 
 /** 48 kHz stereo: the rate AAC encoders are happiest at, and what every phone records. */
@@ -42,6 +43,11 @@ export interface MixedAudio {
 interface DecodedSource {
   channels: Float32Array[];
   sampleRate: number;
+  /**
+   * How long the file's container says its sound runs, in µs, for a file [SourceDecoder] was told
+   * to measure (the music's) and whose container says; see [soundLengthUs].
+   */
+  presentedUs?: number | null;
 }
 
 const EMPTY = new Float32Array(0);
@@ -57,7 +63,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
   const channels = Array.from({ length: MIX_CHANNELS }, () => new Float32Array(length));
   const mix: MixedAudio = { sampleRate: MIX_SAMPLE_RATE, channels, length };
 
-  const decoder = new SourceDecoder(sourceUses(plan));
+  const decoder = new SourceDecoder(sourceUses(plan), plan.music ? [plan.music.uri] : []);
   let anything = false;
 
   // How long each base clip fades in for: the length of the transition bringing it in, if any.
@@ -102,10 +108,13 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
 
     if (plan.music) {
       const source = await decoder.get(plan.music.uri);
-      if (source) {
-        for (const item of plan.music.items) {
+      // Laid again against the file's own length, which the web reads for itself: a spec asks for
+      // "the end of the file" when the sound is not trimmed at its end. See [soundLengthUs].
+      const music = source ? musicForSource(plan.music, soundLengthUs(source)) : null;
+      if (source && music) {
+        for (const item of music.items) {
           throwIfAborted(signal);
-          anything = placeMusic(mix, source, item, plan.music.volume) || anything;
+          anything = placeMusic(mix, source, item, music) || anything;
         }
       }
       decoder.done(plan.music.uri);
@@ -189,16 +198,27 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
   return wrote;
 }
 
-function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, volume: number): boolean {
+/**
+ * One repetition of the music into the mix, under the fades of the music's whole window rather than
+ * any of its own: the ramps are counted from where the music starts on the output timeline, so the
+ * fade in runs on across a seam when it is longer than the first pass, and the fade out starts in
+ * whichever pass it has to - an earlier one, when the last is shorter than the fade - to reach
+ * silence exactly where the music stops ([MusicPlan]).
+ */
+function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, music: MusicPlan): boolean {
   const from = samplesAt(item.inUs, mix.sampleRate);
   const to = samplesAt(item.outUs, mix.sampleRate);
   const at = samplesAt(item.atUs, mix.sampleRate);
   const count = Math.min(to - from, mix.length - at);
   if (count <= 0) return false;
 
-  const fadeIn = samplesAt(item.fadeInUs, mix.sampleRate);
-  const fadeOutFrom = item.fadeOutStartUs >= 0 ? samplesAt(item.fadeOutStartUs, mix.sampleRate) : -1;
-  const fadeOut = samplesAt(item.fadeOutUs, mix.sampleRate);
+  // Where this repetition's first sample falls in the window, and the fades in the window's terms.
+  // The fade out's start is before the window's own when the fade is longer than the music.
+  const start = samplesAt(music.startUs, mix.sampleRate);
+  const into = at - start;
+  const fadeIn = samplesAt(music.fadeInUs, mix.sampleRate);
+  const fadeOut = samplesAt(music.fadeOutUs, mix.sampleRate);
+  const fadeOutFrom = samplesAt(music.stopUs, mix.sampleRate) - start - fadeOut;
 
   for (let channel = 0; channel < MIX_CHANNELS; channel++) {
     const input = channelOf(source, channel);
@@ -207,7 +227,7 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, vol
     for (let i = 0; i < count; i++) {
       const sample = input[from + i];
       if (sample === undefined) break;
-      out[at + i] = (out[at + i] ?? 0) + sample * fadeGain(volume, i, fadeIn, fadeOutFrom, fadeOut);
+      out[at + i] = (out[at + i] ?? 0) + sample * fadeGain(music.volume, into + i, fadeIn, fadeOutFrom, fadeOut);
     }
   }
   return true;
@@ -215,14 +235,14 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, vol
 
 /**
  * `gain` as a fade leaves it at sample `i` of a placed stream: a linear ramp up over the first
- * `fadeIn` samples, and a linear ramp down over `fadeOut` samples from `fadeOutFrom` (-1 for none).
- * One function for music and for transitions, so the two cannot come to mean different curves - and
- * the multiplications run in the order the music fade always ran them, so its samples are the same
- * bits they were.
+ * `fadeIn` samples, and a linear ramp down over `fadeOut` samples from `fadeOutFrom`, which may be
+ * negative for a ramp that began before the stream did (a `fadeOut` of 0 is none). One function for
+ * music and for transitions, so the two cannot come to mean different curves, and the product of
+ * the two where they overlap, as the preview's `musicFadeAt` and both native engines have it.
  */
 function fadeGain(gain: number, i: number, fadeIn: number, fadeOutFrom: number, fadeOut: number): number {
   if (fadeIn > 0 && i < fadeIn) gain *= i / fadeIn;
-  if (fadeOutFrom >= 0 && fadeOut > 0 && i >= fadeOutFrom) {
+  if (fadeOut > 0 && i >= fadeOutFrom) {
     gain *= Math.max(0, 1 - (i - fadeOutFrom) / fadeOut);
   }
   return gain;
@@ -260,6 +280,70 @@ function addInto(out: Float32Array | undefined, input: Float32Array, at: number,
  */
 function channelOf(source: DecodedSource, channel: number): Float32Array {
   return source.channels[Math.min(channel, source.channels.length - 1)] ?? EMPTY;
+}
+
+/**
+ * How long a decoded sound runs, in µs, for a pass that goes to the end of its file: what was decoded,
+ * held to the length its container presents where that is shorter.
+ *
+ * WHY NOT THE DECODE ALONE. An AAC `.m4a` holds whole frames of 1024 samples, and the encoder puts a
+ * frame's worth of priming before the sound and pads the last frame out; the container's edit list
+ * says which stretch of those samples is the sound. `qa-sample.m4a`, the seeded 12 s tone, is 518
+ * frames - 12.028 s of samples - presented as 12.000 s (priming 1024, then 529200 samples at 44.1
+ * kHz). Measured on 2026-09-29 on a local page, Chromium 153 decodes it to exactly 576000 samples at
+ * 48 kHz, 12.000 s; WebKit 26.6 trims the priming as well - the tone starts on the same sample in both
+ * - but keeps the padding, and decodes it to 576226, 12.0047 s. Looped at that, every pass on WebKit
+ * ended in 4.7 ms of silence and came round that much later at every seam, where iOS's render (the
+ * audio track's end), Android's and Chromium's loop at 12.000 s, and so does the preview of a sound
+ * picked on iOS or in Chromium. So the container is read too, and the shorter of the two is the
+ * length: the padding goes, and nothing that was decoded as sound does.
+ *
+ * Never the longer. A decode that came out SHORT of what the container presents has no more samples
+ * to give; a pass laid past them would only be silence. And a browser that kept the priming too
+ * (none measured does: the priming would be 23 ms of near-silence at the start of the decode) would
+ * lose the last 23 ms of each pass here rather than gain a gap - the length still the one every
+ * other engine loops at.
+ *
+ * `<audio>`'s own measure is not used: WebKit's is 11.975 s for the same file, short of both.
+ */
+function soundLengthUs(source: DecodedSource): number {
+  const decodedUs = (channelOf(source, 0).length / source.sampleRate) * 1_000_000;
+  const presentedUs = source.presentedUs;
+  return presentedUs && presentedUs > 0 && presentedUs < decodedUs ? presentedUs : decodedUs;
+}
+
+/**
+ * How long the sound in an MP4 or QuickTime file runs as the container presents it - its first sound
+ * track, from its first presented sample to the end of its edit list - in µs, or null for any other
+ * kind of file, a file with no sound track, or one the demuxer cannot read. Read from the packets'
+ * timing alone (the sample table, already in memory), with nothing decoded; see [soundLengthUs].
+ *
+ * Only those two containers, because theirs is the edit list the decoders were measured against.
+ * Other kinds carry their encoder's delay and padding in other ways (an MP3's LAME header, Opus's
+ * pre-skip) that nobody has checked a browser's decode against, and there the decode stands, as it
+ * did before.
+ *
+ * The demuxer is loaded on first use, as [readFrameTimes]'s is, so a post with no music never loads
+ * it. It reads `bytes` before `decodeAudioData` takes them: decoding detaches the buffer.
+ */
+export async function presentedSoundUs(bytes: ArrayBuffer): Promise<number | null> {
+  let input: { dispose(): void } | null = null;
+  try {
+    const { BufferSource, Input, MP4, QTFF } = await import('mediabunny');
+    const reader = new Input({ source: new BufferSource(bytes), formats: [MP4, QTFF] });
+    input = reader;
+    const track = await reader.getPrimaryAudioTrack();
+    if (!track) return null;
+    // The end of the last packet, less where the first is presented when that is after 0: a sound
+    // that starts late decodes from its first sample, with no silence put in front of it. Priming
+    // is presented before 0, so it takes nothing off.
+    const seconds = (await track.computeDuration()) - Math.max(0, await track.getFirstTimestamp());
+    return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1_000_000) : null;
+  } catch {
+    return null;
+  } finally {
+    input?.dispose();
+  }
 }
 
 function samplesAt(microseconds: number, sampleRate: number): number {
@@ -309,12 +393,19 @@ export function sourceUses(plan: RenderPlan): Map<string, number> {
  * placement is about 23 MB a minute of stereo holding nothing up; holding every one to the end made
  * the peak the sum of every distinct file in the post rather than the few in use at once. When a
  * source is let go changes nothing about what is mixed, or in which order.
+ *
+ * The files in `measured` - the music's - also have their container's own length read before they
+ * are decoded ([presentedSoundUs]). By file rather than by ask, because the one decode is shared:
+ * a music file that is also a clip or a take is measured whichever of them asks for it first.
  */
 class SourceDecoder {
   private readonly cache = new Map<string, DecodedSource | null>();
   private context: BaseAudioContext | null = null;
+  private readonly measured: ReadonlySet<string>;
 
-  constructor(private readonly uses: Map<string, number>) {}
+  constructor(private readonly uses: Map<string, number>, measured: Iterable<string> = []) {
+    this.measured = new Set(measured);
+  }
 
   async get(uri: string): Promise<DecodedSource | null> {
     const cached = this.cache.get(uri);
@@ -355,6 +446,8 @@ class SourceDecoder {
       // read for its sound simply contributes none.
       return null;
     }
+    // Before the decode, which detaches `bytes`.
+    const presentedUs = this.measured.has(uri) ? await presentedSoundUs(bytes) : null;
     let buffer: AudioBuffer;
     try {
       buffer = await decodeAudioData(context, bytes);
@@ -372,9 +465,10 @@ class SourceDecoder {
       return {
         sampleRate: MIX_SAMPLE_RATE,
         channels: channels.map(channel => resampleLinear(channel, buffer.sampleRate, MIX_SAMPLE_RATE)),
+        presentedUs,
       };
     }
-    return { sampleRate: buffer.sampleRate, channels };
+    return { sampleRate: buffer.sampleRate, channels, presentedUs };
   }
 
   private audioContext(): BaseAudioContext | null {

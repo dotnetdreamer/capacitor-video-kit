@@ -78,6 +78,28 @@ class RampGainProviderTest {
         assertKeepsTheContract(RampGainProvider(level = 0.6f, fadeInUs = 500_000L, fadeOutStartUs = 1_000_000L, fadeOutUs = 500_000L))
     }
 
+    /*
+     * A music repetition in the middle of one of the music's fades: its fades are the whole window
+     * the music is heard in, so a later repetition takes up the line where the one before it left
+     * it - a fade in that began 600 ms before this item, a fade out that began 300 ms before it.
+     */
+    @Test
+    fun `a repetition a fade in runs on through, reaching the level part way`() {
+        val provider = RampGainProvider(level = 1f, fadeInUs = 1_000_000L, fadeInFromUs = -600_000L)
+        assertEquals(0.6f, provider.getGainFactorAtSamplePosition(0L, rate), 1e-6f)
+        assertEquals(0.8f, provider.getGainFactorAtSamplePosition(rate / 5L, rate), 1e-4f)
+        assertEquals(1f, provider.getGainFactorAtSamplePosition(rate * 2L / 5L, rate), 1e-6f)
+        assertKeepsTheContract(provider)
+    }
+
+    @Test
+    fun `a repetition a fade out began before`() {
+        val provider = RampGainProvider(level = 1f, fadeOutStartUs = -300_000L, fadeOutUs = 1_000_000L)
+        assertEquals(0.7f, provider.getGainFactorAtSamplePosition(0L, rate), 1e-6f)
+        assertEquals(0f, provider.getGainFactorAtSamplePosition(rate * 7L / 10L, rate), 1e-6f)
+        assertKeepsTheContract(provider, seconds = 0.7)
+    }
+
     @Test
     fun `no fades at all is one unity run to the end`() {
         assertEquals(C.TIME_END_OF_SOURCE, RampGainProvider(level = 1f).isUnityUntil(0L, rate))

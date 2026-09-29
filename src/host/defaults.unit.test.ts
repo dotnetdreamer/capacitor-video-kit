@@ -361,6 +361,54 @@ describe('the audio picker in a Capacitor app on iOS', () => {
     expect(document.querySelectorAll('input').length).toBe(inputs);
   });
 
+  /*
+   * WebKit's `<audio>` reads a 12 s m4a as 11975 ms, and the iOS render loops it at its audio
+   * track's end, 12000. The length handed on is whatever the composer's `probe` answers, and the
+   * element is still asked whether it can play the sound at all. The 12000 mocked here is what an
+   * iPhone's `probe` answers for this file: `Thumbnailer.probe` reads a file with no video to its
+   * audio track's end, as the render does (see `composerLength` in defaults.ts).
+   */
+  it('hands on the length the composer answers over the element\'s own', async () => {
+    installBridge('ios', nativePromise, ['retainMedia', 'pickAudioFile', 'stageRenderInput', 'probe']);
+    nativePromise.mockImplementation(async (_plugin: string, method: string) =>
+      method === 'pickAudioFile'
+        ? { cancelled: false, uri: COPY, fileName: 'qa-sample.m4a', mimeType: 'audio/x-m4a' }
+        : { durationMs: 12_000, width: 0, height: 0, rotation: 0, hasAudio: true, hasVideo: false },
+    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 0, blob: async () => new Blob(['sound']) }));
+    soundPlaysFor(11.975);
+
+    const picked = await browserMediaHost().pickAudio();
+
+    expect(picked?.sourceDurationMs).toBe(12_000);
+    expect(nativePromise).toHaveBeenCalledWith('VideoComposer', 'probe', { uri: COPY });
+  });
+
+  it('falls back on the element\'s length when the composer cannot read the copy', async () => {
+    installBridge('ios', nativePromise, ['retainMedia', 'pickAudioFile', 'stageRenderInput', 'probe']);
+    nativePromise.mockImplementation(async (_plugin: string, method: string) => {
+      if (method === 'pickAudioFile') return { cancelled: false, uri: COPY, fileName: 'qa-sample.m4a', mimeType: 'audio/x-m4a' };
+      throw new Error('unreadable');
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 0, blob: async () => new Blob(['sound']) }));
+    soundPlaysFor(11.975);
+
+    await expect(browserMediaHost().pickAudio()).resolves.toMatchObject({ sourceDurationMs: 11_975 });
+  });
+
+  it('refuses a sound the element cannot play even when the composer measured it', async () => {
+    installBridge('ios', nativePromise, ['retainMedia', 'pickAudioFile', 'stageRenderInput', 'probe']);
+    nativePromise.mockImplementation(async (_plugin: string, method: string) =>
+      method === 'pickAudioFile'
+        ? { cancelled: false, uri: COPY, fileName: 'noise.caf', mimeType: 'audio/x-caf' }
+        : { durationMs: 4000, width: 0, height: 0, rotation: 0, hasAudio: true, hasVideo: false },
+    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => new Blob(['noise']) }));
+    soundPlaysFor(null);
+
+    await expect(browserMediaHost().pickAudio()).rejects.toThrow('noise.caf');
+  });
+
   it('answers a cancel with null, and reads nothing', async () => {
     nativePromise.mockResolvedValue({ cancelled: true });
     const read = vi.fn();

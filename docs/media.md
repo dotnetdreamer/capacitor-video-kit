@@ -136,7 +136,7 @@ const clip = await describeMedia('file:///.../beach.mov');                 // a 
 const photo = await describeMedia(pictureUri, { kind: 'image' });          // a picture: looked at once
 // clip.scenes  -> [{ scene: 'beach', score: 0.71 }, { scene: 'sunset', score: 0.44 }, ...]
 // clip.labels  -> the engine's own labels behind them, averaged over the frames
-// null         -> nothing to ask here (a browser, the iOS simulator, an older native build)
+// null         -> nothing to ask here (the iOS simulator, a browser whose recogniser would not load, an older native build)
 
 const trip = mergeScenes([clip, photo].flatMap((one) => (one ? [one.scenes] : [])));
 ```
@@ -209,18 +209,62 @@ configureWebLabeling({
 });
 ```
 
+Both of the kit's builds, the ES module one and the CommonJS one (`plugin/cjs`, the `require` entry),
+import the runtime from its URL with a real `import()`, so no bundler ever takes it in.
+
 `prepareWebLabeling()` starts the download early - LightSnip calls it as One tap's picker opens - and
-the calls keep the phones' pace: two at a time, and a video looked at for 8 s at most before the frames
-read so far are the answer.
+resolves `true` once the recogniser is ready or `false` when it will not load. It never rejects, so a
+host that only wants the download started calls it and ignores what it answers. A host that times its
+own label calls waits on it first, as LightSnip does, so a slow first download is not counted against
+the first clips. The model comes down beside MediaPipe's runtime and WebAssembly rather than after
+them, so that first wait is as short as the network allows. A load that fails is the answer for a
+minute before one is tried again, so the warm-up and the call after it do not both fetch files that
+are not there; the retry then imports the runtime under a URL of its own, since Chromium and Firefox
+remember a failed import of the same one until the page reloads. `configureWebLabeling` lets a classifier go
+only once the calls using it have finished, and never starts a load while another is running.
+
+The calls keep the phones' pace: two at a time, and a video looked at for 8 s at most before the
+frames read so far are the answer. The first frame is always tried however long it takes; after it
+no new frame is started past the 8 s, whether or not the ones tried gave a picture (as on Android),
+no seek is waited on for longer than is left of them, and a video whose decoder has failed is not
+seeked again. The 8 s are counted from the call, a wait for a turn included, but not the
+recogniser's download: a call made while it downloads counts from the moment it is ready.
+
+**It needs WebGL**, though the model runs on the CPU: MediaPipe takes every picture in through a WebGL
+context of its own. Where it cannot start - no WebAssembly, no WebGL (switched off, or a GPU the browser
+blocks), or the files are not where it looks - `labelMedia` refuses as `unsupported` and `describeMedia`
+answers null, as everywhere a recogniser is missing. A load tries the classifier on one pixel before it
+counts as loaded, so a browser that cannot run it is found out there and not at every clip. A
+classifier that stops working later - the browser takes its WebGL context back after a GPU reset, or
+because the page holds too many - refuses the call it was answering the same way and is loaded afresh
+by the next one.
+
+A video the browser opens but decodes no picture for - HEVC in a browser with no decoder for it, which
+then plays the file's sound alone - is `unreadable_input`, as on a phone that cannot read a file,
+rather than labeled from empty frames. A call with no `kind` reads a file whose type is `video/*` as a
+video, and one whose type names neither a picture nor a video (it has none, or it is
+`application/octet-stream`) as a video too when its name ends in a video container's extension:
+Safari's `<img>` decodes MP4, and would otherwise hand back a clip's first frame as a picture.
+
+**MediaPipe reports its use to Google.** The pictures never leave the page, but MediaPipe's runtime
+sends metrics about its own performance and use to Google, at `https://odml.pa.googleapis.com/v1/log`:
+which task runs and how, the kind of device the browser says it is on, and how many pictures it
+classified and how long that took - when the classifier is created, every minute while it is loaded,
+and when it is closed. It has no switch to turn this off, and it starts with the first load: a
+`prepareWebLabeling()` as a picker opens is enough. MediaPipe's privacy notice (in the `README.md` of
+`@mediapipe/tasks-vision`) makes the app responsible for obtaining its users' informed consent to
+Google's processing of that data, as the law that applies requires. So a host that needs that consent
+asks for it before its first label call or `prepareWebLabeling()`, and says so in its privacy text.
+The kit does not block the request, because whether to is the host's decision; a host that does can
+leave the address out of the `connect-src` of its Content Security Policy, after which MediaPipe stops
+reporting and goes on labeling.
 
 The model knows ImageNet's 1000 classes (`golden retriever`, `seashore`, `web site`), so `engine` is
 `'mediapipe'` and the labels are ImageNet's. Its scores are one softmax, so a picture's confidence is
 split between the classes that fit it and `minConfidence` defaults to 0.02 here, not 0.1. It sees food,
 pets, birthdays, travel, cities, homes, nature, beaches and screen-recorded games well, and has no class
 at all for a person, a sunset or the night sky: in a browser `people` and `sunset` never come back, and
-a sunset over the water reads as a beach. Where it cannot start - no WebAssembly, or the files are not
-where it looks - `labelMedia` refuses as `unsupported` and `describeMedia` answers null, as everywhere a
-recogniser is missing.
+a sunset over the water reads as a beach.
 
 | Scene | What it means |
 |---|---|
@@ -245,26 +289,30 @@ recogniser is missing.
 
 **Two vocabularies, one set of scenes.** Vision knows 1303 things and names them in `snake_case`
 (`birthday_cake`); ML Kit knows 447 and names them in English (`Cake`). They score differently too:
-Vision gives a parent label its child's confidence, so one cake is `food`, `dessert`, `baked_goods`
-and `cake` at once, and ML Kit hands a few labels to nearly anything - `Dog` at 0.79 on a city bridge
-at night, `Event` at 0.94 on a sunset. `src/video-composer/scenes.ts` holds one table per engine: a
-label says a scene with a weight, and a label that is right when it is sure and wrong when it is not
-has a floor below which it counts for nothing (ML Kit's `Dog` below 0.9, where `Pet` is the label that
-tells a pet from a picture it merely thinks has a dog in it). In a frame a scene is as strong as its
-strongest label, never the sum of them, and across frames it is the mean, so a scene in the whole
-clip beats a stronger one in a single frame. `mergeScenes` averages a set the same way.
+Vision gives a parent label at least its child's confidence, so one cake is `food`, `dessert`,
+`baked_goods` and `cake` at once, and ML Kit hands a few labels to nearly anything - `Dog` at 0.79
+on a city bridge at night, `Event` at 0.94 on a sunset. `src/video-composer/scenes.ts` holds one
+table per engine: a label says a scene with a weight, and a label that is right when it is sure and
+wrong when it is not has a floor below which it counts for nothing (ML Kit's `Dog` below 0.9, where
+`Pet` is the label that tells a pet from a picture it merely thinks has a dog in it). A label Vision
+is never surer of than of a parent meaning another scene carries a weight above 1 - `birthday_cake`,
+which always comes with `food` at least as sure - and no label counts for more than 1. In a frame a
+scene is as strong as its strongest label, never the sum of them, and across frames it is the mean,
+so a scene in the whole clip beats a stronger one in a single frame. `mergeScenes` averages a set
+the same way.
 
 The tables were tuned against both engines' real answers for 90 photographs of the themes a video
 app gets (beaches, parties, food, pets, sport, cities, couples, outfits) and the frames of eight
-screen-recorded games: Vision's two classifier revisions run on macOS, and the exact model file ML Kit
-bundles, run with its own score calibration. The strongest scene is the one a person names for the
-picture in 82% of them for Vision revision 2, 80% for revision 1 and 82% for ML Kit; most of the rest
-are pictures a person would call ambiguous too - an empty basketball court, a birthday cake that is
-also food. The same photographs and captures were then run through `labelMedia` itself on an iPhone
-14 Pro Max with iOS 26.6.2: Vision answered in about 23 ms a picture and under 0.7 s a video, its top
-label matched the Mac's for 80 of the 90 photographs, and lighsnip's One tap chose the same templates
-from its answers as from the Mac's (86% of random groups of one theme's photos, against 86%). A test holds every label in both tables against the engine's own vocabulary, so a
-misspelt label cannot quietly never match.
+screen-recorded games: Vision's two classifier revisions run on macOS, and the exact model file ML
+Kit bundles, run with its own score calibration. The strongest scene is the one a person names for
+the picture in 82% of them for Vision revision 2, 80% for revision 1 and 82% for ML Kit; most of the
+rest are pictures a person would call ambiguous too - an empty basketball court. The same
+photographs and captures were then run through `labelMedia` itself on an iPhone 14 Pro Max with iOS
+26.6.2: Vision answered in about 23 ms a picture and under 0.7 s a video, its top label matched the
+Mac's for 80 of the 90 photographs, and lighsnip's One tap chose the same templates from its answers
+as from the Mac's (86% of random groups of one theme's photos, against 86%). A test holds every
+label in both tables against the engine's own vocabulary, so a misspelt label cannot quietly never
+match.
 
 **Frames.** A video is looked at in 5 frames unless `frames` (1 to 20) or `timesMs` says otherwise,
 each in the middle of its own share of the clip, so none is the first or the last, where a camera is

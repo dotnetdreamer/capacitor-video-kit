@@ -991,6 +991,15 @@ class RenderPlan private constructor(
             minRepetitionUs: Long,
         ): MusicPlan? {
             if (music == null) return null
+            /*
+             * A sound the editor did not trim at its end comes with an `outMs` longer than any file
+             * (ComposeMusic.outMs), so the probe is what says where a pass ends. One the probe could
+             * not read - the plugin logs that and carries on - is laid as a single pass to the stop,
+             * because nothing here knows where its loop would turn: Media3 plays it to the end of
+             * the file, it is silent from there to the stop, and its fade out, which ends at the
+             * stop, is not heard. The page's own measure used to stand in for the probe, and is not
+             * sent any more because WebKit's is short of the file.
+             */
             val probed = probes[music.uri]
             val outMs = if (probed != null && probed.durationMs > 0L) {
                 min(music.outMs, probed.durationMs)
@@ -1029,25 +1038,36 @@ class RenderPlan private constructor(
             if (lastLenUs < MIN_CLIP_US) return null
 
             val inUs = music.inMs * 1000L
-            val fadeInUs = music.fadeInMs * 1000L
-            val fadeOutUs = music.fadeOutMs * 1000L
+            val fadeInUs = max(0L, music.fadeInMs) * 1000L
+            val fadeOutUs = max(0L, music.fadeOutMs) * 1000L
+            // Where the music really stops: the end of the last repetition laid, which is short of
+            // `stopUs` by the sliver left off above, or the end of a section that plays once.
+            val endUs = startUs + (reps - 1) * trackLenUs + lastLenUs
 
+            /*
+             * The fades belong to the window the music is heard in, `startUs..endUs`, and not to any
+             * repetition: `level * (t - startUs) / fadeIn` up and `level * (endUs - t) / fadeOut`
+             * down, each held to 0..1, and their product where they overlap - ComposeMusic's rule,
+             * and the preview's `musicFadeAt`. Each repetition the fade in or the fade out reaches
+             * gets its share of the one line, placed in its own terms, so the line carries on
+             * across the seam. They used to belong to the first and the last repetition, cut to
+             * each one's length, and a last repetition shorter than the fade out - a stop dropped
+             * just past a seam - ended the music near full level with a hard cut.
+             */
             val items = (0 until reps).map { k ->
+                val atUs = startUs + k * trackLenUs
                 val lenUs = if (k == reps - 1) lastLenUs else trackLenUs
+                val fadesIn = fadeInUs > 0L && atUs < startUs + fadeInUs
+                val fadesOut = fadeOutUs > 0L && atUs + lenUs > endUs - fadeOutUs
                 MusicItem(
                     inUs = inUs,
                     outUs = inUs + lenUs,
                     gain = RampGainProvider(
                         level = music.volume,
-                        // A fade belongs to the start of the track and the end of the video, not to
-                        // every repetition.
-                        fadeInUs = if (k == 0) fadeInUs else 0L,
-                        fadeOutStartUs = if (k == reps - 1 && fadeOutUs > 0L) {
-                            max(0L, lenUs - fadeOutUs)
-                        } else {
-                            C.TIME_UNSET
-                        },
-                        fadeOutUs = if (k == reps - 1) fadeOutUs else 0L,
+                        fadeInUs = if (fadesIn) fadeInUs else 0L,
+                        fadeInFromUs = if (fadesIn) startUs - atUs else 0L,
+                        fadeOutStartUs = if (fadesOut) endUs - fadeOutUs - atUs else C.TIME_UNSET,
+                        fadeOutUs = if (fadesOut) fadeOutUs else 0L,
                     ),
                 )
             }

@@ -99,8 +99,10 @@ export interface SceneScore {
 }
 
 /**
- * How much one label says for a scene: its confidence times `weight`, or nothing below `floor`.
- * A number alone is a weight with no floor.
+ * How much one label says for a scene: its confidence times `weight`, never more than 1, or nothing
+ * below `floor`. A number alone is a weight with no floor. A weight above 1 is for a label that its
+ * engine is never surer of than of a parent meaning another scene: it lets the label win at the
+ * parent's confidence, and the cap keeps it to one whole scene at most.
  */
 type Rule = number | readonly [weight: number, floor: number];
 
@@ -234,7 +236,6 @@ const VISION: SceneTable = {
     tableware: 0.35,
   },
   party: {
-    celebration: 1,
     nightclub: 1,
     deejay: 1,
     disco_ball: 1,
@@ -246,6 +247,9 @@ const VISION: SceneTable = {
     pyrotechnics: 0.9,
     dancing: 0.8,
     carnival: 0.8,
+    // Below 1: Vision names a wedding `celebration` and `ceremony` too, at the wedding's own
+    // confidence, so at 1 every wedding tied `love` here and went to `party` on [MEDIA_SCENES] order.
+    celebration: 0.8,
     parade: 0.7,
     dragon_parade: 0.7,
     santa_claus: 0.7,
@@ -262,6 +266,8 @@ const VISION: SceneTable = {
     bellydance: 0.6,
     samba: 0.6,
     hula: 0.6,
+    // A birthday is a party as well, below `birthday` itself, as a balloon and a gift are.
+    birthday_cake: 0.6,
     sparkling_wine: 0.5,
     costume: 0.5,
     entertainer: 0.5,
@@ -273,7 +279,10 @@ const VISION: SceneTable = {
     spotlight: 0.4,
   },
   birthday: {
-    birthday_cake: 1,
+    // Above 1: its parents `cake`, `dessert`, `baked_goods` and `food` always come at least as sure
+    // as it does, so at 1 every birthday cake was `food` first. A label's strength stops at 1
+    // ([scenesFromLabels]), so a sure birthday cake is a whole birthday and no more.
+    birthday_cake: 1.25,
     candle: 0.6,
     balloon: 0.6,
     gift: 0.6,
@@ -1333,12 +1342,12 @@ export function sceneLabels(engine: LabelEngine): ReadonlyMap<string, readonly M
  * The scenes in the frames `labelMedia` answered with, strongest first.
  *
  * In each frame a scene is as strong as the strongest label that says it - its confidence times
- * the label's weight, and nothing below the label's floor - rather than the sum of them: Vision
- * names a cake four ways at one confidence, and a sum would count one cake four times. MediaPipe is
- * the exception ([SUMMED]): its classes split one confidence between them, so there a scene is the
- * sum of its labels' strengths, and never more than 1. Across the frames a scene is the mean of its
- * strength in each, so a scene seen throughout the clip beats a stronger one seen once. A scene no
- * label says is left out rather than listed at 0.
+ * the label's weight, never more than 1, and nothing below the label's floor - rather than the sum
+ * of them: Vision names a cake four ways at one confidence, and a sum would count one cake four
+ * times. MediaPipe is the exception ([SUMMED]): its classes split one confidence between them, so
+ * there a scene is the sum of its labels' strengths, and never more than 1. Across the frames a
+ * scene is the mean of its strength in each, so a scene seen throughout the clip beats a stronger
+ * one seen once. A scene no label says is left out rather than listed at 0.
  */
 export function scenesFromLabels(frames: readonly LabeledFrame[], engine: LabelEngine): SceneScore[] {
   const index = INDEX[engine];
@@ -1351,7 +1360,7 @@ export function scenesFromLabels(frames: readonly LabeledFrame[], engine: LabelE
       if (!Number.isFinite(confidence) || confidence <= 0) continue;
       for (const rule of index.get(sceneLabelKey(label)) ?? []) {
         if (confidence < rule.floor) continue;
-        const strength = Math.min(1, confidence) * rule.weight;
+        const strength = Math.min(1, Math.min(1, confidence) * rule.weight);
         const before = inFrame.get(rule.scene) ?? 0;
         inFrame.set(rule.scene, summed ? Math.min(1, before + strength) : Math.max(before, strength));
       }

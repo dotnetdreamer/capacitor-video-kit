@@ -10,6 +10,7 @@ import { findClip } from '../../editor';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorStore } from '../../state/editor-store';
 import { ClipMedia } from './clip-media';
+import { onPageShown } from './preview-media';
 import { PresentedFrames } from './presented-frames';
 
 /**
@@ -77,6 +78,16 @@ const TAIL_WAIT_MS = 600;
  * callbacks never come waits this long.
  */
 const FIRST_FRAME_WAIT_MS = 1200;
+
+/**
+ * After the page comes back from being hidden, on WebKit, a paused canvas draws again this often for as
+ * long as an element it draws from has not shown a frame of what it holds; see [PreviewCanvas.revived].
+ */
+const REVIVE_REDRAW_MS = 250;
+/** ...until this long after the last event any of those elements fired, which ends a reload... */
+const REVIVE_QUIET_MS = 3000;
+/** ...and never for longer than this after the page came back. */
+const REVIVE_MAX_MS = 15_000;
 
 let appleWebKit: boolean | null = null;
 
@@ -239,6 +250,17 @@ export class PreviewCanvas {
     release: copy => this.painter?.releaseFrame(copy),
   });
 
+  /**
+   * When the page last came back from being hidden, while the paused redraws that follow it are still
+   * going, and 0 once they have stopped; when the elements drawn from last fired an event in that time;
+   * and the next of those redraws. See [revived].
+   */
+  private shownAt = 0;
+  private eventAt = 0;
+  private reviveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Only on WebKit, which is the engine that takes a hidden page's pictures away; see [revived]. */
+  private readonly offShown = waitsForFirstFrame() ? onPageShown(() => this.revived()) : null;
+
   constructor(
     private readonly store: EditorStore,
     private readonly canvas: HTMLCanvasElement,
@@ -285,12 +307,19 @@ export class PreviewCanvas {
    * already drawing, and a redraw asked for twice in a frame only happens once.
    */
   private listenTo(video: PreviewSource): void {
-    const onFrame = () => this.request();
+    const onFrame = () => {
+      this.request();
+      this.heardFrom();
+    };
     for (const type of FRAME_EVENTS) video.addEventListener(type, onFrame);
     // On WebKit each source is followed from the moment it is put on until it has shown a frame;
-    // see [framed].
+    // see [framed]. Every load is a source put on, the same file loaded again included; see
+    // [followStart].
     const element = video instanceof ClipMedia ? video.element : video;
-    const onSource = () => this.followStart(element);
+    const onSource = () => {
+      this.followStart(element, true);
+      this.heardFrom();
+    };
     // Asked to play again before a frame came: the wait is timed afresh from the first draw.
     const onPlay = () => {
       const start = this.starts.get(element);
@@ -313,10 +342,24 @@ export class PreviewCanvas {
    * Follows `element`'s current source until it has shown a frame, which its frame callback says.
    * Asking for the callback is also what has WebKit set up the output a frame is read from, so asked
    * as the source goes on, that is under way long before anything draws from it.
+   *
+   * `loaded` is a load that has just started - `loadstart` - and it is followed afresh even when it is
+   * the file the element had already: a load is a new player on WebKit, with no output and no frame,
+   * whatever the URL. That is exactly the load [PreviewPlayer.revive] makes to give a paused element
+   * its picture back after a picker has hidden the page, and taken for the source already followed,
+   * it was the one load with no frame callback asked for: nothing set the output up, the first draw
+   * after it landed asked for the output itself and got an EMPTY frame - WebKit reports HAVE_ENOUGH_DATA
+   * at `seeked` and hands `drawImage` nothing for about a second more (iOS 26.5 simulator, 2026-09-29)
+   * - and nothing drew again once the frame was there. The stage stayed black until Play, every time
+   * a sound was taken from a video: the extraction slows that reload by half a second, so it lands
+   * after the sound sheet has closed and the resize has cleared the canvas. Followed afresh, the
+   * callback both sets the output up as the load starts and asks for the redraw once the frame is out.
+   * Asked the first time an element is handed over, `loaded` is false and a source already followed
+   * is left as it is.
    */
-  private followStart(element: HTMLVideoElement): void {
+  private followStart(element: HTMLVideoElement, loaded = false): void {
     const src = element.currentSrc;
-    if (this.starts.get(element)?.src === src) return;
+    if (!loaded && this.starts.get(element)?.src === src) return;
     // `since` is when a draw first found it playing without a frame; see [framed].
     const start = { src, shown: false, since: Number.NaN };
     this.starts.set(element, start);
@@ -417,9 +460,75 @@ export class PreviewCanvas {
     });
   }
 
+  /**
+   * The page has come back from being hidden: a picker, a call, the home button. A paused canvas then
+   * draws again every [REVIVE_REDRAW_MS] until every element it draws from has shown a frame of what
+   * it holds - which its frame callback says; see [followStart] - or until [REVIVE_QUIET_MS] after the
+   * last event any of them fired, or [REVIVE_MAX_MS] after the page came back.
+   *
+   * [PreviewPlayer.revive] loads the paused elements again, because a hidden page's paused elements
+   * have their pictures taken away, and WebKit gives a reloaded element's first frame no event of its
+   * own: it reports HAVE_ENOUGH_DATA and fires `seeked`, `loadeddata` and `canplay` while `drawImage`
+   * still gets nothing from it, and the frame itself turns up about a second later with nothing said
+   * (measured in the app's WebView on the iOS 26.5 simulator, 2026-09-29). A canvas that only draws
+   * when an element says something drew black at those events, and nothing asked it to draw again:
+   * the stage stayed black until Play. The frame callback [followStart] asks for on every load is what
+   * says the frame is out, and these redraws are for a WebView that does not call it for a paused
+   * element. A redraw that finds no frame yet paints no worse than the black that is there already,
+   * and a paused canvas is a handful of draws a second for a few seconds, once per return to the page.
+   */
+  private revived(): void {
+    if (this.destroyed) return;
+    const now = performance.now();
+    this.shownAt = now;
+    this.eventAt = now;
+    this.request();
+    this.keepRedrawing();
+  }
+
+  /** An element drawn from has fired an event, which keeps [revived]'s redraws going a while longer. */
+  private heardFrom(): void {
+    if (!this.shownAt) return;
+    this.eventAt = performance.now();
+    this.keepRedrawing();
+  }
+
+  private keepRedrawing(): void {
+    if (this.reviveTimer || this.destroyed) return;
+    this.reviveTimer = setTimeout(() => {
+      this.reviveTimer = null;
+      if (this.destroyed || !this.shownAt) return;
+      const now = performance.now();
+      if (now - this.shownAt > REVIVE_MAX_MS || now - this.eventAt > REVIVE_QUIET_MS || !this.awaitingFrame()) {
+        this.shownAt = 0;
+        return;
+      }
+      this.request();
+      this.keepRedrawing();
+    }, REVIVE_REDRAW_MS);
+  }
+
+  /**
+   * Whether any element the canvas draws from holds a source it has not shown a frame of yet, which
+   * its frame callback says; see [followStart]. An element with nothing on it, and a picture, have no
+   * frame to wait for.
+   */
+  private awaitingFrame(): boolean {
+    const videos = [...this.baseElements, ...[...this.sources.values()].map(source => source.video)];
+    return videos.some(video => {
+      const element = video instanceof ClipMedia ? (video.isPicture ? null : video.element) : video;
+      if (!element?.currentSrc) return false;
+      const start = this.starts.get(element);
+      return !start || start.src !== element.currentSrc || !start.shown;
+    });
+  }
+
   destroy(): void {
     this.destroyed = true;
     this.stopLoop();
+    this.offShown?.();
+    if (this.reviveTimer) clearTimeout(this.reviveTimer);
+    this.reviveTimer = null;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     for (const source of this.sources.values()) this.release(source.video);

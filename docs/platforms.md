@@ -138,9 +138,18 @@ volume point to the next, so one point per clip ramped every clip towards the ne
 clip before a picture, a held frame, a muted clip or a quieter voiceover take faded out across the
 whole of its length, and every clip a transition leads out of faded towards the silence its
 successor's fade-in starts from. The builder sets each level again a millisecond before its range
-ends, which to the ear is the step Android's and the web's per-clip gain makes. Music fades follow
-Android's `planMusic` and the web's `fadeGain`, with the one exception `ComposeMusic.fadeOutMs`
-describes.
+ends, which to the ear is the step Android's and the web's per-clip gain makes. Music fades are the
+rule `ComposeMusic.fadeInMs` states, which Android, the web and the preview share: ramps on the one
+music track over the window the music is heard in, across the seams between its repetitions, and
+where the fade in and the fade out overlap - which a single ramp cannot draw, since the level there
+is their product - 32 short ramps end to end, under 0.3 dB below the curve (0.28 dB where the piece
+leaving silence starts, 0.14 dB at its middle, and less in every other piece). A loop's
+repetitions run to the end of the audio TRACK, not the asset: AVFoundation reads a 12 s AAC `.m4a`
+as an asset of 11975 ms whose track runs the full 12000, and the last 25 ms are the song. `probe`
+answers that same end for a file with no video, so a sound picked on iOS is laid in 12000 ms passes in
+the editor as well. WebKit's `<audio>` still reads the file as 11975 ms, so the preview's element has
+nothing to play for the last 25 ms of each pass: it starts the next pass up to that much early, within
+the drift the preview allows, or waits for it once it has played to the end of its file.
 
 **A spec Android plans around, iOS plans around too.** A track with no `z` sits at its index plus
 one, an empty track is refused with Android's own message, a clip whose in-point is at or past the
@@ -215,6 +224,17 @@ letterbox bars - the same rule, and the same reason, as on the phone.
 **Pitch is preserved by hand.** `playbackRate` resamples, so a 2x clip would come back an octave up.
 `web/time-stretch.ts` is overlap-add with a correlation search, which is the only way a browser gets
 what Media3 and AVFoundation get from the platform.
+
+**The music is laid against the file the mix decoded.** Nothing opens the music before the mix
+decodes it, and a sound not trimmed at its end asks for the end of the file (`ComposeMusic.outMs`),
+so the repetitions are laid again against the samples `decodeAudioData` gave (`musicForSource` in
+`web/plan.ts`) - held, for an MP4 or QuickTime file, to the length its container presents
+(`soundLengthUs` in `web/audio.ts`). An AAC file pads its last frame out, and the edit list says
+where the sound ends; WebKit decodes the padding too, so a 12 s `.m4a` came out 4.7 ms too long
+there, and looped at that it came round later at every seam than Chromium, iOS and Android, which
+all go round at 12.000 s. The fades follow `ComposeMusic.fadeInMs`'s rule sample by sample. The
+mix is the length of the post, so a post whose music stops early has silence to its end in its audio
+track, where both native engines end the track with the last sound in it.
 
 **The render does not survive the page, and the result does.** A browser has no foreground service
 and no WorkManager: a tab closed mid-render stops rendering, and a job left behind comes back as

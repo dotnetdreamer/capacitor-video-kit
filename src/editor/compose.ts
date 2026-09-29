@@ -51,7 +51,10 @@ export class MissingClipError extends Error {
   }
 }
 
-/** Longer than any post can run; the composer clips a track of unknown length to the video's end. */
+/**
+ * The `outMs` of a sound that is not trimmed at its end: longer than any post can run, so every
+ * engine plays to the end of the file, which it reads for itself (see [ComposeMusic.outMs]).
+ */
 const UNKNOWN_TRACK_END_MS = 3_600_000;
 
 /**
@@ -173,7 +176,11 @@ export async function toComposeSpec(
             uri: music.uri,
             startMs: Math.max(0, Math.round(music.startMs)),
             inMs: Math.max(0, Math.round(music.inMs)),
-            outMs: Math.round(music.outMs > 0 ? music.outMs : music.sourceDurationMs > 0 ? music.sourceDurationMs : UNKNOWN_TRACK_END_MS),
+            // A trim the customer made, or "to the end of the file" - never the page's own measure of
+            // that end. WebKit reads a 12 s m4a as 11975 ms, which AVFoundation and Chromium read as
+            // 12000, and sending that clipped the last 25 ms off every pass on iOS: a click at every
+            // loop seam, and a sliver of a last pass. Each engine reads the file's real length.
+            outMs: Math.round(music.outMs > 0 ? music.outMs : UNKNOWN_TRACK_END_MS),
             // Only a stop that cuts the music short, for the reason `tracks` is left off: music that
             // plays to the end is the spec this package has always produced, byte for byte.
             ...(music.endMs > 0 && music.endMs < totalMs ? { endMs: Math.round(music.endMs) } : {}),

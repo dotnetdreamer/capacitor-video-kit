@@ -872,22 +872,144 @@ class RenderPlanTest {
         assertNull(plan.music)
     }
 
+    /*
+     * The fades belong to the window the music is heard in, not to its repetitions: every engine
+     * draws `volume * clamp((t - start) / fadeIn) * clamp((stop - t) / fadeOut)` (ComposeMusic), so
+     * a loop's seams play no part and a fade out reaches silence exactly where the music stops.
+     */
+
+    /** The music's gain at an output instant, from whichever repetition is playing then. */
+    private fun musicGainAt(plan: RenderPlan, outputUs: Long, rate: Int = 48_000): Float {
+        val music = plan.music!!
+        var atUs = music.leadGapUs
+        for (item in music.items) {
+            val lenUs = item.outUs - item.inUs
+            if (outputUs < atUs + lenUs) {
+                return item.gain.getGainFactorAtSamplePosition((outputUs - atUs) * rate / 1_000_000, rate)
+            }
+            atUs += lenUs
+        }
+        error("nothing plays at $outputUs us")
+    }
+
+    private fun musicPlan(music: Music, videoMs: Long, trackMs: Long): RenderPlan = RenderPlan.build(
+        spec(listOf(clip("a", outMs = videoMs)), audio = Audio(true, 1f, music, emptyList())),
+        mapOf("file:///a.mp4" to probe(videoMs), "file:///m.m4a" to probe(trackMs)),
+    )
+
     @Test
-    fun `fades belong to the first and last repetitions only`() {
+    fun `fades come up at the start and go down at the end, and nothing between moves`() {
         val music = Music("file:///m.m4a", 0, 0, 3_000, 0.6f, loop = true, fadeInMs = 500, fadeOutMs = 400)
+        val plan = musicPlan(music, videoMs = 9_000, trackMs = 3_000)
+        assertEquals(3, plan.music!!.items.size)
+        assertEquals(0f, musicGainAt(plan, 0), 1e-6f)
+        assertEquals(0.3f, musicGainAt(plan, 250_000), 1e-3f)
+        // Flat at the track's volume through every seam...
+        for (us in listOf(500_000L, 2_999_000L, 3_000_000L, 6_000_000L, 8_600_000L)) {
+            assertEquals("at $us us", 0.6f, musicGainAt(plan, us), 1e-4f)
+        }
+        // ...and down to silence at the end, without ever exceeding the chosen volume.
+        assertEquals(0.3f, musicGainAt(plan, 8_800_000), 1e-3f)
+        assertEquals(0f, musicGainAt(plan, 8_999_990), 1e-3f)
+    }
+
+    /*
+     * WebKit reads a 12 s song as 11975 ms, which left a 60 s post five passes and a 125 ms sixth.
+     * The fade out hung off that sixth alone and the music ended at 99% of its level.
+     */
+    @Test
+    fun `a fade out longer than the last repetition starts in the ones before it`() {
+        val music = Music("file:///m.m4a", 0, 0, 11_975, 1f, loop = true, fadeInMs = 0, fadeOutMs = 10_000)
+        val plan = musicPlan(music, videoMs = 60_000, trackMs = 11_975)
+        val items = plan.music!!.items
+        assertEquals(6, items.size)
+        assertEquals(125_000L, items.last().outUs - items.last().inUs)
+        assertEquals(1f, musicGainAt(plan, 49_000_000), 1e-6f)
+        assertEquals(0.5f, musicGainAt(plan, 55_000_000), 1e-3f)
+        // Across the seam at 59.875 s the line carries on where it was.
+        assertEquals(0.0126f, musicGainAt(plan, 59_874_000), 1e-3f)
+        assertEquals(0.0125f, musicGainAt(plan, 59_875_000), 1e-3f)
+        assertEquals(0f, musicGainAt(plan, 59_999_990), 1e-3f)
+    }
+
+    @Test
+    fun `a stop just past a seam still fades all the way out`() {
+        // A 4 s section stopped at 8.2 s: the last pass is 200 ms of a 1 s fade.
+        val music = Music("file:///m.m4a", 0, 0, 4_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 1_000, endMs = 8_200)
+        val plan = musicPlan(music, videoMs = 10_000, trackMs = 4_000)
+        assertEquals(3, plan.music!!.items.size)
+        assertEquals(1f, musicGainAt(plan, 7_000_000), 1e-6f)
+        assertEquals(0.5f, musicGainAt(plan, 7_700_000), 1e-3f)
+        assertEquals(0.1f, musicGainAt(plan, 8_100_000), 1e-3f)
+        assertEquals(0f, musicGainAt(plan, 8_199_990), 1e-3f)
+    }
+
+    /*
+     * A last repetition shorter than a frame is left off (see `planMusic`), so the music stops that
+     * sliver early - and the fade out has to end there, where it really stops, not at the stop asked.
+     */
+    @Test
+    fun `a fade out ends where the music really stops when a sliver of a repetition is left off`() {
+        val music = Music("file:///m.m4a", 0, 0, 1_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 400, endMs = 2_010)
+        val plan = musicPlan(music, videoMs = 3_000, trackMs = 1_000)
+        val items = plan.music!!.items
+        assertEquals(2, items.size)
+        assertEquals(2_000_000L, items.sumOf { it.outUs - it.inUs })
+        assertEquals(1f, musicGainAt(plan, 1_600_000), 1e-3f)
+        assertEquals(0.5f, musicGainAt(plan, 1_800_000), 1e-3f)
+        assertEquals(0f, musicGainAt(plan, 1_999_990), 1e-3f)
+    }
+
+    @Test
+    fun `a fade in longer than the section runs on across its seams`() {
+        val music = Music("file:///m.m4a", 0, 0, 800, 1f, loop = true, fadeInMs = 3_000, fadeOutMs = 0)
+        val plan = musicPlan(music, videoMs = 6_000, trackMs = 800)
+        assertEquals(1f / 6f, musicGainAt(plan, 500_000), 1e-3f)
+        // Into the second pass at the level the line has reached, not back at the full level.
+        assertEquals(0.5f, musicGainAt(plan, 1_500_000), 1e-3f)
+        assertEquals(2.5f / 3f, musicGainAt(plan, 2_500_000), 1e-3f)
+        assertEquals(1f, musicGainAt(plan, 4_000_000), 1e-6f)
+    }
+
+    @Test
+    fun `overlapping fades multiply`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = false, fadeInMs = 2_000, fadeOutMs = 2_000)
+        val plan = musicPlan(music, videoMs = 10_000, trackMs = 3_000)
+        assertEquals(0.75f * 0.75f, musicGainAt(plan, 1_500_000), 1e-3f)
+        assertEquals(0.5f, musicGainAt(plan, 1_000_000), 1e-3f)
+        assertEquals(0.5f, musicGainAt(plan, 2_000_000), 1e-3f)
+    }
+
+    /*
+     * The editor sends a sound it did not trim at its end as an `outMs` longer than any file, rather
+     * than the page's measure of it (ComposeMusic.outMs), so the passes are the probe's length.
+     */
+    @Test
+    fun `a sound not trimmed at its end loops at the length the probe reads`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 10_000)
+        val plan = musicPlan(music, videoMs = 60_000, trackMs = 12_000)
+        val items = plan.music!!.items
+        assertEquals(5, items.size)
+        assertTrue(items.all { it.outUs - it.inUs == 12_000_000L })
+        assertEquals(0.5f, musicGainAt(plan, 55_000_000), 1e-3f)
+        assertEquals(0f, musicGainAt(plan, 59_999_990), 1e-3f)
+    }
+
+    /*
+     * With no probe nothing says where the loop would turn, so it is one pass to the stop: Media3
+     * plays the file to its end and the rest is silence. Accepted and documented (planMusic): it
+     * takes a file MediaMetadataRetriever cannot read.
+     */
+    @Test
+    fun `a sound the probe could not read is laid as one pass to the stop`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 1_000)
         val plan = RenderPlan.build(
-            spec(listOf(clip("a", outMs = 9_000)), audio = Audio(false, 1f, music, emptyList())),
-            mapOf("file:///a.mp4" to probe(9_000), "file:///m.m4a" to probe(3_000)),
+            spec(listOf(clip("a", outMs = 20_000)), audio = Audio(true, 1f, music, emptyList())),
+            mapOf("file:///a.mp4" to probe(20_000)),
         )
         val items = plan.music!!.items
-        assertEquals(3, items.size)
-        // The first repetition ramps in from silence...
-        assertEquals(0f, items.first().gain.getGainFactorAtSamplePosition(0, 48_000), 1e-6f)
-        // ...the middle one sits flat at the track's volume...
-        assertEquals(0.6f, items[1].gain.getGainFactorAtSamplePosition(0, 48_000), 1e-6f)
-        // ...and the last ends in silence, without ever exceeding the chosen volume.
-        val lastSample = 3_000L * 48_000 / 1_000 - 1
-        assertEquals(0f, items.last().gain.getGainFactorAtSamplePosition(lastSample, 48_000), 1e-3f)
+        assertEquals(1, items.size)
+        assertEquals(20_000_000L, items.single().outUs - items.single().inUs)
     }
 
     /* ------------------------------------------------------------------------------------- */

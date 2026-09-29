@@ -26,10 +26,11 @@ import {
   type EditAdjust,
   type EditClip,
   type EditManifest,
+  type EditMusic,
   type EditOverlay,
   type EditZoom,
 } from '../editor/edit-manifest';
-import { clipDurationMs, overlayEndMs, timelineSlots } from '../editor/edit-ops';
+import { clipDurationMs, musicSectionMs, musicWindow, overlayEndMs, timelineSlots } from '../editor/edit-ops';
 import type { FilterOp } from '../video-composer/definitions';
 import { zoomOffered, type McpEditingOptions } from './ops';
 
@@ -114,7 +115,7 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
     const fadeIn = (music.fadeInMs ?? 0) > 0 ? `, fades in over ${time(music.fadeInMs ?? 0)}` : '';
     const fade = fadeIn + (music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '');
     sound.push(
-      `Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ` + `${percent(music.volume)}${loop}${fade}`,
+      `Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${loop}${fade}; ${heard(music, totalMs)}`,
     );
   } else {
     sound.push('Music: none');
@@ -271,6 +272,34 @@ function describeZoomRamps(zoom: EditZoom): string {
   if (out === zoom.rampMs) return zoom.rampMs > 0 ? `${time(zoom.rampMs)} ${zoom.ease} ramps` : 'instant';
   const ramp = (ms: number): string => (ms > 0 ? time(ms) : 'instant');
   return `${zoom.ease} ramps, ${ramp(zoom.rampMs)} in and ${ramp(out)} out`;
+}
+
+/**
+ * Where the music is heard on the post: what its start, its stop, its section and Loop add up to,
+ * which none of them says alone. A sound played once ends with its section however far off its stop
+ * is, a stop past the end of the post is the end of the post, and a sound starting there or later
+ * is never heard. [musicWindow] is the window every engine plays once it knows where the section
+ * ends, and this reads it rather than the fields a second time.
+ *
+ * Except where nobody here knows that: a sound played once with no `outMs` and no
+ * `sourceDurationMs`, which is what `setMusic` makes of a bare `{uri}`. [musicWindow] runs such a
+ * sound to its stop or the end of the post, because it has no end of the section to stop at, but
+ * the render is sent "to the end of the file" (`UNKNOWN_TRACK_END_MS` in compose.ts) and every
+ * engine stops where the file does - so a three-second track on a ten-second post is heard for
+ * three seconds. Said as a window, that read "heard 0ms..10000ms", and an agent took the music to
+ * cover the whole post. So it is said as what it is, an upper bound, with the field that would
+ * turn it into an answer. A looping sound has no such gap: it repeats until its stop whatever its
+ * length, which is what the window says.
+ */
+function heard(music: EditMusic, totalMs: number): string {
+  const { startMs, endMs } = musicWindow(music, totalMs);
+  if (endMs <= startMs) {
+    return music.startMs >= totalMs ? 'never heard: it starts at or after the end of the post' : 'never heard: it stops before it starts';
+  }
+  if (!music.loop && musicSectionMs(music) === 0) {
+    return `heard from ${time(startMs)} until the track ends, ${time(endMs)} at most - its length is unknown (send sourceDurationMs or outMs to know)`;
+  }
+  return `heard ${time(startMs)}..${time(endMs)}`;
 }
 
 /** `4500ms (0:04.5)`, and a plain `0ms` for the start, where a clock adds nothing. */

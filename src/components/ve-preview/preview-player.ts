@@ -25,13 +25,25 @@ import {
   SEEK_EPSILON_S,
   applyClipAudio,
   applyPitch,
+  atFileEnd,
+  audioEndGuardMs,
   clipsSilenced,
+  fileEndMs,
+  musicSpan,
   onPageShown,
   oneVideoSoundAtATime,
+  passFollows,
+  passMs,
+  playedOut,
   posterFor,
   previewSrc,
+  soundOffsetMs,
+  soundPutMs,
   startPlayback,
+  takeSpan,
   volumeIsWritable,
+  wrapAimMs,
+  type SoundSpan,
 } from './preview-media';
 import { PreviewMixer, levelsInUse, playableHere } from './preview-mixer';
 import {
@@ -94,6 +106,71 @@ const AUDIO_SETTLE_TIMEOUT_MS = 1500;
 /** An output stall longer than this is not a stall any lead can make up for. */
 const MAX_AUDIO_LEAD_MS = 400;
 /**
+ * A repeating section is sent round to its next pass a seek stall before its element gets to the out
+ * point - the element's own seek lead, measured like every other - and not left to reach it. At the
+ * latest this long before it, or before the end guard where there is one (see [AUDIO_END_GUARD_MS]):
+ * the sound is checked every [PLAYHEAD_WRITE_MS], which is two frames and sometimes three, so an
+ * element is always seen at least once in the last this-much before the point it has to go by.
+ *
+ * Left to reach it, the element stopped at the end of its file (or played on past an out point short
+ * of it) and sat there until the playhead came round the seam too and the frame loop started it
+ * again: up to 100 ms of silence at every seam in Chromium, where the element runs 60-90 ms ahead of
+ * the playhead, and then its start stall. Sent round a stall early, it comes out of the seek on the
+ * next pass's first moment as the playhead gets there, and what the stall costs is the last moment of
+ * this pass instead. On WebKit it is also what keeps it off the end of its file, where a seek costs
+ * the file its length: WebKit's seek stall is 95-130 ms (iOS 26.5 simulator), so it is sent round
+ * before it gets inside the guard.
+ *
+ * Sent round any EARLIER than its stall, an element comes out of the seek on the in point before the
+ * playhead is there - there is nothing before the in point to put it on - and stays that much ahead,
+ * which the next seam adds to again; that is why the stall and not a fixed margin says when.
+ *
+ * Where the stall is SHORTER than this floor - Chromium's under 50 ms, or an iPhone's under 100 ms -
+ * that is what happens all the same: the element is seen somewhere in the last this-much and has to go
+ * then, up to the difference early. Each seam leaves it a little further ahead, until [AUDIO_DRIFT_MS]
+ * puts it back. It stays bounded: with the preview's audio tests' stand-in elements, a 1 s section
+ * looped for 28 s came to ~260 ms ahead at worst, with a correcting seek every six seams or so, for a
+ * 60 ms stall on WebKit and a 10 ms one on Chromium; the iOS simulator's ~100 ms stall does not reach
+ * it. A timer set for the exact moment would avoid it, but not safely: one frame late on a busy
+ * WebView, it lets WebKit's element into the guard, and that element is then left to end and started
+ * again cold - a gap and a start stall, where this costs a few tens of ms of lead at a seam.
+ *
+ * A file that ends a little short of its section's out point comes to the same. WebKit reads a 12 s
+ * AAC `.m4a` as 11.975 s, where the section, read as the iOS render reads it (`probe` answers the audio
+ * track's end), runs to 12.000 s. Sent round a stall before the end of its FILE, where it has to go,
+ * the element has nothing to play for the rest of the pass and starts the next one up to 25 ms early,
+ * which the drift check bounds in the same way. Paused rather than sent round - one that has played to
+ * the end of its file - it waits for the playhead to reach the out point instead; see [soundPutMs].
+ *
+ * Not the element's own `loop`, even for a section that is the whole file. Both engines loop an
+ * element by seeking it back to the start once it has ended, so it has the same stall - only at the
+ * start of the next pass, which comes in late by it and stays late, inside the drift allowed - and on
+ * the pass the post ends on, an element running ahead would loop the start of the track over the
+ * last frames.
+ */
+const LOOP_WRAP_EARLY_MS = 50;
+/**
+ * An element that is still reported playing at the end of its file this long after it got there is
+ * taken for one that will never say it has ended (see [AUDIO_END_GUARD_MS]), and is paused so it can
+ * be put like any other. Long past the few tens of milliseconds the notice takes when it comes.
+ */
+const AUDIO_END_WAIT_MS = 500;
+/**
+ * A file whose element now says it is this much shorter than it said before, and than the stretch of
+ * it the post plays, sitting at that new end, has had its length cut short under it by WebKit; see
+ * [PreviewPlayer.recoverLength].
+ */
+const COLLAPSED_BY_MS = 250;
+/**
+ * ...and whose new length is no further than this from where the preview last put the element: WebKit
+ * takes the length from where a seek put it (0.121 s, put there and read back to the millisecond on the
+ * iOS 26.5 simulator), where a length read properly at last comes down to wherever the file really
+ * ends, which has nothing to do with any put.
+ */
+const COLLAPSED_AT_PUT_MS = 50;
+/** A file reloaded for that is not reloaded again for this long, whatever it says. */
+const RELOAD_RETRY_MS = 1000;
+/**
  * The lead to use before anything has been measured. The very first play after a cold launch has no
  * measurement to go on, and the phone's audio output takes ~150-200 ms to start, so music and
  * voiceovers came in that late every first time - the one play a customer is most likely to judge the
@@ -101,6 +178,45 @@ const MAX_AUDIO_LEAD_MS = 400;
  * measured like any other and replaces this with the real figure.
  */
 const DEFAULT_AUDIO_LEAD_MS = 180;
+
+/**
+ * An audio element played through [PreviewMixer] - ROUTED, which on iOS is every music and voiceover
+ * element of a post with a level for them, and so every new sound, which comes with 80 % and a fade-out
+ * - is only judged this long after it was put, whatever its clock has done by then.
+ *
+ * A routed element is not slow. Left alone it runs at 1.00x, exactly as one that is not routed. What it
+ * has is a far longer and more uneven stall after every start and every seek: about 440 ms of its clock
+ * lost over the next second, where one that is not routed loses about 45 ms (measured in the app's
+ * WebView on the iOS 26.5 simulator, 2026-09-29, with nothing muted). And it does not stand still and
+ * then run, which is what [AUDIO_SETTLED_MS] waits out: it moves on at first, then stands still for a
+ * couple of hundred milliseconds, moves, stands still again. Judged the way every other element is, it
+ * had "settled" a few hundred milliseconds in, with most of the stall still to come, so the lead learned
+ * from it was about 150 ms; the rest of the stall then left it more than [AUDIO_DRIFT_MS] behind the
+ * picture about 0.7 s after the put, and it was put again - into another second of the same. The music
+ * of every new sound was seeked 86 times a minute and ran at 0.6x.
+ *
+ * Judged once this has gone by, the whole of the stall is in the measurement, the lead learned from it
+ * covers it, and the next put - if one is needed at all - lands in step and stays there.
+ */
+const ROUTED_SETTLE_MS = 1200;
+/** A routed put whose clock has not got [AUDIO_SETTLED_MS] past where it was put after this long is not measured at all. */
+const ROUTED_SETTLE_TIMEOUT_MS = 3000;
+/**
+ * A routed element is put back in step when it is further out than this, rather than [AUDIO_DRIFT_MS].
+ * Every put of one costs a second of uneven clock, so a put for a drift the picture would not show is a
+ * worse thing than the drift. Wider than the few tens of milliseconds a routed stall differs by from one
+ * put to the next (419-481 ms over five measured), so a lead learned from one put is never taken for a
+ * drift on the next; see [ROUTED_SETTLE_MS].
+ */
+const ROUTED_DRIFT_MS = 300;
+/** The longest routed stall a lead is learned for; see [MAX_AUDIO_LEAD_MS]. Well past the 481 ms measured. */
+const MAX_ROUTED_LEAD_MS = 700;
+/**
+ * The lead a routed element is put with before its own has been measured: the ~440 ms it was measured
+ * losing, for the reason [DEFAULT_AUDIO_LEAD_MS] gives. Kept apart from the other kind's, and learned
+ * apart from it: either one taken for the other puts every element of that kind the difference out.
+ */
+const DEFAULT_ROUTED_LEAD_MS = 440;
 
 /** A playback position this far before a segment's in point means its trim moved under us. */
 const BEHIND_TRIM_MS = 100;
@@ -150,6 +266,8 @@ type AudioPut = 'cold' | 'warm' | 'seek';
  * first play of a take in it - starts in step.
  */
 let lastAudioLeadMs = DEFAULT_AUDIO_LEAD_MS;
+/** The same for a routed audio element; see [DEFAULT_ROUTED_LEAD_MS]. */
+let lastRoutedLeadMs = DEFAULT_ROUTED_LEAD_MS;
 /** The same for a video element's start; see [DEFAULT_VIDEO_LEAD_MS]. */
 let lastVideoLeadMs = DEFAULT_VIDEO_LEAD_MS;
 
@@ -308,6 +426,25 @@ export class PreviewPlayer implements EditorPlayer {
   private readonly settling = new Map<HTMLAudioElement, { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number; learn: boolean }>();
   /** How long each element's clock stands still after a start and after a seek, as last measured. */
   private readonly audioLeadMs = new Map<HTMLAudioElement, Partial<Record<AudioPut, number>>>();
+  /**
+   * The same once the element is routed through [mixer], which it is for good: a stall learned before
+   * that is not the stall it has now; see [ROUTED_SETTLE_MS].
+   */
+  private readonly routedLeadMs = new Map<HTMLAudioElement, Partial<Record<AudioPut, number>>>();
+  /**
+   * The longest each audio element has said its file is since its source was set, and when it was
+   * last loaded again because that had collapsed; see [recoverLength].
+   */
+  private readonly audioLengths = new Map<HTMLAudioElement, { longestMs: number; reloadedAt: number }>();
+  /** Where the preview last put each audio element in its file, in ms; see [recoverLength]. */
+  private readonly audioPutAtMs = new Map<HTMLAudioElement, number>();
+  /** Audio elements seen still playing at the end of their file, and since when; see [waitForEnd]. */
+  private readonly audioAtEnd = new Map<HTMLAudioElement, number>();
+  /**
+   * Audio elements seen playing the last of their sound during this play - coming up to its out point,
+   * or the end of its file, with nothing after it - and not put anywhere since; see [playedOut].
+   */
+  private readonly audioFinishing = new Set<HTMLAudioElement>();
   /** Base elements started from a standing frame and not yet measured; see [DEFAULT_VIDEO_LEAD_MS]. */
   private readonly starts = new Map<ClipMedia, { putAtMs: number; wallMs: number; rate: number }>();
   /** How long each base element's clock stands still after `play()`, as last measured. */
@@ -412,6 +549,9 @@ export class PreviewPlayer implements EditorPlayer {
     this.store.playheadMs.value = target;
     // Audio still settling from its last start would measure this jump as its stall.
     this.settling.clear();
+    // Sound that had played out ahead of where the playhead was is heard again from where it is now,
+    // however near its end that is; see [playedOut].
+    this.audioFinishing.clear();
     if (this.pendingLoad || this.seekInFlight) {
       this.queuedMs = target;
       return;
@@ -428,6 +568,8 @@ export class PreviewPlayer implements EditorPlayer {
     // usually still loading or seeking there, and playing on from where the element is going
     // would play nothing and stop at the end again - Play looked dead.
     const restart = this.store.playheadMs.value >= total - RESTART_WITHIN_MS;
+    // From the top, a sound that had played out is heard again, however short it is; see [playedOut].
+    if (restart) this.audioFinishing.clear();
     if (this.pendingLoad) {
       if (restart) {
         this.queuedMs = 0;
@@ -1689,7 +1831,7 @@ export class PreviewPlayer implements EditorPlayer {
       music && heard && live ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= musicLead ? music.inMs + ms - heard.startMs : null)) : null;
     if (music && heard && musicAt !== null) {
       // The render fades the track in and out; the preview follows along.
-      this.playAt(this.musicEl, musicAt, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running);
+      this.playAt(this.musicEl, musicAt, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running, musicSpan(music, heard.endMs - ms));
     } else if (!this.musicEl.paused) {
       this.musicEl.pause();
     }
@@ -1698,14 +1840,19 @@ export class PreviewPlayer implements EditorPlayer {
     const take = live ? manifest.voiceovers.find(t => ms >= t.startMs - voiceLead && ms < t.startMs + t.durationMs) : undefined;
     if (take) {
       this.setSource('voice', take.uri);
-      this.playAt(this.voiceEl, ms - take.startMs, clamp(take.volume, 0, 1), running);
+      this.playAt(this.voiceEl, ms - take.startMs, clamp(take.volume, 0, 1), running, takeSpan(take, ms));
     } else if (!this.voiceEl.paused) {
       this.voiceEl.pause();
     }
   }
 
-  /** @param running see [syncAudio]. */
-  private playAt(el: HTMLAudioElement, positionMs: number, volume: number, running: boolean): void {
+  /**
+   * Keeps one audio element where the playhead wants it: `positionMs` into its file, at `volume`, on
+   * the stretch of the file `span` says is heard.
+   *
+   * @param running see [syncAudio].
+   */
+  private playAt(el: HTMLAudioElement, positionMs: number, volume: number, running: boolean, span: SoundSpan): void {
     this.mixer.setLevel(el, volume);
     // Sound goes with a picture that is MOVING. Left to run through a clock that stood still, it ran
     // ahead of the picture by the length of the stall and was seeked back as soon as the picture
@@ -1716,71 +1863,280 @@ export class PreviewPlayer implements EditorPlayer {
       this.settling.delete(el);
       return;
     }
-    if (el.paused) {
-      this.putAudio(el, positionMs, running ? 'warm' : 'cold');
-      startPlayback(el);
+    const guardMs = audioEndGuardMs();
+    const length = this.recoverLength(el, span, guardMs);
+    if (length === 'held') {
+      if (!el.paused) el.pause();
+      this.settling.delete(el);
       return;
     }
+    const reloaded = length === 'loaded';
+    if (el.paused) {
+      // Stopped at the end of the last of the sound, a little ahead of the playhead - by the preview
+      // at the out point, or by the element itself at the end of its file - it has played everything
+      // it is going to, and is left there; see [playedOut]. Only one seen playing up to it as the post
+      // played on: a seek back to just short of the end forgets that, and it is heard again from there.
+      if (this.audioFinishing.has(el)) {
+        if (playedOut(el.currentTime * 1000, positionMs, span, fileEndMs(el), guardMs, this.maxLeadMs(el) + this.driftAllowedMs(el))) return;
+        this.audioFinishing.delete(el);
+      }
+      // Not measured after a reload: the load is in the stall, and no lead makes up for that.
+      if (this.putAudio(el, positionMs, running ? 'warm' : 'cold', span, !reloaded)) startPlayback(el);
+      return;
+    }
+    if (this.waitForEnd(el, guardMs)) return;
     const atMs = el.currentTime * 1000;
+    // Coming up to its out point, or to the end of its file where that is sooner, or a little past an
+    // out point it was not seen coming up to in time: a repeating section is sent round to its next
+    // pass now, its seek stall early (see [LOOP_WRAP_EARLY_MS]), and one with nothing after it stops
+    // at the out point rather than play what the post does not use. Further past the out point than
+    // [AUDIO_DRIFT_MS] it is somewhere else in the file, and put back below like any drift.
+    const seekLeadMs = this.leadsFor(el).seek ?? this.fallbackLeadMs(el);
+    const endMs = Math.min(span.outMs, fileEndMs(el));
+    const zoneMs = this.wrapZoneMs(el, span, guardMs);
+    if (atMs >= span.inMs && endMs - atMs <= zoneMs && atMs - endMs <= AUDIO_DRIFT_MS) {
+      if (passFollows(atMs, positionMs, span)) {
+        this.wrapAudio(el, atMs, positionMs, span, seekLeadMs, zoneMs, running);
+        return;
+      }
+      this.audioFinishing.add(el);
+      if (atMs >= span.outMs) {
+        el.pause();
+        this.settling.delete(el);
+        return;
+      }
+    }
+    // How far it is from where it should be - round the loop, at a seam; see [soundOffsetMs].
+    const offsetMs = soundOffsetMs(atMs, positionMs, span);
+    // Played through the mixer, whose stall is judged over [ROUTED_SETTLE_MS] and allowed
+    // [ROUTED_DRIFT_MS]; everything else exactly as it always was.
+    const routed = this.mixer.isRouted(el);
+    const maxLeadMs = routed ? MAX_ROUTED_LEAD_MS : MAX_AUDIO_LEAD_MS;
+    const driftMs = routed ? ROUTED_DRIFT_MS : AUDIO_DRIFT_MS;
     const settling = this.settling.get(el);
     if (settling) {
-      if (performance.now() - settling.wallMs > AUDIO_SETTLE_TIMEOUT_MS) {
+      const sinceMs = performance.now() - settling.wallMs;
+      if (sinceMs > (routed ? ROUTED_SETTLE_TIMEOUT_MS : AUDIO_SETTLE_TIMEOUT_MS)) {
         this.settling.delete(el);
-      } else if (atMs < settling.putAtMs + AUDIO_SETTLED_MS) {
+      } else if (soundOffsetMs(atMs, settling.putAtMs, span) < AUDIO_SETTLED_MS || (routed && sinceMs < ROUTED_SETTLE_MS)) {
         // Inside the stall the element is expected to be off by up to its lead; only something
-        // further out than that (the music looping round) is a drift to correct now.
-        if (Math.abs(atMs - positionMs) <= MAX_AUDIO_LEAD_MS + AUDIO_DRIFT_MS) return;
+        // further out than that is a drift to correct now. A routed element is inside it for the
+        // whole of [ROUTED_SETTLE_MS], however far its clock has got: it moves before it stands still.
+        if (Math.abs(offsetMs) <= maxLeadMs + driftMs) return;
       } else {
         this.settling.delete(el);
         // Measured only against a video that is running steadily itself.
-        const behindMs = positionMs - atMs;
-        if (running && settling.learn && Math.abs(behindMs) <= MAX_AUDIO_LEAD_MS) {
-          const leadMs = clamp(settling.leadMs + behindMs, 0, MAX_AUDIO_LEAD_MS);
+        const behindMs = -offsetMs;
+        if (running && settling.learn && Math.abs(behindMs) <= maxLeadMs) {
+          const leadMs = clamp(settling.leadMs + behindMs, 0, maxLeadMs);
           this.leadsFor(el)[settling.kind] = leadMs;
-          lastAudioLeadMs = leadMs;
+          if (routed) lastRoutedLeadMs = leadMs;
+          else lastAudioLeadMs = leadMs;
         }
       }
     }
-    if (Math.abs(atMs - positionMs) > AUDIO_DRIFT_MS) {
+    if (Math.abs(offsetMs) > driftMs) {
       if (this.seekInFlight || this.pendingLoad) {
         // The video is seeking or loading as well, and will stand still for about as long as the
-        // audio does: put exactly, and not measured - its stall would be learned as the audio's.
+        // audio does: put exactly, and not measured - its stall would be learned as the audio's. A
+        // routed element is not judged again until its own stall is over, all the same: judged inside
+        // it, it is put again for a drift that is only the stall; see [ROUTED_SETTLE_MS].
         el.currentTime = positionMs / 1000;
-        this.settling.delete(el);
-      } else {
+        this.notePut(el, positionMs);
+        if (routed) this.settling.set(el, { kind: 'seek', putAtMs: positionMs, leadMs: 0, wallMs: performance.now(), learn: false });
+        else this.settling.delete(el);
+      } else if (!this.putAudio(el, positionMs, 'seek', span, running)) {
         // The clock is running - a cut taken over from the spare, an edit that moved the sound -
         // so the audio's own seek stall is all there is to lead: put with it, and only measured
-        // when the frame loop is the one asking.
-        this.putAudio(el, positionMs, 'seek', running);
+        // when the frame loop is the one asking. Where less is left of the sound than that stall
+        // there is nothing to put it on, and it stops; where that would put it on the last moment
+        // of a pass that another follows, it stops until the playhead is near enough the seam for
+        // it to go round exactly (see [soundPutMs]), and is started again from paused.
+        el.pause();
+        this.settling.delete(el);
       }
     }
   }
 
   /**
-   * Seeks an audio element to `positionMs` plus the stall it is about to have, and - unless `learn`
-   * is false - measures that stall once past it.
+   * Seeks an audio element to `positionMs` plus the stall it is about to have - on the next pass when
+   * that carries a repeating section past its out point - and, unless `learn` is false, measures that
+   * stall once past it. False, and the element left where it was, when that is past the end of
+   * everything that is heard, or on the last moment of a pass another follows; see [soundPutMs].
    */
-  private putAudio(el: HTMLAudioElement, positionMs: number, kind: AudioPut, learn = true): void {
-    const leadMs = this.leadsFor(el)[kind] ?? lastAudioLeadMs;
+  private putAudio(el: HTMLAudioElement, positionMs: number, kind: AudioPut, span: SoundSpan, learn = true): boolean {
+    const leadMs = this.leadsFor(el)[kind] ?? this.fallbackLeadMs(el);
+    const guardMs = audioEndGuardMs();
     // A negative position is sound that is not due yet (see [syncAudio]); it starts at its beginning.
-    const putAtMs = Math.max(0, positionMs + leadMs);
+    const putAtMs = soundPutMs(positionMs, leadMs, span, fileEndMs(el), guardMs, this.wrapZoneMs(el, span, guardMs));
+    if (putAtMs === null) return false;
+    this.seekAudio(el, putAtMs, kind, leadMs, learn);
+    return true;
+  }
+
+  /**
+   * Puts `el` at `putAtMs` and starts measuring the stall that costs. Not moved at all when it is
+   * already within [SEEK_EPSILON_S] of there - never the case for an element that has ended, at the
+   * end of its file, because nothing is put that close to the end (see [soundPutMs]): left there,
+   * `play()` would take it back to the start of the file.
+   */
+  private seekAudio(el: HTMLAudioElement, putAtMs: number, kind: AudioPut, leadMs: number, learn: boolean): void {
     if (Math.abs(el.currentTime * 1000 - putAtMs) > SEEK_EPSILON_S * 1000) el.currentTime = putAtMs / 1000;
+    this.notePut(el, putAtMs);
     this.settling.set(el, { kind, putAtMs, leadMs, wallMs: performance.now(), learn });
+  }
+
+  /**
+   * Remembers where `el` was put - the length WebKit takes when it cuts a file short (see
+   * [recoverLength]) - and that it has something to play again; see [audioFinishing].
+   */
+  private notePut(el: HTMLAudioElement, putAtMs: number): void {
+    this.audioPutAtMs.set(el, putAtMs);
+    this.audioFinishing.delete(el);
+  }
+
+  /**
+   * How long before the end of the pass it is on - its out point, or the end of its file where that
+   * is sooner - a playing element is sent round to the next pass: its seek stall, and never less than
+   * the checks need to see it there in time; see [LOOP_WRAP_EARLY_MS]. A section so short that this
+   * would be most of it is sent round from halfway, so each pass is heard at all.
+   */
+  private wrapZoneMs(el: HTMLAudioElement, span: SoundSpan, guardMs: number): number {
+    const seekLeadMs = this.leadsFor(el).seek ?? this.fallbackLeadMs(el);
+    return Math.min(Math.max(seekLeadMs, guardMs + LOOP_WRAP_EARLY_MS), passMs(span) / 2 || Infinity);
+  }
+
+  /**
+   * Sends a playing element on to its section's next pass, its seek stall ahead of the seam; see
+   * [LOOP_WRAP_EARLY_MS]. Put where the playhead will be once the stall is over, and measured like
+   * any seek - unless that is before the in point, when it is put on the in point instead (see
+   * [wrapAimMs]), and what it is measured against is not where it was put.
+   *
+   * Aimed at the stretch at the end of that pass where it would be sent round again (`zoneMs`) - only
+   * on a section not much longer than the stall, where which pass the playhead is on is anybody's
+   * guess - it would come out of this stall straight into the next one, a put 50 ms after a put. It is
+   * sent on round to the in point at once instead.
+   */
+  private wrapAudio(el: HTMLAudioElement, atMs: number, positionMs: number, span: SoundSpan, leadMs: number, zoneMs: number, running: boolean): void {
+    let aimMs = wrapAimMs(atMs, positionMs, leadMs, span);
+    if (aimMs >= Math.min(span.outMs, fileEndMs(el)) - zoneMs) aimMs -= passMs(span);
+    this.seekAudio(el, Math.max(span.inMs, aimMs), 'seek', leadMs, running && aimMs >= span.inMs);
+  }
+
+  /**
+   * Whether a playing `el` is at the end of its file, and so is to be left alone for now; see
+   * [AUDIO_END_GUARD_MS]. It says it has ended within a few tens of milliseconds, and is put from
+   * there like any paused element. One still reported playing after [AUDIO_END_WAIT_MS] is paused
+   * here instead, which comes to the same: by then no notice can still be on its way.
+   */
+  private waitForEnd(el: HTMLAudioElement, guardMs: number): boolean {
+    if (!atFileEnd(el, guardMs)) {
+      this.audioAtEnd.delete(el);
+      return false;
+    }
+    const now = performance.now();
+    const since = this.audioAtEnd.get(el);
+    if (since === undefined) {
+      this.audioAtEnd.set(el, now);
+    } else if (now - since > AUDIO_END_WAIT_MS) {
+      this.audioAtEnd.delete(el);
+      el.pause();
+      this.settling.delete(el);
+    }
+    return true;
+  }
+
+  /**
+   * Loads `el`'s file again when WebKit has cut its length short under it: 'loaded' when it has just
+   * done so, 'held' when it is cut short but was loaded again too recently to be loaded once more yet,
+   * and null for a file that is as long as it was.
+   *
+   * That is what a seek landing between the end of the file and WebKit's notice of it does (see
+   * [AUDIO_END_GUARD_MS]): the file's length becomes wherever the seek put the element. Nothing the
+   * preview does now puts it there, but an element it happens to anyway is lost for the rest of the
+   * play without this - it ends the moment it starts, every time, and the drift correction seeks it
+   * on every frame. Only a new load forgets the length the old one settled on.
+   *
+   * Told by all four at once: the element sits at the end of a file it said was more than
+   * [COLLAPSED_BY_MS] longer before, which is that much shorter than the stretch of it the post plays,
+   * and which now ends where the preview last put the element ([COLLAPSED_AT_PUT_MS]). A length that
+   * comes down while the element is somewhere else in the file - a length that was estimated at first,
+   * and has been read properly since - is not it; nor is one that comes down to where the file really
+   * ends, as WebKit's own correction of an estimate does once the element plays up to it, which has
+   * nothing to do with any put and would otherwise be loaded again at every seam.
+   *
+   * Not loaded more often than [RELOAD_RETRY_MS], so a file that truly is shorter than the post thinks
+   * cannot keep it loading. In between it is held, paused where it is - which keeps all four true for
+   * when it may be loaded again. Started, all it could play is the little the file now says it has,
+   * over and over, and the drift correction would put it back to the start of that every few frames:
+   * the preview's own stutter in place of the silence it waits in, and a put that no longer says where
+   * the file was cut.
+   */
+  private recoverLength(el: HTMLAudioElement, span: SoundSpan, guardMs: number): 'loaded' | 'held' | null {
+    const lengthMs = fileEndMs(el);
+    if (!Number.isFinite(lengthMs)) return null;
+    let known = this.audioLengths.get(el);
+    if (!known) {
+      known = { longestMs: lengthMs, reloadedAt: Number.NEGATIVE_INFINITY };
+      this.audioLengths.set(el, known);
+    }
+    if (lengthMs > known.longestMs) known.longestMs = lengthMs;
+    const putAtMs = this.audioPutAtMs.get(el);
+    const collapsed =
+      lengthMs + COLLAPSED_BY_MS < known.longestMs &&
+      lengthMs + COLLAPSED_BY_MS < span.outMs &&
+      putAtMs !== undefined &&
+      Math.abs(lengthMs - putAtMs) < COLLAPSED_AT_PUT_MS &&
+      atFileEnd(el, guardMs);
+    if (!collapsed) return null;
+    const now = performance.now();
+    if (now - known.reloadedAt < RELOAD_RETRY_MS) return 'held';
+    known.reloadedAt = now;
+    debugWarn('[ve-preview] a sound file came back shorter than it is; loading it again', { was: known.longestMs, now: lengthMs });
+    const src = el.src;
+    el.pause();
+    this.settling.delete(el);
+    this.audioAtEnd.delete(el);
+    this.audioPutAtMs.delete(el);
+    this.audioFinishing.delete(el);
+    // Emptied first, so the load after it starts from nothing rather than from the player it had.
+    el.removeAttribute('src');
+    el.load();
+    if (src) el.src = src;
+    el.load();
+    return 'loaded';
   }
 
   /** How early sound has to start on this element for it to be heard on time - its longest known stall. */
   private leadWindow(el: HTMLAudioElement): number {
     const leads = this.leadsFor(el);
-    return leads.warm ?? leads.cold ?? lastAudioLeadMs;
+    return leads.warm ?? leads.cold ?? this.fallbackLeadMs(el);
   }
 
+  /** The stalls learned for `el` as it plays now: routed through the mixer or not; see [routedLeadMs]. */
   private leadsFor(el: HTMLAudioElement): Partial<Record<AudioPut, number>> {
-    let leads = this.audioLeadMs.get(el);
+    const table = this.mixer.isRouted(el) ? this.routedLeadMs : this.audioLeadMs;
+    let leads = table.get(el);
     if (!leads) {
       leads = {};
-      this.audioLeadMs.set(el, leads);
+      table.set(el, leads);
     }
     return leads;
+  }
+
+  /** The lead for a put of `el` that nothing has been learned for yet; see [DEFAULT_AUDIO_LEAD_MS]. */
+  private fallbackLeadMs(el: HTMLAudioElement): number {
+    return this.mixer.isRouted(el) ? lastRoutedLeadMs : lastAudioLeadMs;
+  }
+
+  /** The longest stall a lead is learned for on `el`; see [MAX_AUDIO_LEAD_MS] and [MAX_ROUTED_LEAD_MS]. */
+  private maxLeadMs(el: HTMLAudioElement): number {
+    return this.mixer.isRouted(el) ? MAX_ROUTED_LEAD_MS : MAX_AUDIO_LEAD_MS;
+  }
+
+  /** How far `el` may be from the playhead before it is put back; see [AUDIO_DRIFT_MS] and [ROUTED_DRIFT_MS]. */
+  private driftAllowedMs(el: HTMLAudioElement): number {
+    return this.mixer.isRouted(el) ? ROUTED_DRIFT_MS : AUDIO_DRIFT_MS;
   }
 
   /**
@@ -1806,6 +2162,13 @@ export class PreviewPlayer implements EditorPlayer {
       was.pause();
       was.removeAttribute('src');
       was.load();
+    }
+    // What was known about the file each of them had is not true of the next one.
+    for (const changed of [was, el]) {
+      this.audioLengths.delete(changed);
+      this.audioPutAtMs.delete(changed);
+      this.audioAtEnd.delete(changed);
+      this.audioFinishing.delete(changed);
     }
     el.pause();
     if (url) {

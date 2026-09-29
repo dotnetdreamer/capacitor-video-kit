@@ -61,9 +61,10 @@ object MediaLabels {
      * phone footage can cost seconds (see KEYFRAMES FIRST above), and a page asking about a clip waits
      * for a while and then gives up on it - lighsnip's One tap after 15 s. The answer has to come
      * before that: past this no new frame is started, so a call ends within this and one frame more,
-     * with the frames it has. The first frame is always read, however long it takes. Counted from
-     * when the call was made, its wait for a turn ([AT_ONCE]) included, since the page's own wait
-     * began then too.
+     * with the frames it has. The first frame is always tried, however long the call has waited, and
+     * frames are counted as they are tried, not as they are read; see [lookWithin]. Counted from when
+     * the call was made, its wait for a turn ([AT_ONCE]) included, since the page's own wait began
+     * then too.
      */
     const val LOOK_BUDGET_MS = 8_000L
 
@@ -217,6 +218,38 @@ object MediaLabels {
     }
 
     /**
+     * The frames `look` reads for `cuts`, in the order they come, for as long as [LOOK_BUDGET_MS]
+     * allows (`deadline`, on `now`'s clock): past it no new cut is started, and what has been read is
+     * the answer. `look` answers null for a cut that gave no frame - a seek that decoded nothing, or a
+     * frame already read, which it tells from the frames read so far that it is handed - and
+     * `onOutOfTime` hears how many frames there were when the budget stopped the look.
+     *
+     * It counts cuts TRIED, not frames read, as the browser's engine does (`web/labels.ts`). Counted by
+     * frames read, the budget never started for a clip none of whose seeks gave a frame: every cut it
+     * planned was tried, each for as long as `MediaMetadataRetriever` takes to give up - seconds, for
+     * an exact frame of phone footage - and one of the [AT_ONCE] turns was held all that while, as
+     * every clip behind it waited. The first cut is still tried however long the call has waited, so
+     * a slow file gets its one look.
+     */
+    fun lookWithin(
+        cuts: List<Cut>,
+        deadline: Long,
+        now: () -> Long = System::nanoTime,
+        onOutOfTime: (read: Int) -> Unit = {},
+        look: (cut: Cut, read: List<Frame>) -> Frame?,
+    ): List<Frame> {
+        val out = ArrayList<Frame>(cuts.size)
+        for ((tried, cut) in cuts.withIndex()) {
+            if (tried > 0 && now() > deadline) {
+                onOutOfTime(out.size)
+                break
+            }
+            look(cut, out)?.let { out += it }
+        }
+        return out
+    }
+
+    /**
      * The picture, decoded to at least [LOOK_SIZE] on its long edge and at most twice that, and the
      * quarter turns its orientation tag asks for, which ML Kit applies itself
      * (`InputImage.fromBitmap(bitmap, rotation)`). A mirrored tag is read as its turn alone: a picture
@@ -302,12 +335,11 @@ object MediaLabels {
             }
             val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             val plan = plan(durationMs, timesMs, frames)
-            val out = ArrayList<Frame>(plan.times.size)
-            for (cut in cuts(plan.times, keyframesAt(ctx, uri, plan.times))) {
-                if (out.isNotEmpty() && System.nanoTime() > deadline) {
-                    Log.i(TAG, "looked at $uri for ${LOOK_BUDGET_MS} ms; answering with ${out.size} frames")
-                    break
-                }
+            val out = lookWithin(
+                cuts(plan.times, keyframesAt(ctx, uri, plan.times)),
+                deadline,
+                onOutOfTime = { read -> Log.i(TAG, "looked at $uri for ${LOOK_BUDGET_MS} ms; answering with $read frames") },
+            ) { cut, read ->
                 val atKeyframe = cut.keyframeMs != null
                 // At a keyframe the seek is to the keyframe itself, so the frame is the one looked up.
                 val seekMs = cut.keyframeMs ?: cut.timeMs
@@ -318,13 +350,13 @@ object MediaLabels {
                     // forward from; the keyframe nearest it is still a frame of this part of the clip.
                     bitmap = grab(retriever, cut.timeMs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 }
-                if (bitmap == null) continue
-                if (out.any { it.timeMs == seekMs }) {
+                if (bitmap == null) return@lookWithin null
+                if (read.any { it.timeMs == seekMs }) {
                     bitmap.recycle()
-                    continue
+                    return@lookWithin null
                 }
                 try {
-                    out += Frame(seekMs, labeler.classify(bitmap, 0, minConfidence))
+                    Frame(seekMs, labeler.classify(bitmap, 0, minConfidence))
                 } finally {
                     bitmap.recycle()
                 }
