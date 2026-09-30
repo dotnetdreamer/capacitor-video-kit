@@ -561,7 +561,6 @@ export class VeTextSheet {
       <button
         type="button"
         class={{ 'ts__tool': true, 'ts__tool--on': on }}
-        aria-label={label}
         // A string, because the vdom removes an attribute set to boolean false and a button with no
         // `aria-pressed` at all is announced as an ordinary one rather than as an unpressed toggle.
         aria-pressed={String(on)}
@@ -569,6 +568,13 @@ export class VeTextSheet {
         onClick={() => this.togglePanel(panel)}
       >
         {glyph}
+        {/*
+          The name is the button's own hidden text and NOT an `aria-label`. With `aria-pressed`
+          beside it, an `aria-label` reached Android's WebView as a ToggleButton with no name, so
+          only "Alignment: ..." (a plain button) was left with one and the flows could not find
+          "Font". See `.sheet__hidden-name` in sheet-common.css.
+        */}
+        <span class="sheet__hidden-name">{label}</span>
       </button>
     );
   }
@@ -606,13 +612,20 @@ export class VeTextSheet {
               key={style.id}
               class={{ 'ts__font-tile': true, 'ts__font-tile--on': style.id === activeStyleId }}
               aria-pressed={String(style.id === activeStyleId)}
-              aria-label={style.label}
               onMouseDown={keepFocus}
               onClick={() => this.pickStyle(style.id)}
             >
-              <span class="ts__font-name" style={style.css}>
+              {/*
+                The sample is only a picture of the name: it is drawn in the style itself, and a
+                style may be all capitals (Tallhaus), which a browser may pass on as "TALLHAUS".
+                The name is the hidden copy beside it instead of an `aria-label`, because an
+                `aria-label` beside `aria-pressed` never reaches Android's WebView as the name (see
+                `.sheet__hidden-name` in sheet-common.css). It reads exactly as the label did.
+              */}
+              <span class="ts__font-name" style={style.css} aria-hidden="true">
                 {style.label}
               </span>
+              <span class="sheet__hidden-name">{style.label}</span>
             </button>
           ))}
         </div>

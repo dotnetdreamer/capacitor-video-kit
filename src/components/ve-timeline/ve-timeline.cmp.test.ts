@@ -378,6 +378,21 @@ describe('the take being recorded', () => {
   });
 });
 
+describe('a voiceover take', () => {
+  it('is an image named Voiceover, a name Android’s WebView passes on', async () => {
+    const { store, tl } = await mount();
+    expect(store.addVoiceover({ id: 'vo-1', uri: 'take.m4a', startMs: 0, durationMs: 2000, volume: 1 })).toBe(true);
+    const take = () => root(tl).querySelector<HTMLElement>('[data-hit="voice"][data-id="vo-1"]');
+    await until('the take', () => take() !== null);
+
+    // A label on a div with no role reached Android with no name, so editor-voiceover.yaml could
+    // not tap "Voiceover". As an image the label is the content description there, and the
+    // VoiceOver label on iOS.
+    expect(take()!.getAttribute('role')).toBe('img');
+    expect(take()!.getAttribute('aria-label')).toBe('Voiceover');
+  });
+});
+
 describe('carrying a segment to another layer', () => {
   it('opens a layer of its own when the segment is let go in the gap under the base track', async () => {
     const { store, tl } = await mount();

@@ -6,9 +6,10 @@ import type { AlertButton } from './alert.types';
 /**
  * The editor's confirmation, for a host that has no dialog of its own.
  *
- * The package asks the customer two questions - discard the edits on the way out, and what to do
- * when a render failed - and both of them went to Ionic's `AlertController` in the app. A host
- * application usually has a dialog already, one that looks like the rest of it, so
+ * The package asks the customer two questions - what happens to the edits on the way out (Discard,
+ * or Save and exit on a host that keeps drafts), and what to do when a render failed - and both of
+ * them went to Ionic's `AlertController` in the app. A host application usually has a dialog
+ * already, one that looks like the rest of it, so
  * `EditorPlatformHost.confirm` is where the question goes when there is one. This is what happens
  * when there is not: a browser, a host that has not wired one up, and the dev harness. [EditorConfirm]
  * in `editor-confirm.ts` is the piece that decides between the two, and it is the only thing that

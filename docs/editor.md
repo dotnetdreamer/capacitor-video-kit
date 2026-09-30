@@ -108,7 +108,7 @@ One element, four properties, two events.
 | Event | Detail | When |
 |---|---|---|
 | `veDone` | `VideoEditorResult` | The customer tapped Next and the render, if there was one, finished. |
-| `veCancel` | `EditorCancelReason`, `'back'` or `'exit'` | They left without a video. Two reasons because a host's own navigation has to tell a back press from a discard. |
+| `veCancel` | `EditorCancelReason`, `'back'` or `'exit'` | They left without a video. Two reasons because a host's own navigation has to tell a back press from a discard. Back on an edit with changes asks first: "Discard edits?", or "Save and exit?" on a host that keeps drafts and says so with `editing.savesDrafts` ([The edits the host settles](editor-customization.md#the-edits-the-host-settles)). |
 
 ```ts
 interface VideoEditorResult {

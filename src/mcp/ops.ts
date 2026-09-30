@@ -1061,12 +1061,13 @@ export const OP_NAMES: readonly string[] = Object.freeze(Object.keys(OPS).sort()
  * property too many to TypeScript - which is exactly how an app writes its editor's settings, and
  * what the README tells a host to hand over.
  *
- * The other two have no op to govern, and are taken and left unread. `replaceKeepsLength` decides
+ * The other three have no op to govern, and are taken and left unread. `replaceKeepsLength` decides
  * what the Replace GESTURE does to a segment somebody already sized, and `replaceClipSource` is not
  * that gesture: its caller states the length outright (see the note on the op). `pictures` decides
  * what the clip pickers offer, and there is no picker here: `insertClip` and `addVideoTrack` put a
- * source down by its key, as footage. `zoom` is different in kind: it decides whether a post may
- * hold a kind of edit at all, and on this server, off, the answer is that it may not.
+ * source down by its key, as footage. `savesDrafts` decides the words of the question the editor's
+ * Back asks, and there is no editor here to leave. `zoom` is different in kind: it decides whether a
+ * post may hold a kind of edit at all, and on this server, off, the answer is that it may not.
  */
 export type McpEditingOptions = EditorEditingOptions;
 

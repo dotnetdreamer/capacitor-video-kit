@@ -254,9 +254,11 @@ follow `playbackRate`, and a clip plays at anything from a quarter to four times
 element played through Web Audio also loses about 440 ms of its clock over the second after every
 start and every seek, where one played straight to the speaker loses about 45 ms (iOS 26.5
 simulator), so the preview starts it that much early, judges where it is only once that second is
-over, and puts it back in step only when it is more than 300 ms out, not the 200 ms it allows
-elsewhere; judged sooner, it had been put again every 0.7 s and ran at 0.6x. The export is unaffected
-by all of it, and none of it has been listened to on a device yet.
+over, and puts it back in step only when it is more than 300 ms out, not the 200 ms it allows on
+Chromium; judged sooner, it had been put again every 0.7 s and ran at 0.6x. Every WebKit audio element
+is judged that way, played through Web Audio or not, because Safari on a Mac stalls as long without
+it (see [Web](platforms.md#web)). The export is unaffected by all of it, and none of it has been
+listened to on a device yet.
 
 ## Entry points
 

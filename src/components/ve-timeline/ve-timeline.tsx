@@ -3670,6 +3670,13 @@ export class VeTimeline {
             data-hit="voice"
             data-id={take.id}
             style={{ left: `${take.x}px`, width: `${take.w}px` }}
+            // An image, named. A label on a div with no role is not a name ARIA allows, and Android's
+            // WebView dropped it: the take reached the tree with no name, so TalkBack said nothing
+            // and editor-voiceover.yaml could not tap "Voiceover". An image's label is its content
+            // description on Android and its label in VoiceOver. Not a button, although a finger
+            // selects it: that tap comes through the pointer path by `data-hit` and the take has no
+            // click of its own, so a screen reader's double tap on a "button" would do nothing.
+            role="img"
             aria-label="Voiceover"
           >
             {this.waveSvg(waves.get(take.id) ?? null)}

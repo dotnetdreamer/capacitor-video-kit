@@ -219,6 +219,32 @@ export function audioEndGuardMs(): number {
 }
 
 /**
+ * Whether this is Apple's WebKit - Safari on a Mac, and every WebView on an iPhone or an iPad - whose
+ * `<audio>` clock can lose a long and uneven stretch over the second after a start or a seek: always on
+ * a Mac, and on a phone once the element is played through Web Audio. [audioSlowToSeekOnItsOwn] says
+ * which of those the player judges once that second is over; see [PreviewPlayer]'s
+ * [SLOW_SEEK_SETTLE_MS]. Chromium's, on a desktop and in Android's WebView, loses a few tens of
+ * milliseconds at once and is judged as it always was. Asked each time rather than remembered, as
+ * [audioEndGuardMs] is: it is one comparison.
+ */
+export function audioSlowToSeek(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /^Apple/.test(navigator.vendor ?? '');
+}
+
+/**
+ * Whether an audio element here is slow to seek ON ITS OWN, played straight to the speaker: Apple's
+ * WebKit where a page can set `volume` ([volumeIsWritable]), which is Safari on a Mac - and so routes
+ * nothing through [PreviewMixer]. An iPhone's or an iPad's element is slow to seek only once it is
+ * routed; played straight to the speaker it loses about 45 ms. [PreviewPlayer] asks, because the two
+ * are put with different leads before their own have been measured; see its
+ * [DEFAULT_SLOW_SEEK_LEADS_MS].
+ */
+export function audioSlowToSeekOnItsOwn(): boolean {
+  return audioSlowToSeek() && volumeIsWritable();
+}
+
+/**
  * The stretch of a sound file one `<audio>` element plays, and for how much longer: the music's
  * section, which may repeat, or a voiceover take. `inMs` and `outMs` are positions in the FILE; `outMs`
  * is Infinity when the length of the file is not known, and then nothing below reads it.

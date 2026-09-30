@@ -50,6 +50,15 @@ interface Put {
 }
 
 /**
+ * A stretch of the wall clock in which an element's clock stands still after a start or a seek:
+ * `afterMs` after it, for `forMs`.
+ */
+interface Still {
+  afterMs: number;
+  forMs: number;
+}
+
+/**
  * How a ROUTED element's clock stands still after a start or a seek - one played through the preview's
  * mixer, which is every new sound on iOS (see [PreviewMixer]). Measured in the app's WebView on the
  * iOS 26.5 simulator (2026-09-29, ios-probe r3): a seek or a start costs a routed `<audio>` about
@@ -59,17 +68,84 @@ interface Put {
  * for `forMs`: the loss comes AFTER the first moments, which is what a check made a few hundred
  * milliseconds after a put reads as an element that has settled, when it has not.
  */
-interface RoutedStall {
-  afterMs: number;
-  forMs: number;
-}
+type RoutedStall = Still;
 
 const ROUTED_STALL: RoutedStall = { afterMs: 300, forMs: 440 };
 
 /**
+ * Each put's stall, taken a put at a time from `starts` for a `play()` and from `seeks` for a seek of
+ * an element that is playing. A paused element that is put and then played - every start the player
+ * makes - is one start: its clock stands still from the `play()`, as WebKit's does, and the seek
+ * before it takes nothing.
+ */
+interface UnevenStalls {
+  starts: readonly (readonly Still[])[];
+  seeks: readonly (readonly Still[])[];
+}
+
+/**
+ * How the music element's clock stands still after a start or a seek in WebKit on a Mac, which can set
+ * `volume` and so routes nothing - measured in the web editor on Playwright's build of Safari's engine
+ * (2026-09-29, verify-web runs), the same shape as a routed iPhone's and about as long. A seek costs
+ * 390-475 ms of the clock over the next 0.8 s: about 150 ms of it at once, then a stretch of running,
+ * then the rest. A start costs less, 285-334 ms. No two puts cost the same. Read a few hundred
+ * milliseconds in, the element looks settled with the first 150 ms or so lost, and 0.7 s after the put
+ * it is the rest of the stall behind: the web editor's music was seeked again that often, up to 30
+ * times in a 24 s play.
+ *
+ * Modelled as a turn of four starts and a turn of five seeks, each lost at once, then run on, then lost
+ * again: starts of 310, 330, 300 and 320 ms in all, and seeks of 440, 400, 460, 390 and 420, the first
+ * part 120-190 ms of each. The running in between is long enough for a check made once the clock is
+ * 300 ms past where it was put to fall inside it, as the measurements say it did.
+ */
+const MAC_STALLS: UnevenStalls = {
+  starts: [
+    [
+      { afterMs: 0, forMs: 150 },
+      { afterMs: 150 + 320, forMs: 160 },
+    ],
+    [
+      { afterMs: 0, forMs: 130 },
+      { afterMs: 130 + 330, forMs: 200 },
+    ],
+    [
+      { afterMs: 0, forMs: 170 },
+      { afterMs: 170 + 310, forMs: 130 },
+    ],
+    [
+      { afterMs: 0, forMs: 140 },
+      { afterMs: 140 + 320, forMs: 180 },
+    ],
+  ],
+  seeks: [
+    [
+      { afterMs: 0, forMs: 150 },
+      { afterMs: 150 + 330, forMs: 290 },
+    ],
+    [
+      { afterMs: 0, forMs: 120 },
+      { afterMs: 120 + 350, forMs: 280 },
+    ],
+    [
+      { afterMs: 0, forMs: 190 },
+      { afterMs: 190 + 330, forMs: 270 },
+    ],
+    [
+      { afterMs: 0, forMs: 130 },
+      { afterMs: 130 + 340, forMs: 260 },
+    ],
+    [
+      { afterMs: 0, forMs: 160 },
+      { afterMs: 160 + 330, forMs: 260 },
+    ],
+  ],
+};
+
+/**
  * A media element with nothing to decode, whose clock runs off the (faked) wall clock while it plays,
  * standing still for `stallMs` after every start and every seek, as a phone's audio output does - or,
- * once it is routed through the mixer's graph, as [RoutedStall] says.
+ * once it is routed through the mixer's graph, as [RoutedStall] says, or as [unevenStalls] says where
+ * a test hands it some.
  */
 class FakeMedia extends EventTarget {
   src = '';
@@ -100,15 +176,20 @@ class FakeMedia extends EventTarget {
   /** Handed to the mixer's graph (see [route]); its stall is then [routedStall]. */
   routed = false;
   routedStall: RoutedStall = ROUTED_STALL;
+  /**
+   * Not routed, and stalling as WebKit's element does on a Mac ([MAC_STALLS]): each start and each seek
+   * costs the next of its kind in turn, in place of `stallMs`.
+   */
+  unevenStalls: UnevenStalls | null = null;
+  private readonly handedOut = { starts: 0, seeks: 0 };
 
   /**
-   * Where the clock was put last, the wall time it was put there, and the stretch of wall time after
-   * that in which it stands still: straight after the put, or - routed - a little after it.
+   * Where the clock was put last, the wall time it was put there, and the stretches of wall time after
+   * that in which it stands still: straight after the put, a little after it - routed - or both.
    */
   private at = 0;
   private since = 0;
-  private stillFrom = 0;
-  private stillTo = 0;
+  private stills: Array<[fromMs: number, toMs: number]> = [];
   private endTimer: ReturnType<typeof setTimeout> | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -131,7 +212,8 @@ class FakeMedia extends EventTarget {
   set currentTime(seconds: number) {
     this.puts.push({ fromS: this.position(), toS: seconds, playing: !this.paused, playheadMs: this.playhead() });
     this.moveTo(seconds);
-    this.stall();
+    // A paused element's clock stands still from its `play()`: put and then played, it is one start.
+    if (!this.paused) this.stall('seeks');
     // A seek before the clock gets to the end means it never did; a notice already on its way is
     // not called back by anything - which is the whole of WebKit's trouble.
     this.planEnd();
@@ -166,7 +248,7 @@ class FakeMedia extends EventTarget {
     if (this.ended) this.at = 0;
     if (this.paused) {
       this.paused = false;
-      this.stall();
+      this.stall('starts');
       this.planEnd();
       this.fire('play');
     }
@@ -195,8 +277,7 @@ class FakeMedia extends EventTarget {
   jumpTo(seconds: number): void {
     this.moveTo(seconds);
     this.since = performance.now();
-    this.stillFrom = this.since;
-    this.stillTo = this.since;
+    this.stills = [];
     this.planEnd();
   }
 
@@ -208,7 +289,7 @@ class FakeMedia extends EventTarget {
     this.routed = true;
     if (this.paused) return;
     this.at = this.position();
-    this.stall();
+    this.stall('seeks');
     this.planEnd();
   }
 
@@ -231,25 +312,38 @@ class FakeMedia extends EventTarget {
   }
 
   /** Starts the stall a start or a seek costs, from now. */
-  private stall(): void {
+  private stall(kind: keyof UnevenStalls): void {
     const now = performance.now();
     this.since = now;
-    this.stillFrom = now + (this.routed ? this.routedStall.afterMs : 0);
-    this.stillTo = this.stillFrom + (this.routed ? this.routedStall.forMs : this.stallMs);
+    let pattern: readonly Still[] = [{ afterMs: 0, forMs: this.stallMs }];
+    if (this.routed) pattern = [this.routedStall];
+    else if (this.unevenStalls) {
+      const turn = this.unevenStalls[kind];
+      pattern = turn[this.handedOut[kind]++ % turn.length];
+    }
+    this.stills = pattern.map(({ afterMs, forMs }) => [now + afterMs, now + afterMs + forMs]);
   }
 
   /** How long the clock has actually run since it was put, at wall time `now`. */
   private runMs(now: number): number {
-    const still = Math.max(0, Math.min(now, this.stillTo) - Math.max(this.since, this.stillFrom));
+    let still = 0;
+    for (const [from, to] of this.stills) still += Math.max(0, Math.min(now, to) - Math.max(this.since, from));
     return Math.max(0, now - this.since) - still;
   }
 
   /** The wall time from `now` until the clock has run `ms` more. */
   private wallFor(ms: number, now: number): number {
-    if (now >= this.stillTo) return ms;
-    if (now >= this.stillFrom) return this.stillTo - now + ms;
-    const before = this.stillFrom - now;
-    return ms <= before ? ms : ms + (this.stillTo - this.stillFrom);
+    let at = now;
+    let left = ms;
+    for (const [from, to] of this.stills) {
+      if (to <= at) continue;
+      if (from > at) {
+        if (left <= from - at) return at + left - now;
+        left -= from - at;
+      }
+      at = to;
+    }
+    return at + left - now;
   }
 
   private moveTo(seconds: number): void {
@@ -392,22 +486,31 @@ interface RigOptions {
   take?: Take;
   stallMs?: number;
   /**
-   * An iPhone: a WebView that ignores `volume`, gives the page an audio session and a context, and so
-   * plays a post's music through the mixer whenever the post has a level for it (see [levelsInUse]).
+   * An iPhone whose WebView gives the page an audio session and a context, and so plays a post's music
+   * through the mixer whenever the post has a level for it (see [levelsInUse]). WebKit without it is an
+   * iPhone's WebView all the same - a touch screen, and a `volume` the page cannot set - but one with no
+   * audio session, where nothing is ever routed.
    */
   iphone?: boolean;
+  /**
+   * WebKit on a Mac: no touch screen, a `volume` the page can set, and so nothing ever routed, whose
+   * elements are slow to seek on their own (see [MAC_STALLS]) and start from leads of their own.
+   */
+  mac?: boolean;
 }
 
 /**
  * A player over a half-minute clip, `music` and `take`, with its elements ending their files as
  * `engine`'s do. The start and seek stall of the music and the voiceover is 100 ms on WebKit, which is
- * what the iOS simulator measured, and 30 ms on Chromium, unless `stallMs` says otherwise.
+ * what the iOS simulator measured, and 30 ms on Chromium, unless `stallMs` says otherwise. WebKit is an
+ * iPhone's unless `mac` says otherwise: the WebKit every measurement behind these tests was made on,
+ * the Mac's aside.
  */
-async function rig(engine: Engine, music: EditMusic | null, { take, stallMs, iphone = false }: RigOptions = {}): Promise<Rig> {
+async function rig(engine: Engine, music: EditMusic | null, { take, stallMs, iphone = false, mac = false }: RigOptions = {}): Promise<Rig> {
   vi.resetModules();
   Object.defineProperty(navigator, 'vendor', { value: engine === 'webkit' ? 'Apple Computer, Inc.' : 'Google Inc.', configurable: true });
+  if (engine === 'webkit' && !mac) Object.defineProperty(navigator, 'maxTouchPoints', { value: 5, configurable: true });
   if (iphone) {
-    Object.defineProperty(navigator, 'maxTouchPoints', { value: 5, configurable: true });
     Object.defineProperty(navigator, 'audioSession', { value: { type: 'auto' }, configurable: true });
     vi.stubGlobal('AudioContext', FakeContext);
     // The page as the app on iOS serves it, which is what "this page's own file" is measured against.
@@ -670,9 +773,11 @@ describe('a repeating track at its seams, on WebKit', () => {
 
   it('starts a play that begins just short of a seam on the next pass, not on the last moment of this one', async () => {
     const r = await rig('webkit', LOOPED);
-    // Somewhere else in the track first, so the put at the seam is one the element has to be moved for.
+    // Somewhere else in the track first, so the put at the seam is one the element has to be moved for -
+    // and for long enough for its stall to be learned: WebKit's element is judged only a second and a
+    // bit after it was put (the player's SLOW_SEEK_SETTLE_MS).
     await playFrom(r, 5000);
-    await playTo(r, 5500);
+    await playTo(r, 6500);
     r.player.pause();
     const plays = r.music.plays.length;
     // 175 ms short of the end of the file: with the 100 ms lead learned on that first play, the put
@@ -740,9 +845,10 @@ function trackDriftMs(r: Rig): number {
 describe('a repeating track whose file WebKit reads 25 ms short of its section', () => {
   it('waits, paused and not seeked, when its element ends 25 ms before the section does, and goes round with the playhead', async () => {
     const r = await rig('webkit', LOOPED_TRACK);
-    // A play somewhere else first, so the element's 100 ms stall is learned and it runs in step.
+    // A play somewhere else first, so the element's 100 ms stall is learned and it runs in step: long
+    // enough for WebKit's element to be judged, a second and a bit after it was put.
     await playFrom(r, 5000);
-    await playTo(r, 5500);
+    await playTo(r, 6500);
     r.player.pause();
     // Started here, the frame loop looks at the element at 11.836 s, 11.884 s and 11.932 s of the post.
     // At 11.884 s it has ended its file, and a put with its stall would land 16 ms into the 25 ms the
@@ -783,9 +889,10 @@ describe('a repeating track whose file WebKit reads 25 ms short of its section',
 
   it('goes round every seam without reaching the end of its file, and stays within the drift allowed', async () => {
     const r = await rig('webkit', LOOPED_TRACK);
-    // A play somewhere else first, so the element's stall is learned and it starts in step.
+    // A play somewhere else first, so the element's stall is learned and it starts in step: long enough
+    // for WebKit's element to be judged, a second and a bit after it was put.
     await playFrom(r, 5000);
-    await playTo(r, 5500);
+    await playTo(r, 6500);
     r.player.pause();
     await playFrom(r, 0);
     const first = r.music.puts.length;
@@ -976,7 +1083,8 @@ async function sampleTo(r: Rig, toMs: number): Promise<Sample[]> {
 
 /**
  * The samples taken once `quietMs` had gone by since the element was last put: where it has settled,
- * rather than inside the stall of a put, where a routed element is expected to be off by up to its lead.
+ * rather than inside the stall of a put, where a slow-to-seek element is expected to be off by up to its
+ * lead.
  */
 function settled(samples: readonly Sample[], quietMs: number): Sample[] {
   // The first sample to see each count of puts stands for when that put was made: the checks that
@@ -1060,10 +1168,156 @@ describe('a track played through the mixer, on an iPhone', () => {
     for (const sample of settled(samples, 1300)) expect(Math.abs(sample.driftMs)).toBeLessThan(40);
   });
 
-  it('is judged as it always was once it is not routed: put back as soon as it is 200 ms out, with the short stall', async () => {
+  it("is judged as Chromium's is when it is not routed: put back as soon as it is 200 ms out", async () => {
     // The same phone and the same track at full level with no fades: nothing for the mixer to do, so
-    // the element is never routed, and a quarter of a second out is put back at once.
+    // the element is never routed and loses only about 45 ms to a put. It is NOT slow to seek, and is
+    // judged as Chromium's element is. Judged over the long second with the 300 ms a Mac's is allowed,
+    // it was left about 0.3 s ahead of a phone's slow-to-start picture for a whole pass, and each seam
+    // carried that on (the iOS 26.5 simulator, 2026-09-29): a knock under 300 ms is the case that
+    // tells the two rules apart.
     const r = await rig('webkit', { ...ROUTED_TRACK, volume: 1 }, { iphone: true, stallMs: 45 });
+    await playFrom(r, 0);
+    await playTo(r, 3000);
+    expect(r.music.routed).toBe(false);
+    // Started with the lead every element starts from, and not a Mac's.
+    expect(r.music.puts[0].toS).toBeCloseTo(0.18, 3);
+    const puts = r.music.puts.length;
+    // Moved to 250 ms ahead of the picture, wherever the start left it: past the 200 ms this element is
+    // allowed, and inside the 300 ms a slow-to-seek one would be, which is what the phone got wrong.
+    r.music.jumpTo(r.music.currentTime + (250 - driftMs(r)) / 1000);
+    expect(driftMs(r)).toBeGreaterThan(230);
+    expect(driftMs(r)).toBeLessThan(270);
+    const jumpedAtMs = r.store.playheadMs.value;
+    await playTo(r, jumpedAtMs + 100);
+    expect(r.music.puts.length).toBe(puts + 1);
+    // Seen at the next check the frame loop makes of it - every 33 ms, and sometimes a frame later.
+    const [put] = r.music.puts.slice(puts);
+    expect(put.playheadMs - jumpedAtMs).toBeLessThan(60);
+    const samples = await sampleTo(r, 11_000);
+    expect(r.music.puts.length).toBe(puts + 1);
+    for (const sample of settled(samples, 400)) expect(Math.abs(sample.driftMs)).toBeLessThan(40);
+    expect(rateBetween(samples, 4000, 11_000)).toBeCloseTo(1, 2);
+  });
+});
+
+/*
+ * The music in WebKit on a Mac - Safari, and the web editor's own checks in Playwright's build of it -
+ * which can set `volume`, so the preview's mixer never starts and the element is never routed. Its
+ * clock stalls after every put all the same, about as long and as unevenly as a routed iPhone's (see
+ * [MAC_STALLS]), and the preview judged it as it judges Chromium's: a few hundred milliseconds in, with
+ * the first part of the stall lost and the rest still to come. It found it more than 200 ms behind
+ * 0.7 s later, put it again into another stall, and did so again: up to 30 seeks in a 24 s play, 2 or 3
+ * corrections after most seams, and twice a correction that landed just before a seam waited there,
+ * paused, for it. These pin that it is judged as a routed element is - once its whole stall is over -
+ * and that it starts from leads close to what a Mac's start and a Mac's seek cost, a kind at a time:
+ * a lead that misses by less than the 300 ms it is then allowed is not put right until the next put.
+ */
+describe('a track in WebKit on a Mac, which routes nothing', () => {
+  it('is put once to start and once at each seam, and left to play at its own speed: no put after put', async () => {
+    const r = await rig('webkit', ROUTED_TRACK, { mac: true });
+    r.music.unevenStalls = MAC_STALLS;
+    await playFrom(r, 0);
+    const pauses = r.music.pauses.length;
+    const samples = await sampleTo(r, 29_000);
+    expect(r.music.routed).toBe(false);
+
+    // The play's own put to start it, and one at each of the two seams, each a playing element sent
+    // round onto the next pass: no correction in between, and none after a seam.
+    expect(r.music.puts).toHaveLength(3);
+    expect(r.music.puts[0].playing).toBe(false);
+    const seams = r.music.puts.filter(put => put.playing);
+    expect(seams).toHaveLength(2);
+    for (const put of seams) {
+      expect(put.fromS).toBeGreaterThan(11);
+      expect(TRACK_S - put.fromS).toBeGreaterThanOrEqual(0.05);
+      expect(put.toS).toBeLessThan(0.2);
+    }
+    // Never stopped to wait for a seam, never cut short.
+    expect(r.music.pauses).toHaveLength(pauses);
+    expect(r.music.paused).toBe(false);
+    expect(r.music.duration).toBeCloseTo(TRACK_S, 6);
+    // At the post's own speed between the seams...
+    expect(rateBetween(samples, 2000, 11_000)).toBeCloseTo(1, 2);
+    expect(rateBetween(samples, 14_000, 23_000)).toBeCloseTo(1, 2);
+    // ...and, once each stall is over, as far out as the lead it was put with misses that put's stall
+    // by, and no further - read against the playhead signal, which is written every 33 ms and so reads
+    // up to that much more. It is not put right before its next put, whatever it misses by inside the
+    // 300 ms it is allowed, so each pass is pinned on its own:
+    const steady = settled(samples, 1300);
+    expect(steady.length).toBeGreaterThan(1000);
+    const pass = (puts: number): Sample[] => steady.filter(sample => sample.puts === puts);
+    // the first, by what its 310 ms start misses the 280 ms a Mac's start is put with before one has
+    // been measured - where the 180 ms every other element starts from had it 130 ms behind the picture
+    // for the whole of the pass;
+    expect(pass(1).length).toBeGreaterThan(500);
+    for (const sample of pass(1)) expect(Math.abs(sample.driftMs)).toBeLessThan(30 + 40);
+    // the second, by what the first seam's 440 ms misses the 420 a seek is put with before one has been
+    // measured - and not the 310 the start taught it, which a seek costs 130 ms more than;
+    expect(pass(2).length).toBeGreaterThan(500);
+    for (const sample of pass(2)) expect(Math.abs(sample.driftMs)).toBeLessThan(20 + 40);
+    // and the third by what the second seam's 400 ms misses the 440 the first one taught it.
+    expect(pass(3).length).toBeGreaterThan(200);
+    for (const sample of pass(3)) expect(Math.abs(sample.driftMs)).toBeLessThan(40 + 40);
+  });
+
+  it('is in step with the picture a second into the first play of the page, on a track heard once', async () => {
+    // Nothing measured yet on this page, and a track that does not repeat, so the play's one put is the
+    // only one there is: whatever lead it is put with, the music is that far out for the whole play.
+    const r = await rig('webkit', { ...ROUTED_TRACK, loop: false }, { mac: true });
+    r.music.unevenStalls = MAC_STALLS;
+    await playFrom(r, 0);
+    const samples = await sampleTo(r, 11_000);
+    expect(r.music.puts).toHaveLength(1);
+    expect(r.music.puts[0].playing).toBe(false);
+    // Put with a Mac's start lead, 280 ms, where it used to be put with every engine's 180...
+    expect(r.music.puts[0].toS).toBeCloseTo(0.28, 3);
+    // ...so once its 310 ms start is over it is 30 ms behind, and stays there, where it was 130.
+    const steady = settled(samples, 1300);
+    expect(steady.length).toBeGreaterThan(500);
+    for (const sample of steady) expect(Math.abs(sample.driftMs)).toBeLessThan(30 + 40);
+    expect(rateBetween(samples, 2000, 10_000)).toBeCloseTo(1, 2);
+  });
+
+  it('comes out of a play started anywhere with one put, and goes round the next seam with one more', async () => {
+    // Plays started one after another, as a customer scrubbing and playing does: every start is a put
+    // with a stall of its own, and none of them may set off a chain of corrections.
+    const r = await rig('webkit', ROUTED_TRACK, { mac: true });
+    r.music.unevenStalls = MAC_STALLS;
+    for (const fromMs of [2000, 5000, 8000]) {
+      const puts = r.music.puts.length;
+      await playFrom(r, fromMs);
+      await playTo(r, fromMs + 2500);
+      r.player.pause();
+      // The start's put - made on the first frame the picture is seen moving - and nothing after it
+      // while its stall came and went.
+      expect(r.music.puts.length).toBe(puts + 1);
+      expect(lastPut(r.music).playing).toBe(false);
+    }
+    // And through a seam: a start 1.5 s short of it, the seam's put, and nothing else.
+    const puts = r.music.puts.length;
+    await playFrom(r, 10_500);
+    await playTo(r, 10_600);
+    const pauses = r.music.pauses.length;
+    await playTo(r, 14_000);
+    const after = r.music.puts.slice(puts);
+    expect(after).toHaveLength(2);
+    expect(after[0].playing).toBe(false);
+    expect(after[1].playing).toBe(true);
+    expect(after[1].fromS).toBeGreaterThan(11);
+    expect(after[1].toS).toBeLessThan(0.2);
+    expect(r.music.pauses).toHaveLength(pauses);
+    expect(r.music.paused).toBe(false);
+  });
+});
+
+/*
+ * Chromium's element - on a desktop, and in Android's WebView - loses a few tens of milliseconds at
+ * once after a put and is then in step, which is what the player's AUDIO_SETTLED_MS was written for.
+ * It is judged exactly as it always was.
+ */
+describe('a track on Chromium', () => {
+  it("is put back as soon as it is 200 ms out, with the short stall, at a new sound's level", async () => {
+    const r = await rig('chromium', ROUTED_TRACK, { stallMs: 45 });
     await playFrom(r, 0);
     await playTo(r, 3000);
     expect(r.music.routed).toBe(false);

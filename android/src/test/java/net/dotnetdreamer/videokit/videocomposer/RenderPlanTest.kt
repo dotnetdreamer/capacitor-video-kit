@@ -1010,6 +1010,74 @@ class RenderPlanTest {
         val items = plan.music!!.items
         assertEquals(1, items.size)
         assertEquals(20_000_000L, items.single().outUs - items.single().inUs)
+        // Nothing says where the file ends, so it is decoded to its end, whatever that is.
+        assertEquals(C.TIME_END_OF_SOURCE, items.single().decodeEndUs)
+    }
+
+    /*
+     * THE TICK AT EVERY SEAM. Each pass of the 12 s test tone was clipped at 12.000 s, and Media3
+     * checks a clip end against frame timestamps that run ahead of an AAC file's sound by its priming,
+     * so the last frame was never decoded and played as 18.5 ms of silence on every seam. A pass that
+     * runs to the end of its file is not clipped at its end at all now, and one cut short of it is
+     * decoded past the cut; the builder then holds each to its length on the sample.
+     */
+
+    @Test
+    fun `every pass lies where the one before it stops, from the leading gap to the stop`() {
+        val music = Music("file:///m.m4a", 1_000, 0, 3_600_000, 0.8f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val plan = musicPlan(music, videoMs = 30_000, trackMs = 12_000)
+        val musicPlan = plan.music!!
+        val items = musicPlan.items
+        assertEquals(3, items.size)
+        assertEquals(musicPlan.leadGapUs, items.first().atUs)
+        for (k in 1 until items.size) {
+            assertEquals("pass $k", items[k - 1].atUs + (items[k - 1].outUs - items[k - 1].inUs), items[k].atUs)
+        }
+        val last = items.last()
+        assertEquals(plan.totalUs, last.atUs + (last.outUs - last.inUs))
+    }
+
+    @Test
+    fun `a pass that runs to the end of its file is not clipped at its end`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val items = musicPlan(music, videoMs = 24_000, trackMs = 12_000).music!!.items
+        assertEquals(2, items.size)
+        for (item in items) {
+            assertEquals(0L, item.inUs)
+            assertEquals(12_000_000L, item.outUs)
+            assertEquals(C.TIME_END_OF_SOURCE, item.decodeEndUs)
+        }
+        assertEquals(listOf(0L, 12_000_000L), items.map { it.atUs })
+    }
+
+    @Test
+    fun `a pass cut short of its file is decoded past its cut`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = true, fadeInMs = 0, fadeOutMs = 3_000)
+        val items = musicPlan(music, videoMs = 30_000, trackMs = 12_000).music!!.items
+        // Two whole passes and six seconds of a third: the video cut it.
+        assertEquals(3, items.size)
+        assertEquals(C.TIME_END_OF_SOURCE, items[0].decodeEndUs)
+        assertEquals(C.TIME_END_OF_SOURCE, items[1].decodeEndUs)
+        assertEquals(6_000_000L, items[2].outUs)
+        assertEquals(6_000_000L + RenderPlan.DECODE_PAST_US, items[2].decodeEndUs)
+    }
+
+    @Test
+    fun `a section trimmed inside its file is decoded past its end, unless that reaches the file's end`() {
+        val inside = Music("file:///m.m4a", 0, 2_000, 5_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val insideItems = musicPlan(inside, videoMs = 9_000, trackMs = 12_000).music!!.items
+        assertEquals(3, insideItems.size)
+        for (item in insideItems) {
+            assertEquals(2_000_000L, item.inUs)
+            assertEquals(5_000_000L, item.outUs)
+            assertEquals(5_000_000L + RenderPlan.DECODE_PAST_US, item.decodeEndUs)
+        }
+        // Trimmed a fraction of a second short of the end: the room past the trim reaches the end of
+        // the file anyway, and there the decoder's own trim of the padding is worth having.
+        val nearEnd = Music("file:///m.m4a", 0, 0, 11_800, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val nearEndItems = musicPlan(nearEnd, videoMs = 20_000, trackMs = 12_000).music!!.items
+        assertEquals(C.TIME_END_OF_SOURCE, nearEndItems[0].decodeEndUs)
+        assertEquals(11_800_000L, nearEndItems[0].outUs)
     }
 
     /* ------------------------------------------------------------------------------------- */

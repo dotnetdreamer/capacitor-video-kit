@@ -236,6 +236,29 @@ all go round at 12.000 s. The fades follow `ComposeMusic.fadeInMs`'s rule sample
 mix is the length of the post, so a post whose music stops early has silence to its end in its audio
 track, where both native engines end the track with the last sound in it.
 
+**The preview's music waits out WebKit's seek stall.** Safari on a Mac lets a page set `volume`, so
+the preview plays nothing through Web Audio there, and its music `<audio>` still loses 390-475 ms of
+its clock over the 0.8 s after every seek - about 150 ms at once, a couple of hundred milliseconds of
+running, then the rest - and 285-334 ms after every start (measured in the web editor on Playwright's
+WebKit). That is the same shape as an iPhone's element played through Web Audio (see
+[installation](installation.md)). Judged a few hundred milliseconds in, as Chromium's element is, it
+looked settled with most of the stall still to come, and was put again about every 0.7 s - up to 30
+times in a 24 s play, with 2 or 3 corrections after most loop seams and now and then a short silence
+just before one. So every audio element in Safari on a Mac, and every one an iPhone or an iPad plays
+through Web Audio, is judged only 1.2 s after it was put, learns a lead of up to 700 ms, and is put
+back in step only when it is more than 300 ms out. Chromium, Android's WebView and an iPhone's element
+played straight to the speaker lose a few tens of milliseconds at once and keep the 200 ms rule - an
+iPhone's judged the slow way ran about 0.3 s ahead of its picture for a whole pass, since a phone's
+picture is slow to start and nothing put the music right.
+
+A lead that misses by less than those 300 ms is not put right until the element's next put - the next
+loop seam, or never on music that does not repeat - so on a Mac the preview starts its elements from
+leads close to what they lose, before it has measured any: 280 ms for a start and 420 ms for a seek,
+each kind learned apart from the other. Started from the 180 ms every other engine starts from, and
+with a seek put with whatever a start had just taught it, the music would run 50-105 ms behind the
+picture for its whole first pass and 105-245 ms behind for its second. An iPhone's element played
+straight to the speaker loses about 45 ms, and still starts from 180.
+
 **The render does not survive the page, and the result does.** A browser has no foreground service
 and no WorkManager: a tab closed mid-render stops rendering, and a job left behind comes back as
 `interrupted`. But the finished video's bytes and the job record go into IndexedDB as they are

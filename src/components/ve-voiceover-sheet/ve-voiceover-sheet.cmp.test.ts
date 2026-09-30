@@ -133,6 +133,21 @@ function recordButton(sheet: HTMLElement): HTMLButtonElement {
   return sheet.shadowRoot!.querySelector<HTMLButtonElement>('.vo__record')!;
 }
 
+/**
+ * A button's name as its content makes it: the text inside it, less anything `aria-hidden`. With no
+ * `aria-label` on the button this is the accessible name every browser computes, and it is the only
+ * name of a toggle that Android's WebView passes on (see `.sheet__hidden-name`).
+ */
+function textName(el: Element | null | undefined): string {
+  if (!el) return '';
+  let out = '';
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) out += node.textContent ?? '';
+    else if (node instanceof Element && node.getAttribute('aria-hidden') !== 'true') out += textName(node);
+  }
+  return out.trim();
+}
+
 function status(sheet: HTMLElement): string {
   return sheet.shadowRoot!.querySelector('.vo__status')!.textContent!.trim();
 }
@@ -181,6 +196,27 @@ describe('ve-voiceover-sheet', () => {
     expect(head(sheet, '.sheet__title')?.textContent).toBe('Voiceover');
     expect(status(sheet)).toBe('Tap to record from 00:00');
     expect(recordButton(sheet).disabled).toBe(false);
+  });
+
+  it('names the record button by its own words, which Android’s WebView passes on, pressed while a take runs', async () => {
+    const { store, sheet } = await mount();
+
+    // No `aria-label`: beside `aria-pressed` it was the name everywhere except Android, where the
+    // button arrived as a ToggleButton with no name and editor-voiceover.yaml stopped at it.
+    expect(recordButton(sheet).hasAttribute('aria-label')).toBe(false);
+    expect(textName(recordButton(sheet))).toBe('Record voiceover');
+    expect(recordButton(sheet).getAttribute('aria-pressed')).toBe('false');
+    // The disc is the picture; the words are for a reader only.
+    expect(recordButton(sheet).querySelector('.sheet__hidden-name')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
+
+    await record(sheet, store);
+    await until('the button to offer to stop', () => textName(recordButton(sheet)) === 'Stop recording');
+    expect(recordButton(sheet).getAttribute('aria-pressed')).toBe('true');
+
+    recordButton(sheet).click();
+    await until('the take to land', () => takes(store).length === 1);
+    await until('the button to offer to record again', () => textName(recordButton(sheet)) === 'Record voiceover');
+    expect(recordButton(sheet).getAttribute('aria-pressed')).toBe('false');
   });
 
   it('will not record where a take has nowhere to go, and says where to move', async () => {

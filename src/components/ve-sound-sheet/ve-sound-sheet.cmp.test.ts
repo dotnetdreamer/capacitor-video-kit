@@ -87,6 +87,21 @@ function text(el: Element | null | undefined): string {
   return el?.textContent?.trim() ?? '';
 }
 
+/**
+ * A button's name as its content makes it: the text inside it, less anything `aria-hidden`. With no
+ * `aria-label` on the button this is the accessible name every browser computes, and it is the only
+ * name of a toggle that Android's WebView passes on (see `.sheet__hidden-name`).
+ */
+function textName(el: Element | null | undefined): string {
+  if (!el) return '';
+  let out = '';
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) out += node.textContent ?? '';
+    else if (node instanceof Element && node.getAttribute('aria-hidden') !== 'true') out += textName(node);
+  }
+  return out.trim();
+}
+
 /** Polls a frame at a time, because a repaint is Stencil's to schedule and not ours to await. */
 async function until(what: string, ready: () => boolean, ms = 2000): Promise<void> {
   const deadline = performance.now() + ms;
@@ -141,6 +156,25 @@ describe('ve-sound-sheet', () => {
 
     expect(rows(sheet)[0].querySelector('.snd__in-use')).not.toBeNull();
     expect(rows(sheet)[1].querySelector('.snd__in-use')).toBeNull();
+    // A picture with a name. A label on a span with no role reached Android's WebView as a TextView
+    // with no text; an image's label is its content description there, and its label in VoiceOver.
+    const tick = rows(sheet)[0].querySelector('.snd__in-use')!;
+    expect(tick.getAttribute('role')).toBe('img');
+    expect(tick.getAttribute('aria-label')).toBe('On this post');
+  });
+
+  it('names each row’s Play button by its own words, which Android’s WebView passes on', async () => {
+    const { sheet } = await mount();
+    await until('the list', () => rows(sheet).length === 2);
+    const play = rows(sheet).map(row => row.querySelector<HTMLButtonElement>('.snd__play')!);
+
+    // No `aria-label`: beside `aria-pressed` it was the name everywhere except Android, where the
+    // button arrived as a ToggleButton with no name and editor-sound-sheet.yaml stopped at "Play .*".
+    expect(play.map(button => button.hasAttribute('aria-label'))).toEqual([false, false]);
+    expect(play.map(textName)).toEqual(['Play holiday', 'Play market']);
+    // Still a toggle, and not playing: the preview player is not driven here (see the top).
+    expect(play.map(button => button.getAttribute('aria-pressed'))).toEqual(['false', 'false']);
+    expect(play[0].querySelector('.sheet__hidden-name')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
   });
 
   it('takes two taps to delete, and the first one can be waited out', async () => {

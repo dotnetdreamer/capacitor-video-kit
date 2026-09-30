@@ -130,9 +130,40 @@ function field(sheet: HTMLElement): HTMLTextAreaElement {
   return sheet.shadowRoot!.querySelector<HTMLTextAreaElement>('.ts__field')!;
 }
 
+/**
+ * A button's name as its content makes it: the text inside it, less anything `aria-hidden`. With no
+ * `aria-label` on the button this is the accessible name every browser computes, and it is the only
+ * name of a toggle that Android's WebView passes on (see `.sheet__hidden-name`).
+ */
+function textName(el: Element | null | undefined): string {
+  if (!el) return '';
+  let out = '';
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) out += node.textContent ?? '';
+    else if (node instanceof Element && node.getAttribute('aria-hidden') !== 'true') out += textName(node);
+  }
+  return out.trim();
+}
+
+/**
+ * The button a reader knows by `name`: by its `aria-label` where it has one (Cancel, Done), and by
+ * its own words where it has not, which is how every toggle here is named (Font, Colour...).
+ */
+function findButton(sheet: HTMLElement, name: string): HTMLButtonElement | null {
+  const all = [...sheet.shadowRoot!.querySelectorAll<HTMLButtonElement>('button')];
+  return all.find(el => (el.getAttribute('aria-label') ?? textName(el)) === name) ?? null;
+}
+
 function button(sheet: HTMLElement, label: string): HTMLButtonElement {
-  const found = sheet.shadowRoot!.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);
+  const found = findButton(sheet, label);
   if (!found) throw new Error(`no ${label} button`);
+  return found;
+}
+
+/** A tile in the font grid, by the style's name. Only the grid: "Retro" is a tab as well. */
+function fontTile(sheet: HTMLElement, name: string): HTMLButtonElement {
+  const found = [...sheet.shadowRoot!.querySelectorAll<HTMLButtonElement>('.ts__font-tile')].find(el => textName(el) === name);
+  if (!found) throw new Error(`no ${name} tile`);
   return found;
 }
 
@@ -243,7 +274,7 @@ describe('ve-text-sheet', () => {
     type(sheet, 'Worst pizza');
     button(sheet, 'Font').click();
     await until('the font panel', () => sheet.shadowRoot?.querySelector('.ts__font-grid') !== null);
-    sheet.shadowRoot!.querySelector<HTMLButtonElement>('[aria-label="Neon"]')!.click();
+    fontTile(sheet, 'Neon').click();
 
     button(sheet, 'Cancel').click();
 
@@ -301,7 +332,7 @@ describe('ve-text-sheet', () => {
 
     // Classic is in the Trending list, so that is the tab the grid opens on.
     expect(sheet.shadowRoot?.querySelector('.sheet__tab--on')?.textContent).toBe('Trending');
-    const tile = sheet.shadowRoot!.querySelector<HTMLButtonElement>('[aria-label="Neon"]')!;
+    const tile = fontTile(sheet, 'Neon');
     expect(button(sheet, 'Font').getAttribute('aria-pressed')).toBe('true');
 
     tile.click();
@@ -310,6 +341,34 @@ describe('ve-text-sheet', () => {
     // Still inside the one gesture: only the tick lands any of this.
     expect(store.canUndo.value).toBe(false);
     await until('the tile to light up', () => tile.getAttribute('aria-pressed') === 'true');
+  });
+
+  it('names every style tool and font tile by its own words, which Android’s WebView passes on', async () => {
+    const { sheet } = await mount();
+    const tools = ['Font', 'Colour', 'Background', 'Stroke'];
+
+    // No `aria-label` on any of them: beside `aria-pressed` it was the name everywhere except
+    // Android, where each arrived as a ToggleButton with no name and the flows stopped at "Font".
+    for (const name of tools) {
+      const tool = button(sheet, name);
+      expect(tool.hasAttribute('aria-label'), name).toBe(false);
+      expect(textName(tool), name).toBe(name);
+      expect(tool.getAttribute('aria-pressed'), name).toBe('false');
+      // The glyph is all that is seen; the words are for a reader only.
+      expect(tool.querySelector('.sheet__hidden-name')!.getBoundingClientRect().width, name).toBeLessThanOrEqual(1);
+    }
+
+    button(sheet, 'Font').click();
+    await until('the font tool to be pressed', () => button(sheet, 'Font').getAttribute('aria-pressed') === 'true');
+    await until('the font grid', () => sheet.shadowRoot?.querySelector('.ts__font-grid') !== null);
+
+    // A tile's sample is drawn in its own style, capitals and all, so it is hidden and the name is
+    // the plain word beside it: the same word the label was, on every platform.
+    const classic = fontTile(sheet, 'Classic');
+    expect(classic.hasAttribute('aria-label')).toBe(false);
+    expect(classic.getAttribute('aria-pressed')).toBe('true');
+    expect(fontTile(sheet, 'Neon').getAttribute('aria-pressed')).toBe('false');
+    expect(classic.querySelector('.ts__font-name')!.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('replaces the panel rather than patching one into another', async () => {
@@ -360,7 +419,7 @@ describe('ve-text-sheet', () => {
     expect(layer(store).effect).toBe('plate');
 
     button(sheet, 'Stroke').click();
-    await until('the stroke panel', () => sheet.shadowRoot?.querySelector('[aria-label="Stroke"]')?.getAttribute('aria-pressed') === 'true');
+    await until('the stroke panel', () => findButton(sheet, 'Stroke')?.getAttribute('aria-pressed') === 'true');
     // A text on a plate has no stroke, so the stroke panel reads None - and its None must not take
     // the plate away either.
     const strokes = [...sheet.shadowRoot!.querySelectorAll<HTMLButtonElement>('.ts__effect')];
@@ -400,7 +459,7 @@ describe('ve-text-sheet', () => {
       button(sheet, 'Font'),
       button(sheet, 'Colour'),
       button(sheet, 'Show keyboard'),
-      sheet.shadowRoot!.querySelector<HTMLButtonElement>('[aria-label="Neon"]')!,
+      fontTile(sheet, 'Neon'),
       sheet.shadowRoot!.querySelector<HTMLButtonElement>('.sheet__tab')!,
     ];
 

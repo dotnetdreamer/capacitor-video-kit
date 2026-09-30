@@ -2,7 +2,7 @@ import { effect } from '@preact/signals-core';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ConfirmRequest } from '../../host/host.types';
-import { DISCARD_EDITS, EditorConfirm, renderFailed } from './editor-confirm';
+import { DISCARD_EDITS, EditorConfirm, leaveQuestion, renderFailed, SAVE_AND_EXIT } from './editor-confirm';
 
 /** The shell's own question, shortened, so a test reads as one thing being asked. */
 const ASK: ConfirmRequest = {
@@ -75,6 +75,20 @@ describe('EditorConfirm, with a host dialog', () => {
     expect(confirm.pending).toBe(false);
   });
 
+  /*
+   * Save and exit's role is not one an Ionic alert styles, and a host dialog that answered only for
+   * the roles it knew would turn the tap into a dismissal: the customer taps Save and exit and stays.
+   * What the host hands back is what the editor reads, whatever the role is.
+   */
+  it('hands back a role the host dialog has no styling for exactly as the host answered it', async () => {
+    const native = vi.fn(async (request: ConfirmRequest) => request.buttons.at(-1)!.role);
+    const confirm = new EditorConfirm({ confirm: native });
+
+    await expect(confirm.ask(SAVE_AND_EXIT)).resolves.toBe('save');
+    expect(native).toHaveBeenCalledWith(SAVE_AND_EXIT);
+    expect(confirm.pending).toBe(false);
+  });
+
   it('takes one that throws where it stands the same way', async () => {
     const confirm = new EditorConfirm({
       confirm: () => {
@@ -122,10 +136,48 @@ describe('EditorConfirm, while one question is open', () => {
   });
 });
 
-describe('the two questions the editor asks', () => {
+describe('the questions the editor asks', () => {
   it('keeps the clips out of what Discard threatens', () => {
     expect(DISCARD_EDITS.message).toContain('Your clips stay');
     expect(DISCARD_EDITS.buttons.map(button => button.role)).toEqual(['cancel', 'destructive']);
+  });
+
+  /*
+   * On a host that files the edit as a draft while it is made, Discard said the changes would be
+   * lost when they were not. The same moment there says they are kept, and its button is not red,
+   * because nothing is thrown away.
+   */
+  it('says the changes are kept, and leaves with Save and exit, on a host that keeps drafts', () => {
+    expect(SAVE_AND_EXIT.header).toBe('Save and exit?');
+    expect(SAVE_AND_EXIT.message).toBe('Your changes are kept as a draft');
+    expect(SAVE_AND_EXIT.message).not.toContain('lost');
+    expect(SAVE_AND_EXIT.buttons).toEqual([
+      { text: 'Keep editing', role: 'cancel' },
+      { text: 'Save and exit', role: 'save' },
+    ]);
+    expect(SAVE_AND_EXIT.buttons.map(button => button.role)).not.toContain('destructive');
+  });
+
+  /*
+   * The question and the role that leaves come from one place, so they cannot be paired wrongly: a
+   * `destructive` checked against Save and exit's buttons would read every tap as "stay", and nobody
+   * could leave the editor.
+   */
+  it('pairs each leaving question with the role of its own button that leaves', () => {
+    for (const savesDrafts of [false, true]) {
+      const { request, leaves } = leaveQuestion(savesDrafts);
+      expect(request.buttons.map(button => button.role)).toContain(leaves);
+      expect(leaves).not.toBe('cancel');
+    }
+    expect(leaveQuestion(false)).toEqual({ request: DISCARD_EDITS, leaves: 'destructive' });
+    expect(leaveQuestion(true)).toEqual({ request: SAVE_AND_EXIT, leaves: 'save' });
+  });
+
+  /* How the host this was written for writes every sentence it shows: no stop on the end, no dashes, no curly quotes. */
+  it('writes Save and exit without a full stop, a dash or a curly quote', () => {
+    for (const text of [SAVE_AND_EXIT.header, SAVE_AND_EXIT.message, ...SAVE_AND_EXIT.buttons.map(button => button.text)]) {
+      expect(text).not.toMatch(/\.$|[\u2013\u2014\u2018\u2019\u201c\u201d]/);
+    }
   });
 
   it('says something different for each way a render can fail', () => {

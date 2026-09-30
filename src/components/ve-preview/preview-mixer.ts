@@ -132,10 +132,10 @@ export class PreviewMixer {
    * the element will be handed over the moment it has (see [start]), which on the first play of a
    * page is a few milliseconds after the player has already put the element and started it.
    *
-   * [PreviewPlayer] asks, because a routed element's clock stands still after a start or a seek for
-   * far longer, and far more unevenly, than one that is not; see its [ROUTED_SETTLE_MS]. Asked about
-   * an element on its way in, it puts it with a routed element's lead from the first put, rather than
-   * with the other kind's and then find it a quarter of a second behind for the rest of the play.
+   * [PreviewPlayer] asks, because on iOS a routed element's clock stands still after a start or a seek
+   * for far longer, and far more unevenly, than one that is not; see its [SLOW_SEEK_SETTLE_MS]. Asked
+   * about an element on its way in, it puts it with a routed element's lead from the first put, rather
+   * than with the other kind's and then find it a quarter of a second behind for the rest of the play.
    */
   isRouted(element: HTMLMediaElement): boolean {
     if (routes.has(element)) return true;

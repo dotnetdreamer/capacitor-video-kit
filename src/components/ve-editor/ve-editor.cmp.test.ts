@@ -514,3 +514,140 @@ describe('ve-editor on a host that does not offer Zoom', () => {
     expect(changes.at(-1)!.zooms).toMatchObject([{ id: 'zm-1', ease: 'snappy', startMs: 500, endMs: 3000 }]);
   });
 });
+
+/*
+ * Back on an edit with changes, which asks before it leaves, and what it asks.
+ *
+ * On a host that says nothing the question is Discard edits?, because there the changes really do
+ * go with the editor. On a host that keeps the edit as a draft while it is made
+ * (`editing.savesDrafts`) that question was a lie - the changes were filed from `veChange` all
+ * along - so there it says they are kept and its button is Save and exit, in the ordinary colour.
+ * What the answers DO is the same on both: the button that leaves emits `veCancel('back')`, and
+ * Keep editing stays.
+ */
+describe('ve-editor leaving an edit with changes', () => {
+  const KEEPS_DRAFTS: VideoEditorHost = { ...HOST, editing: { savesDrafts: true } };
+
+  function tile(editor: HTMLElement, id: string): HTMLButtonElement | null {
+    return inside(editor, 've-toolbar')?.shadowRoot?.querySelector<HTMLButtonElement>(`[data-tile="${id}"]`) ?? null;
+  }
+
+  /** Puts a zoom at the playhead: the smallest change the root tool row makes with one tap. */
+  async function change(editor: HTMLElement): Promise<void> {
+    const changes: unknown[] = [];
+    editor.addEventListener('veChange', event => changes.push(event));
+    await until('the Zoom tile', () => !!tile(editor, 'zoom'));
+    tile(editor, 'zoom')!.click();
+    await until('the change to be filed', () => changes.length > 0);
+  }
+
+  /**
+   * Presses Back until the editor has nothing left to close and asks. Each press waits for the
+   * question before the next one, because a press while it is on the screen answers it with a
+   * dismissal - which is right for the customer and would make this test ask twice.
+   */
+  async function backUntilAsked(editor: HTMLElement): Promise<HTMLElement> {
+    for (let press = 0; press < 6 && !inside(editor, 've-alert'); press++) {
+      inside<HTMLButtonElement>(editor, '.ve__round--back')!.click();
+      await until('the press to land', () => !!inside(editor, 've-alert'), 250).catch(() => undefined);
+    }
+    const alert = inside(editor, 've-alert');
+    if (!alert) throw new Error('Back never asked before leaving');
+    await (alert as StencilElement).componentOnReady?.();
+    return alert;
+  }
+
+  function buttons(alert: HTMLElement): HTMLButtonElement[] {
+    return [...(alert.shadowRoot?.querySelectorAll<HTMLButtonElement>('button') ?? [])];
+  }
+
+  function text(alert: HTMLElement, selector: string): string {
+    return alert.shadowRoot?.querySelector(selector)?.textContent?.trim() ?? '';
+  }
+
+  function cancels(editor: HTMLElement): string[] {
+    const reasons: string[] = [];
+    editor.addEventListener('veCancel', event => reasons.push((event as CustomEvent<string>).detail));
+    return reasons;
+  }
+
+  it('asks Discard edits? on a host that says nothing, and Discard leaves', async () => {
+    const { editor } = await mount();
+    const left = cancels(editor);
+    await change(editor);
+
+    const alert = await backUntilAsked(editor);
+    expect(text(alert, '.alert__header')).toBe('Discard edits?');
+    expect(text(alert, '.alert__message')).toContain('will be lost');
+    expect(buttons(alert).map(button => button.textContent?.trim())).toEqual(['Keep editing', 'Discard']);
+    expect(buttons(alert)[1].classList.contains('alert__btn--danger')).toBe(true);
+
+    buttons(alert)[1].click();
+    await until('the editor to leave', () => left.length > 0);
+    expect(left).toEqual(['back']);
+  });
+
+  it('asks Save and exit? on a host that keeps drafts, says the changes are kept, and Save and exit leaves', async () => {
+    const { editor } = await mount(KEEPS_DRAFTS);
+    const left = cancels(editor);
+    await change(editor);
+
+    const alert = await backUntilAsked(editor);
+    expect(text(alert, '.alert__header')).toBe('Save and exit?');
+    expect(text(alert, '.alert__message')).toBe('Your changes are kept as a draft');
+    expect(buttons(alert).map(button => button.textContent?.trim())).toEqual(['Keep editing', 'Save and exit']);
+    // Nothing is thrown away, so nothing on it is red.
+    expect(buttons(alert).some(button => button.classList.contains('alert__btn--danger'))).toBe(false);
+
+    buttons(alert)[1].click();
+    await until('the editor to leave', () => left.length > 0);
+    expect(left).toEqual(['back']);
+  });
+
+  it('stays on Keep editing, and asks the same question on the next Back', async () => {
+    const { editor } = await mount(KEEPS_DRAFTS);
+    const left = cancels(editor);
+    await change(editor);
+
+    buttons(await backUntilAsked(editor))[0].click();
+    await until('the question to go', () => !inside(editor, 've-alert'));
+    expect(left).toEqual([]);
+    expect(inside(editor, 've-toolbar')).not.toBeNull();
+
+    const again = await backUntilAsked(editor);
+    expect(text(again, '.alert__header')).toBe('Save and exit?');
+  });
+
+  /*
+   * A host with a dialog of its own is handed the same question, and Save and exit's role - `save`,
+   * which no Ionic alert styles - has to come back through it and still leave. A host whose dialog
+   * answered only for roles it knew would leave the customer tapping Save and exit and staying put.
+   */
+  it('hands the question to a host dialog, and leaves on the role it answers with', async () => {
+    const asked: { header: string; buttons: readonly { text: string; role: string }[] }[] = [];
+    const host: VideoEditorHost = {
+      ...KEEPS_DRAFTS,
+      platform: {
+        ...HOST.platform,
+        confirm: async request => {
+          asked.push(request);
+          return request.buttons.find(button => button.text === 'Save and exit')?.role ?? null;
+        },
+      },
+    };
+    const { editor } = await mount(host);
+    const left = cancels(editor);
+    await change(editor);
+
+    for (let press = 0; press < 6 && left.length === 0; press++) {
+      inside<HTMLButtonElement>(editor, '.ve__round--back')!.click();
+      await until('the press to land', () => left.length > 0, 250).catch(() => undefined);
+    }
+
+    expect(left).toEqual(['back']);
+    expect(asked.map(request => request.header)).toEqual(['Save and exit?']);
+    expect(asked[0].buttons.map(button => button.role)).toEqual(['cancel', 'save']);
+    // The host's dialog, not the package's: nothing of the editor's own was put on the screen.
+    expect(inside(editor, 've-alert')).toBeNull();
+  });
+});

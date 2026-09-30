@@ -922,6 +922,10 @@ export class VeToolbar {
                     aria-pressed={tile.toggled === undefined ? null : String(tile.toggled)}
                     aria-haspopup={tile.expanded === undefined ? null : 'menu'}
                     aria-expanded={tile.expanded === undefined ? null : String(tile.expanded)}
+                    // Only ever on a tile that neither toggles nor opens a menu: `soonTile` gives a
+                    // tile no `toggled` and no `expanded`. An `aria-label` BESIDE `aria-pressed` or
+                    // `aria-haspopup` is not the name on Android's WebView (see `.sheet__hidden-name`
+                    // in sheet-common.css), which is why Loop and Sound are named by their own words.
                     aria-label={tile.soon ? `${tile.label}, coming soon` : null}
                     onClick={() => this.tap(tile)}
                   >

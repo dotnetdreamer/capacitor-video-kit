@@ -15,7 +15,7 @@ import type { ConfirmRequest, RenderFailureCode, ResolvedPlatformHost } from '..
  * The shell holds one of these and uses four lines of it:
  *
  * ```tsx
- * const role = await this.confirm.ask(DISCARD_EDITS);        // wherever the question comes up
+ * const role = await this.confirm.ask(RENDER_UNAVAILABLE);   // wherever the question comes up
  * const asking = this.confirm.showing;                       // inside the render
  * {asking && <ve-alert header={asking.header} message={asking.message} buttons={asking.buttons}
  *            onVeDismiss={(e) => this.confirm.settle(e.detail)} />}
@@ -60,8 +60,8 @@ export class EditorConfirm {
         return;
       }
       // A host dialog that throws or rejects is taken as a dismissal. There is no other way out of
-      // this promise, and the one place it matters is Discard edits: a customer who cannot get an
-      // answer back is a customer who cannot leave the editor.
+      // this promise, and the one place it matters is the question Back asks: a customer who cannot
+      // get an answer back is a customer who cannot leave the editor.
       try {
         void native(request).then(
           role => this.settle(role),
@@ -93,7 +93,8 @@ export class EditorConfirm {
 }
 
 /**
- * Leaving with changes asks first, because the clips stay either way and the edits would not.
+ * Leaving with changes asks first, because the clips stay either way and, on a host that keeps no
+ * drafts, the edits would not. On a host that does keep them the question is [SAVE_AND_EXIT].
  *
  * The message says what is kept before it says what is lost: the fear at this button is losing the
  * videos themselves, and they are never at risk.
@@ -106,6 +107,40 @@ export const DISCARD_EDITS: ConfirmRequest = {
     { text: 'Discard', role: 'destructive' },
   ],
 };
+
+/**
+ * The same moment as [DISCARD_EDITS], on a host that keeps the edit as a draft while it is being
+ * made (`EditorEditingOptions.savesDrafts`). There, Discard was a lie: the changes had been filed
+ * from `veChange` all along, so a customer who tapped it found them in their drafts afterwards, and
+ * one who believed it stayed in an editor they meant to leave.
+ *
+ * The answer does exactly what Discard did - the editor emits `veCancel('back')` and the host's
+ * draft is already written - so only the words and the button's weight change. `save` rather than
+ * `destructive`, because nothing is thrown away and a red button would say something was.
+ *
+ * "As a draft" and not "in Drafts": the words cannot name a screen, because this package does not
+ * know what a host calls it or whether it has one. The message has no full stop on the end, which is
+ * how the host this was written for writes every sentence it shows.
+ */
+export const SAVE_AND_EXIT: ConfirmRequest = {
+  header: 'Save and exit?',
+  message: 'Your changes are kept as a draft',
+  buttons: [
+    { text: 'Keep editing', role: 'cancel' },
+    { text: 'Save and exit', role: 'save' },
+  ],
+};
+
+/**
+ * What Back asks of an edit with changes in it, and which answer means "go".
+ *
+ * One function rather than a choice made at the call, so the question and the role that leaves are
+ * never taken from two different requests: a `destructive` checked against Save and exit's buttons
+ * would read every press as "stay", and nobody could leave the editor.
+ */
+export function leaveQuestion(savesDrafts: boolean): { request: ConfirmRequest; leaves: string } {
+  return savesDrafts ? { request: SAVE_AND_EXIT, leaves: 'save' } : { request: DISCARD_EDITS, leaves: 'destructive' };
+}
 
 /**
  * A post that HAS to be built, on a host that cannot build one.

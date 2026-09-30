@@ -128,6 +128,10 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       // On unless the host says so: Zoom shipped on for every host, and one that has never heard of
       // this setting keeps the tool it already has. Only an explicit false takes it away.
       zoom: host?.editing?.zoom !== false,
+      // Off unless the host says so, and only a real true turns it on: "your changes are kept" said
+      // by a host that keeps nothing is the one answer here that loses somebody's work, where the
+      // other mistake only asks them a harsher question than it needed to.
+      savesDrafts: host?.editing?.savesDrafts === true,
     },
   };
 }

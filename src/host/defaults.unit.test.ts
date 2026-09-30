@@ -127,13 +127,29 @@ describe('resolveEditorHost', () => {
     expect(resolveEditorHost({ editing: { zoom: false } }).editing.zoom).toBe(false);
   });
 
-  it('settles each editing option on its own, so turning Zoom off leaves the other two as they were', () => {
-    expect(resolveEditorHost({ editing: { zoom: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: false });
-    expect(resolveEditorHost({ editing: { pictures: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true });
+  /*
+   * Off unless the host says so, because the words it switches to - "your changes are kept" - are
+   * the one answer that loses somebody's work when it is wrong. Only a real true turns it on: a
+   * truthy string from a hand-written config is not a host saying it keeps drafts.
+   */
+  it('asks Discard, not Save and exit, unless the host says it keeps drafts', () => {
+    expect(resolveEditorHost().editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({}).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: {} }).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: { savesDrafts: false } }).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: { savesDrafts: 'yes' as unknown as boolean } }).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: { savesDrafts: true } }).editing.savesDrafts).toBe(true);
+  });
+
+  it('settles each editing option on its own, so turning Zoom off leaves the others as they were', () => {
+    expect(resolveEditorHost({ editing: { zoom: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: false, savesDrafts: false });
+    expect(resolveEditorHost({ editing: { pictures: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true, savesDrafts: false });
+    expect(resolveEditorHost({ editing: { savesDrafts: true } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true, savesDrafts: true });
     expect(resolveEditorHost({ editing: { pictures: true, replaceKeepsLength: false } }).editing).toEqual({
       replaceKeepsLength: false,
       pictures: true,
       zoom: true,
+      savesDrafts: false,
     });
   });
 });

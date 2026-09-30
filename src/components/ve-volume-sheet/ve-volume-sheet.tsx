@@ -267,10 +267,16 @@ export class VeVolumeSheet {
                   // Written as a string on purpose: the vdom removes an attribute set to boolean
                   // false, and a toggle with no `aria-pressed` at all is announced as a plain button.
                   aria-pressed={String(muted)}
-                  aria-label={muted ? 'Unmute' : 'Mute'}
                   onClick={this.toggleMute}
                 >
                   <ve-icon name={muted ? 'volume-mute' : 'volume-high'}></ve-icon>
+                  {/*
+                    The name is the button's own hidden text and NOT an `aria-label`. With
+                    `aria-pressed` beside it, an `aria-label` reached Android's WebView as a
+                    ToggleButton with no name at all, so TalkBack had nothing to read and the
+                    Maestro flows could not find "Mute". See `.sheet__hidden-name`.
+                  */}
+                  <span class="sheet__hidden-name">{muted ? 'Unmute' : 'Mute'}</span>
                 </button>
 
                 <ve-slider

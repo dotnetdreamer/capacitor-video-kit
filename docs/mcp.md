@@ -121,7 +121,7 @@ against the other, and the line the server writes to stderr when it starts says 
 
 In code it is the editor's own `editing` type, so a host can pass on the setting it already has,
 held in a variable or written out with the editor's other fields beside `zoom`. Only `zoom` is read
-here; `pictures` and `replaceKeepsLength` are taken and have no op to govern:
+here; `pictures`, `replaceKeepsLength` and `savesDrafts` are taken and have no op to govern:
 
 ```ts
 const server = createVideoKitMcpServer({ version: '1.3.0', editing: { pictures: true, zoom: false } });
