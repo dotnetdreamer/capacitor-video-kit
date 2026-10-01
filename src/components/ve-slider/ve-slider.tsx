@@ -274,6 +274,34 @@ export class VeSlider {
         role="slider"
         tabindex={this.disabled ? '-1' : '0'}
         aria-disabled={this.disabled ? 'true' : undefined}
+        /*
+         * Named by `aria-label` beside a value in words, and never by `title`, although on Android
+         * the label never reaches the tree a test reads. Chromium 153 (WebView 153 on Android 17,
+         * measured on the emulator on 2026-09-30) puts a slider's `aria-label` in Android's
+         * supplemental description, so uiautomator and Maestro see a SeekBar with no text and no
+         * content description. Google's TalkBack 17 reads it all the same, as "<value>. <label>.
+         * Slider" - "80%. Volume. Slider" and "1.0s. Fade out duration. Slider" in the volume sheet
+         * - so the customer hears the name and the test cannot find it.
+         *
+         * `title` looked like the way into the node's text, and it is not one:
+         *
+         *  - Beside the label it changes nothing in the tree, and every desktop browser shows it as a
+         *    tooltip over the bar.
+         *  - In place of the label it loses the name. Chromium drops a name taken from `title` on a
+         *    range control that has `aria-valuetext`, which this one always has, and TalkBack says
+         *    only "50%. Slider".
+         *  - Without `aria-valuetext` it does reach the text, and TalkBack then reads the raw "50.0"
+         *    instead of the value the sheet formats.
+         *
+         * So the pair stays exactly as it is, and build/android-names.unit.test.ts keeps it that way.
+         * A test finds a slider by the word and the readout its sheet puts beside it, or by where it
+         * is. The one case not covered is a screen reader that ignores supplemental descriptions,
+         * and the likely one is Samsung's own TalkBack. Chromium's main branch has stopped filling
+         * them in while it runs, because older versions of it do not read them; 153 has no such
+         * exception, and Samsung's TalkBack on 153 has not been tried. If it skips them, a slider
+         * whose sheet hides the word beside it - the volume sheet's fades - has no name there at
+         * all.
+         */
         aria-label={this.label}
         aria-orientation="horizontal"
         aria-valuemin={String(min)}

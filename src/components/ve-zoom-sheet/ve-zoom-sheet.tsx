@@ -37,11 +37,15 @@ const RAMP_STEP_MS = 100;
  * The chosen curve is in each tile's NAME (`Smooth, selected`) and never in `aria-pressed`: on the
  * Samsung A13's WebView (Chrome 99) a change to `aria-pressed` inside a shadow root never reaches
  * Android's accessibility tree, and a button with both a label and `aria-pressed` arrives there as a
- * ToggleButton with no text at all - nothing for TalkBack to read or for Maestro to find. The
- * transition sheet and the timeline's dots made the same move.
+ * ToggleButton with no text at all - nothing for Maestro to find. (A current WebView sends that label
+ * to Android's supplemental description instead, as it does a slider's name: Google's TalkBack reads
+ * it there and uiautomator does not. See ve-slider.) The transition sheet and the timeline's dots
+ * made the same move.
  *
- * Each slider sits between a visible word and a visible readout, because a slider reaches Android's
- * tree with no name of its own; the word and the number are what TalkBack and Maestro have.
+ * Each slider sits between a visible word and a visible readout, because a slider's name and value
+ * never reach the tree uiautomator reads on Android (see ve-slider): the word and the number are
+ * what Maestro has. Google's TalkBack on WebView 153 reads the slider's own name, and the pair is
+ * still there for a screen reader that does not.
  */
 @Component({
   tag: 've-zoom-sheet',
@@ -165,7 +169,7 @@ export class VeZoomSheet {
                   onVeGestureStart={this.onGestureStart}
                   onVeLive={this.onLevel}
                 />
-                {/* The number a test can read, and the one TalkBack can: the slider arrives unnamed. */}
+                {/* The number a test can read: the slider reaches uiautomator unnamed (see ve-slider). */}
                 <span class="zs__value" data-readout="level">
                   {zoomLevelLabel(zoom.scale)}
                 </span>

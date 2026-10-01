@@ -27,6 +27,18 @@ import { describe, expect, it } from 'vitest';
  * copy in `.sheet__hidden-name` when it shows only an icon), and a labelled div or span is given
  * the role of what it is.
  *
+ * Some controls stay on the supplemental description on purpose, and the last block below holds
+ * them there: the slider, the progress bars, the timeline's "Video length" separator and the text
+ * fields. Their names are not lost for Google's TalkBack, which reads the supplemental description.
+ * On WebView 153 with TalkBack 17 (the emulator, 2026-09-30) the volume sheet's sliders were
+ * "80%. Volume. Slider" and "1.0s. Fade out duration. Slider", and the text sheet's field "Enter
+ * text. Editing. Text. Edit box"; the progress bars and the separator take the same path in
+ * Chromium's source. Only uiautomator cannot see them, and no markup moves a slider's or a field's
+ * name into the node's text without costing the listener something (see the Host in ve-slider.tsx
+ * and the field in ve-text-sheet.tsx), so the Maestro flows reach those two by where they are and
+ * by the field's own focus instead. Samsung's own TalkBack on 153 has not been tried, and is the
+ * open risk: if it skips the supplemental description, these controls have no name there.
+ *
  * Written as a source check, like element-members.unit.test.ts beside it, because the rule is about
  * the markup a component writes in every state it can be in, and most of those states are never on
  * screen in a component test. The component tests pin the named controls themselves.
@@ -149,5 +161,64 @@ describe('a hidden name stays hidden', () => {
     expect(users.length).toBeGreaterThan(3);
     const missing = users.filter(file => !readFileSync(file, 'utf8').includes(`'../sheet-common.css'`)).map(file => relative(COMPONENTS_DIR, file));
     expect(missing).toEqual([]);
+  });
+});
+
+/**
+ * The roles whose name Chromium keeps in the supplemental description, where Google's TalkBack reads
+ * it and uiautomator does not, and which are meant to stay there (see the header, and its Samsung
+ * caveat). `meter` is not in the kit yet; it is here so that the first one is held to the same
+ * rules.
+ */
+const RANGE_ROLES = new Set(['slider', 'progressbar', 'meter', 'separator']);
+
+/** A text field's node text is what has been typed, so its name is never there either. */
+const FIELD_TAGS = new Set(['textarea', 'input']);
+
+describe('a range control or a text field keeps its name where TalkBack reads it', () => {
+  const elements = markupFiles(COMPONENTS_DIR).flatMap(elementsIn);
+  const ranges = elements.filter(el => RANGE_ROLES.has(el.attrs.get('role') ?? ''));
+  const fields = elements.filter(el => FIELD_TAGS.has(el.tag));
+
+  it('finds the controls to check', () => {
+    // The slider, the progress bar, the spinner, the export still and the timeline's end; the text
+    // sheet's field and the sheet frame's search.
+    expect(ranges.length).toBeGreaterThanOrEqual(5);
+    expect(fields.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('names every range control by aria-label', () => {
+    // The route that was measured. `aria-labelledby` reads the same only while the element it points
+    // at is rendered: pointed at one that was not, the slider was heard as "50%. Slider".
+    const found = ranges.filter(el => !el.attrs.has('aria-label')).map(el => el.where);
+    expect(found).toEqual([]);
+  });
+
+  it('never gives one a title', () => {
+    // A title changes nothing in Android's tree beside a label, loses a slider's name in place of
+    // one (Chromium drops a name from `title` on a range control with `aria-valuetext`), and is a
+    // tooltip in every desktop browser.
+    const found = [...ranges, ...fields].filter(el => el.attrs.has('title')).map(el => el.where);
+    expect(found).toEqual([]);
+  });
+
+  it('keeps the slider saying its value in words, beside its label', () => {
+    // Without `aria-valuetext` TalkBack reads the raw number - "50.0" - rather than what the sheet
+    // formats. It is also why a `title` can never stand in for the label: Chromium drops a name
+    // taken from `title` on a range control that has one.
+    const slider = ranges.filter(el => el.where.startsWith('ve-slider/ve-slider.tsx:'));
+    expect(slider.map(el => el.tag)).toEqual(['Host']);
+    expect(slider[0].attrs.get('role')).toBe('slider');
+    expect(slider[0].attrs.has('aria-label')).toBe(true);
+    expect(slider[0].attrs.has('aria-valuetext')).toBe(true);
+  });
+
+  it('names the text sheet’s field "Text", with "Enter text" as its placeholder', () => {
+    // What Google's TalkBack reads, as "Enter text. Editing. Text. Edit box". The flows do not look
+    // for either on Android; they type into the field the sheet focuses as it opens.
+    const field = fields.filter(el => el.tag === 'textarea' && el.where.startsWith('ve-text-sheet/'));
+    expect(field).toHaveLength(1);
+    expect(field[0].attrs.get('aria-label')).toBe('Text');
+    expect(field[0].attrs.get('placeholder')).toBe('Enter text');
   });
 });

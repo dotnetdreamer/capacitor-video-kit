@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { activeElementDeep } from '../../bridge/active-element';
 import type { EditorContext } from '../../bridge/editor-context';
 import { emptyManifest, type EditManifest, type TextOverlay } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
@@ -211,9 +212,30 @@ describe('ve-text-sheet', () => {
     expect(row[1]).toBe(field(sheet));
     expect(row[row.length - 1]).toBe(button(sheet, 'Done'));
     expect(field(sheet).getAttribute('aria-label')).toBe('Text');
+    // Both are what Google's TalkBack reads - "Enter text. Editing. Text. Edit box" - and neither
+    // reaches the tree a test reads on Android. A title would add nothing there and be a tooltip on
+    // the desktop.
+    expect(field(sheet).placeholder).toBe('Enter text');
+    expect(field(sheet).hasAttribute('title')).toBe(false);
     expect(field(sheet).maxLength).toBe(MAX_TEXT_LENGTH);
     // Nothing to style yet, so no panel has taken the keyboard's place.
     expect(panel(sheet)).toBe(null);
+  });
+
+  it('puts the caret in the field by itself as it opens, with no tap on the field', async () => {
+    // What brings the keyboard up with the sheet, and the only way the Maestro flows reach the field
+    // on Android, where it has no name in the tree they read.
+    const { sheet } = await mount();
+
+    await until('the field to take the focus', () => activeElementDeep() === field(sheet));
+  });
+
+  it('puts the caret after an existing layer’s text, so typing carries on from the end', async () => {
+    const { sheet } = await mount(textLayer('text-1', 'Best pizza'));
+
+    await until('the field to take the focus', () => activeElementDeep() === field(sheet));
+    expect(field(sheet).selectionStart).toBe('Best pizza'.length);
+    expect(field(sheet).selectionEnd).toBe('Best pizza'.length);
   });
 
   it('types into the layer live, and lands the whole edit as one undo step', async () => {

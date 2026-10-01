@@ -273,8 +273,10 @@ export class VeVolumeSheet {
                   {/*
                     The name is the button's own hidden text and NOT an `aria-label`. With
                     `aria-pressed` beside it, an `aria-label` reached Android's WebView as a
-                    ToggleButton with no name at all, so TalkBack had nothing to read and the
-                    Maestro flows could not find "Mute". See `.sheet__hidden-name`.
+                    ToggleButton with no text and no description: the label went to Android's
+                    supplemental description, so the Maestro flows could not find "Mute", and a
+                    screen reader that skips that field had nothing to read. See
+                    `.sheet__hidden-name`.
                   */}
                   <span class="sheet__hidden-name">{muted ? 'Unmute' : 'Mute'}</span>
                 </button>

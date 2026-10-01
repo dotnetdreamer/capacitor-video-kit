@@ -722,6 +722,21 @@ export class VeTextSheet {
               Never bound to `value` and never moved: `loadField` writes the text in by hand, which
               only holds while the vdom leaves this element and its content alone. Hence the key and
               the fixed position among two conditional siblings of another tag.
+
+              Named "Text" by `aria-label`, with "Enter text" as its placeholder, and on Android that is
+              what Google's TalkBack reads. On this field, open in the sheet on the emulator (WebView
+              153, TalkBack 17, 2026-09-30), it said "Enter text. Editing. Text. Edit box", and
+              "Editing. QA caption. Text. Edit box" once those words were typed. Samsung's own TalkBack
+              has not been tried: if it skips the supplemental description, as ve-slider says it may,
+              the name "Text" is lost there. A test reading the tree gets none of it. The EditText's
+              text is only what has been typed, the label goes to Android's supplemental description,
+              which uiautomator does not dump, and the placeholder reaches the hint only while a screen
+              reader is running. A `<label>`, `aria-labelledby` and `title` were each tried in its place
+              and put nothing more there either. Only `aria-describedby` reaches the hint, and a
+              description saying "Text" is the name read out a second time. So nothing is added for a
+              test's sake: the field takes the focus by itself as the sheet opens (`componentDidLoad`),
+              and that is how the Maestro flows type into it on Android. A `title` would also put a
+              tooltip over the field in every desktop browser.
             */}
             <textarea
               key="field"

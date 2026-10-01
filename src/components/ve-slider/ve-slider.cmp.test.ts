@@ -245,6 +245,22 @@ describe('ve-slider', () => {
     expect(slider.getAttribute('aria-valuenow')).toBe('40');
     expect(slider.getAttribute('aria-valuetext')).toBe('40%');
     expect(slider.shadowRoot!.querySelector('.sl__pin')!.textContent).toBe('40%');
+    // No title. On Android a title reaches the tree a test reads only on a slider with no
+    // `aria-valuetext`, which costs TalkBack the formatted value; beside the label it changes
+    // nothing there and is a tooltip in every desktop browser (see the Host in ve-slider.tsx).
+    expect(slider.hasAttribute('title')).toBe(false);
+  });
+
+  it('always sets aria-valuetext, even with the default format, which keeps TalkBack off the raw "40.0"', async () => {
+    // Without `aria-valuetext` Android's TalkBack reads the raw value as "40.0" beside the name, and
+    // a `title` could then stand in for the label (see the Host in ve-slider.tsx).
+    const { slider, setValue } = await mount();
+
+    expect(slider.getAttribute('aria-label')).toBe('Filter strength');
+    expect(slider.getAttribute('aria-valuetext')).toBe('40');
+    await setValue(25);
+    expect(slider.getAttribute('aria-valuetext')).toBe('25');
+    expect(slider.hasAttribute('title')).toBe(false);
   });
 
   it('draws no value above the knob, and reserves no room for one, when the pin is off', async () => {

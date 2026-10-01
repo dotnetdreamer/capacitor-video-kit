@@ -27,7 +27,7 @@ The chosen tile is in its NAME (`Pop, selected`) and never in `aria-pressed`: on
 WebView (Chrome 99) a change to `aria-pressed` inside a shadow root never reaches Android's
 accessibility tree, while a change to the name does - the transition sheet's tiles and the zoom
 sheet's chips made the same move. The slider sits between a visible word and a visible readout,
-because a slider reaches Android's tree with no name of its own.
+because a slider's name never reaches the tree uiautomator reads on Android (see ve-slider).
 
 The tiles move outside the vdom, as the preview's layers do: a repaint is a diff of fourteen
 buttons, and a move is two style writes per tile per frame, done by a `requestAnimationFrame` pump

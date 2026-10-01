@@ -649,8 +649,10 @@ export class VeTransitionSheet {
     return (
       <div class={{ 'ts__duration': true, 'ts__duration--off': !set }} key="duration" aria-disabled={set ? undefined : 'true'}>
         {/*
-          A visible word as well as the slider's own name: on a current Android WebView the slider
-          reaches the accessibility tree with no name at all, and the word is what is left.
+          A visible word as well as the slider's own name. On a current Android WebView the slider
+          reaches the tree uiautomator reads with no name (see ve-slider), so the word is what
+          Maestro has, and what a screen reader that skips Android's supplemental description has.
+          Google's TalkBack on WebView 153 reads the slider's own name.
         */}
         <span class="ts__duration-label">Duration</span>
         <ve-slider

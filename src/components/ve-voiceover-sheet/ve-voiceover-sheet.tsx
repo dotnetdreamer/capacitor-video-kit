@@ -458,9 +458,10 @@ export class VeVoiceoverSheet {
                 {/*
                   The name is the button's own hidden text and NOT an `aria-label`. With
                   `aria-pressed` beside it, an `aria-label` reached Android's WebView as a
-                  ToggleButton with no name at all, so TalkBack had nothing to read and the Maestro
-                  flow could not find "Record voiceover". The disc is only the picture of it. See
-                  `.sheet__hidden-name` in sheet-common.css.
+                  ToggleButton with no text and no description: the label went to Android's
+                  supplemental description, so the Maestro flow could not find "Record voiceover",
+                  and a screen reader that skips that field had nothing to read. The disc is only
+                  the picture of it. See `.sheet__hidden-name` in sheet-common.css.
                 */}
                 <span class="sheet__hidden-name">{live ? 'Stop recording' : 'Record voiceover'}</span>
               </button>

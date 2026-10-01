@@ -205,8 +205,9 @@ export class VeSoundSheet {
           <ve-icon name={playing ? 'pause' : 'play'}></ve-icon>
           {/*
             The name is the button's own hidden text and NOT an `aria-label`. With `aria-pressed`
-            beside it, an `aria-label` reached Android's WebView as a ToggleButton with no name at
-            all, so TalkBack read nothing and Maestro could not find "Play ...". See
+            beside it, an `aria-label` reached Android's WebView as a ToggleButton with no text and
+            no description: the label went to Android's supplemental description, so Maestro could
+            not find "Play ...", and a screen reader that skips that field had nothing to read. See
             `.sheet__hidden-name` in sheet-common.css.
           */}
           <span class="sheet__hidden-name">{playing ? `Stop ${sound.fileName}` : `Play ${sound.fileName}`}</span>
