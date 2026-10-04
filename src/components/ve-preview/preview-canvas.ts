@@ -1,5 +1,7 @@
 import { cameraAt, type CameraView } from '../../editor/camera';
 import type { ComposeCamera } from '../../video-composer/definitions';
+import type { EditOutput } from '../../editor/edit-manifest';
+import { drawsNothing, layoutRectAt, type LayoutMotions } from '../../editor/layout-motion';
 import { compileTransition, lookAt, transitionPreset, type CompiledTransition } from '../../editor/transitions';
 import { DEFAULT_FRAME_ASPECT, cropStageBox, orWhole } from '../../state/clip-framing';
 import { fold, isIdentity, type ColorMatrix } from '../../video-composer/web/color-matrix';
@@ -472,7 +474,17 @@ export class PreviewCanvas {
 
     // ONE reading of the base track per frame; see [BaseShot].
     const feed = this.baseFeed;
-    const shot = feed ? this.framedShot(feed(), now) : null;
+    const framed = feed ? this.framedShot(feed(), now) : null;
+    // The instant this frame is OF: the shot's own reading, or the player's clock where there is no
+    // shot. Everything that moves with time is read here - the arrangements' rectangles below and the
+    // camera at the end - so a split cannot open a tick ahead of the picture it is opening around.
+    const atMs = framed?.atMs ?? this.clock?.() ?? this.store.playheadMs.value;
+    // Off - every clip where it rests - for the crop sheet's tool view, which is about one clip's own
+    // picture and frames it on a stage that must not move under the finger.
+    const motions = cropOpen ? NO_LAYOUT_MOTIONS : this.store.layoutMotions.value;
+    const output = this.store.output.value;
+    // A base too thin to show at this instant is simply not on screen, rather than a layer to wait for.
+    const shot = framed && motions.size > 0 ? movedShot(framed, motions, atMs, output) : framed;
     if (shot) {
       onScreen += 1;
       const base = baseDraw(shot, frameAspect, cropOpen, cropping, slowed);
@@ -501,13 +513,17 @@ export class PreviewCanvas {
       if (feed && layer.trackId === null) continue;
       const source = this.sources.get(layer.trackId);
       if (!source) continue;
+      // Where its arrangement has it at this instant - sliding in, growing out of an edge - or as it
+      // rests. Too thin to show, nothing of it is on screen, and there is nothing to wait for either.
+      const placed = motions.size > 0 ? movedLayer(layer, motions, atMs, output) : layer;
+      if (!placed) continue;
       onScreen += 1;
       const video = source.video;
       if (video.readyState < HAVE_CURRENT_DATA || !(video.videoWidth > 0) || !(video.videoHeight > 0) || !this.framed(video, now)) {
         missing = true;
         continue;
       }
-      draws.push(slowed(layer, video, layerDraw(layer, video, frameAspect, cropping === layer.clipId)));
+      draws.push(slowed(placed, video, layerDraw(placed, video, frameAspect, cropping === placed.clipId)));
     }
 
     // Nothing to draw, over a post that should be showing something: KEEP what is on the canvas.
@@ -534,9 +550,11 @@ export class PreviewCanvas {
     // camera is not live: the crop sheet's tool view, and a zoom's area being drawn in its sheet, whose
     // box is drawn over the unzoomed frame it is chosen from. A scrub in that sheet turns it back on
     // (see [EditorStore.zoomView]). See [cameraDraws].
-    const camera = previewCamera(this.store.cameraLive.value, this.store.camera.value, shot?.atMs ?? this.clock?.() ?? this.store.playheadMs.value);
+    const camera = previewCamera(this.store.cameraLive.value, this.store.camera.value, atMs);
 
     painter.setColour(this.colour(), this.store.previewCss.value);
+    // The canvas the post is painted on, exactly as the render paints it; black for a post with none.
+    painter.setBackground(this.store.backgroundRgb.value);
     // Warmed with the picture unzoomed: a warm-up frame is thrown away, and it only has to build the
     // transition's programs and targets, which a camera does not change.
     const side = draws[0] ? warmSide(draws[0]) : null;
@@ -730,6 +748,47 @@ export function layerDraw(layer: PreviewVideoLayer, video: PreviewSource, frameA
     ...common,
     framing,
     dest: pictureDest(layer.rect ?? WHOLE_FRAME, framing, frameAspect, video.videoWidth, video.videoHeight),
+  };
+}
+
+/** No clip moving anywhere: what the crop sheet's tool view draws with. */
+const NO_LAYOUT_MOTIONS: LayoutMotions = new Map();
+
+/**
+ * A layer where its arrangement has it at output instant `atMs`, read through the one helper the
+ * render reads the same keys with: the very same object when nothing moves it - every layer of a
+ * post with no animated arrangement - a copy carrying the moving rectangle when something does, and
+ * null when that rectangle is too thin to show on `output` at all.
+ *
+ * The copy is the canvas's alone. [EditorStore.previewLayers] keeps every layer's RESTING rectangle,
+ * which is what the selection frame, a tap on the picture and a drag all read: a layer is grabbed and
+ * moved where it rests, as an animated sticker is, and the store's layers stay the same objects from
+ * one playhead write to the next instead of becoming a new rectangle every tick of a scrub.
+ */
+export function movedLayer(layer: PreviewVideoLayer, motions: LayoutMotions, atMs: number, output: Pick<EditOutput, 'width' | 'height'>): PreviewVideoLayer | null {
+  if (!motions.has(layer.clipId)) return layer;
+  const rect = layoutRectAt(motions, { id: layer.clipId, rect: layer.rect ?? undefined }, atMs);
+  if (rect && drawsNothing(rect, output.width, output.height)) return null;
+  return { ...layer, rect };
+}
+
+/**
+ * A [BaseShot] where the arrangements have it at `atMs`: both of its clips moved by [movedLayer], or
+ * null when the base clip itself is too thin to show. A transition's outgoing side too thin to show is
+ * handed over as LOST - nothing is coming for it - so the incoming side is drawn on its own rather
+ * than the frame being held for a tail that has nothing to draw.
+ */
+export function movedShot(shot: BaseShot, motions: LayoutMotions, atMs: number, output: Pick<EditOutput, 'width' | 'height'>): BaseShot | null {
+  const layer = movedLayer(shot.layer, motions, atMs, output);
+  if (!layer) return null;
+  const transition = shot.transition;
+  if (!transition) return layer === shot.layer ? shot : { ...shot, layer };
+  const from = movedLayer(transition.layer, motions, atMs, output);
+  if (layer === shot.layer && from === transition.layer) return shot;
+  return {
+    ...shot,
+    layer,
+    transition: from ? { ...transition, layer: from } : { ...transition, video: null, lost: true },
   };
 }
 

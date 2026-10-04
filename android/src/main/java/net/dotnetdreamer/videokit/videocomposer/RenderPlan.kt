@@ -217,6 +217,15 @@ class RenderPlan private constructor(
          */
         val zoomed: Boolean = false,
         /**
+         * True for a clip whose rectangle MOVES ([Clip.rectMotion]). Its picture is not drawn at its
+         * rectangle's size, because that size changes from frame to frame and a texture's cannot: it
+         * is drawn into the WHOLE output frame like a base clip, placed inside it by its own geometry
+         * on every frame and transparent around it, and the compositor lays that frame over the base
+         * exactly as it is - centred, unscaled, at the track's opacity. The zoom camera goes in its
+         * effect chain for the same reason it does on the base, so [zoomed] is false here.
+         */
+        val wholeFrame: Boolean = false,
+        /**
          * What the compositor scales the layer's texture by to put it back at its rectangle's size:
          * 1 unless the clip was SUPERSAMPLED, drawn into a frame larger than its rectangle so that a
          * zoom magnifies real source pixels rather than the rectangle-sized picture. Then it is the
@@ -540,7 +549,7 @@ class RenderPlan private constructor(
                 outDurUs = floor((outUs - inUs) / speed.toDouble()).toLong(),
                 gain = gain,
                 removeAudio = gain <= 0f || !sourceHasAudio,
-                reframed = clip.crop != null || clip.rect != null,
+                reframed = clip.crop != null || clip.rect != null || clip.rectMotion != null,
                 rotationGlDeg = rotationGlDegOf(clip.rect),
                 frame = frame,
                 imageMimeType = if (clip.image) probe?.imageMimeType else null,
@@ -581,6 +590,34 @@ class RenderPlan private constructor(
 
             for (clip in track.clips) {
                 if (cursorUs >= totalUs) break
+                if (clip.rectMotion != null) {
+                    // A rectangle that MOVES cannot be the frame the clip is drawn into - a texture
+                    // keeps its size for the whole clip - so the clip is drawn into the whole output
+                    // frame instead, placed and turned inside it on every frame by its own geometry,
+                    // exactly as a base clip is, with its rectangle and its keys left on it to do that.
+                    // See [LayerPlacement.wholeFrame].
+                    var item = planClip(clip, spec.audio, probes, spec.output)
+                    val roomUs = totalUs - cursorUs
+                    if (item.outDurUs > roomUs) item = item.cutTo(roomUs) ?: break
+                    // The camera goes in the clip's own chain, as it does for a base clip: its picture
+                    // is the whole frame, so the camera is one more matrix after its geometry.
+                    val zoomed = camera?.zoomsBetween(
+                        (cursorUs - marginUs) / 1000.0,
+                        (cursorUs + item.outDurUs + marginUs) / 1000.0,
+                    ) == true
+                    if (zoomed) item = item.copy(zoomed = true)
+                    clips += item
+                    placements += LayerPlacement(
+                        startUs = cursorUs,
+                        endUs = cursorUs + item.outDurUs,
+                        anchorX = 0f,
+                        anchorY = 0f,
+                        rotationGlDeg = 0f,
+                        wholeFrame = true,
+                    )
+                    cursorUs += item.outDurUs
+                    continue
+                }
                 // The four numbers alone: they size the layer and anchor it, and the angle is not
                 // theirs to answer for. It travels on the placement instead, because a layer is
                 // turned where the compositor puts it and not inside its own texture.
@@ -890,13 +927,21 @@ class RenderPlan private constructor(
          * JVM: the GL side only reads it back out in `configure`, where the source frame's real
          * size is finally known.
          */
-        fun sourceWindow(clip: Clip, output: Output, inputWidth: Int, inputHeight: Int): Rect {
-            val crop = clip.crop ?: FULL_FRAME
+        fun sourceWindow(clip: Clip, output: Output, inputWidth: Int, inputHeight: Int): Rect =
             // The rectangle's four numbers and not its angle, because the fit is measured BEFORE
             // the turn, in the upright rectangle, and the whole fitted result is turned afterwards
             // as one piece. Measuring it against the turned rectangle's bounding box instead would
             // swell and shrink the picture as the customer spun it.
-            val rect = clip.rect?.bounds ?: FULL_FRAME
+            sourceWindow(clip, output, inputWidth, inputHeight, clip.rect?.bounds ?: FULL_FRAME)
+
+        /**
+         * [sourceWindow] for the rectangle [rect] the clip is placed in at one frame, which for a clip
+         * whose rectangle MOVES is where [Clip.rectMotion] has it then, and the fit is worked out
+         * against it afresh: a picture squeezed into half the frame is re-framed on every frame of the
+         * squeeze, exactly as the preview and the other engines re-frame it.
+         */
+        fun sourceWindow(clip: Clip, output: Output, inputWidth: Int, inputHeight: Int, rect: Rect): Rect {
+            val crop = clip.crop ?: FULL_FRAME
 
             // One pixel floors everywhere, so a hand-built spec cannot divide by zero below and
             // turn the matrix into NaN, which would show up as a black clip and nothing else.

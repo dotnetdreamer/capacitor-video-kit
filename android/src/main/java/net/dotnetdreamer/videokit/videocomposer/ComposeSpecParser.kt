@@ -100,6 +100,9 @@ object ComposeSpecParser {
         // Read last, after everything that was already read before it existed, so a spec that is
         // broken somewhere else reports the same first failure it always did.
         val camera = parseCamera(json.opt("camera"))
+        // After the camera, for the same reason, by the tints' rule: exactly three finite numbers,
+        // each held to 0..1, and anything else that is there refused as `background`.
+        val background = parseTint(json.opt("background"), "background")
 
         return ComposeSpec(
             jobId = jobId,
@@ -113,6 +116,7 @@ object ComposeSpecParser {
             durationMs = json.optLong("durationMs", 0L).coerceAtLeast(0L),
             tracks = tracks,
             camera = camera,
+            background = background,
         )
     }
 
@@ -203,8 +207,70 @@ object ComposeSpecParser {
             fit = if (o.optString("fit", "contain") == "cover") Fit.COVER else Fit.CONTAIN,
             crop = o.rectOrNull("crop", "$path.crop"),
             rect = o.placementOrNull("rect", "$path.rect"),
+            // Straight after the rectangle it moves - Kotlin evaluates named arguments in the order
+            // they are written - which is the order the browser reads them in, so a clip wrong in
+            // both is refused for the same one everywhere.
+            rectMotion = parseRectMotion(o.opt("rectMotion"), "$path.rectMotion"),
             image = image,
         )
+    }
+
+    /**
+     * A clip's moving rectangle, or null when it holds still - `normaliseRectMotion` in
+     * layout-motion.ts, check for check and in the same order: the motion an object, then `atMs`, then
+     * `x`, `y`, `w` and `h` each an array of `atMs`'s length, then the unknown keys (the
+     * alphabetically first is the one named), then the count, then the times, then the values. Every
+     * value is CLAMPED - the corner to +-[RectMotion.MAX_OFFSET], each side to 0..[MAX_PLACEMENT_SIZE]
+     * - and no strip of it is held on the frame the way a resting placement's is: a picture sliding
+     * in from below starts wholly under the bottom edge, and the frame cuts it there.
+     */
+    private fun parseRectMotion(value: Any?, path: String): RectMotion? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val at = o.opt("atMs") as? JSONArray ?: throw SpecException("$path.atMs")
+        val n = at.length()
+        val channels = RECT_CHANNELS.map { name ->
+            val array = o.opt(name) as? JSONArray
+            if (array == null || array.length() != n) throw SpecException("$path.$name")
+            array
+        }
+        firstUnknownKey(o, RECT_MOTION_KEYS)?.let { throw SpecException("$path.$it") }
+        if (n == 0 || n > RectMotion.MAX_KEYS) {
+            throw SpecException(path, "invalid_spec:$path must have 1 to ${RectMotion.MAX_KEYS} keys")
+        }
+        val atMs = DoubleArray(n)
+        for (i in 0 until n) {
+            val t = finiteNumber(at.opt(i)) ?: throw SpecException("$path.atMs[$i]")
+            if (i > 0 && t < atMs[i - 1]) throw SpecException("$path.atMs[$i]")
+            atMs[i] = t
+        }
+        val values = RECT_CHANNELS.mapIndexed { c, name ->
+            val corner = name == "x" || name == "y"
+            val min = if (corner) -RectMotion.MAX_OFFSET else 0.0
+            val max = if (corner) RectMotion.MAX_OFFSET else MAX_PLACEMENT_SIZE.toDouble()
+            DoubleArray(n) { i -> (finiteNumber(channels[c].opt(i)) ?: throw SpecException("$path.$name[$i]")).coerceIn(min, max) }
+        }
+        return RectMotion(atMs, values[0], values[1], values[2], values[3])
+    }
+
+    /** The four numbers of a moving rectangle, in the order they are checked. */
+    private val RECT_CHANNELS = listOf("x", "y", "w", "h")
+
+    private val RECT_MOTION_KEYS = setOf("atMs", "x", "y", "w", "h")
+
+    /**
+     * The first key of [o] that is not one of [known] in ALPHABETICAL order, which is the order the
+     * browser and iOS name one in: a JSON object's own order is the sender's, and two readers that
+     * walk it differently would name different keys for the same spec.
+     */
+    private fun firstUnknownKey(o: JSONObject, known: Set<String>): String? {
+        val keys = o.keys()
+        var first: String? = null
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (key !in known && (first == null || key < first)) first = key
+        }
+        return first
     }
 
     /**

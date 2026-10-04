@@ -1,9 +1,10 @@
 import { cameraAt } from '../../editor/camera';
 import { byteCeiling, cssFor } from '../../editor/edit-manifest';
+import { drawsNothing, rectMotionAt } from '../../editor/layout-motion';
 import { overlayMotionAt } from '../../editor/motion';
 import { lookAt } from '../../editor/transitions';
 import { describe } from '../../web-runtime/files';
-import type { ComposeClip, ComposeFailureCode, ComposeRect, ComposeSpec } from '../definitions';
+import type { ComposeClip, ComposeFailureCode, ComposeOutput, ComposeRect, ComposeSpec } from '../definitions';
 
 import { mixdown } from './audio';
 import { throughCamera } from './camera-draw';
@@ -51,6 +52,20 @@ const TAIL_READER = 'base:tail';
 /** An extra layer's reader slot, kept apart from the base track's two whatever the track is called. */
 function layerReader(trackId: string): string {
   return `track:${trackId}`;
+}
+
+/**
+ * The rectangle a base clip or a tail is framed into at output time `atUs`: where its `rectMotion`
+ * has it then, read at the frame's own unrounded milliseconds as the camera is, or its resting `rect`
+ * for one that does not move - which is every clip of every spec written before clips moved.
+ */
+function rectAt(clip: ComposeClip, atUs: number): ComposeRect | undefined {
+  return clip.rectMotion ? rectMotionAt(clip.rectMotion, atUs / 1000) : clip.rect;
+}
+
+/** Whether a picture placed in `rect` is too thin to show on this output, so its frame is not even fetched. */
+function hidden(rect: ComposeRect | undefined, output: ComposeOutput): boolean {
+  return rect !== undefined && drawsNothing(rect, output.width, output.height);
 }
 
 /** How often the bar is allowed to move. Any faster and it is work rather than feedback. */
@@ -102,6 +117,8 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
 
   const painter = new Painter(plan.output);
   painter.setColour(plan.colorMatrix, cssFor(spec.filter));
+  // Once, before the first frame: the canvas every frame is painted on, black for a spec with none.
+  painter.setBackground(plan.background);
   // Each element closed is one the painter will never be handed again, so its texture goes with it.
   // A picture is decoded at twice the output's long side, so a crop can zoom into it before it
   // softens, and never past 4096, the largest texture every GL implementation guarantees. A camera
@@ -201,17 +218,36 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     const base = baseIndex >= 0 ? plan.clips[baseIndex] : undefined;
     // The base track's picture is placed by its `rect` INSIDE the whole frame rather than by a
     // destination of its own, so the angle comes off the clip; the painter turns it about that
-    // same rectangle's centre either way.
-    const baseJob = base ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0) : null;
+    // same rectangle's centre either way. A rectangle that moves is read at this frame's instant,
+    // through the one helper the preview reads it with, and one too thin to show draws nothing.
+    const baseRect = base ? rectAt(base.clip, atUs) : undefined;
+    const baseJob =
+      base && !hidden(baseRect, plan.output)
+        ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0, null, baseRect)
+        : null;
     // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
     // tail - read from its own element, drawn the way the base clip it continues was drawn - is
     // the other. The spec was lowered, so the window opens exactly where the base clip starts
     // and `clipIndexAt` has already named the right clip for it.
     const active = base && hasTransitions ? transitionAt(plan, atUs) : null;
     const crossing = active && active.index === baseIndex ? active : null;
-    const tailJob = crossing
-      ? layerDraw(layers, TAIL_READER, crossing.planned.tail, atUs - crossing.planned.startUs, frameSeconds, WHOLE_FRAME, 1, crossing.planned.tail.clip.rect?.rotationDeg ?? 0)
-      : null;
+    // The tail is its clip carried on, keys and all, so it moves on through the window as that clip would have.
+    const tailRect = crossing ? rectAt(crossing.planned.tail.clip, atUs) : undefined;
+    const tailJob =
+      crossing && !hidden(tailRect, plan.output)
+        ? layerDraw(
+            layers,
+            TAIL_READER,
+            crossing.planned.tail,
+            atUs - crossing.planned.startUs,
+            frameSeconds,
+            WHOLE_FRAME,
+            1,
+            crossing.planned.tail.clip.rect?.rotationDeg ?? 0,
+            null,
+            tailRect,
+          )
+        : null;
     // Never on a frame that asked for a tail: the last window has closed by the time this is true.
     if (tailsUntilUs > 0 && atUs >= tailsUntilUs) {
       layers.release(TAIL_READER);
@@ -231,22 +267,17 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
       const clip = track.clips[visible];
       const placement = track.placements[visible];
       if (!clip || !placement) continue;
+      // Where the layer is at this instant: its keys' rectangle when it moves - sliding in, or growing
+      // out of an edge, as its arrangement opens - and its resting one when it does not. Too thin to
+      // show, it is skipped for the frame, and the layers under it show through.
+      const dest = placement.motion ? rectMotionAt(placement.motion, atUs / 1000) : placement.rect;
+      if (hidden(dest, plan.output)) continue;
       const slot = layerReader(track.id);
       // The frame's shape goes with it, because an extra layer's destination narrows to the shape
       // its picture comes out at rather than staying its whole rectangle: bars inside a layer are
       // opaque black over the picture beneath it. See [pictureDest].
       const run = () =>
-        layerDraw(
-          layers,
-          slot,
-          clip,
-          atUs - placement.startUs,
-          frameSeconds,
-          placement.rect,
-          track.opacity,
-          placement.rect.rotationDeg ?? 0,
-          plan.output.width / plan.output.height,
-        );
+        layerDraw(layers, slot, clip, atUs - placement.startUs, frameSeconds, dest, track.opacity, placement.rect.rotationDeg ?? 0, plan.output.width / plan.output.height);
       const before = busy.get(slot);
       const job = before ? before.then(run, run) : run();
       busy.set(slot, job);
@@ -341,6 +372,11 @@ async function layerDraw(
    * Null for the base track, which is drawn into the whole frame and whose bars ARE the background.
    */
   extraFrameAspect: number | null = null,
+  /**
+   * The rectangle a base clip or a tail is framed into at THIS frame: its resting `rect`, or where its
+   * `rectMotion` has it now. An extra layer's rectangle is its `dest` instead, and is not given here.
+   */
+  framingRect: ComposeRect | undefined = clip.clip.rect,
 ): Promise<LayerDraw | null> {
   const reader = await layers.reader(layerId, clip.clip);
   const seconds = sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000;
@@ -354,7 +390,7 @@ async function layerDraw(
   // An extra layer's `rect` became its destination when the plan was built and was taken off the
   // clip, so what is left here is the crop and the fit - which is the whole of the difference
   // between a clip on the base track and one on a layer.
-  const framing = { fit: clip.clip.fit, crop: clip.clip.crop, rect: clip.clip.rect };
+  const framing = { fit: clip.clip.fit, crop: clip.clip.crop, rect: framingRect };
   const draw: LayerDraw = {
     source: synthesised ? synthesised.source : reader.source,
     sourceWidth: reader.width,

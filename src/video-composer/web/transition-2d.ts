@@ -51,7 +51,15 @@ export class Transition2d {
   private mask: { image: ImageData; key: string } | null = null;
   private filters: boolean | null = null;
 
+  /** The canvas as a CSS colour: black until the painter says otherwise. See `Painter.setBackground`. */
+  private background = '#000';
+
   constructor(private readonly output: Frame) {}
+
+  /** What a side is laid on and what shows where neither side covers the frame, 0..1 RGB. */
+  setBackground(rgb: readonly [number, number, number]): void {
+    this.background = `rgb(${Math.round(rgb[0] * 255)}, ${Math.round(rgb[1] * 255)}, ${Math.round(rgb[2] * 255)})`;
+  }
 
   /**
    * The whole transition onto `ctx`, over every pixel of it - the outgoing side over black and the
@@ -70,7 +78,7 @@ export class Transition2d {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     ctx.filter = 'none';
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = this.background;
     ctx.fillRect(0, 0, width, height);
     if (from) this.place(ctx, from, draw.look.from);
 
@@ -124,7 +132,7 @@ export class Transition2d {
     const frame = this.surface(name, width, height);
     const c = frame.ctx;
     reset(c);
-    c.fillStyle = '#000';
+    c.fillStyle = this.background;
     c.fillRect(0, 0, width, height);
     drawSide(c, layer);
     reset(c);

@@ -23,6 +23,7 @@ export type LayoutPresetId =
   | 'full'
   | 'splitTopBottom'
   | 'splitLeftRight'
+  | 'framed'
   | 'pipTL'
   | 'pipTR'
   | 'pipBL'
@@ -79,6 +80,37 @@ function pipRect(right: boolean, bottom: boolean, frameAspect: number): EditPlac
 }
 
 /**
+ * The room round each of the two videos of a framed layout, and between them, as a fraction of the
+ * frame's SHORTER side - the same number of pixels on every side, which is what makes the two read as
+ * cards laid on the canvas rather than a split with a thin line down it.
+ */
+const FRAMED_MARGIN = 0.06;
+
+/**
+ * Two videos as cards on the canvas, with even room round both: stacked on an upright frame, side by
+ * side on a wide one - the arrangement a screenshot-style post is, once the canvas has a colour.
+ */
+function framedRects(frameAspect: number): { base: EditPlacement; track: EditPlacement } {
+  if (frameAspect < 1) {
+    // The width is the shorter side: the margin is a fraction of it across, and that many pixels down.
+    const across = FRAMED_MARGIN;
+    const down = FRAMED_MARGIN * frameAspect;
+    const h = round4((1 - 3 * down) / 2);
+    return {
+      base: { x: across, y: round4(down), w: round4(1 - 2 * across), h },
+      track: { x: across, y: round4(2 * down + h), w: round4(1 - 2 * across), h },
+    };
+  }
+  const down = FRAMED_MARGIN;
+  const across = FRAMED_MARGIN / frameAspect;
+  const w = round4((1 - 3 * across) / 2);
+  return {
+    base: { x: round4(across), y: down, w, h: round4(1 - 2 * down) },
+    track: { x: round4(2 * across + w), y: down, w, h: round4(1 - 2 * down) },
+  };
+}
+
+/**
  * Every arrangement a customer can pick, in the order a picker shows them. `full` comes first
  * because it is where a post starts and what every other one is a departure from.
  */
@@ -99,6 +131,7 @@ export function layoutPresets(frameAspect: number = DEFAULT_FRAME_ASPECT): Layou
       track: { x: 0.5, y: 0, w: 0.5, h: 1 },
       fit: 'cover',
     },
+    { id: 'framed', label: 'Framed', ...framedRects(frameAspect), fit: 'cover' },
     { id: 'pipTL', label: 'Corner top left', track: pipRect(false, false, frameAspect), fit: 'cover' },
     { id: 'pipTR', label: 'Corner top right', track: pipRect(true, false, frameAspect), fit: 'cover' },
     { id: 'pipBL', label: 'Corner bottom left', track: pipRect(false, true, frameAspect), fit: 'cover' },

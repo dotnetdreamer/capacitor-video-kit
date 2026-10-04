@@ -15,6 +15,7 @@ import {
   contentDurationMs,
   defaultPictureEdit,
   isFullFrameRect,
+  normaliseBackground,
   normalisePlacement,
   normaliseZoom,
   normaliseRect,
@@ -32,7 +33,9 @@ import {
   type EditVideoTrack,
   type EditVoiceover,
   type EditZoom,
+  type LayoutAnimation,
 } from './edit-manifest';
+import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
 import { normaliseTransition, transitionSpans } from './transitions';
 
@@ -813,6 +816,39 @@ export function setTrackStart(manifest: EditManifest, trackId: string, startMs: 
 /** How far the whole layer is faded into what is under it. */
 export function setTrackOpacity(manifest: EditManifest, trackId: string, opacity: number): EditManifest {
   return patchTrack(manifest, trackId, { opacity: clamp(opacity, 0, 1) });
+}
+
+/**
+ * The canvas colour, `#rrggbb`: what shows wherever no video picture is drawn. Black - or anything that
+ * is not a colour - takes the key off, so a post coloured and put back to black is the post it was,
+ * down to its keys, and its spec is the one it always was.
+ */
+export function setBackground(manifest: EditManifest, colour: string | null): EditManifest {
+  const next = normaliseBackground(colour);
+  if (next === manifest.background) return manifest;
+  const updated: EditManifest = { ...manifest };
+  if (next) updated.background = next;
+  else delete updated.background;
+  return updated;
+}
+
+/**
+ * How the layer's arrangement opens as it comes on screen and closes as it goes, or `null` for one
+ * that holds still all the way through - the arrangement every layer had before arrangements moved.
+ *
+ * Normalised on the way in, so an id this version does not know is no animation and a length outside
+ * the range is held to it. `null` takes the key off rather than leaving it undefined: a layer that
+ * holds still is one with no key, which is what keeps its clips on the wire byte for byte as they were.
+ */
+export function setTrackLayoutAnimation(manifest: EditManifest, trackId: string, animation: LayoutAnimation | null): EditManifest {
+  const current = findVideoTrack(manifest, trackId);
+  if (!current) return manifest;
+  const next = normaliseLayoutAnimation(animation);
+  if (sameLayoutAnimation(current.layoutAnimation, next)) return manifest;
+  const track: EditVideoTrack = { ...current };
+  if (next) track.layoutAnimation = next;
+  else delete track.layoutAnimation;
+  return { ...manifest, videoTracks: manifest.videoTracks.map(one => (one.id === trackId ? track : one)) };
 }
 
 /**

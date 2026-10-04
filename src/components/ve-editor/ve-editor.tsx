@@ -1094,6 +1094,8 @@ export class VeEditor {
         return <ve-zoom-sheet key="zoom" class="ve__sheet" ctx={ctx} />;
       case 'animation':
         return <ve-animation-sheet key="animation" class="ve__sheet" ctx={ctx} />;
+      case 'background':
+        return <ve-background-sheet key="background" class="ve__sheet" ctx={ctx} />;
       default:
         return <ve-toolbar key="toolbar" class="ve__toolbar" ctx={ctx} />;
     }

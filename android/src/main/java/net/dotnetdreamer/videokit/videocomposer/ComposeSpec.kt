@@ -110,6 +110,17 @@ data class Clip(
      * the field. See `ComposeClip.image` in definitions.ts.
      */
     val image: Boolean = false,
+    /**
+     * The placement MOVING over output time - a split screen opening as a second video comes on and
+     * closing as it goes. Null is a clip that stands where [rect] puts it for as long as it plays,
+     * which is every spec written before the field, and the plan asks this ONCE, when it is built.
+     *
+     * Present, its four numbers replace [rect]'s at every frame and nothing else does: the angle is
+     * still [Placement.rotationDeg], and [crop] and [fit] mean what they mean, the fit measured afresh
+     * against the moving rectangle. Last in the list so that every clip built before it existed, by
+     * name or by position, is built exactly as it was. See `ComposeClip.rectMotion`.
+     */
+    val rectMotion: RectMotion? = null,
 )
 
 /**
@@ -381,6 +392,12 @@ data class ComposeSpec(
      * a sticker stay where the customer put them.
      */
     val camera: CameraTrack? = null,
+    /**
+     * The canvas, 0..1 RGB - `ComposeSpec.background` - or null for black, which is every spec
+     * written before the key. Three channels already held to 0..1 by the parser. Laid under the
+     * finished picture by [BackgroundEffect], and under each transition side by [TransitionEffect].
+     */
+    val background: FloatArray? = null,
 )
 
 /**

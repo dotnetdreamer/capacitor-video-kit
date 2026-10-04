@@ -44,6 +44,8 @@ export const PANEL_LAYOUT: Readonly<Record<EditorPanel, 'compact' | 'tall'>> = {
    * or looping is the whole of what the sheet is showing, and it happens on the preview.
    */
   animation: 'compact',
+  /* Compact so the canvas being coloured stays on screen above the swatches choosing it. */
+  background: 'compact',
   /* The keyboard sits under this one and the sheet has to clear it. */
   text: 'tall',
   /* A scrolling grid of several hundred tiles, with a search field and a category bar. */

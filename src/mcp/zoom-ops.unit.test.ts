@@ -70,14 +70,12 @@ describe('zoom ops on an app that has turned Zoom off', () => {
 
   it('has an example here for every zoom op there is', () => {
     expect(Object.keys(zoomOps).sort()).toEqual([...ZOOM_OPS]);
-    expect(OP_NAMES.filter((name) => /zoom/i.test(name))).toEqual([...ZOOM_OPS]);
+    expect(OP_NAMES.filter(name => /zoom/i.test(name))).toEqual([...ZOOM_OPS]);
   });
 
   it('refuses every zoom op, and says it is the app that turned Zoom off', () => {
     for (const [name, op] of Object.entries(zoomOps)) {
-      expect(() => applyEditOps(withZoom(), [op], off), name).toThrow(
-        new RegExp(`^op 0 \\(${name}\\): zoom is turned off for this app, so no post on this server holds a zoom`),
-      );
+      expect(() => applyEditOps(withZoom(), [op], off), name).toThrow(new RegExp(`^op 0 \\(${name}\\): zoom is turned off for this app, so no post on this server holds a zoom`));
     }
     expect(() => applyEditOps(post(), [zoomOps['addZoom']!], off)).toThrow(/none can be added/);
     expect(() => applyEditOps(withZoom(), [zoomOps['duplicateZoom']!], off)).toThrow(/a copy of one would be a new zoom/);
@@ -120,7 +118,7 @@ describe('zoom ops on an app that has turned Zoom off', () => {
   });
 
   it('leaves every zoom op out of opNamesFor, and nothing else', () => {
-    expect(opNamesFor({ zoom: false })).toEqual(OP_NAMES.filter((name) => !ZOOM_OPS.includes(name)));
+    expect(opNamesFor({ zoom: false })).toEqual(OP_NAMES.filter(name => !ZOOM_OPS.includes(name)));
     // The editor's own object written out in place, other fields and all, as a host passes it on.
     expect(opNamesFor({ pictures: true, zoom: false })).toEqual(opNamesFor({ zoom: false }));
     expect(opNamesFor({ replaceKeepsLength: true, pictures: true, zoom: true })).toBe(OP_NAMES);
@@ -144,7 +142,7 @@ describe('zoom ops on an app that has turned Zoom off', () => {
   it('adds zooms as it always has when nothing is said, or when Zoom is said to be on', () => {
     for (const options of [undefined, {}, { editing: {} }, { editing: { zoom: true } }, { editing: { pictures: true, zoom: true } }]) {
       const m = applyEditOps(post(), [{ op: 'addZoom', id: 'z', startMs: 1000 }], options);
-      expect(m.zooms.map((z) => z.id)).toEqual(['z']);
+      expect(m.zooms.map(z => z.id)).toEqual(['z']);
     }
   });
 
@@ -226,7 +224,9 @@ describe('no op makes a zoom on a post that has none', () => {
     swapTrackZ: [{ op: 'swapTrackZ', trackId: 'vt' }],
     moveClipToTrack: [{ op: 'moveClipToTrack', clipId: 'c', target: { kind: 'new', index: 1 }, atMs: 0, newTrackId: 'vt4' }],
     // A corner rather than the first preset, which is the full frame a new track already fills.
-    applyLayoutPreset: [{ op: 'applyLayoutPreset', trackId: 'vt', presetId: layoutPresets().find((p) => p.id === 'pipTR')!.id }],
+    applyLayoutPreset: [{ op: 'applyLayoutPreset', trackId: 'vt', presetId: layoutPresets().find(p => p.id === 'pipTR')!.id }],
+    setLayoutAnimation: [{ op: 'setLayoutAnimation', trackId: 'vt', animation: { id: 'slide', durationMs: 600 } }],
+    setBackground: [{ op: 'setBackground', colour: '#ffffff' }],
     addText: [{ op: 'addText', id: 't2', text: 'Hi' }],
     addSticker: [{ op: 'addSticker', id: 's1', emoji: '🔥' }],
     addImage: [{ op: 'addImage', id: 'i1', uri: 'file:///x.png' }],

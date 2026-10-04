@@ -1,4 +1,5 @@
 import { normaliseCamera } from '../../editor/camera';
+import { normaliseRectMotion } from '../../editor/layout-motion';
 import { normaliseOverlayMotion } from '../../editor/motion';
 import type {
   ComposeCamera,
@@ -7,6 +8,7 @@ import type {
   ComposeOutput,
   ComposeOverlayMotion,
   ComposePlacement,
+  ComposeRectMotion,
   ComposeSpec,
   ComposeTrack,
   ComposeTransition,
@@ -82,6 +84,14 @@ export interface LayerPlacement {
    * below that sizes a layer's frame from `rect.w` and `rect.h` is right to ignore the turn.
    */
   rect: ComposePlacement;
+  /**
+   * How that rectangle MOVES, in output-timeline milliseconds, or null for a layer that stands where
+   * [rect] puts it - every layer of every spec written before arrangements opened and closed, and the
+   * render asks this once per frame and layer rather than re-reading the clip. Present, its four
+   * numbers replace [rect]'s on every frame and the angle stays [rect]'s. Milliseconds for the
+   * camera's reason: the one reading of it, `rectMotionAt`, is shared verbatim with the preview.
+   */
+  motion: ComposeRectMotion | null;
 }
 
 export interface PlannedTrack {
@@ -202,6 +212,13 @@ export interface RenderPlan {
   camera: ComposeCamera | null;
   /** The most the camera ever magnifies, 1 with none: how much sharper a still has to be decoded. */
   cameraMaxScale: number;
+  /**
+   * The canvas, 0..1 RGB: black for a spec with no `background`, which is every spec written before
+   * the key, and what the painter fills the frame, a base clip's bars and each transition side's
+   * backdrop with. Settled here, once, so the render hands the painter one colour before its first
+   * frame and never asks again.
+   */
+  background: [number, number, number];
   /** Null when `filter` was empty or folded to identity. */
   colorMatrix: ColorMatrix | null;
   overlays: OverlayPlacement[];
@@ -271,6 +288,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     tracks,
     camera,
     cameraMaxScale: camera ? camera.scale.reduce((most, scale) => Math.max(most, scale), 1) : 1,
+    background: spec.background ? [clamp(spec.background[0], 0, 1), clamp(spec.background[1], 0, 1), clamp(spec.background[2], 0, 1)] : [0, 0, 0],
     colorMatrix,
     overlays: spec.overlays.map(overlay => ({
       id: overlay.id,
@@ -440,9 +458,11 @@ function planTrack(track: ComposeTrack, spec: ComposeSpec, probes: ReadonlyMap<s
       height: Math.max(MIN_LAYER_PX, Math.round(rect.h * output.height)),
     };
     // `rect` is dropped from the clip the plan carries: the rectangle has BECOME the frame, and
-    // leaving it on would place the picture inside the layer a second time.
+    // leaving it on would place the picture inside the layer a second time. Its motion goes with it,
+    // onto the placement, for the same reason.
     const withoutRect: ComposeClip = { ...clip };
     delete withoutRect.rect;
+    delete withoutRect.rectMotion;
     let item = planClip(withoutRect, spec, probes, frame);
     // What is left of the base is a CEILING for this clip rather than a target.
     const roomUs = totalUs - cursorUs;
@@ -452,7 +472,9 @@ function planTrack(track: ComposeTrack, spec: ComposeSpec, probes: ReadonlyMap<s
       item = cut;
     }
     clips.push(item);
-    placements.push({ startUs: cursorUs, endUs: cursorUs + item.outDurUs, rect });
+    // Normalised again here rather than trusted, the camera's rule: a plan built from a spec nobody
+    // validated still holds the same line.
+    placements.push({ startUs: cursorUs, endUs: cursorUs + item.outDurUs, rect, motion: normaliseRectMotion(clip.rectMotion) });
     cursorUs += item.outDurUs;
   }
 

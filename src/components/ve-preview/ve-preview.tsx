@@ -814,8 +814,18 @@ export class VePreview implements EditorPlayer {
     this.disposers.push(
       deferredEffect(
         // The zoom camera redraws a paused frame too: a zoom edited, and the camera switching on
-        // and off as the zoom sheet opens, closes and plays.
-        () => [store.previewLayers.value, store.filterOps.value, store.frameAspect.value, store.camera.value, store.cameraLive.value] as const,
+        // and off as the zoom sheet opens, closes and plays. So does a layout opening chosen or
+        // re-timed, which moves the clips at the playhead without touching the layers' resting rects.
+        () =>
+          [
+            store.previewLayers.value,
+            store.filterOps.value,
+            store.frameAspect.value,
+            store.camera.value,
+            store.cameraLive.value,
+            store.layoutMotions.value,
+            store.backgroundRgb.value,
+          ] as const,
         () => this.canvas?.request(),
       ),
     );

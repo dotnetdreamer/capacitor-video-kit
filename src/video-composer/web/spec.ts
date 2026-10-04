@@ -5,6 +5,7 @@ import type {
   ComposeOverlayMotion,
   ComposePlacement,
   ComposeRect,
+  ComposeRectMotion,
   ComposeSpec,
   ComposeTransition,
   ComposeTransitionCurves,
@@ -15,6 +16,7 @@ import type {
 
 import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
 import { normaliseCamera } from '../../editor/camera';
+import { RectMotionError, normaliseRectMotion } from '../../editor/layout-motion';
 import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
 import { batchIdRefusal } from '../batch-id';
 
@@ -204,6 +206,9 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
 
   // After the overlays, in the fixed order the native parsers read the top level in.
   const camera = readCamera(spec.camera);
+  // The canvas colour by the tints' own rule - exactly three finite numbers, each held to 0..1 - since
+  // it is the same kind of number, and the native parsers read it with the reader their tints use.
+  const background = readTint(spec.background, 'background');
 
   const durationMs = Math.max(0, Math.round(finite(spec.durationMs, 0)));
 
@@ -232,6 +237,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     // Left off for a camera that moves nothing, for the same reason as the two above: absent is
     // what the plan tests to take the path every post without a zoom has always taken.
     ...(camera ? { camera } : {}),
+    ...(background ? { background } : {}),
     output: {
       width,
       height,
@@ -332,6 +338,23 @@ function readOverlayMotion(value: unknown, path: string): ComposeOverlayMotion |
 }
 
 /**
+ * A clip's moving rectangle, or `null` when it holds still. The rules are `normaliseRectMotion`'s,
+ * shared with the editor and the tests and not written again here, for the reason [readCamera] gives;
+ * what this adds is the refusal turned into a [SpecError] naming the path that broke -
+ * `clips[1].rectMotion.atMs[7]`, `tracks[0].clips[0].rectMotion.w`. The arrays that come back are
+ * new ones, so a caller still editing its own spec cannot move a clip under a render.
+ */
+function readRectMotion(value: unknown, path: string): ComposeRectMotion | null {
+  try {
+    return normaliseRectMotion(value);
+  } catch (error) {
+    if (!(error instanceof RectMotionError)) throw error;
+    const at = error.field ? `${path}.${error.field}` : path;
+    throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
+  }
+}
+
+/**
  * One segment, read the same way for the base track and every extra layer - a clip on the second
  * layer is the same kind of thing as one on the first, and one reader is one set of error paths.
  */
@@ -362,6 +385,10 @@ function readClip(input: unknown, path: string): ComposeSpec['clips'][number] {
   if (crop) out.crop = crop;
   const rect = readPlacement(clip['rect'], `${path}.rect`);
   if (rect) out.rect = rect;
+  // Straight after the rectangle it moves, which is the order the native parsers read them in, so a
+  // clip wrong in both is refused for the same one everywhere.
+  const rectMotion = readRectMotion(clip['rectMotion'], `${path}.rectMotion`);
+  if (rectMotion) out.rectMotion = rectMotion;
   // A picture is silent at 1x whatever the rest of the clip says - see `ComposeClip.image` - so
   // the plan and the mixer read the same answer off the fields they already read.
   if (clip['image'] === true) {

@@ -107,6 +107,122 @@
   font-weight: 700;
 }
 
+/* ------------------------------------------------------------------------------------ animation */
+
+/*
+ * A tile's two boxes run between where the style has them closed and where they rest open, on a
+ * loop: closed, opening, open, closing. The eight numbers are each tile's own (`tileStyle` writes
+ * them as custom properties), so one set of keyframes draws every style on every arrangement, and a
+ * repaint of the row never restarts a tile part way through its move.
+ */
+.ls__box--moving {
+  left: var(--ls-x1);
+  top: var(--ls-y1);
+  width: var(--ls-w1);
+  height: var(--ls-h1);
+  animation: ls-open 2400ms ease-in-out infinite;
+}
+
+@keyframes ls-open {
+  0%,
+  12% {
+    left: var(--ls-x0);
+    top: var(--ls-y0);
+    width: var(--ls-w0);
+    height: var(--ls-h0);
+  }
+  42%,
+  70% {
+    left: var(--ls-x1);
+    top: var(--ls-y1);
+    width: var(--ls-w1);
+    height: var(--ls-h1);
+  }
+  100% {
+    left: var(--ls-x0);
+    top: var(--ls-y0);
+    width: var(--ls-w0);
+    height: var(--ls-h0);
+  }
+}
+
+/* Asked for less motion, every tile is drawn open: the arrangement the move ends in. */
+@media (prefers-reduced-motion: reduce) {
+  .ls__box--moving {
+    animation: none;
+  }
+}
+
+.ls__frame--none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ls__none {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 22px;
+}
+
+.ls__preset--on .ls__none {
+  color: var(--ve-text, #fff);
+}
+
+.ls__hint {
+  margin: 4px 20px 0;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* The animation sheet's length row: a word, the slider, and the number the slider sets. */
+.ls__length {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+  transition: opacity 160ms ease;
+}
+
+/*
+ * None: the row is there to say there is a length to set, and out of reach until there is. Never
+ * `inert`, which Chrome 99 ignores and a current WebView answers by taking the readout out of the
+ * accessibility tree.
+ */
+.ls__length--off {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.ls__word {
+  flex: 0 0 62px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ls__value {
+  flex: 0 0 34px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/*
+ * The row already has a gutter, so the slider's own is taken away - which is also why the rule below
+ * that pads every slider in this sheet is undone here.
+ */
+ve-slider.ls__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  --ve-slider-edge: 0px;
+}
+
 /* --------------------------------------------------------------------------------------- slider */
 
 /*

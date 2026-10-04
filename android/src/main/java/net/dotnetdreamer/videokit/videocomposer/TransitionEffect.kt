@@ -79,7 +79,16 @@ class TransitionEffect(
     val startUs: Long,
     /** How long it runs. */
     val durUs: Long,
+    /**
+     * The canvas a side's bars and the room round it are, 0..1 RGB - `ComposeSpec.background` - or
+     * null for black. A side's frame is its picture OVER the canvas, so every texel read is laid on it
+     * first; on black that is the colour as it is, which is every frame this effect drew before.
+     */
+    background: FloatArray? = null,
 ) : GlEffect {
+
+    /** [background] as the shaders take it: three channels, black when there is none. */
+    internal val backgroundRgb: FloatArray = background?.copyOf() ?: FloatArray(3)
 
     private val loggedFirstFrame = AtomicBoolean(false)
 
@@ -213,6 +222,7 @@ private class TransitionShaderProgram(
         blurProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
         blurProgram.setFloatUniform("uTapStep", tapStepPx(frame.sigmaPx) / width)
         blurProgram.setFloatUniform("uTapFalloff", tapFalloff(frame.sigmaPx))
+        blurProgram.setFloatsUniform("uBackground", effect.backgroundRgb)
         blurProgram.bindAttributesAndUniforms()
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first= */ 0, /* count= */ 4)
         GlUtil.checkGlError()
@@ -248,6 +258,7 @@ private class TransitionShaderProgram(
         p.setFloatUniform("uMaskEdge", frame.maskEdge)
         p.setFloatUniform("uMaskFeather", frame.maskFeather)
         p.setIntUniform("uMaskInvert", if (frame.maskInvert) 1 else 0)
+        p.setFloatsUniform("uBackground", effect.backgroundRgb)
         p.bindAttributesAndUniforms()
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first= */ 0, /* count= */ 4)
         GlUtil.checkGlError()
@@ -325,20 +336,26 @@ private class TransitionShaderProgram(
             uniform sampler2D uTexSampler;
             uniform float uTapStep;
             uniform float uTapFalloff;
+            uniform vec3 uBackground;
             varying vec2 vTexSamplingCoord;
             const int TAPS = 32;
+            // A texel of the side's frame laid on the canvas: its bars are transparent, so they come
+            // out the canvas colour - black, unless the post coloured it.
+            vec3 over(vec4 t) {
+              return t.rgb + uBackground * (1.0 - t.a);
+            }
             void main() {
               float r = exp(-0.5 * uTapFalloff);
               float c = exp(-uTapFalloff);
               float w = 1.0;
               float total = 1.0;
-              vec3 sum = texture2D(uTexSampler, vTexSamplingCoord).rgb;
+              vec3 sum = over(texture2D(uTexSampler, vTexSamplingCoord));
               for (int k = 1; k <= TAPS; k++) {
                 w *= r;
                 r *= c;
                 vec2 o = vec2(float(k) * uTapStep, 0.0);
-                sum += w * (texture2D(uTexSampler, vTexSamplingCoord + o).rgb
-                    + texture2D(uTexSampler, vTexSamplingCoord - o).rgb);
+                sum += w * (over(texture2D(uTexSampler, vTexSamplingCoord + o))
+                    + over(texture2D(uTexSampler, vTexSamplingCoord - o)));
                 total += 2.0 * w;
               }
               gl_FragColor = vec4(sum / total, 1.0);
@@ -379,14 +396,21 @@ private class TransitionShaderProgram(
             uniform float uMaskEdge;
             uniform float uMaskFeather;
             uniform int uMaskInvert;
+            uniform vec3 uBackground;
             varying vec2 vTexSamplingCoord;
             const int TAPS = 32;
             const float TWO_PI = 6.283185307179586;
 
+            // A texel of the side's frame laid on the canvas, its transparent bars coming out the
+            // canvas colour. The blur pass's output is opaque already, and passes through unchanged.
+            vec3 over(vec4 t) {
+              return t.rgb + uBackground * (1.0 - t.a);
+            }
+
             vec3 colourAt(vec2 s) {
               vec2 uv = vec2(s.x / uSize.x, 1.0 - s.y / uSize.y);
               if (uTapStep <= 0.0) {
-                return texture2D(uTexSampler, uv).rgb;
+                return over(texture2D(uTexSampler, uv));
               }
               float r = exp(-0.5 * uTapFalloff);
               float c = exp(-uTapFalloff);
@@ -433,7 +457,7 @@ private class TransitionShaderProgram(
 
             void main() {
               if (uDrawLook == 0) {
-                gl_FragColor = vec4(texture2D(uTexSampler, vTexSamplingCoord).rgb, 1.0);
+                gl_FragColor = vec4(over(texture2D(uTexSampler, vTexSamplingCoord)), 1.0);
                 return;
               }
               vec2 q = vec2(vTexSamplingCoord.x, 1.0 - vTexSamplingCoord.y) * uSize;

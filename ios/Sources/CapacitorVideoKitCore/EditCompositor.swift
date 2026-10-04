@@ -27,6 +27,10 @@ final class RenderPlan: @unchecked Sendable {
     /// `CompositionBuilder` does not know it exists.
     let camera: CameraTrack?
 
+    /// The canvas - `ComposeSpec.background` - that every frame starts on and each transition side is
+    /// laid on: black for a spec with none, which is the black every frame has always started on.
+    let background: CIColor
+
     /// Where the compositor has got to on THIS job's output timeline, read when the encode fails.
     let cursor = FrameCursor()
 
@@ -55,6 +59,12 @@ final class RenderPlan: @unchecked Sendable {
         flowGrade = colorMatrix.isIdentity ? .identity : FlowGrade(rowMajor: colorMatrix.m, bias: colorMatrix.b)
         self.slowMotion = slowMotion
         camera = CameraTrack(spec.camera)
+        // Already three channels held to 0...1 by the parser; anything else is the black of old.
+        if let rgb = spec.background, rgb.count == 3 {
+            background = CIColor(red: CGFloat(rgb[0]), green: CGFloat(rgb[1]), blue: CGFloat(rgb[2]))
+        } else {
+            background = .black
+        }
         // compactMap, because a fully transparent overlay decodes to nil rather than to an
         // invisible image the compositor would blend for nothing.
         overlays = try spec.overlays.compactMap { try OverlayBitmap.decode($0, render: size) }
@@ -130,11 +140,19 @@ struct EditLayer {
     /// every layer cut from the same timeline entry.
     let slow: SlowClip?
 
+    /// The keys of a rectangle that MOVES - a split screen opening and closing - or nil for one that
+    /// stands at `dst` for good, which is every clip of every spec written before clips moved. Kept in
+    /// the wire's fractions and read per frame in `placedPicture`, where the frame's time is known:
+    /// the builder makes a layer per instruction, and nothing here is worth doing more than once a
+    /// frame. The angle is still `spin`, about the moving rectangle's own centre.
+    let motion: ComposeRectMotion?
+
     init(trackID: CMPersistentTrackID, orientation: CGImagePropertyOrientation, fit: Fit,
          crop: ComposeRect?, rect: ComposePlacement?, opacity: Double, render: CGSize,
-         slow: SlowClip? = nil) {
+         slow: SlowClip? = nil, rectMotion: ComposeRectMotion? = nil) {
         self.trackID = trackID
         self.slow = slow
+        self.motion = rectMotion
         self.orientation = orientation
         self.fit = fit
         self.crop = crop
@@ -405,10 +423,10 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             .flatMap { CameraMath.pose($0, atMs: Double(tUs) / 1000) }
             .map { CameraMath.transform($0, in: rect) }
 
-        // Black under every layer. With one layer it is the same black `Placement` used to hold
-        // behind its picture, and the frame a source that arrived nil has always produced; with two
-        // it is what shows wherever neither layer reaches.
-        var image = CIImage(color: .black).cropped(to: rect)
+        // The canvas under every layer - black, unless the post coloured it. With one layer it is the
+        // same black `Placement` used to hold behind its picture, and the frame a source that arrived
+        // nil has always produced; with two it is what shows wherever neither layer reaches.
+        var image = CIImage(color: instr.plan.background).cropped(to: rect)
         var layers = instr.layers[...]
 
         // Inside a transition window the base is not one clip but two: the outgoing clip's tail and
@@ -425,12 +443,13 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             let p = TransitionMath.progress(tUs: tUs, startUs: transition.startUs,
                                             durationUs: transition.durationUs)
             image = TransitionRender.frame(from: wholeFrame(transition.tail, request, plan: instr.plan,
-                                                            rect: rect, camera: camera),
+                                                            rect: rect, camera: camera, tUs: tUs),
                                            to: wholeFrame(incoming, request, plan: instr.plan,
-                                                          rect: rect, camera: camera),
+                                                          rect: rect, camera: camera, tUs: tUs),
                                            look: TransitionMath.look(transition.curves, p),
                                            transition: transition,
-                                           rect: rect)
+                                           rect: rect,
+                                           background: instr.plan.background)
             layers = layers.dropFirst()
         }
 
@@ -439,7 +458,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             // is still rendered: a hole in one layer is not a reason to fail an export.
             guard let src = sourcePicture(of: layer, request, plan: instr.plan),
                   let picture = placedPicture(of: layer, from: src, plan: instr.plan, rect: rect,
-                                              camera: camera)
+                                              camera: camera, tUs: tUs)
             else { continue }
             image = Alpha.scaled(picture, by: layer.opacity).composited(over: image)
         }
@@ -504,7 +523,19 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     /// itself (see `Placement.placed`) rather than applied to the finished frame, so the SOURCE is
     /// what gets magnified and a zoom into a sharp recording stays sharp.
     private func placedPicture(of layer: EditLayer, from src: CIImage, plan: RenderPlan,
-                               rect: CGRect, camera: CGAffineTransform?) -> CIImage? {
+                               rect: CGRect, camera: CGAffineTransform?, tUs: Int64) -> CIImage? {
+        // A rectangle that MOVES is read at this frame's output time, in the milliseconds its keys
+        // are in, and placed exactly as a resting one would be there - the fit measured afresh, the
+        // turn about its own centre. Too thin to show, nothing of the clip is on screen: nil, which
+        // the layer loop skips and `wholeFrame` answers with its black.
+        var into = layer.dst ?? rect
+        if let motion = layer.motion {
+            let moving = motion.rect(atMs: Double(tUs) / 1000)
+            if ComposeRectMotion.drawsNothing(moving, width: Double(rect.width), height: Double(rect.height)) {
+                return nil
+            }
+            into = Placement.destination(moving, in: rect)
+        }
         var pic = src.oriented(layer.orientation)
         // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
         // finished frame instead, any op with a non-zero bias paints the bars: `golden` carries
@@ -524,7 +555,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // `dst` are nil for a clip that fills the frame, which is every spec written before
         // this feature; the absence was decided when the instruction was built, and all that is
         // left here is the coalesce.
-        return Placement.placed(pic, crop: layer.crop, into: layer.dst ?? rect,
+        return Placement.placed(pic, crop: layer.crop, into: into,
                                 fit: layer.fit, spin: layer.spin, camera: camera)
     }
 
@@ -539,11 +570,12 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
     /// placed through the camera and the black is not moved, which is all the camera's view of a
     /// frame whose bars are black can be. The transition then works on that frame in output pixels.
     private func wholeFrame(_ layer: EditLayer, _ request: AVAsynchronousVideoCompositionRequest,
-                            plan: RenderPlan, rect: CGRect, camera: CGAffineTransform?) -> CIImage? {
+                            plan: RenderPlan, rect: CGRect, camera: CGAffineTransform?, tUs: Int64) -> CIImage? {
         guard let src = sourcePicture(of: layer, request, plan: plan) else { return nil }
-        let black = CIImage(color: .black).cropped(to: rect)
+        // The side's whole frame is its picture over the canvas: black, unless the post coloured it.
+        let black = CIImage(color: plan.background).cropped(to: rect)
         guard let picture = placedPicture(of: layer, from: src, plan: plan, rect: rect,
-                                          camera: camera) else { return black }
+                                          camera: camera, tUs: tUs) else { return black }
         // Cropped to the render: a picture placed half off the frame hangs past it, and the frame the
         // contract moves and blurs is the render rectangle and nothing more.
         return Alpha.scaled(picture, by: layer.opacity).composited(over: black).cropped(to: rect)

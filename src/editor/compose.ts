@@ -3,8 +3,10 @@ import type { ComposeClip, ComposeOverlay, ComposeOverlayMotion, ComposePlacemen
 import {
   MAX_SPEED,
   MIN_LAYER_MS,
+  backgroundRgb,
   byteCeiling,
   clamp,
+  normaliseBackground,
   isFullFrameRect,
   isUprightRect,
   rectRotationDeg,
@@ -20,6 +22,7 @@ import {
   type EditRect,
 } from './edit-manifest';
 import { overlayEndMs } from './edit-ops';
+import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
@@ -92,7 +95,11 @@ export async function toComposeSpec(
 ): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
-  const clips: ComposeClip[] = baseClips(manifest, uriByKey);
+  // Every clip a layer's arrangement opens and closes around, with its keys. Empty for a post with no
+  // animated layer, and then every clip is sent exactly as it was before arrangements could move.
+  const layout = compileLayoutMotions(manifest);
+
+  const clips: ComposeClip[] = baseClips(manifest, uriByKey, layout);
 
   // Resolved here beside the base clips rather than further down, so a layer whose footage the host
   // has no file for fails before the phone has spent a second drawing bitmaps for a render that was
@@ -102,7 +109,7 @@ export async function toComposeSpec(
     manifest.videoTracks.length > 0
       ? manifest.videoTracks.map(track => ({
           id: track.id,
-          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey)),
+          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout)),
           startMs: Math.max(0, Math.round(track.startMs)),
           z: track.z,
           opacity: clamp(track.opacity, 0, 1),
@@ -216,6 +223,12 @@ export async function toComposeSpec(
   const camera = compileCamera(manifest.zooms ?? [], totalMs);
   if (camera) spec.camera = camera;
 
+  // Only a canvas somebody coloured, for the reason `tracks` is left off: a black one is the spec this
+  // package has always produced, byte for byte, and [normaliseBackground] keeps black out of the
+  // manifest so the two questions cannot disagree.
+  const background = normaliseBackground(manifest.background);
+  if (background) spec.background = backgroundRgb(background);
+
   return spec;
 }
 
@@ -255,9 +268,11 @@ export function overlayMotionFor(overlay: EditOverlay, totalMs: number): Compose
  * trims in, and [transitionSpan] measured it the same way - so the editor's timeline and the render
  * agree about where every clip starts.
  */
-function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>): ComposeClip[] {
+function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions): ComposeClip[] {
   const spans = transitionSpans(manifest.clips);
-  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey));
+  // The outgoing side of a transition is spread from these, so it carries its clip's keys with it -
+  // keys that already run on through the stretch it plays under the next clip.
+  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout));
   // A segment sent with more source than it has ([sourceStretch]) gives a transition that much more
   // of it too, so the overlap runs the output time it runs in the editor.
   const stretches = manifest.clips.map(sourceStretch);
@@ -289,10 +304,10 @@ function structuredCloneOf<T>(value: T): T {
  * and framing - and a second copy of this mapping is exactly how the two layers would quietly start
  * disagreeing about which rectangle or which fit a clip is drawn with.
  */
-function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<string, string>): ComposeClip {
+function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions): ComposeClip {
   const uri = uriByKey.get(edit.clipKey);
   if (!uri) throw new MissingClipError(edit.clipKey);
-  if (edit.image) return pictureClip(edit, manifestFit, uri);
+  if (edit.image) return pictureClip(edit, manifestFit, uri, layout);
   const stretch = sourceStretch(edit);
   const clip: ComposeClip = {
     // The segment id, not the clip key: split and duplicate put several segments over one source,
@@ -315,9 +330,27 @@ function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<st
   // cost, and it would stop an untouched clip producing the spec it produces today.
   const crop = wireRect(edit.crop);
   if (crop) clip.crop = crop;
+  placeOnWire(clip, edit, layout);
+  return clip;
+}
+
+/**
+ * A segment's placement on the wire: the rectangle it rests in, and the keys it moves by when an
+ * arrangement opens or closes while it is on screen.
+ *
+ * A base clip that plays only while every arrangement is closed goes with NO rectangle at all, which
+ * is the whole frame - the picture it is on screen as - and the path every engine takes for a clip
+ * nobody framed. One that moves keeps its rectangle, as the arrangement it opens into, so an engine
+ * that has never heard of `rectMotion` draws the split screen it always drew rather than nothing.
+ */
+function placeOnWire(clip: ComposeClip, edit: EditClip, layout: LayoutMotions): void {
+  const placed = layout.get(edit.id);
+  if (placed && !placed.motion) return;
   const rect = wirePlacement(edit.rect);
   if (rect) clip.rect = rect;
-  return clip;
+  // Assigned after the rectangle, and only for a clip that moves, for the reason a crop is: a still
+  // clip is the clip this package has always sent, byte for byte.
+  if (placed?.motion) clip.rectMotion = placed.motion;
 }
 
 /** The least source a video segment is sent with; shorter trims are lengthened to it on the wire. */
@@ -351,7 +384,7 @@ function sourceStretch(edit: EditClip): number {
  * time, so the transition arithmetic in [baseClips] that subtracts source milliseconds off `outMs`
  * works on the rebased numbers unchanged.
  */
-function pictureClip(edit: EditClip, manifestFit: EditFit, uri: string): ComposeClip {
+function pictureClip(edit: EditClip, manifestFit: EditFit, uri: string, layout: LayoutMotions): ComposeClip {
   const clip: ComposeClip = {
     key: edit.id,
     uri,
@@ -365,8 +398,7 @@ function pictureClip(edit: EditClip, manifestFit: EditFit, uri: string): Compose
   };
   const crop = wireRect(edit.crop);
   if (crop) clip.crop = crop;
-  const rect = wirePlacement(edit.rect);
-  if (rect) clip.rect = rect;
+  placeOnWire(clip, edit, layout);
   return clip;
 }
 

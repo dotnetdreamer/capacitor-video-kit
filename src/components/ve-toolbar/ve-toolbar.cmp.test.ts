@@ -251,7 +251,7 @@ describe('ve-toolbar', () => {
     const { store, bar } = await mount();
 
     expect(label(bar)).toBe('Editing tools');
-    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
     // Nothing to step back out to, so no chevron at all.
     expect(root(bar).querySelector('.tile--collapse')).toBe(null);
 
@@ -558,7 +558,7 @@ describe('ve-toolbar', () => {
     await frames(3);
 
     tile(bar, 'edit').focus();
-    for (const id of ['crop', 'zoom', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
+    for (const id of ['crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
       press(toolbar, 'ArrowRight');
       expect(root(bar).activeElement).toBe(tile(bar, id));
       await frames(1);
@@ -613,11 +613,11 @@ describe('ve-toolbar on a host that does not offer Zoom', () => {
 
   it('takes the Zoom tile off the root row and leaves every other tile where it was', async () => {
     const on = await mount();
-    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
 
     const off = await mount(NO_ZOOM);
     expect(label(off.bar)).toBe('Editing tools');
-    expect(ids(off.bar)).toEqual(['edit', 'crop', 'layout', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(off.bar)).toEqual(['edit', 'crop', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
     // Taken away rather than dimmed: there is nothing to hear a reason from and no tile to tap.
     expect(root(off.bar).querySelector('[data-tile="zoom"]')).toBeNull();
     expect(ids(off.bar)).toEqual(ids(on.bar).filter(id => id !== 'zoom'));

@@ -1,4 +1,5 @@
 import type { FilterOp } from '../video-composer/definitions';
+import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
 import { normaliseTransition, transitionSpans } from './transitions';
 
@@ -16,7 +17,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 12;
+export const MANIFEST_VERSION = 13;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -177,6 +178,31 @@ export interface EditVideoTrack {
   z: number;
   /** 0..1 over the whole track. 1 is the picture as it is. */
   opacity: number;
+  /**
+   * How the arrangement OPENS when this layer comes on screen and CLOSES when it goes: the base is
+   * let out to the whole frame while the layer is off it, and squeezed back into its own rectangle
+   * as the layer arrives. Absent is an arrangement that holds for the whole post - the base in its
+   * rectangle from the first frame to the last - which is every layer of every manifest written
+   * before version 13, and absent is what [toComposeSpec] turns into clips with no `rectMotion`.
+   *
+   * On the TRACK rather than on its clips, because it is a property of the arrangement and of when
+   * the layer is on screen, and neither belongs to one clip: a layer cut in two still opens once and
+   * closes once, and a trim, a split or a Swap has nothing here to carry along. The keys every clip
+   * is drawn with are compiled from this, the clips' own rectangles and the layer's place on the
+   * timeline whenever the post is drawn (`compileLayoutMotions`).
+   */
+  layoutAnimation?: LayoutAnimation;
+}
+
+/**
+ * How a layer's arrangement opens and closes: an id from [LAYOUT_ANIMATIONS], and how long the opening
+ * takes - and the closing, which is the same move run backwards. The length is what the customer
+ * ASKED for; a layer too short for both is squeezed in proportion when it is compiled, the transition
+ * precedent, so a layer trimmed short and dragged back gets its moves back as they were.
+ */
+export interface LayoutAnimation {
+  id: string;
+  durationMs: number;
 }
 
 export type TextAlign = 'left' | 'center' | 'right';
@@ -545,6 +571,67 @@ export interface EditManifest {
    * `output` key and [normaliseManifest] gives it that same default, so it reopens unchanged.
    */
   output: EditOutput;
+  /**
+   * The colour of the canvas, `#rrggbb`: what shows wherever no video picture is drawn - around a
+   * video placed smaller than the frame, in a clip's letterbox bars, past the end of the base track.
+   * It is what turns two videos placed with room around them into the cards on a page every
+   * screenshot-style post is.
+   *
+   * Absent is black, which is every manifest written before version 13 and every post nobody has
+   * coloured - and absent is what [toComposeSpec] turns into no `background` key at all. Optional
+   * rather than always present like [output] for that reason: black is the frame every engine has
+   * always drawn, so a post that carries none is exactly the post that was always being made.
+   */
+  background?: string;
+}
+
+/** One canvas colour a picker offers: the colour, and the name a screen reader says for it. */
+export interface BackgroundColor {
+  colour: string;
+  label: string;
+}
+
+/**
+ * The canvas colours a picker offers, in its order: black first, because it is where every post
+ * starts, then the light and dark neutrals a screenshot-style post is laid on, then the text
+ * palette's colours. Any `#rrggbb` is a valid [EditManifest.background]; these are the ones offered.
+ */
+export const BACKGROUND_COLORS: readonly BackgroundColor[] = Object.freeze([
+  { colour: '#000000', label: 'Black' },
+  { colour: '#ffffff', label: 'White' },
+  { colour: '#f2f2f7', label: 'Light grey' },
+  { colour: '#d1d1d6', label: 'Silver' },
+  { colour: '#8e8e93', label: 'Grey' },
+  { colour: '#1c1c1e', label: 'Charcoal' },
+  { colour: '#f5e6c8', label: 'Cream' },
+  { colour: '#ffd23f', label: 'Yellow' },
+  { colour: '#ff8a3d', label: 'Orange' },
+  { colour: '#ff3b5c', label: 'Red' },
+  { colour: '#ff5cc8', label: 'Pink' },
+  { colour: '#9b5cff', label: 'Purple' },
+  { colour: '#3d6bff', label: 'Blue' },
+  { colour: '#3dc2ff', label: 'Sky blue' },
+  { colour: '#2ee6a6', label: 'Mint' },
+  { colour: '#a6ff2e', label: 'Lime' },
+  { colour: '#0b8e87', label: 'Teal' },
+  { colour: '#4b1b5a', label: 'Plum' },
+]);
+
+/**
+ * A stored canvas colour as [EditManifest.background] keeps one: `#rrggbb` in lower case, or
+ * `undefined` for black and for anything that is not a colour - the absent key, so a post coloured
+ * black and back is the post it was before, down to its keys.
+ */
+export function normaliseBackground(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) return undefined;
+  const colour = value.toLowerCase();
+  return colour === '#000000' ? undefined : colour;
+}
+
+/** A `#rrggbb` colour as the wire carries one: three 0..1 channels. */
+export function backgroundRgb(colour: string): [number, number, number] {
+  const channel = (at: number): number => round4(parseInt(colour.slice(at, at + 2), 16) / 255);
+  return [channel(1), channel(3), channel(5)];
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1616,6 +1703,13 @@ export function emptyManifest(): EditManifest {
  * Version 11 to version 12 adds the music's [EditMusic.endMs], read as 0 from an older manifest:
  * "until the end", which is where every sound stopped before - byte for byte the spec version 11
  * produced. Bumped because an older build reading a version-12 draft plays a stopped sound to the end.
+ *
+ * Version 12 to version 13 adds a layer's [EditVideoTrack.layoutAnimation] and the post's
+ * [EditManifest.background], and nothing is written into an older manifest: a version-12 layer has
+ * no animation, which is an arrangement that holds for the whole post, and a version-12 post has no
+ * background, which is black - and [toComposeSpec] sends neither, byte for byte the spec version 12
+ * produced. Bumped because an older build reading a version-13 draft holds every split still and
+ * paints a coloured canvas black.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1631,15 +1725,20 @@ export function normaliseManifest(input: unknown): EditManifest {
   // reject it outright, and an empty lane in the timeline is a thing a customer cannot get rid of.
   // The cap counts the base track, so only MAX_VIDEO_TRACKS - 1 of these survive.
   const videoTracks: EditVideoTrack[] = (Array.isArray(raw['videoTracks']) ? raw['videoTracks'] : [])
-    .map(
-      (t: any, i: number): EditVideoTrack => ({
+    .map((t: any, i: number): EditVideoTrack => {
+      const track: EditVideoTrack = {
         id: typeof t?.id === 'string' && t.id ? t.id : `vt-${i}`,
         clips: readClips(t?.clips, usedIds, false),
         startMs: Math.max(0, Math.round(num(t?.startMs, 0))),
         z: Math.max(0, Math.round(num(t?.z, i + 1))),
         opacity: clamp(num(t?.opacity, 1), 0, 1),
-      }),
-    )
+      };
+      // Assigned rather than listed, like a layer's animation: a track that holds still carries no
+      // key, and a setting whose move this version does not know reads as none.
+      const layoutAnimation = normaliseLayoutAnimation(t?.layoutAnimation);
+      if (layoutAnimation) track.layoutAnimation = layoutAnimation;
+      return track;
+    })
     .filter((track: EditVideoTrack) => track.clips.length > 0)
     .slice(0, MAX_VIDEO_TRACKS - 1);
 
@@ -1706,6 +1805,9 @@ export function normaliseManifest(input: unknown): EditManifest {
         ]
       : [];
 
+  // Assigned only when there is one, below, so a post with the old black canvas has no key at all.
+  const background = normaliseBackground(raw['background']);
+
   const m = raw['music'];
   const music: EditMusic | null = m
     ? {
@@ -1752,6 +1854,7 @@ export function normaliseManifest(input: unknown): EditManifest {
     // rendered at - so one of those reopens at the size it was always going to be, and its
     // fractions go on meaning what they meant.
     output: normaliseOutput(raw['output']),
+    ...(background ? { background } : {}),
   };
 }
 
@@ -1912,6 +2015,9 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
    * and an unknown shape answers the safe way, which is to render.
    */
   if (manifest.fit === 'cover' && !fillsFrame(sourceAspect, manifest.output)) return false;
+  // A coloured canvas shows in a `contain` clip's bars, which the file on disk does not have at all.
+  // On a clip that fills the frame it shows nowhere, and the file is the picture exactly.
+  if (manifest.background && manifest.fit === 'contain' && !fillsFrame(sourceAspect, manifest.output)) return false;
   if (manifest.overlays.length > 0) return false;
   if (manifest.music || manifest.voiceovers.length > 0) return false;
   // [zoomWindow] is the same test the compiled camera makes, so a zoom the render would show is

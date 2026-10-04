@@ -105,6 +105,14 @@ import {
   type OverlayAnimationPart,
   type OverlayLoop,
   type OverlayMove,
+  DEFAULT_LAYOUT_ANIMATION_MS,
+  backgroundRgb,
+  compileLayoutMotions,
+  layoutAnimationPreset,
+  layoutOpenings,
+  setBackground as setBackgroundOp,
+  setTrackLayoutAnimation,
+  type LayoutMotions,
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
@@ -882,12 +890,15 @@ export class EditorStore {
     this.soundMenuOpen.value = false;
     if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
     if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
+    // A layout opening still being played is the layout sheet's, and goes with it.
+    if (this.panel.value === 'layout' && panel !== 'layout') this.endAudition();
     this.panel.value = panel;
   }
 
   closePanel(): void {
     if (this.panel.value === 'transition') this.leaveTransition();
     if (this.panel.value === 'animation') this.leaveAnimation();
+    if (this.panel.value === 'layout') this.endAudition();
     this.panel.value = null;
     this.volumeTarget.value = null;
   }
@@ -1452,6 +1463,65 @@ export class EditorStore {
     }
   }
 
+  /**
+   * The canvas colour: what shows wherever no video is drawn - around a video placed smaller than the
+   * frame, in letterbox bars, past the end of the base track. Black takes the key off. One undo step.
+   */
+  setBackground(colour: string): void {
+    if (this.commit('Canvas', m => setBackgroundOp(m, colour))) this.haptic('selection');
+  }
+
+  /**
+   * How the layout opens when the second video comes on and closes when it goes: a style from
+   * [LAYOUT_ANIMATIONS], or null for a layout that holds still for the whole post. One undo step.
+   *
+   * A style keeps the length the layer already has, so trying Slide and then Wipe compares the two
+   * moves and not two speeds. Choosing one - or the one already chosen, which is the only way to see
+   * it twice - plays the opening on the frame and parks where the layout is open ([auditionLayout]),
+   * because a layout that only moves at the edges of the layer is otherwise invisible from wherever
+   * the playhead happens to be.
+   */
+  setLayoutAnimation(trackId: string, id: string | null): void {
+    const track = findVideoTrack(this.manifest.value, trackId);
+    if (!track) return;
+    const preset = id === null ? null : layoutAnimationPreset(id);
+    if (id !== null && !preset) return;
+    if ((track.layoutAnimation?.id ?? null) !== (preset?.id ?? null)) {
+      // An audition left running would go on playing a move that is no longer there.
+      if (!preset && this.stopAudition) {
+        this.endAudition();
+        this.pause();
+      }
+      const animation = preset ? { id: preset.id, durationMs: track.layoutAnimation?.durationMs ?? DEFAULT_LAYOUT_ANIMATION_MS } : null;
+      if (!this.commit('Layout animation', m => setTrackLayoutAnimation(m, trackId, animation))) return;
+      this.haptic('selection');
+    }
+    if (preset) this.auditionLayout(trackId);
+  }
+
+  /** How long the opening (and the closing) takes. Live; the slider wraps the drag in a gesture. */
+  setLayoutAnimationMs(trackId: string, durationMs: number, live = false): void {
+    const current = findVideoTrack(this.manifest.value, trackId)?.layoutAnimation;
+    if (!current) return;
+    const fn = (m: EditManifest): EditManifest => setTrackLayoutAnimation(m, trackId, { id: current.id, durationMs });
+    if (live) this.preview(fn);
+    else this.commit('Animation duration', fn);
+  }
+
+  /**
+   * Plays a layer's layout opening on the frame, once - from a moment before the second video comes
+   * on to a moment after the layout has opened - and parks, paused, where it is open, which is how the
+   * customer will see it for most of the layer. The times are the render's: [layoutOpenings] is what
+   * the keys are compiled from, squeeze and all.
+   */
+  auditionLayout(trackId: string): void {
+    const opening = layoutOpenings(this.manifest.value).find(one => one.trackId === trackId);
+    if (!opening) return;
+    // Open, but never at the layer's very end, where it is no longer drawn.
+    const open = Math.min(opening.startMs + opening.inMs, opening.endMs - 1);
+    this.playOnce(Math.max(0, opening.startMs - AUDITION_LEAD_MS), Math.min(opening.endMs, open + AUDITION_TAIL_MS), open);
+  }
+
   /* ========================================================================================= */
   /* Layers                                                                                    */
   /* ========================================================================================= */
@@ -1966,6 +2036,23 @@ export class EditorStore {
    * recomputed when the manifest changes, never per frame; the preview reads it through [cameraAt].
    */
   readonly camera = computed(() => compileCamera(this.zooms.value, this.totalMs.value));
+  /**
+   * Every clip a layer's arrangement opens and closes around, with its keys, compiled exactly as
+   * [toComposeSpec] compiles them - so the preview reads the same keys through `rectMotionAt` that
+   * the render is handed. Empty for a post with no animated layer, which is nearly every post.
+   * Recomputed when the manifest changes, never per frame.
+   */
+  readonly layoutMotions = computed<LayoutMotions>(() => compileLayoutMotions(this.manifest.value));
+  /** The canvas colour as `#rrggbb` - [EditManifest.background] - or null for the black every post starts on. */
+  readonly background = computed<string | null>(() => this.manifest.value.background ?? null);
+  /**
+   * The same as the painter takes it, 0..1 RGB: the colour the preview fills its frame, a clip's bars
+   * and a transition's backdrop with - the numbers [toComposeSpec] sends, so the two cannot differ.
+   */
+  readonly backgroundRgb = computed<[number, number, number]>(() => {
+    const colour = this.background.value;
+    return colour ? backgroundRgb(colour) : [0, 0, 0];
+  });
   /**
    * Every moving layer's motion, by layer id, compiled exactly as [toComposeSpec] compiles it: over
    * the layer's window as the wire carries it ([overlayWireWindow]), so the preview reads the same

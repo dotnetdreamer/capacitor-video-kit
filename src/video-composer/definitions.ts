@@ -91,6 +91,51 @@ export interface ComposePlacement extends ComposeRect {
 }
 
 /**
+ * A clip's placement rectangle, LOWERED to keys exactly as [ComposeCamera] is: JS compiles the ease of
+ * a split opening and closing into straight lines (`compileLayoutMotions` in
+ * `src/editor/layout-motion.ts`), and an engine only interpolates between the keys it is handed.
+ *
+ * READING IT, at output time `t` (ms): exactly the camera's reading. The keys are in [atMs] order,
+ * non-decreasing. Before the first key and after the last the end key HOLDS. Between key `i` and
+ * `i + 1` each of the four is read by straight-line interpolation,
+ * `v = v[i] + (v[i + 1] - v[i]) * (t - atMs[i]) / (atMs[i + 1] - atMs[i])`; two keys at the same time
+ * are a STEP, the later one taking effect at that time. The five arrays have the same length, 1 to
+ * [MAX_RECT_MOTION_KEYS].
+ *
+ * DRAWING IT. With the four read at `t`, the clip is drawn exactly as it would be with a static
+ * `rect` of those numbers: cropped, fitted into the rectangle, turned by `rect.rotationDeg` about its
+ * centre in output pixels, graded. A rectangle with no width or no height draws nothing at that
+ * instant. Unlike a static placement the rectangle may leave the frame altogether - a picture sliding
+ * in from below starts wholly under the bottom edge - and the output frame cuts it there as it cuts
+ * any overhang.
+ *
+ * Each parser CLAMPS every value - `x` and `y` to -4..4, `w` and `h` to 0..`MAX_PLACEMENT_SIZE` - and
+ * REFUSES, as shape errors with the path that broke: a motion that is not an object, a missing array
+ * or one that is not an array, one whose length is not `atMs`'s, a key nobody defined, more than
+ * [MAX_RECT_MOTION_KEYS] keys, a time that is not a finite number or goes back in time, and a value
+ * that is not a finite number. `normaliseRectMotion` states these rules once for the web engine and
+ * the tests; the Kotlin and Swift parsers check in the same order: `atMs`, then `x`, `y`, `w` and `h`,
+ * then the unknown keys, then the count, then the times, then the values.
+ */
+export interface ComposeRectMotion {
+  /** Output-timeline milliseconds, non-decreasing; equal times are a step (the later key wins). */
+  atMs: number[];
+  /** The rectangle's left edge, a fraction of the output width. */
+  x: number[];
+  /** Its top edge, a fraction of the output height, y DOWN. */
+  y: number[];
+  w: number[];
+  h: number[];
+}
+
+/**
+ * The most keys one clip's [ComposeRectMotion] may carry. A spec with more is rejected rather than
+ * truncated. A split opening is a key per 60th of a second of its ease - thirty-odd for a whole open
+ * and close - so this only bounds a hand-built spec.
+ */
+export const MAX_RECT_MOTION_KEYS = 6000;
+
+/**
  * One segment of the output timeline. Split and duplicate are expressed as two entries pointing at
  * the same `uri` with different `inMs`/`outMs`; reorder is simply the array order.
  */
@@ -143,6 +188,19 @@ export interface ComposeClip {
    * operation on different pixels, and the builder never emits one there.
    */
   rect?: ComposePlacement;
+  /**
+   * The placement MOVING over output time: a split screen opening when a second video comes in and
+   * closing when it goes. Absent is a clip that stands where `rect` puts it for as long as it plays,
+   * which is every spec written before this key, and every engine is expected to decide that ONCE,
+   * when it builds its plan, so a still clip is placed by exactly the arithmetic it always was.
+   *
+   * Present, it replaces the four numbers of `rect` at every instant and nothing else: the angle is
+   * still `rect.rotationDeg` (absent, upright), and `crop` and `fit` still mean what they mean, the
+   * fit measured afresh against the moving rectangle on every frame. `rect` is still sent, as the
+   * placement the clip comes to rest in, so an engine that ignores this key draws the arrangement
+   * the motion opens into rather than nothing.
+   */
+  rectMotion?: ComposeRectMotion;
   /**
    * A transition INTO this clip from the one before it on the BASE track. Absent is a cut, and
    * absence is every spec written before this field. It is ignored on the first base clip and on
@@ -683,6 +741,27 @@ export interface ComposeSpec {
    * already ask for - so a post with no zoom renders byte for byte as it always has.
    */
   camera?: ComposeCamera;
+  /**
+   * The colour of the canvas, 0..1 RGB: what the output frame is filled with UNDER every video
+   * layer. Absent is black, which is every spec written before this key, and every engine is
+   * expected to decide that ONCE, when it builds its plan.
+   *
+   * It is exactly the black each engine already draws, in exactly the places it draws it, and
+   * nowhere else:
+   *  - the frame under the base track - around a base clip placed smaller than the frame, under a
+   *    layer's gaps, and past the base track's last frame;
+   *  - a base clip's letterbox bars, which have always been black (a layer is narrowed to its own
+   *    picture and has none);
+   *  - each side of a transition, which is its clip's whole frame over the background where the
+   *    contract says "over black".
+   * It is not graded: the filter acts on pictures, and the background is no picture's - the rule
+   * the bars have always had.
+   *
+   * Each parser reads exactly three finite numbers and clamps each to 0..1, and refuses anything
+   * else that is there - not an array, the wrong count, a value that is not a finite number - as
+   * `invalid_spec:background`. JSON null is absent.
+   */
+  background?: [number, number, number];
   output: ComposeOutput;
   /** Ordered; empty means "no colour work at all". */
   filter: FilterOp[];

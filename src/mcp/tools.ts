@@ -76,6 +76,7 @@
  * as they always have. The setting is per set of tools, like the store, and for the same reason.
  */
 import {
+  BACKGROUND_COLORS,
   DEFAULT_OUTPUT,
   FILTER_CATEGORIES,
   FILTER_PRESETS,
@@ -103,6 +104,7 @@ import {
 } from '../editor/edit-manifest';
 import { insertClip } from '../editor/edit-ops';
 import { EFFECT_CATEGORIES, EFFECT_PRESETS } from '../editor/effects';
+import { DEFAULT_LAYOUT_ANIMATION_MS, LAYOUT_ANIMATIONS, MAX_LAYOUT_ANIMATION_MS, MIN_LAYOUT_ANIMATION_MS } from '../editor/layout-animation';
 import { layoutPresets } from '../editor/layout-presets';
 import { MAX_OVERLAY_LOOP_MS, MAX_OVERLAY_MOVE_MS, MIN_OVERLAY_LOOP_MS, MIN_OVERLAY_MOVE_MS, OVERLAY_ANIMATIONS } from '../editor/motion';
 import { DEFAULT_TRANSITION_MS, MAX_TRANSITION_MS, MIN_TRANSITION_MS, TRANSITIONS, TRANSITION_CATEGORIES } from '../editor/transitions';
@@ -216,8 +218,7 @@ class ManifestStore {
  * Said wherever an agent is told it may hand a manifest in whole, when Zoom is off, so the first it
  * hears of the rule is not the refusal.
  */
-const ZOOM_OFF_MANIFEST =
-  ' Zoom is turned off for this app, so a manifest that holds a zoom is refused: leave "zooms" empty.';
+const ZOOM_OFF_MANIFEST = ' Zoom is turned off for this app, so a manifest that holds a zoom is refused: leave "zooms" empty.';
 
 /*
  * The two ways in, on every tool that reads a manifest. Neither is `required`, because exactly one
@@ -270,9 +271,7 @@ export function refuseZooms(manifest: EditManifest): void {
   const zooms: unknown = (manifest as { zooms?: unknown } | null | undefined)?.zooms;
   if (!Array.isArray(zooms) || zooms.length === 0) return;
   const count = zooms.length;
-  const ids = zooms
-    .map((zoom: { id?: unknown } | null) => (typeof zoom?.id === 'string' ? `"${zoom.id}"` : 'one with no id'))
-    .join(', ');
+  const ids = zooms.map((zoom: { id?: unknown } | null) => (typeof zoom?.id === 'string' ? `"${zoom.id}"` : 'one with no id')).join(', ');
   throw new ToolError(
     `Zoom is turned off for this app, and this manifest holds ${count === 1 ? '1 zoom' : `${count} zooms`} ` +
       `(${ids}). Take ${count === 1 ? 'it' : 'them'} out - "zooms": [] - and pass the manifest again: ` +
@@ -312,13 +311,7 @@ function requireNoZoom(manifest: EditManifest): void {
  * copy of it, so nothing a caller does to its answer reaches the post under `manifestId`. A tool
  * added later that answers with a stored manifest has to come through here for that to hold.
  */
-function manifestResult(
-  store: ManifestStore,
-  editing: McpEditingOptions,
-  manifest: EditManifest,
-  id?: string,
-  note?: string,
-): ToolResult {
+function manifestResult(store: ManifestStore, editing: McpEditingOptions, manifest: EditManifest, id?: string, note?: string): ToolResult {
   if (!editing.zoom) requireNoZoom(manifest);
   const manifestId = store.put(manifest, id);
   const summary = summariseManifest(manifest, { editing });
@@ -335,11 +328,7 @@ function manifestResult(
  * stored, through [manifestResult], under the same setting it is read with now, and a copy nobody
  * outside the store has held since ([ManifestStore] says why that matters).
  */
-function resolve(
-  store: ManifestStore,
-  editing: McpEditingOptions,
-  args: Record<string, unknown>,
-): { manifest: EditManifest; id?: string } {
+function resolve(store: ManifestStore, editing: McpEditingOptions, args: Record<string, unknown>): { manifest: EditManifest; id?: string } {
   const id = args['manifestId'];
   const inline = args['manifest'];
   if (typeof id === 'string' && id.length > 0) {
@@ -410,6 +399,10 @@ export const OP_REFERENCE: Record<string, string> = {
   swapTrackZ: 'trackId - swaps this layer with the one above it.',
   moveClipToTrack: 'clipId, target ({kind:"base"} | {kind:"track",trackId} | {kind:"new",index}), atMs, newTrackId - ' + 'newTrackId is only used when the target is "new".',
   applyLayoutPreset: 'trackId, presetId - see the "layouts" section for the ids.',
+  setLayoutAnimation:
+    'trackId, animation ({id, durationMs?} | null) - the layout opens as the layer comes on screen and closes ' +
+    'as it goes; null holds it still. See the "layoutAnimations" section for the ids.',
+  setBackground: 'colour ("#rrggbb" | null) - the canvas, which shows wherever no video is drawn; null is black.',
 
   /* layers */
   addText:
@@ -469,16 +462,14 @@ function opReferenceFor(opNames: readonly string[]): Record<string, string> {
 /* The tools                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
 
-const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'animations', 'layouts', 'textStyles', 'output', 'ops', 'limits'] as const;
+const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'animations', 'layouts', 'layoutAnimations', 'backgrounds', 'textStyles', 'output', 'ops', 'limits'] as const;
 type CatalogSection = (typeof CATALOG_SECTIONS)[number];
 
 /*
  * What `manifest_edit`'s description and `catalog_list`'s `ops` say with Zoom off, in the same words
  * in both, since an agent may read either one first and must not come away with two stories.
  */
-const ZOOM_OFF_OPS =
-  'Zoom is turned off for this app, so there are no zoom ops: no post here holds a zoom, and a ' +
-  'manifest passed in with one is refused.';
+const ZOOM_OFF_OPS = 'Zoom is turned off for this app, so there are no zoom ops: no post here holds a zoom, and a ' + 'manifest passed in with one is refused.';
 
 export interface VideoKitToolsOptions {
   /**
@@ -688,9 +679,7 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
         const next = applyEditOps(manifest, ops as EditOp[], { editing });
         const after = totalDurationMs(next);
 
-        const note =
-          `Applied ${ops.length} op${ops.length === 1 ? '' : 's'}.` +
-          (before === after ? '' : ` The post went from ${Math.round(before)}ms to ${Math.round(after)}ms.`);
+        const note = `Applied ${ops.length} op${ops.length === 1 ? '' : 's'}.` + (before === after ? '' : ` The post went from ${Math.round(before)}ms to ${Math.round(after)}ms.`);
         return manifestResult(store, editing, next, id, note);
       },
     },
@@ -762,11 +751,7 @@ function readSources(value: unknown): SourceInput[] {
  * One section of the catalogue, as this set of tools' settings leave it. Only `ops` and `limits`
  * depend on them; every other section is the same list whatever the host has turned off.
  */
-function catalogSection(
-  section: CatalogSection,
-  editing: McpEditingOptions,
-  opNames: readonly string[],
-): { data: unknown; lines: string } {
+function catalogSection(section: CatalogSection, editing: McpEditingOptions, opNames: readonly string[]): { data: unknown; lines: string } {
   /*
    * The category lists are the editor's own module constants, the ones its sheets draw their tabs
    * from, so they go out as copies. Handed out as they are, an in-process host that tidied one up in
@@ -824,6 +809,25 @@ function catalogSection(
         lines: 'Layout presets (applyLayoutPreset presetId), for arranging a video track over the base:\n' + data.map(preset => `  ${preset.id} - ${preset.label}`).join('\n'),
       };
     }
+    case 'layoutAnimations': {
+      const data = LAYOUT_ANIMATIONS.map(preset => ({ id: preset.id, label: preset.label }));
+      return {
+        data: { minMs: MIN_LAYOUT_ANIMATION_MS, maxMs: MAX_LAYOUT_ANIMATION_MS, defaultMs: DEFAULT_LAYOUT_ANIMATION_MS, animations: data },
+        lines:
+          `Layout animations (setLayoutAnimation animation.id), ${MIN_LAYOUT_ANIMATION_MS}..${MAX_LAYOUT_ANIMATION_MS}ms each way, ` +
+          'opening as the layer comes on screen and closing as it goes:\n' +
+          data.map(preset => `  ${preset.id} - ${preset.label}`).join('\n'),
+      };
+    }
+    case 'backgrounds': {
+      const data = BACKGROUND_COLORS.map(swatch => ({ colour: swatch.colour, label: swatch.label }));
+      return {
+        data,
+        lines:
+          'Background colours (setBackground colour), the canvas wherever no video is drawn; any #rrggbb is accepted:\n' +
+          data.map(swatch => `  ${swatch.colour} - ${swatch.label}`).join('\n'),
+      };
+    }
     case 'textStyles': {
       const data = TEXT_STYLES.map(style => ({ id: style.id, label: style.label, category: style.category }));
       return {
@@ -860,7 +864,7 @@ function catalogSection(
         data: reference,
         lines:
           'Edit ops (manifest_edit), each one {"op": <name>, ...}:\n' +
-          opNames.map((name) => `  ${name} - ${reference[name]}`).join('\n') +
+          opNames.map(name => `  ${name} - ${reference[name]}`).join('\n') +
           (editing.zoom ? '' : `\n${ZOOM_OFF_OPS}`),
       };
     }

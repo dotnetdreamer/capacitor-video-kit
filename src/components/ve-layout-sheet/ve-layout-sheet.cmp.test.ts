@@ -96,9 +96,7 @@ function chip(sheet: HTMLElement, label: string): HTMLButtonElement {
 }
 
 function action(sheet: HTMLElement, label: string): HTMLButtonElement {
-  const found = [...(sheet.shadowRoot?.querySelectorAll<HTMLButtonElement>('.ls__action') ?? [])].find(
-    button => button.textContent?.includes(label),
-  );
+  const found = [...(sheet.shadowRoot?.querySelectorAll<HTMLButtonElement>('.ls__action') ?? [])].find(button => button.textContent?.includes(label));
   if (!found) throw new Error(`no action labelled ${label}`);
   return found;
 }
@@ -122,7 +120,7 @@ afterEach(() => {
 describe('ve-layout-sheet', () => {
   it('writes a preset onto both layers as one undo step, and lights the chip it is on', async () => {
     const { store, sheet } = await mount();
-    expect(chips(sheet).length).toBe(7);
+    expect(chips(sheet).length).toBe(8);
     await until('the full frame chip to light', () => chip(sheet, 'Full frame').getAttribute('aria-pressed') === 'true');
 
     chip(sheet, 'Top and bottom').click();
@@ -181,6 +179,33 @@ describe('ve-layout-sheet', () => {
     // The two layers are drawn in the same two rectangles as before, so the arrangement the row
     // is showing has not changed at all: only which video is in which half of it.
     await until('the chip to stay lit', () => chip(sheet, 'Top and bottom').getAttribute('aria-pressed') === 'true');
+  });
+
+  it('animates the layout from its second tab: a style is one undo step, None takes it off', async () => {
+    const { store, sheet } = await mount();
+    chip(sheet, 'Top and bottom').click();
+    const tab = frame(sheet)?.shadowRoot?.querySelector<HTMLButtonElement>('[role="tab"]:nth-child(2)');
+    expect(tab?.textContent).toBe('Animation');
+    tab!.click();
+    await until('the animation tiles', () => (sheet.shadowRoot?.querySelectorAll('.ls__anim').length ?? 0) === 3);
+    const tiles = (): HTMLButtonElement[] => [...(sheet.shadowRoot?.querySelectorAll<HTMLButtonElement>('.ls__anim') ?? [])];
+    expect(tiles().map(tile => tile.getAttribute('aria-label'))).toEqual(['None, selected', 'Slide', 'Wipe']);
+    // On None the length is there but out of reach.
+    expect(sheet.shadowRoot?.querySelector('.ls__length')?.getAttribute('aria-disabled')).toBe('true');
+
+    tiles()[1].click();
+    expect(store.videoTrack.value?.layoutAnimation).toEqual({ id: 'slide', durationMs: 600 });
+    await until('Slide to light', () => tiles()[1].getAttribute('aria-label') === 'Slide, selected');
+    expect(sheet.shadowRoot?.querySelector('.ls__value')?.textContent).toBe('0.6s');
+    expect(sheet.shadowRoot?.querySelector('.ls__length')?.getAttribute('aria-disabled')).toBeNull();
+
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Layout animation');
+    expect('layoutAnimation' in store.videoTrack.value!).toBe(false);
+
+    tiles()[2].click();
+    tiles()[0].click();
+    expect('layoutAnimation' in store.videoTrack.value!).toBe(false);
   });
 
   it('closes itself when the layer it is about has gone, rather than sitting there empty', async () => {

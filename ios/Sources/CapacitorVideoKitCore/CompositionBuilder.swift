@@ -1015,7 +1015,10 @@ enum CompositionBuilder {
                   rect: e.clip.rect,
                   opacity: layer.opacity,
                   render: plan.renderSize,
-                  slow: e.slow)
+                  slow: e.slow,
+                  // The keys as they came, read per frame: a layer is made per instruction, and the
+                  // keys are output time, so every instruction cut from this clip reads them alike.
+                  rectMotion: e.clip.rectMotion)
     }
 
     /// The outgoing side of one transition as the compositor draws it: the tail's clip on its tail
@@ -1030,7 +1033,10 @@ enum CompositionBuilder {
                                               rect: w.tail.clip.rect,
                                               opacity: 1,
                                               render: plan.renderSize,
-                                              slow: w.tail.slow),
+                                              slow: w.tail.slow,
+                                              // The tail is its clip carried on, keys and all, so it
+                                              // moves on through the window as that clip would have.
+                                              rectMotion: w.tail.clip.rectMotion),
                               startUs: w.startMs * 1000,
                               durationUs: w.durMs * 1000,
                               curves: t.curves,

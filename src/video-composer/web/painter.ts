@@ -299,6 +299,8 @@ uniform vec4 u_kept;
 uniform mat3 u_matrix;
 uniform vec3 u_offset;
 uniform float u_opacity;
+// The canvas colour a letterbox bar is: black, until a post gives the canvas a colour.
+uniform vec3 u_bars;
 out vec4 fragColor;
 ${INTERPOLATE_FRAMES_GLSL}
 void main() {
@@ -307,13 +309,14 @@ void main() {
   // larger than the rectangle it was put in, and every engine cuts it there.
   if (v_out.x < u_clip.x || v_out.y < u_clip.y || v_out.x > u_clip.x + u_clip.z || v_out.y > u_clip.y + u_clip.w) discard;
   // Outside the KEPT part of the source is a letterbox bar: a piece of the output that stands for
-  // no piece of the picture. It is black, and the colour matrix never touches it.
+  // no piece of the picture. It is the canvas - black unless the post coloured it - and the colour
+  // matrix never touches it.
   //
   // u_kept is the clip's crop, and the whole frame for a clip with none. The source's own edges are
   // not the bound: the window goes on mapping past the rectangle the kept picture lands on, and
   // what lies just outside it is the part of the source the customer cropped away - which a test
   // against 0..1 drew into the bars.
-  vec3 rgb = vec3(0.0);
+  vec3 rgb = u_bars;
   if (v_uv.x >= u_kept.x && v_uv.x <= u_kept.x + u_kept.z && v_uv.y >= u_kept.y && v_uv.y <= u_kept.y + u_kept.w) {
     // The picture at this instant: the one frame, or - for a slowed clip - a frame made from the two
     // either side of it, read at the SAME coordinate so everything above and below applies to it as
@@ -367,6 +370,8 @@ export class Painter {
   /** The CSS filter the 2D fallback draws with; `none` when there is no colour work. */
   private cssFilter = 'none';
   private cssTints: string[] = [];
+  /** The canvas colour, 0..1 RGB; see [setBackground]. */
+  private background: [number, number, number] = [0, 0, 0];
 
   /**
    * @param onto a canvas that is already ON SCREEN to assemble the frame in, for the editor's live
@@ -465,6 +470,23 @@ export class Painter {
     this.matrix = matrix;
     this.cssFilter = css.filter;
     this.cssTints = css.tints;
+  }
+
+  /**
+   * The canvas, 0..1 RGB - `ComposeSpec.background` - painted wherever this painter used to paint
+   * black under the video: the frame before the first layer, a layer's letterbox bars, and the
+   * backdrop of each transition side. Black until somebody says otherwise, which is the frame every
+   * painter drew before the canvas had a colour. Never graded: no picture is underneath it.
+   */
+  setBackground(rgb: readonly [number, number, number]): void {
+    this.background = [rgb[0], rgb[1], rgb[2]];
+    this.transition2d?.setBackground(this.background);
+  }
+
+  /** What [setBackground] last set, as a CSS colour for the 2D path's fills. */
+  private backgroundCss(): string {
+    const [r, g, b] = this.background;
+    return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
   }
 
   /**
@@ -707,7 +729,8 @@ export class Painter {
     // viewport, the program and the framebuffer to be set again below.
     this.prepareFlows(gl, layers);
     gl.viewport(0, 0, this.output.width, this.output.height);
-    gl.clearColor(0, 0, 0, 1);
+    // The canvas under every layer: black, until a post gives it a colour.
+    gl.clearColor(this.background[0], this.background[1], this.background[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND);
     // Premultiplied source over: the fragment shader already multiplied by the layer's opacity.
@@ -796,6 +819,7 @@ export class Painter {
     const camera = layer.camera && !isIdentityView(layer.camera) ? cameraAffine(layer.camera, this.output) : null;
     gl.uniform3f(this.uniforms['u_camera'] ?? null, camera ? camera.scale : 1, camera ? camera.tx : 0, camera ? camera.ty : 0);
     gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
+    gl.uniform3f(this.uniforms['u_bars'] ?? null, this.background[0], this.background[1], this.background[2]);
     // Set on every layer for the camera's reason: a layer with no second frame drawn after one with
     // a second frame would otherwise inherit its weight.
     gl.uniform1f(this.uniforms['u_tween'] ?? null, tween ? tween.weight : 0);
@@ -936,6 +960,8 @@ export class Painter {
   private paintTransitionGl(gl: WebGL2RenderingContext, draw: TransitionDraw): boolean {
     const gpu = this.transitionGl ?? (this.transitionGl = TransitionGl.create(gl, this.output, this.position));
     if (!gpu) return false;
+    // Every transition, rather than once: a colour is three numbers, and a side is laid on it.
+    gpu.setBackground(this.background);
     const hasFrom = hasPicture(draw.from);
     // An incoming side at no alpha covers nothing anywhere - its coverage is alpha times the mask -
     // so it is left out rather than uploaded, drawn and blurred to be multiplied by nought. Half of a
@@ -995,7 +1021,7 @@ export class Painter {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     ctx.filter = 'none';
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = this.backgroundCss();
     ctx.fillRect(0, 0, this.output.width, this.output.height);
     ctx.restore();
 
@@ -1004,6 +1030,7 @@ export class Painter {
         // Each side is drawn whole by the very routine below, into a frame of its own, so the
         // fallback's transition is framed and coloured exactly as its fallback layers are.
         const transition = this.transition2d ?? (this.transition2d = new Transition2d(this.output));
+        transition.setBackground(this.background);
         transition.paint(ctx, layer, (into, side) => this.drawLayer2d(into, side));
         continue;
       }
@@ -1064,7 +1091,8 @@ export class Painter {
     // the moment a rectangle could be larger than the output or hang off its edge, and would have
     // made a layer's bars turn transparent as a pinch took it through the frame's own size.
     ctx.globalAlpha = layer.opacity;
-    ctx.fillStyle = '#000';
+    // The canvas colour, as the GL path's bars are; black for a post that has none.
+    ctx.fillStyle = this.backgroundCss();
     ctx.fillRect(clipX, clipY, clipW, clipH);
     // A [GpuFrame] is a texture, which this path has no way to draw: its layer keeps its black. The
     // preview asks [canDraw] before it hands one over, so only a frame in which the GPU gave up part
@@ -1302,6 +1330,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
       u_matrix: gl.getUniformLocation(program, 'u_matrix'),
       u_offset: gl.getUniformLocation(program, 'u_offset'),
       u_opacity: gl.getUniformLocation(program, 'u_opacity'),
+      u_bars: gl.getUniformLocation(program, 'u_bars'),
       u_tween: gl.getUniformLocation(program, 'u_tween'),
       u_flowOn: gl.getUniformLocation(program, 'u_flowOn'),
       u_flowSize: gl.getUniformLocation(program, 'u_flowSize'),

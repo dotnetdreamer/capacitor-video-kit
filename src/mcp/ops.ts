@@ -103,6 +103,8 @@ import {
   setMusic,
   setOverlayWindow,
   setPostDuration,
+  setBackground,
+  setTrackLayoutAnimation,
   setTrackOpacity,
   setTrackStart,
   splitClipAt,
@@ -119,6 +121,7 @@ import {
   type LayerMove,
   type ZoomPatch,
 } from '../editor/edit-ops';
+import { LAYOUT_ANIMATIONS, normaliseLayoutAnimation } from '../editor/layout-animation';
 import { applyLayoutPreset, layoutPresets, type LayoutPresetId } from '../editor/layout-presets';
 /*
  * Type only, and the one thing this server takes from the editor's host contract. It is the same
@@ -625,6 +628,23 @@ const OPS: Record<string, Apply> = {
     return applyLayoutPreset(manifest, trackId, presetId as LayoutPresetId);
   },
 
+  setLayoutAnimation: (manifest, op) => {
+    const trackId = str(op, 'trackId');
+    requireTrack(manifest, trackId);
+    const raw = op['animation'];
+    if (raw === null || raw === undefined) return setTrackLayoutAnimation(manifest, trackId, null);
+    const animation = normaliseLayoutAnimation(raw);
+    if (!animation) throw new Error(`"animation" must be null, or {id, durationMs?} with id one of ${LAYOUT_ANIMATIONS.map(preset => preset.id).join(', ')}`);
+    return setTrackLayoutAnimation(manifest, trackId, animation);
+  },
+
+  setBackground: (manifest, op) => {
+    const raw = op['colour'];
+    if (raw === null || raw === undefined) return setBackground(manifest, null);
+    if (typeof raw !== 'string' || !/^#[0-9a-f]{6}$/i.test(raw)) throw new Error('"colour" must be a #rrggbb colour, or null for black');
+    return setBackground(manifest, raw);
+  },
+
   /* ---- layers ---- */
 
   addText: (manifest, op) => {
@@ -970,13 +990,7 @@ export interface EditOpsOptions {
  * process with Zoom off take zoom ops again, while each one's `manifest_edit` description, settled
  * when its tools were built, still told its agent there were none.
  */
-export const ZOOM_OPS: readonly string[] = Object.freeze([
-  'addZoom',
-  'deleteZoom',
-  'duplicateZoom',
-  'setZoomWindow',
-  'updateZoom',
-]);
+export const ZOOM_OPS: readonly string[] = Object.freeze(['addZoom', 'deleteZoom', 'duplicateZoom', 'setZoomWindow', 'updateZoom']);
 
 /**
  * Whether these settings leave Zoom on. Only an explicit `false` takes it away, which is the rule
@@ -989,7 +1003,7 @@ export function zoomOffered(editing?: McpEditingOptions): boolean {
 
 /** The ops these settings leave an agent, sorted: [OP_NAMES] less whatever the host turned off. */
 export function opNamesFor(editing?: McpEditingOptions): readonly string[] {
-  return zoomOffered(editing) ? OP_NAMES : OP_NAMES.filter((name) => !ZOOM_OPS.includes(name));
+  return zoomOffered(editing) ? OP_NAMES : OP_NAMES.filter(name => !ZOOM_OPS.includes(name));
 }
 
 /*
@@ -998,16 +1012,8 @@ export function opNamesFor(editing?: McpEditingOptions): readonly string[] {
  * but leave zooms out, so the next attempt is not the same op with its values changed.
  */
 function zoomOffMessage(name: string): string {
-  const why =
-    name === 'addZoom'
-      ? 'none can be added'
-      : name === 'duplicateZoom'
-        ? 'a copy of one would be a new zoom'
-        : `there is no zoom for ${name} to act on`;
-  return (
-    `zoom is turned off for this app, so no post on this server holds a zoom, and ${why}. ` +
-    'Leave zooms out of the edit: the app’s editor offers none.'
-  );
+  const why = name === 'addZoom' ? 'none can be added' : name === 'duplicateZoom' ? 'a copy of one would be a new zoom' : `there is no zoom for ${name} to act on`;
+  return `zoom is turned off for this app, so no post on this server holds a zoom, and ${why}. ` + 'Leave zooms out of the edit: the app’s editor offers none.';
 }
 
 /**
@@ -1017,7 +1023,7 @@ function zoomOffMessage(name: string): string {
  */
 function gainedZoom(before: EditManifest, after: EditManifest): boolean {
   const had = new Set<unknown>(before.zooms ?? []);
-  return (after.zooms ?? []).some((zoom) => !had.has(zoom));
+  return (after.zooms ?? []).some(zoom => !had.has(zoom));
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1070,8 +1076,7 @@ export function applyEditOps(manifest: EditManifest, ops: readonly EditOp[], opt
       throw new EditOpError(
         name,
         index,
-        'this op put a zoom into the post while Zoom is turned off for this app. That is a bug in ' +
-          'capacitor-video-kit, not in the edit; nothing was applied.',
+        'this op put a zoom into the post while Zoom is turned off for this app. That is a bug in ' + 'capacitor-video-kit, not in the edit; nothing was applied.',
       );
     }
     current = next;

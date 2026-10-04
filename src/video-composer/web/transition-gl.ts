@@ -150,6 +150,7 @@ uniform vec2 u_maskDir;
 uniform float u_maskCount;
 uniform float u_maskFeather;
 uniform bool u_maskInvert;
+uniform vec3 u_background;
 out vec4 fragColor;
 
 // Where output pixel q samples a side's frame, or false where the moved frame does not cover it:
@@ -214,7 +215,8 @@ float maskAlpha(vec2 q) {
 void main() {
   // Pixel centres, y down: the reference is handed exactly these.
   vec2 q = vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y);
-  vec3 rgb = vec3(0.0);
+  // The canvas, where no side covers the pixel: black, until a post gives the canvas a colour.
+  vec3 rgb = u_background;
   vec2 s;
   if (u_hasFrom && sideSource(u_fromMove, u_fromTurn, q, s)) rgb = shade(u_fromTex, s, u_fromLook, u_fromTint);
   float cover = u_alpha * maskAlpha(q);
@@ -264,6 +266,7 @@ export class TransitionGl {
       'u_maskCount',
       'u_maskFeather',
       'u_maskInvert',
+      'u_background',
     ]);
     if (!blur || !mix) {
       if (blur) gl.deleteProgram(blur.program);
@@ -278,17 +281,25 @@ export class TransitionGl {
     return new TransitionGl(gl, frame, blur, mix);
   }
 
+  /** The canvas colour, 0..1 RGB; black until the painter says otherwise. See `Painter.setBackground`. */
+  private background: RGB = BLACK;
+
+  /** What a side is laid on and what shows where neither side covers the frame. */
+  setBackground(rgb: RGB): void {
+    this.background = rgb;
+  }
+
   /**
-   * Points drawing at one side's own frame-sized target, cleared to OPAQUE black: the black a side's
-   * bars are, and the black it is laid on. The painter then draws the side's layer into it with its
-   * ordinary program, blending as it always does.
+   * Points drawing at one side's own frame-sized target, cleared to the OPAQUE canvas - black, unless
+   * the post coloured it: what a side's bars are, and what it is laid on. The painter then draws the
+   * side's layer into it with its ordinary program, blending as it always does.
    */
   beginSide(side: TransitionSideName): void {
     const gl = this.gl;
     const target = this.target(side, this.frame.width, this.frame.height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
     gl.viewport(0, 0, target.width, target.height);
-    gl.clearColor(0, 0, 0, 1);
+    gl.clearColor(this.background[0], this.background[1], this.background[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
@@ -324,6 +335,7 @@ export class TransitionGl {
     this.sideUniforms('from', draw.look.from, draw.transition.fromTint);
     this.sideUniforms('to', draw.look.to, draw.transition.toTint);
     gl.uniform1f(u['u_alpha'] ?? null, draw.look.alpha);
+    gl.uniform3f(u['u_background'] ?? null, this.background[0], this.background[1], this.background[2]);
 
     const mask = draw.transition.mask;
     if (mask) {

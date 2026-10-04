@@ -35,6 +35,12 @@ enum ComposeSpecParser {
     /// `MAX_OVERLAY_MOTION_KEYS` from `definitions.ts`. A layer's motion with more keys is REFUSED
     /// rather than truncated, in Android's words (`MotionTooLong`), for the camera's reason.
     static let maxOverlayMotionKeys = 6000
+    /// `MAX_RECT_MOTION_KEYS` from `definitions.ts`: the most keys one clip's moving rectangle may
+    /// carry. More is REFUSED, at the motion's own path, for the camera's reason.
+    static let maxRectMotionKeys = 6000
+    /// How far off the frame a moving rectangle's corner may be put, in frames - `MAX_RECT_OFFSET` in
+    /// layout-motion.ts. A picture sliding in from below starts one frame down.
+    static let maxRectOffset: Double = 4
     /// Every curve of a transition has the same number of samples, and this many at the least and
     /// at the most. Two is a straight line from start to end; 121 is three times what the editor
     /// sends, room for a finer catalogue without letting a spec carry a curve of any length at all.
@@ -164,7 +170,8 @@ enum ComposeSpecParser {
                            overlays: overlays,
                            audio: audio,
                            posterAtMs: d.posterAtMs,
-                           camera: d.camera.flatMap(cameraKeys))
+                           camera: d.camera.flatMap(cameraKeys),
+                           background: d.background)
     }
 
     /// A decoded camera with `normaliseCamera`'s clamps applied, key by key - or nil when it moves
@@ -215,7 +222,10 @@ enum ComposeSpecParser {
                     crop: clampRect(c.crop),
                     rect: clampPlacement(c.rect),
                     transitionIn: transitionIn,
-                    image: c.image)
+                    image: c.image,
+                    // Already clamped where it was read, and never held to the frame the way `rect`
+                    // is: a rectangle sliding in starts wholly off it. See `ComposeRectMotion`.
+                    rectMotion: c.rectMotion)
     }
 
     /// A decoded transition as the value the builder consumes. Every curve sample, mask number and
@@ -532,13 +542,17 @@ private struct ComposeSpecDTO: Decodable {
     /// `validate` clamps it, and drops it when it never magnifies.
     let camera: CameraDTO?
 
-    /// The first error found in `filter`, `overlays`, `audio` or `camera`, held rather than thrown
-    /// so that `validate` can run the `output` checks in front of it. Decoding stops at that first error,
-    /// which is what makes "the first one held" and "the first one Android reports" the same error.
+    /// The canvas, three channels already held to 0...1, or nil for black. See `ComposeSpec.background`.
+    let background: [Double]?
+
+    /// The first error found in `filter`, `overlays`, `audio`, `camera` or `background`, held rather
+    /// than thrown so that `validate` can run the `output` checks in front of it. Decoding stops at that
+    /// first error, which is what makes "the first one held" and "the first one Android reports" the
+    /// same error.
     let heldError: SpecError?
 
     private enum K: String, CodingKey {
-        case jobId, batchId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs, camera
+        case jobId, batchId, clips, tracks, output, filter, overlays, audio, posterAtMs, durationMs, camera, background
     }
 
     init(from decoder: Decoder) throws {
@@ -715,6 +729,21 @@ private struct ComposeSpecDTO: Decodable {
         }
         camera = decodedCamera
 
+        // After the camera, where Android's parser reads it, and held like it. The tints' reader and
+        // the tints' rule: exactly three finite numbers, each held to 0...1; absent or null is black,
+        // and anything else that is there fails as `background`.
+        var decodedBackground: [Double]?
+        if held == nil {
+            do {
+                decodedBackground = try c.rgb(.background, "background")
+            } catch let e as SpecError {
+                held = e
+            } catch {
+                held = SpecError("background")
+            }
+        }
+        background = decodedBackground
+
         heldError = held
         posterAtMs = max(0, c.long(.posterAtMs, 0))
         durationMs = max(0, c.long(.durationMs, 0))
@@ -827,12 +856,15 @@ private struct ClipDTO: Decodable {
     /// Raw, not yet clamped: `validate` does that, in the same pass that clamps speed and volume.
     let crop: RectDTO?
     let rect: RectDTO?
+    /// The keys of a rectangle that moves, already clamped as `RectMotionDTO` reads them, or nil for
+    /// one that holds still.
+    let rectMotion: ComposeRectMotion?
     /// Raw as well: `validate` is where a picture's speed and sound are overridden, beside the
     /// clamps those two fields get for every other clip.
     let image: Bool
 
     private enum K: String, CodingKey {
-        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, image
+        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, rectMotion, image
     }
 
     init(from decoder: Decoder) throws {
@@ -856,6 +888,21 @@ private struct ClipDTO: Decodable {
         // still reports the old field. Nothing before this line has changed meaning.
         crop = try c.rect(.crop, "crop")
         rect = try c.rect(.rect, "rect")
+        // Straight after the rectangle it moves, which is where Android and the browser read it, so a
+        // clip wrong in both is refused for the same one everywhere. Absent, or null, holds still;
+        // present and not an object fails as `rectMotion`, the camera's rule.
+        if c.has(.rectMotion) {
+            do {
+                rectMotion = try c.decode(RectMotionDTO.self, forKey: .rectMotion).motion
+            } catch let e as SpecError {
+                throw e
+            } catch {
+                // Capacitor's decoder throws a `DecodingError` when the value is not an object.
+                throw SpecError("rectMotion")
+            }
+        } else {
+            rectMotion = nil
+        }
         // After `rect`, for the reason `crop` and `rect` come after the rest, although this one
         // cannot fail: a value that is not a boolean reads as a video, the lenient reading `muted`
         // gets too.
@@ -1331,6 +1378,81 @@ private struct OverlayMotionDTO: Decodable {
         }
         motion = ComposeOverlayMotion(atMs: times, x: values[0], y: values[1], scale: values[2],
                                       rotation: values[3], opacity: values[4])
+    }
+}
+
+/// A clip's `rectMotion`: `atMs` and four PARALLEL arrays, exactly as `ComposeRectMotion` puts them on
+/// the wire. `normaliseRectMotion` in `src/editor/layout-motion.ts` is the rule book, and Android's
+/// `parseRectMotion` and this check in its order:
+///
+/// - not an object: `rectMotion` (thrown by the caller, where the `DecodingError` surfaces).
+/// - `atMs` absent or not an array: `rectMotion.atMs`.
+/// - each of `x`, `y`, `w` and `h` in that order, absent or not an array exactly as long as
+///   `atMs`: `rectMotion.<name>`. All four are needed: a rectangle has no neutral corner or side.
+/// - a key that is none of those: `rectMotion.<key>`, the alphabetically first (`firstUnknownKey`).
+/// - no keys at all, or more than `maxRectMotionKeys`: `rectMotion`.
+/// - a time that is not a finite number, or less than the one before it: `rectMotion.atMs[i]`.
+/// - a value that is not a finite number: `rectMotion.<name>[i]`. Every other value is CLAMPED - the
+///   corner to +-`maxRectOffset`, each side to 0...`MAX_PLACEMENT_SIZE`.
+///
+/// Leaf paths are thrown from here, as `RectDTO` throws them: the clip loops put the clip's own path
+/// in front. A refusal of the whole motion carries the path alone - the browser and Android add
+/// "must have 1 to 6000 keys" after it - because the path splicing rebuilds every error from its path.
+private struct RectMotionDTO: Decodable {
+    let motion: ComposeRectMotion
+
+    private static let channels = ["x", "y", "w", "h"]
+
+    init(from decoder: Decoder) throws {
+        // Not an object throws a DecodingError here, which the caller reports as `rectMotion`.
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        guard let timesKey = AnyKey(stringValue: "atMs"), c.has(timesKey),
+              var timeList = try? c.nestedUnkeyedContainer(forKey: timesKey),
+              let n = timeList.count else { throw SpecError("rectMotion.atMs") }
+        // Every array's shape before anything else, in order, so a motion broken in two places
+        // names the same one on every engine.
+        var lists: [UnkeyedDecodingContainer] = []
+        for name in Self.channels {
+            guard let key = AnyKey(stringValue: name), c.has(key),
+                  let list = try? c.nestedUnkeyedContainer(forKey: key), list.count == n else {
+                throw SpecError("rectMotion.\(name)")
+            }
+            lists.append(list)
+        }
+        if let unknown = firstUnknownKey(c, known: ["atMs"] + Self.channels) {
+            throw SpecError("rectMotion.\(unknown)")
+        }
+        if n == 0 || n > ComposeSpecParser.maxRectMotionKeys { throw SpecError("rectMotion") }
+
+        var times: [Double] = []
+        times.reserveCapacity(n)
+        for i in 0..<n {
+            // NaN fails `isFinite`, so a time that was not a number at all stops here too.
+            guard !timeList.isAtEnd, let t = try? timeList.decode(Double.self), t.isFinite else {
+                throw SpecError("rectMotion.atMs[\(i)]")
+            }
+            if i > 0 && t < times[i - 1] { throw SpecError("rectMotion.atMs[\(i)]") }
+            times.append(t)
+        }
+
+        var values: [[Double]] = []
+        for (index, name) in Self.channels.enumerated() {
+            var list = lists[index]
+            let corner = name == "x" || name == "y"
+            let low = corner ? -ComposeSpecParser.maxRectOffset : 0
+            let high = corner ? ComposeSpecParser.maxRectOffset : MAX_PLACEMENT_SIZE
+            var read: [Double] = []
+            read.reserveCapacity(n)
+            // Bounded by `n` and not by `isAtEnd`, for the reason `CameraDTO.numbers` gives.
+            for i in 0..<n {
+                guard !list.isAtEnd, let v = try? list.decode(Double.self), v.isFinite else {
+                    throw SpecError("rectMotion.\(name)[\(i)]")
+                }
+                read.append(min(high, max(low, v)))
+            }
+            values.append(read)
+        }
+        motion = ComposeRectMotion(atMs: times, x: values[0], y: values[1], w: values[2], h: values[3])
     }
 }
 

@@ -1,4 +1,4 @@
-import { layoutPresets, sameRect, type EditRect, type LayoutPreset, type LayoutPresetId } from '../../editor';
+import { layoutAnimationEnds, layoutPresets, sameRect, type EditPlacement, type EditRect, type LayoutPreset, type LayoutPresetId } from '../../editor';
 import { orWhole } from '../../state/clip-framing';
 
 /**
@@ -50,6 +50,32 @@ export function layoutChips(frameAspect: number): readonly LayoutChip[] {
   }));
 }
 
+/** One box of an animation tile, at either end of its move, as PERCENTAGES of the little frame. */
+export interface AnimationTileBox {
+  readonly closed: ChipBox;
+  readonly open: ChipBox;
+}
+
+/** An animation tile: the base and the layer, each closed and open. */
+export interface AnimationTile {
+  readonly base: AnimationTileBox;
+  readonly layer: AnimationTileBox;
+}
+
+/**
+ * What a style's tile draws, on the customer's OWN arrangement: the base's rectangle and the layer's
+ * as the Layout tab left them, each from where the style has it closed to where it rests open - by
+ * the very rules the render's keys are compiled with ([layoutAnimationEnds]), so a tile cannot show a
+ * move the file does not make.
+ */
+export function animationTile(base: EditPlacement | undefined, layer: EditPlacement | undefined, style: string, frameAspect: number): AnimationTile {
+  const ends = layoutAnimationEnds(base, layer, style, frameAspect);
+  return {
+    base: { closed: percentOf(ends.base.closed), open: percentOf(ends.base.open) },
+    layer: { closed: percentOf(ends.layer.closed), open: percentOf(ends.layer.open) },
+  };
+}
+
 /**
  * The preset a pair of rectangles is, or null for an arrangement none of them names - which a crop
  * of one of the clips can leave behind, and which is a perfectly good state to be in.
@@ -60,11 +86,7 @@ export function layoutChips(frameAspect: number): readonly LayoutChip[] {
  * lost. A post saved by a build whose Swap moved the rectangles as well as the clips arrives in
  * exactly that state, and so does anyone who frames the two layers by hand.
  */
-export function matchLayoutPreset(
-  baseRect: EditRect | null | undefined,
-  trackRect: EditRect | null | undefined,
-  frameAspect: number,
-): LayoutPresetId | null {
+export function matchLayoutPreset(baseRect: EditRect | null | undefined, trackRect: EditRect | null | undefined, frameAspect: number): LayoutPresetId | null {
   const preset = layoutPresets(frameAspect).find(
     candidate => (sameRect(candidate.base, baseRect) && sameRect(candidate.track, trackRect)) || (sameRect(candidate.base, trackRect) && sameRect(candidate.track, baseRect)),
   );

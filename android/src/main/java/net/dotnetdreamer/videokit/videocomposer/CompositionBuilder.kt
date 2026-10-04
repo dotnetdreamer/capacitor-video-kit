@@ -81,6 +81,9 @@ object CompositionBuilder {
         // what it buys is that Media3 sees the SAME effect on consecutive clips - see [Geometries]
         // for why that saves rebuilding the whole chain at every cut.
         val grade = plan.colorMatrix?.let { ColorMatrixEffect(it) }
+        // The canvas, or null for black - which is what the encoder draws wherever nothing covers the
+        // frame, so a post nobody coloured is built with no pass for it at all.
+        val background = plan.spec.background?.takeUnless { BackgroundEffect.isBlack(it) }
 
         // TOP LAYER FIRST and the base LAST, which is the order Media3 1.11.1 actually draws in.
         // DefaultCompositorGlProgram.drawFrame walks its frame list from the END backwards, blending
@@ -146,7 +149,7 @@ object CompositionBuilder {
         // the post's rate while it is on screen, slowed base under it or not.
         val layers = plan.tracks.asReversed()
         for (track in layers) {
-            sequences += layerSequence(track, plan.totalUs, output, grade)
+            sequences += layerSequence(track, plan.totalUs, output, grade, plan.camera)
         }
         sequences += videoSequence(
             plan.clips,
@@ -157,6 +160,7 @@ object CompositionBuilder {
             grade,
             plan.tails.associateBy { it.index },
             plan.camera,
+            background,
         )
         // The tails go RIGHT AFTER the base, which by the order above draws them UNDER it - the
         // contract's "outgoing side over black, incoming side over that". Registered after it, they
@@ -164,7 +168,7 @@ object CompositionBuilder {
         // layers and the base when there are none, so the output keeps the cadence it has today
         // and never takes on the 30 fps of the blank frames that fill the tails' gaps.
         if (plan.tails.isNotEmpty()) {
-            sequences += tailSequence(plan.tails, plan.totalUs, output, grade, plan.camera)
+            sequences += tailSequence(plan.tails, plan.totalUs, output, grade, plan.camera, background)
         }
         plan.music?.let { sequences += musicSequence(it) }
         plan.voice?.let { sequences += voiceSequence(it) }
@@ -183,6 +187,10 @@ object CompositionBuilder {
         // and it sits before the overlays like the colour did. An RGB matrix, so Media3 folds it
         // into the Presentation's pass instead of drawing the frame once more - see [ProgressTap].
         progressTap?.let { compositionEffects += ProgressTap(it) }
+        // The canvas under the finished picture, after the colour work - the canvas is no picture,
+        // and the grade has never touched a bar - and before the overlays, which lie over the canvas
+        // as they lie over a picture. See [BackgroundEffect].
+        background?.let { compositionEffects += BackgroundEffect(it) }
         overlays.chunked(OVERLAYS_PER_EFFECT).forEach { chunk ->
             compositionEffects += OverlayEffect(ImmutableList.copyOf(chunk))
         }
@@ -201,7 +209,18 @@ object CompositionBuilder {
         // per frame is cheaper than reasoning about them every time the base learns to be
         // transparent somewhere new.
         if (layers.isNotEmpty() || plan.tails.isNotEmpty()) {
-            builder.setVideoCompositorSettings(LayerCompositor(output, layers, plan.tails, plan.camera))
+            builder.setVideoCompositorSettings(
+                LayerCompositor(
+                    output,
+                    layers,
+                    plan.tails,
+                    plan.camera,
+                    // The base's trailing gap is Media3's OPAQUE black, which would sit over the canvas
+                    // past the base track's end; hidden, the canvas shows there instead. With no canvas
+                    // the black it hides is the black the encoder draws anyway, so it stays shown.
+                    baseEndUs = if (background != null && plan.totalUs > plan.baseUs) plan.baseUs else null,
+                ),
+            )
         }
         if (Build.VERSION.SDK_INT >= 29) {
             // Gallery picks from newer phones are frequently HLG or PQ; without this the export
@@ -292,6 +311,8 @@ object CompositionBuilder {
         grade: ColorMatrixEffect?,
         transitionsInto: Map<Int, RenderPlan.PlannedTail>,
         camera: CameraTrack? = null,
+        /** The canvas a transition's incoming side is laid on, or null for black. */
+        background: FloatArray? = null,
     ): EditedMediaItemSequence {
         val geometries = Geometries()
         val items = clips.mapIndexed { i, planned ->
@@ -305,7 +326,7 @@ object CompositionBuilder {
                     output,
                     grade,
                     geometries,
-                    transition = TransitionEffect(TransitionRole.TO, tail.transition, tail.startUs, tail.durUs),
+                    transition = TransitionEffect(TransitionRole.TO, tail.transition, tail.startUs, tail.durUs, background),
                     fadeInUs = tail.durUs,
                     camera = camera,
                 )
@@ -385,6 +406,12 @@ object CompositionBuilder {
         totalUs: Long,
         output: Output,
         grade: ColorMatrixEffect?,
+        /**
+         * For a clip whose rectangle moves, and only for one the plan marked zoomed: its picture is
+         * the whole frame, so it takes the camera in its own chain as a base clip does. Every other
+         * layer clip is zoomed by [LayerCompositor] and is never marked, so it gets nothing here.
+         */
+        camera: CameraTrack? = null,
     ): EditedMediaItemSequence {
         val trackTypes = if (track.hasAudio) {
             setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO)
@@ -395,7 +422,7 @@ object CompositionBuilder {
         if (track.startUs > 0L) builder.addGap(track.startUs)
         val geometries = Geometries()
         for ((i, planned) in track.clips.withIndex()) {
-            builder.addItem(editedClip(planned, track.placements[i].startUs, output, grade, geometries))
+            builder.addItem(editedClip(planned, track.placements[i].startUs, output, grade, geometries, camera = camera))
         }
         // A gap must have a positive duration or Media3 rejects it, and a layer cut at the base's
         // own end has no room left for one.
@@ -434,6 +461,8 @@ object CompositionBuilder {
         output: Output,
         grade: ColorMatrixEffect?,
         camera: CameraTrack? = null,
+        /** The canvas a transition's outgoing side is laid on, or null for black. */
+        background: FloatArray? = null,
     ): EditedMediaItemSequence {
         val trackTypes = if (tails.any { !it.clip.removeAudio }) {
             setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO)
@@ -455,7 +484,7 @@ object CompositionBuilder {
                     output,
                     grade,
                     geometries,
-                    transition = TransitionEffect(TransitionRole.FROM, tail.transition, tail.startUs, tail.durUs),
+                    transition = TransitionEffect(TransitionRole.FROM, tail.transition, tail.startUs, tail.durUs, background),
                     // Over the part of the window the item still plays: all of it, unless the next
                     // tail borrowed its end, and then the fade still reaches silence rather than
                     // stopping on a click at a tenth of the level.
@@ -786,11 +815,36 @@ object CompositionBuilder {
 
         private val matrix = Matrix()
 
+        /** The clip's moving rectangle, or null for one placed once, in [configure], for good. */
+        private val motion = clip.rectMotion
+        private var inputWidth = 0
+        private var inputHeight = 0
+
         override fun configure(inputWidth: Int, inputHeight: Int): Size {
-            val window = RenderPlan.sourceWindow(clip, frame, inputWidth, inputHeight)
+            this.inputWidth = inputWidth
+            this.inputHeight = inputHeight
+            // A rectangle that holds still is placed here, once, as it always was; one that moves is
+            // placed in [getMatrix], at every frame's own time.
+            if (motion == null) place(clip.rect?.bounds ?: FULL_FRAME)
+            // The window has the frame's aspect ratio by construction, so declaring the frame's
+            // size here scales the picture without stretching it.
+            return Size(frame.width, frame.height)
+        }
+
+        /**
+         * The picture fitted into [rect] and turned in it. A rectangle too thin to show draws nothing
+         * at all: the matrix folds the quad to a point, Media3 finds no polygon left to draw, and
+         * the frame stays the transparent black every shader program clears its target to.
+         */
+        private fun place(rect: Rect) {
+            matrix.reset()
+            if (RectMotion.drawsNothing(rect, frame.width, frame.height)) {
+                matrix.setScale(0f, 0f)
+                return
+            }
+            val window = RenderPlan.sourceWindow(clip, frame, inputWidth, inputHeight, rect)
             val centreX = RenderPlan.centreNdcX(window)
             val centreY = RenderPlan.centreNdcY(window)
-            matrix.reset()
             // Put the window's centre on the origin, then open it out until its sides are the
             // frame's: an NDC side of 2 spans a window side of w, so the scale is 1 / w.
             matrix.postTranslate(-centreX, -centreY)
@@ -799,13 +853,7 @@ object CompositionBuilder {
             // which is not turned - every clip of every spec written before the angle existed -
             // leaves with exactly the transform it has always had. The angle can only have come off
             // a rectangle, so there is always one to turn about when there is an angle at all.
-            val placement = clip.rect
-            if (rotationGlDeg != 0f && placement != null) {
-                turn(placement)
-            }
-            // The window has the frame's aspect ratio by construction, so declaring the frame's
-            // size here scales the picture without stretching it.
-            return Size(frame.width, frame.height)
+            if (rotationGlDeg != 0f) turn(rect)
         }
 
         /**
@@ -821,9 +869,9 @@ object CompositionBuilder {
          * frame, and GL discards whatever the matrix pushes past the frame's edges, which is the
          * same crop the customer sees in the preview.
          */
-        private fun turn(placement: Placement) {
-            val pivotX = RenderPlan.centreNdcX(placement.bounds)
-            val pivotY = RenderPlan.centreNdcY(placement.bounds)
+        private fun turn(rect: Rect) {
+            val pivotX = RenderPlan.centreNdcX(rect)
+            val pivotY = RenderPlan.centreNdcY(rect)
             val aspect = frame.width.toFloat() / frame.height.toFloat()
             matrix.postTranslate(-pivotX, -pivotY)
             matrix.postScale(aspect, 1f)
@@ -834,7 +882,21 @@ object CompositionBuilder {
             matrix.postTranslate(pivotX, pivotY)
         }
 
-        override fun getMatrix(presentationTimeUs: Long): Matrix = matrix
+        /**
+         * The same instance every frame, as Media3's own `Crop` hands back, and Media3 copies it into
+         * a float array before drawing. For a moving rectangle it is rebuilt first, from the keys read
+         * at the frame's own presentation time - the output timeline's, as [CameraTransformation]
+         * explains - which is the arithmetic of [configure] once per frame and no allocation.
+         */
+        override fun getMatrix(presentationTimeUs: Long): Matrix {
+            if (motion != null) place(motion.atUs(presentationTimeUs))
+            return matrix
+        }
+
+        private companion object {
+            /** What an absent rectangle means: the whole frame. */
+            val FULL_FRAME = Rect(0f, 0f, 1f, 1f)
+        }
     }
 
     /**
@@ -900,6 +962,13 @@ object CompositionBuilder {
          * took the camera in their own effect chains, and come through here unmoved.
          */
         camera: CameraTrack? = null,
+        /**
+         * Where the base track's own footage ends, for a post with a coloured canvas and a tail past
+         * the base: from here on the base input is the gap Media3 fills with OPAQUE black, and it is
+         * hidden so the canvas under it shows. Null - every post without a canvas colour - composites
+         * the base exactly as it arrives, gap and all, as it always has.
+         */
+        private val baseEndUs: Long? = null,
     ) : VideoCompositorSettings {
 
         private val size = Size(output.width, output.height)
@@ -921,7 +990,8 @@ object CompositionBuilder {
             // registered first, top one first. Then comes the base sequence, composited exactly as
             // it arrives, and then the tails.
             if (inputId == tailsInputId) return tailAt(presentationTimeUs)
-            val layer = layers.getOrNull(inputId) ?: return BASE
+            val layer = layers.getOrNull(inputId)
+                ?: return if (baseEndUs != null && presentationTimeUs >= baseEndUs) TAIL_HIDDEN else BASE
             return layer.settingsAt(presentationTimeUs)
         }
 
@@ -947,6 +1017,12 @@ object CompositionBuilder {
             private val hidden: OverlaySettings =
                 StaticOverlaySettings.Builder().setAlphaScale(0f).build()
             private val placed: List<OverlaySettings> = track.placements.map {
+                // A clip whose rectangle moves arrives as the whole output frame, already placed and
+                // turned inside it and transparent around it (see [RenderPlan.LayerPlacement.wholeFrame]),
+                // so it is laid over the base exactly as it is - centred and unscaled, as the base is -
+                // at the track's opacity. The compositor blends it over what is under it on its alpha,
+                // which is the same blend that puts a transition's incoming side over its tail.
+                if (it.wholeFrame) return@map StaticOverlaySettings.Builder().setAlphaScale(track.opacity).build()
                 val builder = StaticOverlaySettings.Builder()
                 // Only a supersampled clip is scaled, back down to its rectangle's size; every other
                 // layer is built exactly as it was before zooms existed.

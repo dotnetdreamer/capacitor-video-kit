@@ -108,6 +108,74 @@ struct ComposeClip: Sendable {
     /// short still-frame video before the composition is laid, and from there on it is footage like
     /// any other, cropped, fitted, placed and transitioned by code that never asks what it was.
     let image: Bool
+    /// The placement MOVING over output time - a split screen opening as a second video comes on
+    /// and closing as it goes. `ComposeRectMotion` in `definitions.ts` is the contract. nil is a clip
+    /// that stands where `rect` puts it for as long as it plays, which is every spec written before
+    /// the field, and the builder asks this ONCE per layer it makes.
+    ///
+    /// Present, its four numbers replace `rect`'s at every frame and nothing else does: the angle is
+    /// still `rect.rotationDeg`, and `crop` and `fit` mean what they mean, measured afresh against the
+    /// moving rectangle. A `var` with a default, declared LAST, so the memberwise initialiser takes it
+    /// as an optional last argument and every clip built without one is built exactly as it was.
+    var rectMotion: ComposeRectMotion? = nil
+}
+
+/// A clip's rectangle, LOWERED to keys by JS (`compileLayoutMotions` in
+/// `src/editor/layout-motion.ts`), as the parser leaves them: `atMs` finite and non-decreasing,
+/// 1...`ComposeSpecParser.maxRectMotionKeys` of them, and the four arrays as long as `atMs`, each
+/// value already clamped - the corner to +-4 frames, each side to 0...`MAX_PLACEMENT_SIZE`. Nothing
+/// holds a strip of it on the frame the way a resting placement is held: a picture sliding in from
+/// below starts wholly under the bottom edge, and the frame cuts it there.
+///
+/// Doubles and milliseconds for the camera's reasons (`ComposeCameraKey`).
+struct ComposeRectMotion: Sendable {
+    /// Output-timeline milliseconds.
+    let atMs: [Double]
+    /// The left edge, a fraction of the output width.
+    let x: [Double]
+    /// The top edge, a fraction of the output height, y DOWN - flipped only where the picture is
+    /// placed in Core Image's y-up space (`Placement.destination`).
+    let y: [Double]
+    let w: [Double]
+    let h: [Double]
+
+    /// The rectangle at output time `ms`, read exactly as `rectMotionAt` in layout-motion.ts reads it
+    /// - which is the camera's reading, `CameraMath.pose`, line for line: the end keys HOLD, each of
+    /// the four is interpolated in a straight line between the keys either side, and keys at the same
+    /// time are a STEP with the later one winning. Binary search: it runs per frame.
+    func rect(atMs ms: Double) -> ComposeRect {
+        let n = atMs.count
+        guard n > 0 else { return ComposeRect(x: 0, y: 0, w: 1, h: 1) }
+        if !(ms > atMs[0]) {
+            // At or before the first key. Equal times are a step to the LAST key sharing that time.
+            var i = 0
+            while i + 1 < n && atMs[i + 1] <= ms { i += 1 }
+            return key(i)
+        }
+        if ms >= atMs[n - 1] { return key(n - 1) }
+        // The last key at or before `ms`: atMs[lo] <= ms < atMs[lo + 1].
+        var lo = 0
+        var hi = n - 1
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2
+            if atMs[mid] <= ms { lo = mid } else { hi = mid }
+        }
+        let span = atMs[lo + 1] - atMs[lo]
+        let f = span > 0 ? (ms - atMs[lo]) / span : 1
+        func between(_ values: [Double]) -> Double { values[lo] + (values[lo + 1] - values[lo]) * f }
+        return ComposeRect(x: between(x), y: between(y), w: between(w), h: between(h))
+    }
+
+    private func key(_ i: Int) -> ComposeRect { ComposeRect(x: x[i], y: y[i], w: w[i], h: h[i]) }
+
+    /// The narrowest a moving rectangle may be, in output pixels, and still be drawn -
+    /// `MIN_DRAWN_PX`. A wipe opens from exactly nothing, so its first frame is one of these.
+    static let minDrawnPx = 0.5
+
+    /// Whether `rect` on a `width` x `height` frame is too thin to draw anything at all.
+    static func drawsNothing(_ rect: ComposeRect, width: Double, height: Double) -> Bool {
+        !(rect.w * width >= minDrawnPx) || !(rect.h * height >= minDrawnPx)
+    }
 }
 
 /// How one base clip gives way to the next: `ComposeTransition` in `definitions.ts`, whose doc
@@ -398,6 +466,12 @@ struct ComposeSpec: Sendable {
     ///
     /// Declared LAST, so the memberwise initialiser gains it as its last argument.
     let camera: [ComposeCameraKey]?
+
+    /// The canvas, 0...1 RGB - `ComposeSpec.background` in `definitions.ts`, which is the contract -
+    /// or nil for black, which is every spec written before the key. Three channels, each already held
+    /// to 0...1 by the parser. A `var` with a default, after `camera`, so the memberwise initialiser
+    /// takes it as an optional last argument and every spec built without one is built as it was.
+    var background: [Double]? = nil
 
     /// Output-timeline length in ms, rounded PER CLIP exactly as Android's RenderPlan does. Rounding
     /// once at the end instead would drift from the Android number by up to half a millisecond per

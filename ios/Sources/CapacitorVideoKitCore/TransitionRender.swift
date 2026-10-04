@@ -40,8 +40,10 @@ enum TransitionRender {
     /// rather than a flash of black, which is what the contract's recipe would give for a side that
     /// is simply missing, and it is the smaller of the two glitches.
     static func frame(from: CIImage?, to: CIImage?, look: TransitionLook,
-                      transition t: EditTransition, rect: CGRect) -> CIImage {
-        let black = CIImage(color: .black).cropped(to: rect)
+                      transition t: EditTransition, rect: CGRect, background: CIColor = .black) -> CIImage {
+        // The canvas the outgoing side is laid on - black, unless the post coloured it - which is
+        // what shows wherever a side has been moved, scaled or turned off part of the frame.
+        let black = CIImage(color: background).cropped(to: rect)
         guard let from, let to else { return (from ?? to ?? black).cropped(to: rect) }
 
         guard look.alpha > 0 else {

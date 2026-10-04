@@ -397,9 +397,7 @@ export class VeToolbar {
     // the store says so when there is no room for one, or when the post is at its cap. Not there at
     // all on a host that does not offer Zoom (`editing.zoom`), rather than dimmed: dimmed says "not
     // now", and for that app it is never. The row closes up around the gap.
-    const zoom: ToolTile[] = store.host.editing.zoom
-      ? [{ id: 'zoom', label: 'Zoom', icon: 'search-outline', run: () => store.addZoomAtPlayhead() }]
-      : [];
+    const zoom: ToolTile[] = store.host.editing.zoom ? [{ id: 'zoom', label: 'Zoom', icon: 'search-outline', run: () => store.addZoomAtPlayhead() }] : [];
     return {
       kind: 'root',
       label: 'Editing tools',
@@ -420,6 +418,10 @@ export class VeToolbar {
           disabled: !store.videoTrack.value && !store.canAddClip.value,
           run: () => void this.openLayout(),
         },
+        // Beside Layout, the other tool about the frame the videos sit in: the colour of everything
+        // around them. "Canvas", the word every phone editor uses for it, and the one that fits a
+        // tile: "Background" was cut to "Backgro..." at this width.
+        { id: 'background', label: 'Canvas', icon: 'color-palette-outline', run: () => store.openPanel('background') },
         {
           id: SOUND_TILE,
           label: 'Sound',
@@ -746,9 +748,7 @@ export class VeToolbar {
       const zoom = store.selectedZoom.value;
       if (zoom) act(zoom.id);
     };
-    const duplicate: ToolTile[] = store.host.editing.zoom
-      ? [{ id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withZoom(id => store.duplicateZoom(id)) }]
-      : [];
+    const duplicate: ToolTile[] = store.host.editing.zoom ? [{ id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withZoom(id => store.duplicateZoom(id)) }] : [];
     return {
       kind: 'zoom',
       label: 'Zoom tools',
