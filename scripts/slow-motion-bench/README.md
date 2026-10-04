@@ -25,8 +25,9 @@ The flow has to clearly beat the cross-fade on the first three and must not be w
 ## Running it
 
 From the kit. On Windows, with the fnm node on the path
-(`/c/Users/ik/AppData/Roaming/fnm/node-versions/v24.15.0/installation`); on a Mac, the system node
-(24.15 or later). Either way an `ffmpeg` and `ffprobe` on the path, with drawtext, mandelbrot and psnr.
+(`<fnm dir>/node-versions/v24.15.0/installation`, where `<fnm dir>` is fnm's own folder: `fnm env`
+prints it as `FNM_DIR`); on a Mac, the system node (24.15 or later). Either way an `ffmpeg` and
+`ffprobe` on the path, with drawtext, mandelbrot and psnr.
 
 ```sh
 # 1. The scenes (a minute; 360 640 for a quick run at half the pixels).

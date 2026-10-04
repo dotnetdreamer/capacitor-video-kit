@@ -336,10 +336,26 @@ class RenderPlan private constructor(
         val motion: OverlayMotion? = null,
     )
 
+    /**
+     * One pass of the music: [inUs]..[outUs] of the file, played from [atUs] on the output timeline
+     * for exactly `outUs - inUs`. The passes of a loop lie end to end - each one's [atUs] is where the
+     * one before it stops - and the builder holds every pass to its length on the sample (see
+     * [ExactLengthAudioProcessor]), so they join with neither a gap nor an overlap.
+     */
     data class MusicItem(
         val inUs: Long,
+        /** Where this pass's sound ends in the file. */
         val outUs: Long,
         val gain: RampGainProvider,
+        /** Where this pass starts on the output timeline. */
+        val atUs: Long,
+        /**
+         * Where Media3 is told to stop DECODING, which is not [outUs]: [C.TIME_END_OF_SOURCE] for a
+         * pass that runs to the end of its file, and [DECODE_PAST_US] beyond [outUs] for one cut
+         * short of it. What the pass decodes past [outUs] is dropped - see [planMusic] for why a clip
+         * end at [outUs] itself leaves a hole of silence at every seam.
+         */
+        val decodeEndUs: Long,
     )
 
     data class MusicPlan(
@@ -1027,7 +1043,42 @@ class RenderPlan private constructor(
          * the WHOLE sequence: a track that starts three seconds in would go silent for three
          * seconds on every repeat. Explicit items also let the last one be clipped exactly to the
          * end of the video, so the audio sequence can never outlast (and therefore extend) it - or
-         * to the music's own stop, when it has one before that.
+         * to the music's own stop, when it has one before that. Media3's looping cannot carry the
+         * rest of the plan either: every repetition of a looping sequence is the same item with the
+         * same effects, so the fades, which belong to the whole window and not to a pass, would
+         * start again on every pass; and a looping sequence runs to the end of the longest other
+         * one, so it has no way to stop at `endMs`.
+         *
+         * THE SEAMS. A pass is exactly its piece of the timeline, on the sample, and the next one
+         * starts on the sample after it. Two things stood in the way, and both come from asking
+         * Media3 to stop a pass at [MusicItem.outUs]:
+         *
+         * - An AAC `.m4a` (and a gapless `.mp3`) starts with the encoder's priming and says so in its
+         *   header. Media3 keeps the frames' timestamps where they are and has the DECODER drop the
+         *   priming - and checks a clip end against those timestamps, which run ahead of the sound
+         *   by the priming. So the last frame of the sound starts past a clip end at the file's own
+         *   length and is never decoded. Every pass of a 12 s AAC tone came 816 samples short, and
+         *   Media3 made them up with silence: 18.5 ms of nothing, a tick at every seam. Clipping at
+         *   the end also cancels the decoder's trim of the padding after the sound (Media3's
+         *   `ClippingMediaPeriod`), so no clip end could have been exact.
+         * - Wherever a pass is cut, it ends on a whole codec frame: a frame that starts before the
+         *   cut is decoded whole and one that starts after it is not decoded at all.
+         *
+         * So a pass that runs to the end of its file is not clipped at its end at all - the decoder
+         * then drops the priming and the padding itself, as a player does - and one cut short of
+         * it is decoded [DECODE_PAST_US] further than it plays. Either way the builder then holds it
+         * to its length ([ExactLengthAudioProcessor]): what it decoded past that is dropped, and
+         * anything it still came up short of is silence.
+         *
+         * The FIRST sample of a pass needs no such care when the pass starts at the top of the file,
+         * which is every pass of a sound not trimmed at its start: the decoder's trim starts it on
+         * the sound's first sample. A pass trimmed to start inside the file is not exact, and cannot
+         * be made so from here. Media3 starts it on a whole codec frame near the trim - within a
+         * frame and the priming of it, a few tens of milliseconds for AAC - and decodes that frame
+         * without the one before it, so its first milliseconds rise from the codec's own window
+         * rather than start at full level. That moves where such a loop turns and softens its first
+         * instant; it leaves no hole. Placing it on the sample would take the codec's frame size and
+         * priming, which neither the probe nor an audio processor is told.
          */
         private fun planMusic(
             music: Music?,
@@ -1036,12 +1087,18 @@ class RenderPlan private constructor(
             minRepetitionUs: Long,
         ): MusicPlan? {
             if (music == null) return null
-            val probed = probes[music.uri]
-            val outMs = if (probed != null && probed.durationMs > 0L) {
-                min(music.outMs, probed.durationMs)
-            } else {
-                music.outMs
-            }
+            /*
+             * A sound the editor did not trim at its end comes with an `outMs` longer than any file
+             * (ComposeMusic.outMs), so the probe is what says where a pass ends. One the probe could
+             * not read - the plugin logs that and carries on - is laid as a single pass to the stop,
+             * because nothing here knows where its loop would turn: Media3 plays it to the end of
+             * the file, it is silent from there to the stop, and its fade out, which ends at the
+             * stop, is not heard. The page's own measure used to stand in for the probe, and is not
+             * sent any more because WebKit's is short of the file.
+             */
+            // How long the file is, as far as the probe can say; null when it could not say.
+            val probedMs = probes[music.uri]?.durationMs?.takeIf { it > 0L }
+            val outMs = if (probedMs != null) min(music.outMs, probedMs) else music.outMs
             val trackLenUs = (outMs - music.inMs) * 1000L
             if (trackLenUs <= 0L) return null
 
@@ -1074,30 +1131,72 @@ class RenderPlan private constructor(
             if (lastLenUs < MIN_CLIP_US) return null
 
             val inUs = music.inMs * 1000L
-            val fadeInUs = music.fadeInMs * 1000L
-            val fadeOutUs = music.fadeOutMs * 1000L
+            val fadeInUs = max(0L, music.fadeInMs) * 1000L
+            val fadeOutUs = max(0L, music.fadeOutMs) * 1000L
+            // Where the music really stops: the end of the last repetition laid, which is short of
+            // `stopUs` by the sliver left off above, or the end of a section that plays once.
+            val endUs = startUs + (reps - 1) * trackLenUs + lastLenUs
 
+            /*
+             * The fades belong to the window the music is heard in, `startUs..endUs`, and not to any
+             * repetition: `level * (t - startUs) / fadeIn` up and `level * (endUs - t) / fadeOut`
+             * down, each held to 0..1, and their product where they overlap - ComposeMusic's rule,
+             * and the preview's `musicFadeAt`. Each repetition the fade in or the fade out reaches
+             * gets its share of the one line, placed in its own terms, so the line carries on
+             * across the seam. They used to belong to the first and the last repetition, cut to
+             * each one's length, and a last repetition shorter than the fade out - a stop dropped
+             * just past a seam - ended the music near full level with a hard cut.
+             */
             val items = (0 until reps).map { k ->
+                val atUs = startUs + k * trackLenUs
                 val lenUs = if (k == reps - 1) lastLenUs else trackLenUs
+                val fadesIn = fadeInUs > 0L && atUs < startUs + fadeInUs
+                val fadesOut = fadeOutUs > 0L && atUs + lenUs > endUs - fadeOutUs
                 MusicItem(
                     inUs = inUs,
                     outUs = inUs + lenUs,
                     gain = RampGainProvider(
                         level = music.volume,
-                        // A fade belongs to the start of the track and the end of the video, not to
-                        // every repetition.
-                        fadeInUs = if (k == 0) fadeInUs else 0L,
-                        fadeOutStartUs = if (k == reps - 1 && fadeOutUs > 0L) {
-                            max(0L, lenUs - fadeOutUs)
-                        } else {
-                            C.TIME_UNSET
-                        },
-                        fadeOutUs = if (k == reps - 1) fadeOutUs else 0L,
+                        fadeInUs = if (fadesIn) fadeInUs else 0L,
+                        fadeInFromUs = if (fadesIn) startUs - atUs else 0L,
+                        fadeOutStartUs = if (fadesOut) endUs - fadeOutUs - atUs else C.TIME_UNSET,
+                        fadeOutUs = if (fadesOut) fadeOutUs else 0L,
                     ),
+                    atUs = atUs,
+                    decodeEndUs = decodeEndUs(inUs + lenUs, probedMs),
                 )
             }
             return MusicPlan(uri = music.uri, leadGapUs = startUs, items = items)
         }
+
+        /**
+         * Where Media3 is told to stop decoding a pass that plays to [outUs] of a file the probe
+         * measured at [probedMs] - see [planMusic] for why that is not [outUs] itself.
+         *
+         * The end of the source when the pass runs to the end of the file, or near enough that the
+         * room past it reaches the end anyway: the item is then not clipped at its end at all, which
+         * is the one way the decoder drops the file's priming AND its padding and hands over exactly
+         * the sound. Also the end of the source for a file the probe could not read, whose one pass
+         * runs to the music's stop: nothing here knows where that file ends, and Media3 plays it to
+         * its end either way. Otherwise [DECODE_PAST_US] past [outUs], for the pass to be cut on the
+         * sample rather than on a codec frame.
+         */
+        private fun decodeEndUs(outUs: Long, probedMs: Long?): Long {
+            if (probedMs == null) return C.TIME_END_OF_SOURCE
+            val pastUs = outUs + DECODE_PAST_US
+            return if (pastUs >= probedMs * 1000L) C.TIME_END_OF_SOURCE else pastUs
+        }
+
+        /**
+         * How much further than it plays a pass cut short of the end of its file is decoded, so that
+         * it has sound right up to its cut. Wherever Media3 stops decoding it stops on a whole codec
+         * frame, and the frames of a file with priming are stamped that far AHEAD of its sound, so
+         * the room has to cover a frame and the priming: at 44.1 kHz an AAC frame is 23 ms and
+         * Apple's priming 48 ms, at 16 kHz those are 64 ms and 132 ms, and an MP3's are much the
+         * same. Half a second covers every rate a sound is found at, for a few frames' decoding that
+         * is thrown away.
+         */
+        const val DECODE_PAST_US = 500_000L
 
         private fun planVoice(
             takes: List<Voiceover>,

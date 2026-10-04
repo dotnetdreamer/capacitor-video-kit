@@ -9,11 +9,11 @@ exposure.
 
 The product is LightSnap, a phone video editor. Two repos, both on `main`:
 
-- **Video kit** `C:\Users\ik\Documents\GitHub\capacitor-video-kit`: the editor UI (Stencil) and every
+- **Video kit** `capacitor-video-kit` (this repo): the editor UI (Stencil) and every
   render engine: web (`src/video-composer/web`, WebGL2 painter), the live preview
   (`src/components/ve-preview`), Android (Media3 1.11.1, `android/src/main/java/net/dotnetdreamer/videokit/videocomposer`)
   and iOS (AVFoundation + Core Image, `ios/Sources/CapacitorVideoKitCore`).
-- **App** `C:\Users\ik\Documents\GitHub\lighsnip` (Angular/Ionic/Capacitor). It links the kit through
+- **App** `lighsnip`, checked out beside the kit (Angular/Ionic/Capacitor). It links the kit through
   `node_modules/capacitor-video-kit` (a symlink) and loads the kit's BUILT output, so a kit change
   is invisible to the app until `npm run build` runs in the kit (about 2 minutes).
 
@@ -212,10 +212,13 @@ built from your 60-fps-derived benchmark clip.
   - Delete any render you save from `/sdcard/Movies/LightSnip` after pulling it, and leave the
     phone as you found it.
 - **Node:** the system node is too old. Run
-  `export PATH="/c/Users/ik/AppData/Roaming/fnm/node-versions/v24.15.0/installation:$PATH"`.
+  `export PATH="<fnm dir>/node-versions/v24.15.0/installation:$PATH"`, where `<fnm dir>` is fnm's
+  own folder (`fnm env` prints it as `FNM_DIR`).
   The Angular CLI is `node node_modules/@angular/cli/bin/ng.js ...`, not `npx ng`.
 - **App build for the phone:**
-  1. `npm run build:web` (it bundles the template catalogue);
+  1. `npm run catalogue`, then `node node_modules/@angular/cli/bin/ng.js build --configuration development`
+     (the phone build, into `www/`, with the template catalogue bundled in; `npm run build:web` builds
+     the web site into `www-web/`, which `cap sync` never reads);
   2. `npx cap sync android`;
   3. Gradle `assembleDebug` in `lighsnip/android`, with the JDK at `/c/Program Files/Android/Android Studio/jbr`;
   4. `adb -s R58T51N3G2X install -r`.

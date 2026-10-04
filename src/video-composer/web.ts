@@ -133,10 +133,11 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
   /*
    * A browser offers a page no image recogniser, so the kit brings one: MediaPipe's classifier,
    * loaded on the first call from files the host serves (see `web/labels.ts`). Where it cannot
-   * start - no WebAssembly, or the files are not there - this refuses as `unsupported`, the code the
-   * other calls use for what a platform cannot do, and [describeMedia] reads that as "nothing to
-   * say here" and answers null, so a host carries on without scenes. A file that will not open is
-   * `unreadable_input`, as it is on a phone.
+   * start - no WebAssembly, no WebGL, or the files are not there - or stops working in use (a lost
+   * WebGL context), this refuses as `unsupported`, the code the other calls use for what a platform
+   * cannot do, and [describeMedia] reads that as "nothing to say here" and answers null, so a host
+   * carries on without scenes. A file that will not open, or whose picture the browser does not
+   * decode, is `unreadable_input`, as it is on a phone. `unknown` is left for what neither explains.
    */
   async labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult> {
     const uri = required(options?.uri, 'uri');

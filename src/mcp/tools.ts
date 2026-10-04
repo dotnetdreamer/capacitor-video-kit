@@ -82,6 +82,7 @@ import {
   FILTER_PRESETS,
   MANIFEST_VERSION,
   MAX_LAYERS,
+  MAX_MUSIC_FADE_MS,
   MAX_POST_MS,
   MAX_VIDEO_TRACKS,
   MIN_CLIP_MS,
@@ -168,12 +169,13 @@ export class ToolError extends Error {
  * So [put] keeps a copy, and the copy is made on the way IN rather than on the way out, for the
  * same price: every answer that carries a manifest also stores it, so either way is one copy per
  * answer. In is the one that also cuts the store loose from what a caller SENDS, and that is real:
- * `patchOverlay` and `patchMusic` spread an op's patch onto the post as it was handed over, and the
- * normaliser carries a few fields through as it finds them, so the manifest a call builds can hold
- * the caller's own objects. What goes out is then never what is stored. [get] hands the stored copy
- * to the ops, which build a new manifest rather than change the one they are given, and to
- * [manifestResult], which puts a fresh copy under the same id as it answers - so the object it
- * hands back stopped being the store's in the same step.
+ * `patchOverlay` spreads an op's patch onto the layer as it was handed over (`patchMusic` did too,
+ * before it took a sound's own fields and nothing else), and the normaliser carries a few fields
+ * through as it finds them, so the manifest a call builds can hold the caller's own objects. What
+ * goes out is then never what is stored. [get] hands the stored copy to the ops, which build a new
+ * manifest rather than change the one they are given, and to [manifestResult], which puts a fresh
+ * copy under the same id as it answers - so the object it hands back stopped being the store's in
+ * the same step.
  *
  * Not a frozen copy, which would cost more and give less: it has to be made on every answer just
  * the same and then walked a second time to freeze it, and it hands an in-process host an answer
@@ -423,10 +425,20 @@ export const OP_REFERENCE: Record<string, string> = {
 
   /* sound */
   setMusic:
-    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, volume?, loop?, fadeInMs?, fadeOutMs?}) or null. ' +
-    'inMs..outMs is the section of the track, startMs where it starts on the post, and endMs where it stops ' +
-    '(0: until the end); a looping section repeats until endMs, or until the video ends.',
-  patchMusic: 'patch - any of the music fields. Fails when the post has no music yet.',
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, volume?, loop?, fadeInMs?, fadeOutMs?}) or null to take it away. ' +
+    'inMs..outMs is the section of the track (outMs 0: to the end of the track), startMs where it starts on the post, and endMs where it ' +
+    'stops (0, the default: until the end); a looping section repeats until endMs, or until the video ends. An outMs or endMs that is ' +
+    `not 0 is at least ${MIN_LAYER_MS}ms after inMs or startMs, or the op is refused. volume 0..1 (default 1); loop defaults to false. ` +
+    `fadeInMs rises from silence over the start of the sound and fadeOutMs falls to silence at the end of what is heard, each 0 (none, ` +
+    `the default) to ${MAX_MUSIC_FADE_MS}ms. Every time is in milliseconds and none is negative. sourceDurationMs is the track's ` +
+    'length: without it or an outMs, where a sound played once ends is not known until it plays. Any other field is refused; a field ' +
+    'sent as null takes its default.',
+  patchMusic:
+    'patch - any of the fields setMusic takes, checked the same way; any other field is refused, and so is null - send 0 for no stop, ' +
+    'no trim at the end or no fade. A startMs without an endMs MOVES the sound, as the editor’s Move does: a stop it has goes with ' +
+    'it, so what is heard keeps its length, and a stop carried to the end of the post or past it becomes 0 (until the end). Send ' +
+    `endMs as well to put the stop somewhere else. A patch that would leave the section or the stop under ${MIN_LAYER_MS}ms is ` +
+    'refused, not ignored. Fails when the post has no music yet.',
   addVoiceover: 'id, uri, startMs, durationMs, volume? - takes never overlap.',
   patchVoiceover: 'id, volume.',
   moveVoiceover: 'id, startMs - held clear of the takes either side.',
@@ -885,6 +897,7 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
         minLayerMs: MIN_LAYER_MS,
         clipSpeed: { min: 0.25, max: 4 },
         transitionMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS },
+        musicFadeMs: { min: 0, max: MAX_MUSIC_FADE_MS },
         ...(editing.zoom
           ? {
               maxZooms: MAX_ZOOMS,
@@ -909,6 +922,7 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
           `  a post runs at most ${MAX_POST_MS}ms; a clip at least ${MIN_CLIP_MS}ms and a layer at least ${MIN_LAYER_MS}ms\n` +
           '  clip speed is 0.25x to 4x, with pitch preserved\n' +
           `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins\n` +
+          `  the music's section and its stop leave at least ${MIN_LAYER_MS}ms of sound; its fade in and fade out run 0 (none) to ${MAX_MUSIC_FADE_MS}ms each\n` +
           zooms,
       };
     }

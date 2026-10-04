@@ -129,6 +129,44 @@ class MediaLabelsTest {
     }
 
     @Test
+    fun `stops looking once the budget is spent by frames tried, though none of them gave a frame`() {
+        // Four cuts, none of which decodes, each taking 3 s of an 8 s budget to give up. Counted by
+        // frames read, the budget never began and all four were tried: 12 s.
+        var clock = 0L
+        val tried = ArrayList<Long>()
+        var stoppedWith: Int? = null
+        val cuts = listOf(1000L, 3000L, 5000L, 7000L).map { MediaLabels.Cut(it, it) }
+        val out = MediaLabels.lookWithin(cuts, deadline = 8_000L, now = { clock }, onOutOfTime = { stoppedWith = it }) { cut, _ ->
+            tried += cut.timeMs
+            clock += 3_000L
+            null
+        }
+        assertEquals(emptyList<MediaLabels.Frame>(), out)
+        assertEquals(listOf(1000L, 3000L, 5000L), tried)
+        assertEquals(0, stoppedWith)
+    }
+
+    @Test
+    fun `tries the first frame however long the call has waited, and no other past the budget`() {
+        val cuts = listOf(MediaLabels.Cut(1000L, 1000L), MediaLabels.Cut(3000L, 3000L))
+        val out = MediaLabels.lookWithin(cuts, deadline = 0L, now = { 5_000L }) { cut, _ -> MediaLabels.Frame(cut.timeMs, emptyList()) }
+        assertEquals(listOf(1000L), out.map { it.timeMs })
+    }
+
+    @Test
+    fun `reads every frame inside the budget, and hands each look the frames read before it`() {
+        // Two times that meet at one keyframe: the second look sees the first frame and gives none.
+        val cuts = listOf(MediaLabels.Cut(1000L, 2000L), MediaLabels.Cut(1500L, 2000L), MediaLabels.Cut(4000L, null))
+        var stopped = false
+        val out = MediaLabels.lookWithin(cuts, deadline = 8_000L, now = { 0L }, onOutOfTime = { stopped = true }) { cut, read ->
+            val at = cut.keyframeMs ?: cut.timeMs
+            if (read.any { it.timeMs == at }) null else MediaLabels.Frame(at, emptyList())
+        }
+        assertEquals(listOf(2000L, 4000L), out.map { it.timeMs })
+        assertEquals(false, stopped)
+    }
+
+    @Test
     fun `rounds a confidence to three places`() {
         assertEquals(0.5, MediaLabels.rounded(0.4996f), 0.0)
         assertEquals(0.123, MediaLabels.rounded(0.12345f), 0.0)

@@ -33,7 +33,8 @@ sources with the filter in CSS and every layer drawn as the same bitmap the rend
 and the finished video comes from the host's renderer reading the same manifest.
 
 This element is only the frame: it loads the sources, lays the parts out, owns which panel is
-open, and owns leaving - back, discard, and the render on Next. The parts do the editing.
+open, and owns leaving - back, the question it asks on the way out, and the render on Next. The
+parts do the editing.
 
 ## Properties
 

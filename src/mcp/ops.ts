@@ -21,7 +21,9 @@
  *
  *  - An op the editor answers with `null` - the capacity limits, the moves that cannot be made -
  *    throws with the reason spelled out rather than the `null`, because `null` arriving at an agent
- *    is a value it will try to edit.
+ *    is a value it will try to edit. So does the one refusal the editor answers with the manifest
+ *    unchanged instead, the music's: a section or a stop under [MIN_LAYER_MS] is not kept, and an
+ *    unchanged manifest reads to an agent exactly like the success it was not.
  *
  * `totalMs` is never taken from the caller. Three ops need it, and it is a function of the manifest
  * ([totalDurationMs]) rather than a choice, so an agent passing its own would be passing a number
@@ -39,8 +41,10 @@ import {
   DEFAULT_ZOOM_RAMP_MS,
   DEFAULT_ZOOM_SCALE,
   MAX_LAYERS,
+  MAX_MUSIC_FADE_MS,
   MAX_VIDEO_TRACKS,
   MAX_ZOOMS,
+  MIN_LAYER_MS,
   MIN_ZOOM_MS,
   ZOOM_EASES,
   aspectOf,
@@ -83,6 +87,7 @@ import {
   moveLayer,
   moveLayerTo,
   moveVoiceover,
+  musicMovedTo,
   patchClip,
   patchMusic,
   patchOverlay,
@@ -198,13 +203,6 @@ function optionalNum(op: Record<string, unknown>, key: string, fallback: number)
 
 function bool(op: Record<string, unknown>, key: string): boolean {
   const value = op[key];
-  if (typeof value !== 'boolean') throw new Error(`"${key}" must be true or false`);
-  return value;
-}
-
-function optionalBool(op: Record<string, unknown>, key: string, fallback: boolean): boolean {
-  const value = op[key];
-  if (value === undefined || value === null) return fallback;
   if (typeof value !== 'boolean') throw new Error(`"${key}" must be true or false`);
   return value;
 }
@@ -418,6 +416,114 @@ const TEXT_ALIGNS: readonly TextAlign[] = ['left', 'center', 'right'];
 const FITS: readonly EditFit[] = ['contain', 'cover'];
 const LAYER_MOVES: readonly LayerMove[] = ['forward', 'backward', 'front', 'back'];
 const ASPECTS: readonly OutputAspect[] = ['9:16', '16:9'];
+
+/* -------------------------------------------------------------------------------------------- */
+/* The sound a music op describes                                                                 */
+/* -------------------------------------------------------------------------------------------- */
+
+/** The music's times: where its section is on the track, and where it is heard on the post. */
+const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs'] as const satisfies readonly (keyof EditMusic)[];
+const MUSIC_FADES = ['fadeInMs', 'fadeOutMs'] as const satisfies readonly (keyof EditMusic)[];
+/** Every field a sound has, in the order the editor writes them - what a refusal lists. */
+const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES] as const satisfies readonly (keyof EditMusic)[];
+
+/*
+ * And every one of them, held by the compiler. [musicFields] refuses any key not on the list, so a
+ * field added to [EditMusic] and not here would be refused by both ops as "not a music field" - a
+ * sound the editor has and no agent could set, with nothing failing to say so. `satisfies` above
+ * keeps a name on the list that is not a sound's; this keeps a sound's name off it from compiling.
+ */
+type MissingMusicField = Exclude<keyof EditMusic, (typeof MUSIC_FIELDS)[number]>;
+const musicFieldsComplete: [MissingMusicField] extends [never] ? true : MissingMusicField = true;
+void musicFieldsComplete;
+
+/** What 0 means for the two times where it is not a time at all. */
+const MUSIC_ZERO: Partial<Record<string, string>> = { outMs: ' (0: to the end of the track)', endMs: ' (0: until the end)' };
+
+/**
+ * The music fields `raw` carries, each checked before the editor sees it; `path` is only for the
+ * message, as it is for [readRect]: `setMusic` reads a `music`, `patchMusic` a `patch`.
+ *
+ * By range as well as by type, where the rest of this file checks type alone and leaves the range
+ * to the editor's function, because for a sound there is no function that holds one. The editor's
+ * `setMusic` stores what it is handed, having only ever been handed a track by its own picker, so
+ * a volume of 3 or a start 500ms before the post would reach every engine as it was typed. And no
+ * fade length is clamped anywhere: the volume sheet's slider stops at [MAX_MUSIC_FADE_MS], and a
+ * longer fade is one nobody could set or read back on that sheet, so it is refused at the same
+ * length rather than stored. Below the slider's own shortest step is allowed, down to 0 for none,
+ * because a short fade is still one every engine draws.
+ *
+ * A field that is not a sound's is refused with the list of the ones that are, the way `setAdjust`
+ * refuses a name that is not an Adjust slider. The editor's `patchMusic` spreads whatever it is
+ * given onto the sound, so `fadeOut` for `fadeOutMs` would have come back as a changed manifest
+ * whose fade was exactly what it had been - the silent no-op this file exists to keep from an agent,
+ * dressed as a success. Only what is there is read: a patch names the fields it changes.
+ */
+function musicFields(raw: Record<string, unknown>, path: string): Partial<EditMusic> {
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value === undefined) continue;
+    const name = `"${path}.${key}"`;
+    if (key === 'uri' || key === 'fileName') {
+      if (typeof value !== 'string' || (key === 'uri' && value.length === 0)) {
+        throw new Error(`${name} must be a ${key === 'uri' ? 'non-empty ' : ''}string`);
+      }
+    } else if (key === 'loop') {
+      if (typeof value !== 'boolean') throw new Error(`${name} must be true or false`);
+    } else if (key === 'volume') {
+      if (typeof value !== 'number' || !(value >= 0 && value <= 1)) throw new Error(`${name} must be a number from 0 to 1`);
+    } else if ((MUSIC_FADES as readonly string[]).includes(key)) {
+      if (typeof value !== 'number' || !(value >= 0 && value <= MAX_MUSIC_FADE_MS)) {
+        throw new Error(`${name} must be a length in milliseconds from 0 (no fade) to ${MAX_MUSIC_FADE_MS}, the longest the volume sheet sets`);
+      }
+    } else if ((MUSIC_TIMES as readonly string[]).includes(key)) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`${name} must be a number of milliseconds, 0 or more${MUSIC_ZERO[key] ?? ''}`);
+      }
+    } else {
+      throw new Error(`${name} is not a music field - the fields are ${MUSIC_FIELDS.join(', ')}`);
+    }
+    fields[key] = value;
+  }
+  return fields as Partial<EditMusic>;
+}
+
+/**
+ * Why the editor would not keep this sound, in words that name both ends, or null when it would.
+ *
+ * The rule is [patchMusic]'s, said rather than made: a section or a stop that is not 0 leaves at
+ * least [MIN_LAYER_MS] of sound, measured in the whole milliseconds that function rounds to before
+ * it measures. It refuses by handing the manifest back as it was, which a UI can afford - no handle
+ * it draws goes that far - and an agent cannot. `setMusic` has no such rule in the editor at all,
+ * so a stop before the start went in, and left a sound nothing plays: the heard window is empty, and
+ * the web and iOS renders both drop the music whole. It is refused here with the same words, and
+ * `normaliseManifest` clears such a stop from a draft that already has one, so the rule is one rule
+ * wherever a sound comes from. A test holds these words to [patchMusic]'s own answer.
+ */
+function musicRefusal(music: Pick<EditMusic, 'inMs' | 'outMs' | 'startMs' | 'endMs'>): string | null {
+  const ms = (value: number) => Math.max(0, Math.round(value || 0));
+  const [inMs, outMs, startMs, endMs] = [ms(music.inMs), ms(music.outMs), ms(music.startMs), ms(music.endMs)];
+  if (outMs > 0 && outMs - inMs < MIN_LAYER_MS) {
+    return `the section would end at "outMs" ${outMs}, and "outMs" must be 0 (to the end of the track) or at least ${MIN_LAYER_MS}ms after "inMs", which is ${inMs}`;
+  }
+  if (endMs > 0 && endMs - startMs < MIN_LAYER_MS) {
+    return `the sound would stop at "endMs" ${endMs}, and "endMs" must be 0 (until the end) or at least ${MIN_LAYER_MS}ms after "startMs", which is ${startMs}`;
+  }
+  return null;
+}
+
+/**
+ * Whether a patch asks for anything the sound does not already have, read the way [patchMusic]
+ * stores it: a time in whole milliseconds, everything else as it is.
+ */
+function asksForChange(music: EditMusic, patch: Partial<EditMusic>): boolean {
+  const had = music as unknown as Record<string, unknown>;
+  return Object.entries(patch).some(([key, value]) => {
+    const was = had[key];
+    const isTime = (MUSIC_TIMES as readonly string[]).includes(key) || (MUSIC_FADES as readonly string[]).includes(key);
+    return isTime && typeof value === 'number' && typeof was === 'number' ? Math.round(value) !== Math.round(was) : value !== was;
+  });
+}
 
 /* -------------------------------------------------------------------------------------------- */
 /* The table                                                                                      */
@@ -760,25 +866,65 @@ const OPS: Record<string, Apply> = {
   setMusic: (manifest, op) => {
     const raw = nullableObject(op, 'music');
     if (raw === null) return setMusic(manifest, null);
+    // A null field is the default here, as an absent one is everywhere in this file. Only a sound's
+    // own field is dropped for being null, though: any other key goes on to [musicFields] and is
+    // refused there by name. Dropped with the rest, `fadeOut: null` for `fadeOutMs` was taken
+    // without a word - the misspelling the op reference promises to refuse, let through because
+    // the value it was sent with happened to be the one that means "the default".
+    const given = musicFields(Object.fromEntries(Object.entries(raw).filter(([key, value]) => value !== null || !(MUSIC_FIELDS as readonly string[]).includes(key))), 'music');
+    if (given.uri === undefined) throw new Error('"music.uri" must be a non-empty string');
+    const fadeInMs = given.fadeInMs ?? 0;
     const music: EditMusic = {
-      uri: str(raw, 'uri'),
-      fileName: optionalStr(raw, 'fileName') ?? '',
-      sourceDurationMs: optionalNum(raw, 'sourceDurationMs', 0),
-      inMs: optionalNum(raw, 'inMs', 0),
-      outMs: optionalNum(raw, 'outMs', 0),
-      startMs: optionalNum(raw, 'startMs', 0),
-      endMs: optionalNum(raw, 'endMs', 0),
-      volume: optionalNum(raw, 'volume', 1),
-      loop: optionalBool(raw, 'loop', false),
-      fadeInMs: optionalNum(raw, 'fadeInMs', 0),
-      fadeOutMs: optionalNum(raw, 'fadeOutMs', 0),
+      uri: given.uri,
+      fileName: given.fileName ?? '',
+      sourceDurationMs: given.sourceDurationMs ?? 0,
+      inMs: given.inMs ?? 0,
+      outMs: given.outMs ?? 0,
+      startMs: given.startMs ?? 0,
+      endMs: given.endMs ?? 0,
+      volume: given.volume ?? 1,
+      loop: given.loop ?? false,
+      // Only when there is one, as the editor's own picker and the manifest's reader both have it:
+      // absent is no fade in, and a 0 written in would be a sound neither of them would have made.
+      ...(fadeInMs > 0 ? { fadeInMs } : {}),
+      fadeOutMs: given.fadeOutMs ?? 0,
     };
+    const refusal = musicRefusal(music);
+    if (refusal) throw new Error(refusal);
     return setMusic(manifest, music);
   },
 
+  /*
+   * Three things on top of the editor's `patchMusic`, each so that the agent's patch lands where the
+   * editor's own control would have put it, or says why not.
+   *
+   * The patch is a sound's own fields, checked as `setMusic` checks them ([musicFields]), and no
+   * other: the editor's function spreads whatever it is handed onto the sound.
+   *
+   * A new `startMs` with no `endMs` MOVES the sound, and a stop it has goes with it, through the
+   * very function the editor's Move and its timeline drag call ([musicMovedTo]): what is heard keeps
+   * its length, and a stop carried to the end of the post or past it becomes "until the end". Passed
+   * straight through, the start moved and the stop stayed, so the sound grew or shrank by the
+   * distance moved - and a start moved past the stop was refused by the editor with no word. An
+   * agent that wants the stop somewhere else sends `endMs` as well, and gets exactly that.
+   *
+   * A patch the editor hands back unchanged although it asks for something the sound does not have
+   * is a refusal, and is said as one ([musicRefusal]). One asking for nothing new - a volume the
+   * sound already has - is the success it looks like.
+   */
   patchMusic: (manifest, op) => {
-    if (!manifest.music) throw new Error('this post has no music to patch - use setMusic first');
-    return patchMusic(manifest, object(op, 'patch') as Partial<EditMusic>);
+    const music = manifest.music;
+    if (!music) throw new Error('this post has no music to patch - use setMusic first');
+    const patch = musicFields(object(op, 'patch'), 'patch');
+    if (patch.startMs !== undefined && patch.endMs === undefined && music.endMs > 0) {
+      Object.assign(patch, musicMovedTo(music, patch.startMs, totalDurationMs(manifest)));
+    }
+    const next = patchMusic(manifest, patch);
+    if (next === manifest && asksForChange(music, patch)) {
+      const reason = musicRefusal({ ...music, ...patch });
+      throw new Error(reason ?? `the editor did not take ${JSON.stringify(patch)}, and the music is as it was`);
+    }
+    return next;
   },
 
   addVoiceover: (manifest, op) => {
@@ -935,12 +1081,13 @@ export const OP_NAMES: readonly string[] = Object.freeze(Object.keys(OPS).sort()
  * property too many to TypeScript - which is exactly how an app writes its editor's settings, and
  * what the README tells a host to hand over.
  *
- * The other two have no op to govern, and are taken and left unread. `replaceKeepsLength` decides
+ * The other three have no op to govern, and are taken and left unread. `replaceKeepsLength` decides
  * what the Replace GESTURE does to a segment somebody already sized, and `replaceClipSource` is not
  * that gesture: its caller states the length outright (see the note on the op). `pictures` decides
  * what the clip pickers offer, and there is no picker here: `insertClip` and `addVideoTrack` put a
- * source down by its key, as footage. `zoom` is different in kind: it decides whether a post may
- * hold a kind of edit at all, and on this server, off, the answer is that it may not.
+ * source down by its key, as footage. `savesDrafts` decides the words of the question the editor's
+ * Back asks, and there is no editor here to leave. `zoom` is different in kind: it decides whether a
+ * post may hold a kind of edit at all, and on this server, off, the answer is that it may not.
  */
 export type McpEditingOptions = EditorEditingOptions;
 
@@ -977,11 +1124,11 @@ export interface EditOpsOptions {
  * `setFilter`, `setAdjust`, `setFit`, `setOriginalMuted` and `setOutput` - have no such function in
  * `edit-ops.ts` to call, so they spread the manifest right here and set the field or two they own
  * (`setFilter` sets the filter and its intensity), the way the editor's store does for the same
- * controls. Neither way touches `zooms`: splitting,
- * duplicating and moving clips copy clips, the layer ops copy layers, the two open-ended patches
- * land on one layer (`patchOverlay`) or on the music (`patchMusic`), never on the manifest, and the
- * five each name the fields they set. `zooms` rides through every one of them as the very array
- * it came in as, which on this server is empty. The tests run every op there is over a post with no
+ * controls. Neither way touches `zooms`: splitting, duplicating and moving clips copy clips, the
+ * layer ops copy layers, the two patches land on one layer (`patchOverlay`, the open-ended one) or
+ * on the music (`patchMusic`, a sound's own fields and no other), never on the manifest, and the
+ * five each name the fields they set. `zooms` rides through every one of them as the very array it
+ * came in as, which on this server is empty. The tests run every op there is over a post with no
  * zoom to keep that true, and [applyEditOps] checks it on every op anyway, because a check is what
  * survives the day somebody adds an op that copies a template's zooms in with its clips.
  *

@@ -199,11 +199,18 @@ export class VeSoundSheet {
         <button
           type="button"
           class="snd__play"
-          aria-label={playing ? `Stop ${sound.fileName}` : `Play ${sound.fileName}`}
           aria-pressed={String(playing)}
           onClick={() => this.togglePreview(sound)}
         >
           <ve-icon name={playing ? 'pause' : 'play'}></ve-icon>
+          {/*
+            The name is the button's own hidden text and NOT an `aria-label`. With `aria-pressed`
+            beside it, an `aria-label` reached Android's WebView as a ToggleButton with no text and
+            no description: the label went to Android's supplemental description, so Maestro could
+            not find "Play ...", and a screen reader that skips that field had nothing to read. See
+            `.sheet__hidden-name` in sheet-common.css.
+          */}
+          <span class="sheet__hidden-name">{playing ? `Stop ${sound.fileName}` : `Play ${sound.fileName}`}</span>
         </button>
 
         <button type="button" class="snd__pick" onClick={() => this.use(sound)}>
@@ -211,8 +218,14 @@ export class VeSoundSheet {
           <span class="snd__meta">{meta(sound)}</span>
         </button>
 
+        {/*
+          An image, because the tick is a picture, and because ARIA does not allow a name on a span
+          with no role. Android's WebView dropped that label: the tick reached the tree as a
+          TextView with no text, and editor-sound-sheet.yaml could not find "On this post". An
+          image's `aria-label` is its content description on Android and its label in VoiceOver.
+        */}
         {inUse ? (
-          <span class="snd__in-use" key="in-use" aria-label="On this post">
+          <span class="snd__in-use" key="in-use" role="img" aria-label="On this post">
             <ve-icon name="checkmark"></ve-icon>
           </span>
         ) : null}

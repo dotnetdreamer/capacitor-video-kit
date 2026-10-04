@@ -75,10 +75,23 @@ the first clip and then fails the whole export at the first item boundary. (See 
 so a track starting three seconds in would go silent for three seconds on every repeat. The plan
 lays out numbered repetitions and clips the last one, in microseconds, to the video's exact end -
 or to `ComposeMusic.endMs`, when the music was given a stop before that (the editor's end handle on
-a looping sound sets it; `EditMusic.endMs` of 0 means "until the end").
+a looping sound sets it; `EditMusic.endMs` of 0 means "until the end"). A pass is as long as the
+probe reads the file when the spec asks for the end of it, which is how the editor sends a sound it
+did not trim at its end (`ComposeMusic.outMs`). A sound the probe cannot read is logged, not failed,
+and is laid as one pass to the stop: it plays once, to the end of its file, and is silent after it.
 
 **Fades multiply, they do not replace.** Media3's `DefaultGainProvider.addFadeAt` overrides the
 default gain inside the fade window, so a 60 %-volume track would ramp to 100 % and then drop.
+
+**Music fades belong to the time it is heard, not to a repetition.** The fade in runs from
+`ComposeMusic.startMs` and the fade out ends where the music stops - its stop, the end of the video,
+or the end of a section that plays once - with each repetition given its share of the one line, so
+the line runs straight across the seams and the two multiply where they overlap
+(`ComposeMusic.fadeInMs` has the rule every engine and the preview share). Hung off the last
+repetition instead, a fade out was lost whenever that repetition was shorter than the fade: a stop
+dropped just past a seam, or a video a sliver longer than a whole number of passes. A last
+repetition shorter than a frame is still left off (Media3 fails an item under a millisecond), and
+the fade out then ends where the one before it stops.
 
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
 into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got

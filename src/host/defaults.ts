@@ -128,6 +128,10 @@ export function resolveEditorHost(host?: VideoEditorHost): ResolvedEditorHost {
       // On unless the host says so: Zoom shipped on for every host, and one that has never heard of
       // this setting keeps the tool it already has. Only an explicit false takes it away.
       zoom: host?.editing?.zoom !== false,
+      // Off unless the host says so, and only a real true turns it on: "your changes are kept" said
+      // by a host that keeps nothing is the one answer here that loses somebody's work, where the
+      // other mistake only asks them a harsher question than it needed to.
+      savesDrafts: host?.editing?.savesDrafts === true,
     },
   };
 }
@@ -496,22 +500,62 @@ async function pickAudioThroughKit(bridge: NativeBridge): Promise<PickedAudio | 
   return await pickedAudio(
     picked.mimeType ? new Blob([bytes], { type: picked.mimeType }) : bytes,
     picked.fileName || 'Sound',
+    await composerLength(bridge, picked.uri),
   );
+}
+
+/**
+ * How long the composer reads the kit's copy of a picked sound as, in whole milliseconds, or null
+ * when it cannot say: a build without `probe`, a file it could not open, or one with no length.
+ *
+ * WHY IT IS ASKED. WebKit's `<audio>` reads an AAC `.m4a` short: 11975 ms for a 12 s file whose
+ * audio track runs to 12000, which is where the iOS render loops it (`CompositionBuilder.audioSource`
+ * lays each pass to the track's own end), and Chromium reads it as 12000 too. A preview that loops at
+ * the element's measure comes round 25 ms early on every pass, 125 ms by the end of a minute-long
+ * post. The render's length is what the preview should loop at, and the composer is the only one on
+ * the page that can read the file the way the render does.
+ *
+ * WHAT IT ANSWERS. iOS's `probe` (`Thumbnailer.probe`) reads a file with no video to its audio
+ * track's `timeRange.end`, as the render reads it, and not to the asset's `duration`, which for that
+ * same file is 11975 ms, the element's own figure. The element still has only 11975 ms of it to play,
+ * so the preview has nothing to play for the last 25 ms of each pass: it keeps its element on the
+ * post's loop across that, and never seeks one that has run to the end of its file before WebKit has
+ * said so, which on WebKit costs the file its length (`soundPutMs` in `preview-media.ts`,
+ * `recoverLength` in `preview-player.ts`). The fades do not care either way, as they no longer hang
+ * off any pass.
+ *
+ * It is asked through the bridge, and only when the plugin's header lists `probe`, for the reason
+ * [bridgeWithAudioPicker] gives.
+ */
+async function composerLength(bridge: NativeBridge, uri: string): Promise<number | null> {
+  const plugin = bridge.PluginHeaders?.find((header) => header.name === 'VideoComposer');
+  if (!plugin?.methods.some((method) => method.name === 'probe')) return null;
+  try {
+    const { durationMs } = await bridge.nativePromise<{ durationMs: number }>('VideoComposer', 'probe', { uri });
+    return durationMs > 0 ? Math.round(durationMs) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * A picked sound as the editor takes one: an object URL over its bytes and how long it runs, asked of
  * an element that can play it. A sound that element cannot open is refused, and its URL given back
  * first, because nothing else will ever revoke it.
+ *
+ * `knownMs` is the file's length as the composer read it on a phone ([composerLength]), and is the
+ * length handed on when there is one: the element is still asked, because the preview plays the
+ * sound through one and a sound it cannot open is no use, but its own measure can be short of the
+ * render's.
  */
-async function pickedAudio(bytes: Blob, fileName: string): Promise<PickedAudio> {
+async function pickedAudio(bytes: Blob, fileName: string, knownMs: number | null = null): Promise<PickedAudio> {
   const uri = URL.createObjectURL(bytes);
   const durationMs = await mediaDuration('audio', uri);
   if (durationMs === null) {
     URL.revokeObjectURL(uri);
     throw new Error(`The browser could not open ${fileName}`);
   }
-  return { uri, fileName, sourceDurationMs: durationMs };
+  return { uri, fileName, sourceDurationMs: knownMs ?? durationMs };
 }
 
 /** One file from the customer, or null when they closed the picker without choosing. */

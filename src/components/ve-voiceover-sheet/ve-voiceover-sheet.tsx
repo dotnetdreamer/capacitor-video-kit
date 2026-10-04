@@ -449,13 +449,21 @@ export class VeVoiceoverSheet {
                 type="button"
                 class={{ 'vo__record': true, 'vo__record--live': live }}
                 disabled={disabled}
-                aria-label={live ? 'Stop recording' : 'Record voiceover'}
                 // A string on purpose: the vdom removes an attribute set to boolean false, and a
                 // button with no `aria-pressed` at all is announced as a plain button.
                 aria-pressed={String(live)}
                 onClick={this.toggleRecording}
               >
-                <span class="vo__record-core"></span>
+                <span class="vo__record-core" aria-hidden="true"></span>
+                {/*
+                  The name is the button's own hidden text and NOT an `aria-label`. With
+                  `aria-pressed` beside it, an `aria-label` reached Android's WebView as a
+                  ToggleButton with no text and no description: the label went to Android's
+                  supplemental description, so the Maestro flow could not find "Record voiceover",
+                  and a screen reader that skips that field had nothing to read. The disc is only
+                  the picture of it. See `.sheet__hidden-name` in sheet-common.css.
+                */}
+                <span class="sheet__hidden-name">{live ? 'Stop recording' : 'Record voiceover'}</span>
               </button>
 
               {/*

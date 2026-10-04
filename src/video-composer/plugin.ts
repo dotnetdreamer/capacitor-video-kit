@@ -109,29 +109,37 @@ export interface VideoComposerPlugin {
   thumbnails(options: ThumbnailsOptions): Promise<ThumbnailsResult>;
 
   /**
-   * What the phone's own image recogniser sees in a picture, or in a few frames of a video: its
-   * labels, each with a confidence, frame by frame.
+   * What an image recogniser sees in a picture, or in a few frames of a video: its labels, each
+   * with a confidence, frame by frame.
    *
-   * On the device and nowhere else, with nothing downloaded and nothing sent: Apple's Vision
-   * (`VNClassifyImageRequest`) on iOS, which is part of the system, and Google's ML Kit image
+   * On a phone, on the device and nowhere else, with nothing downloaded and nothing sent: Apple's
+   * Vision (`VNClassifyImageRequest`) on iOS, which is part of the system, and Google's ML Kit image
    * labeling on Android, whose model the kit bundles into the app, so it works offline on the first
    * call. Neither needs a permission. A frame is cut from the video the way [thumbnails] cuts one,
    * at the nearest keyframe, and looked at small: what an image classifier reads is the whole of
    * the picture, not its detail.
    *
-   * The two engines name things in their own words and score them their own way, which is why the
+   * A browser has no recogniser of its own, so the kit brings one: MediaPipe's image classifier
+   * (engine `mediapipe`), loaded from files the host serves beside its page (`configureWebLabeling`,
+   * `prepareWebLabeling`) - some 17 MB the first time, which the browser keeps after that. The
+   * pictures stay in the page, but MediaPipe reports its own use to Google, which a host may need
+   * its users' consent for (`docs/media.md`).
+   *
+   * The three engines name things in their own words and score them their own way, which is why the
    * answer says which one read it ([LabelEngine]). [describeMedia] is the call most hosts want
-   * instead: it asks this, and reads either vocabulary into the same scenes ([MediaScene]).
+   * instead: it asks this, and reads any of those vocabularies into the same scenes ([MediaScene]).
    *
    * Rejects `invalid_spec` without a `uri`, and `unreadable_input` for a file that will not open,
-   * a picture that will not decode and a video with no frame to give; `unknown`, in the platform's
-   * own words, when the engine itself fails. A number out of range is brought into it rather than
-   * refused: `frames` to 1..20, `minConfidence` to 0..1, a negative time to the first frame and a
-   * time past the end to the last. The web rejects with `unsupported`, because a browser has no
-   * image recogniser a page can reach, and so does the iOS SIMULATOR, once it has read the file:
-   * Vision's classifier does not run there, and rather than fail it answers every picture with the
-   * same few labels - a black square and a skateboarder both "outdoor, night_sky, moon" - which
-   * would steer a host exactly as wrong as a real answer steers it right. On a device it runs.
+   * a picture that will not decode and a video with no frame to give - and in a browser a video it
+   * decodes no picture for; `unknown`, in the platform's own words, when a phone's engine itself
+   * fails. A number out of range is brought into it rather than refused: `frames` to 1..20,
+   * `minConfidence` to 0..1, a negative time to the first frame and a time past the end to the last.
+   * A browser rejects with `unsupported` where MediaPipe will not load or stops working - no
+   * WebAssembly or WebGL, its files not served, a WebGL context the browser took back - and so does
+   * the iOS SIMULATOR, once it has read the file: Vision's classifier does not run there, and rather
+   * than fail it answers every picture with the same few labels - a black square and a skateboarder
+   * both "outdoor, night_sky, moon" - which would steer a host exactly as wrong as a real answer
+   * steers it right. On a device it runs.
    */
   labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult>;
 

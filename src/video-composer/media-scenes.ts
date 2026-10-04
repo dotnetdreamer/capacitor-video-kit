@@ -28,12 +28,14 @@ export interface MediaDescription {
  * behind them. `labelMedia`, read by [scenesFromLabels] - the one call a host needs to say "these
  * clips are food" whichever phone it runs on.
  *
- * Null where there is nothing to ask: in a browser, which has no image recogniser, in the iOS
- * simulator, where Vision's classifier does not run, and in an app whose native build predates
- * `labelMedia`, which the bridge answers `UNIMPLEMENTED`. A host reads
- * null as "no scenes here" and carries on - an app that picks a template by what the clips show
- * picks one by their number instead. A file that cannot be read still rejects, as `labelMedia`
- * does, because that is something to say about the file rather than about the platform.
+ * Null where the recogniser cannot run: in the iOS simulator, where Vision's classifier does not
+ * run; in a browser whose recogniser - MediaPipe's, which the kit brings - would not load or stopped
+ * working, its files not served, no WebAssembly or no WebGL; on an Android phone whose Play services
+ * have not fetched ML Kit's model yet, or in a build that leaves ML Kit out; and in an app whose
+ * native build predates `labelMedia`, which the bridge answers `UNIMPLEMENTED`. A host reads null as
+ * "no scenes here" and carries on - an app that picks a template by what the clips show picks one by
+ * their number instead. A file that cannot be read still rejects, as `labelMedia` does, because that
+ * is something to say about the file rather than about the platform.
  */
 export async function describeMedia(uri: string, options: DescribeMediaOptions = {}): Promise<MediaDescription | null> {
   let result: LabelMediaResult;

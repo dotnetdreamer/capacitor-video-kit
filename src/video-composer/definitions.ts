@@ -629,10 +629,17 @@ export interface ComposeMusic {
   /** Where the track starts on the OUTPUT timeline. */
   startMs: number;
   /**
-   * Trim inside the track itself. A trim that lies wholly past the end of the file - a replaced
-   * sound, a stale duration - is not a failure: every engine renders the post without its music.
-   * A file that will not open at all is another matter: it fails the render on Android and iOS,
-   * and the web leaves the music out.
+   * Trim inside the track itself. An `outMs` past the end of the file is the end of the file, which
+   * every engine reads for itself - the file's audio track on iOS, its probe on Android, the samples
+   * it decodes on the web, held to the length an MP4's edit list presents - and is how a sound that
+   * is not trimmed at its end is sent: the editor sends a number longer than any file rather than
+   * the page's own measure of it, which can be short (WebKit reads a 12 s AAC `.m4a` as 11975 ms,
+   * and a loop cut there clicks at every seam). A sound Android's probe cannot read is played once
+   * there, to the end of its file, since nothing says where its loop would turn.
+   *
+   * A trim that lies wholly past the end of the file - a replaced sound, a stale duration - is not a
+   * failure: every engine renders the post without its music. A file that will not open at all is
+   * another matter: it fails the render on Android and iOS, and the web leaves the music out.
    */
   inMs: number;
   outMs: number;
@@ -647,19 +654,24 @@ export interface ComposeMusic {
   /** Repeat the trimmed section until the video ends, or until `endMs`. */
   loop: boolean;
   /**
-   * Up from silence at the start of the FIRST repetition, linear in amplitude at a slope of
-   * `1 / fadeInMs`. A fade longer than that repetition stops short of the level rather than
-   * steepening, and the next repetition starts at the level.
+   * Up from silence where the music starts, `startMs`, linear in amplitude at a slope of
+   * `1 / fadeInMs`.
+   *
+   * Both fades belong to the window the music is HEARD in, `startMs` to where it stops - `endMs`, the
+   * end of the video, or the end of a section that plays once, whichever the engine stops it at -
+   * and not to any repetition of a loop. The level at an output time `t` is
+   *
+   *   volume * (fadeInMs > 0 ? clamp((t - startMs) / fadeInMs, 0, 1) : 1)
+   *          * (fadeOutMs > 0 ? clamp((stop - t) / fadeOutMs, 0, 1) : 1)
+   *
+   * on every engine and in the editor's preview (`musicFadeAt`). So a loop's seams play no part: a
+   * fade in longer than the section runs on across them, a fade out starts in whichever repetition it
+   * has to and reaches silence exactly at the stop however short the last repetition is, and where
+   * the two fades overlap the level is their PRODUCT. A fade longer than the music keeps its slope
+   * rather than steepening: the music then never reaches its level, or comes in below it.
    */
   fadeInMs: number;
-  /**
-   * Down to silence at the end of the LAST repetition, at a slope of `1 / fadeOutMs`, starting
-   * `fadeOutMs` before its end or at its start, whichever is later - so a last repetition shorter
-   * than the fade ends above silence. That is Android's `planMusic` and the web's `fadeGain`, and
-   * iOS draws the same ramps with one exception: music that plays once and whose two fades overlap
-   * gives each at most half of its length, from silence to the level and back, where the other two
-   * multiply the two curves.
-   */
+  /** Down to silence where the music stops, linear in amplitude at a slope of `1 / fadeOutMs`: see [fadeInMs]. */
   fadeOutMs: number;
 }
 
@@ -884,6 +896,11 @@ export interface ProbeOptions {
 }
 
 export interface ProbeResult {
+  /**
+   * How long the file runs, 0 when that could not be read. On iOS a file with no video runs to the end
+   * of its audio TRACK, which is where the render loops a sound and cuts a take, and not to the
+   * container's duration, which AVFoundation reads 25 ms short for a 12 s AAC `.m4a`.
+   */
   durationMs: number;
   /** DISPLAY dimensions (rotation applied). */
   width: number;
@@ -1235,7 +1252,10 @@ export interface LabelMediaOptions {
   /**
    * What the file holds. Absent is read off the file: a picture decoder that opens it makes it a
    * picture, and anything else is read as a video. A host that knows - a picked picture comes back
-   * with `kind: 'image'` on its source - saves that look.
+   * with `kind: 'image'` on its source - saves that look. A browser first asks the file's type, or
+   * failing one that names a picture or a video its name, and reads a video by either as a video
+   * without trying it as a picture: Safari's `<img>` decodes MP4, and would answer a clip's first
+   * frame as a photograph.
    */
   kind?: 'video' | 'image';
   /**

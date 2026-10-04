@@ -127,13 +127,29 @@ describe('resolveEditorHost', () => {
     expect(resolveEditorHost({ editing: { zoom: false } }).editing.zoom).toBe(false);
   });
 
-  it('settles each editing option on its own, so turning Zoom off leaves the other two as they were', () => {
-    expect(resolveEditorHost({ editing: { zoom: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: false });
-    expect(resolveEditorHost({ editing: { pictures: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true });
+  /*
+   * Off unless the host says so, because the words it switches to - "your changes are kept" - are
+   * the one answer that loses somebody's work when it is wrong. Only a real true turns it on: a
+   * truthy string from a hand-written config is not a host saying it keeps drafts.
+   */
+  it('asks Discard, not Save and exit, unless the host says it keeps drafts', () => {
+    expect(resolveEditorHost().editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({}).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: {} }).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: { savesDrafts: false } }).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: { savesDrafts: 'yes' as unknown as boolean } }).editing.savesDrafts).toBe(false);
+    expect(resolveEditorHost({ editing: { savesDrafts: true } }).editing.savesDrafts).toBe(true);
+  });
+
+  it('settles each editing option on its own, so turning Zoom off leaves the others as they were', () => {
+    expect(resolveEditorHost({ editing: { zoom: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: false, savesDrafts: false });
+    expect(resolveEditorHost({ editing: { pictures: false } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true, savesDrafts: false });
+    expect(resolveEditorHost({ editing: { savesDrafts: true } }).editing).toEqual({ replaceKeepsLength: true, pictures: false, zoom: true, savesDrafts: true });
     expect(resolveEditorHost({ editing: { pictures: true, replaceKeepsLength: false } }).editing).toEqual({
       replaceKeepsLength: false,
       pictures: true,
       zoom: true,
+      savesDrafts: false,
     });
   });
 });
@@ -359,6 +375,54 @@ describe('the audio picker in a Capacitor app on iOS', () => {
     expect(nativePromise).toHaveBeenCalledWith('VideoComposer', 'pickAudioFile', {});
     // And no file input, which is the thing that could not be trusted.
     expect(document.querySelectorAll('input').length).toBe(inputs);
+  });
+
+  /*
+   * WebKit's `<audio>` reads a 12 s m4a as 11975 ms, and the iOS render loops it at its audio
+   * track's end, 12000. The length handed on is whatever the composer's `probe` answers, and the
+   * element is still asked whether it can play the sound at all. The 12000 mocked here is what an
+   * iPhone's `probe` answers for this file: `Thumbnailer.probe` reads a file with no video to its
+   * audio track's end, as the render does (see `composerLength` in defaults.ts).
+   */
+  it('hands on the length the composer answers over the element\'s own', async () => {
+    installBridge('ios', nativePromise, ['retainMedia', 'pickAudioFile', 'stageRenderInput', 'probe']);
+    nativePromise.mockImplementation(async (_plugin: string, method: string) =>
+      method === 'pickAudioFile'
+        ? { cancelled: false, uri: COPY, fileName: 'qa-sample.m4a', mimeType: 'audio/x-m4a' }
+        : { durationMs: 12_000, width: 0, height: 0, rotation: 0, hasAudio: true, hasVideo: false },
+    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 0, blob: async () => new Blob(['sound']) }));
+    soundPlaysFor(11.975);
+
+    const picked = await browserMediaHost().pickAudio();
+
+    expect(picked?.sourceDurationMs).toBe(12_000);
+    expect(nativePromise).toHaveBeenCalledWith('VideoComposer', 'probe', { uri: COPY });
+  });
+
+  it('falls back on the element\'s length when the composer cannot read the copy', async () => {
+    installBridge('ios', nativePromise, ['retainMedia', 'pickAudioFile', 'stageRenderInput', 'probe']);
+    nativePromise.mockImplementation(async (_plugin: string, method: string) => {
+      if (method === 'pickAudioFile') return { cancelled: false, uri: COPY, fileName: 'qa-sample.m4a', mimeType: 'audio/x-m4a' };
+      throw new Error('unreadable');
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 0, blob: async () => new Blob(['sound']) }));
+    soundPlaysFor(11.975);
+
+    await expect(browserMediaHost().pickAudio()).resolves.toMatchObject({ sourceDurationMs: 11_975 });
+  });
+
+  it('refuses a sound the element cannot play even when the composer measured it', async () => {
+    installBridge('ios', nativePromise, ['retainMedia', 'pickAudioFile', 'stageRenderInput', 'probe']);
+    nativePromise.mockImplementation(async (_plugin: string, method: string) =>
+      method === 'pickAudioFile'
+        ? { cancelled: false, uri: COPY, fileName: 'noise.caf', mimeType: 'audio/x-caf' }
+        : { durationMs: 4000, width: 0, height: 0, rotation: 0, hasAudio: true, hasVideo: false },
+    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => new Blob(['noise']) }));
+    soundPlaysFor(null);
+
+    await expect(browserMediaHost().pickAudio()).rejects.toThrow('noise.caf');
   });
 
   it('answers a cancel with null, and reads nothing', async () => {

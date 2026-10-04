@@ -82,7 +82,7 @@ interface AnimatedLayer {
  * WebView (Chrome 99) a change to `aria-pressed` inside a shadow root never reaches Android's
  * accessibility tree, while a change to the name does - the transition sheet's tiles and the zoom
  * sheet's chips made the same move. The slider sits between a visible word and a visible readout,
- * because a slider reaches Android's tree with no name of its own.
+ * because a slider's name never reaches the tree uiautomator reads on Android (see ve-slider).
  *
  * The tiles move outside the vdom, as the preview's layers do: a repaint is a diff of fourteen
  * buttons, and a move is two style writes per tile per frame, done by a `requestAnimationFrame` pump
@@ -442,7 +442,7 @@ export class VeAnimationSheet {
           format={loop ? this.formatSpeed : this.formatDuration}
           onVeLive={this.onLength}
         />
-        {/* The number a test can read, and the one TalkBack can: the slider arrives unnamed. */}
+        {/* The number a test can read: the slider reaches uiautomator unnamed (see ve-slider). */}
         <span class="an__value" data-readout="length">
           {durationChip(ms)}
         </span>

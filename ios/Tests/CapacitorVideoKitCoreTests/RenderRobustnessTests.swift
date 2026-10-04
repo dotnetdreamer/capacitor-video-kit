@@ -6,9 +6,9 @@ import XCTest
 @testable import CapacitorVideoKitCore
 
 /// Specs the other engines render and this one used to refuse or render wrongly: inputs named so that
-/// AVFoundation will not open them, music trimmed past its file, music fades on a loop, a clip whose
-/// in-point is past its footage, a clip's sound fading out toward a silent neighbour, the parser's
-/// track defaults, and an overlay's opacity.
+/// AVFoundation will not open them, music trimmed past its file, music fades across a loop's seams
+/// and where they overlap, a clip whose in-point is past its footage, a clip's sound fading out
+/// toward a silent neighbour, the parser's track defaults, and an overlay's opacity.
 final class RenderRobustnessTests: RenderTestCase {
 
     // MARK: - Parser parity with Android
@@ -165,61 +165,130 @@ final class RenderRobustnessTests: RenderTestCase {
         }
     }
 
-    func testAMusicFadeLongerThanTheMusicKeepsAndroidsSlope() {
+    /*
+     * The fades belong to the window the music is heard in, not to a repetition: every engine draws
+     * `volume * min(1, (t - start) / fadeIn) * min(1, (end - t) / fadeOut)` (ComposeMusic). The
+     * render tests below hear it; these read the ramps it is drawn with.
+     */
+
+    func testAMusicFadeLongerThanTheMusicStillEndsInSilence() {
         // Played once, 600 ms of it from 1 s.
         let once = CMTimeRange(start: ms(1000), duration: ms(600))
 
-        // Android's `1 - t / fadeOut` from the music's start: 600 ms of a 1000 ms fade leaves 40%.
+        // `(end - t) / fadeOut`: the music starts 600 ms from its end, 60% of the way up a 1000 ms
+        // fade, and comes down from there to silence at its end.
         let out = AVMutableAudioMixInputParameters()
-        Fades.apply(out, first: once, last: once, volume: 0.8, fadeInMs: 0, fadeOutMs: 1000)
+        Fades.apply(out, heard: once, volume: 0.8, fadeInMs: 0, fadeOutMs: 1000)
         let fadeOut = RobustnessSupport.ramp(of: out, at: ms(1300))
-        XCTAssertEqual(fadeOut?.range, once, "a fade-out longer than the music starts where the music does")
-        XCTAssertEqual(fadeOut?.from, 0.8)
-        XCTAssertEqual(Double(fadeOut?.to ?? -1), 0.32, accuracy: 0.001)
+        XCTAssertEqual(fadeOut?.range, once, "a fade-out longer than the music runs the whole of it")
+        XCTAssertEqual(Double(fadeOut?.from ?? -1), 0.48, accuracy: 0.001)
+        XCTAssertEqual(fadeOut?.to, 0)
 
-        // And `t / fadeIn` up: 600 ms of a 900 ms fade reaches two thirds.
+        // And `(t - start) / fadeIn` up: 600 ms of a 900 ms fade reaches two thirds.
         let into = AVMutableAudioMixInputParameters()
-        Fades.apply(into, first: once, last: once, volume: 1, fadeInMs: 900, fadeOutMs: 0)
+        Fades.apply(into, heard: once, volume: 1, fadeInMs: 900, fadeOutMs: 0)
         let fadeIn = RobustnessSupport.ramp(of: into, at: ms(1300))
         XCTAssertEqual(fadeIn?.range, once)
         XCTAssertEqual(fadeIn?.from, 0)
         XCTAssertEqual(Double(fadeIn?.to ?? -1), 2.0 / 3.0, accuracy: 0.001)
-
-        // Both at once in one pass still share it, because two ramps on one track must not overlap.
-        let both = AVMutableAudioMixInputParameters()
-        Fades.apply(both, first: once, last: once, volume: 1, fadeInMs: 400, fadeOutMs: 400)
-        XCTAssertEqual(RobustnessSupport.ramp(of: both, at: ms(1100))?.range,
-                       CMTimeRange(start: ms(1000), duration: ms(300)))
-        XCTAssertEqual(RobustnessSupport.ramp(of: both, at: ms(1500))?.range,
-                       CMTimeRange(start: ms(1300), duration: ms(300)))
     }
 
-    func testALoopedMusicFadesOnlyItsFirstAndLastRepetitions() throws {
+    func testOverlappingFadesMultiplyAsEveryOtherEngineDoes() {
+        // 400 ms up and 400 ms down over 600 ms: up alone until 1.2 s, both from 1.2 s to 1.4 s,
+        // and down alone after that.
+        let once = CMTimeRange(start: ms(1000), duration: ms(600))
+        let both = AVMutableAudioMixInputParameters()
+        Fades.apply(both, heard: once, volume: 1, fadeInMs: 400, fadeOutMs: 400)
+        XCTAssertEqual(RobustnessSupport.ramp(of: both, at: ms(1100))?.range,
+                       CMTimeRange(start: ms(1000), duration: ms(200)))
+        XCTAssertEqual(RobustnessSupport.ramp(of: both, at: ms(1500))?.range,
+                       CMTimeRange(start: ms(1400), duration: ms(200)))
+        // Where both move the level is their product, 0.75 x 0.75 in the middle, where the halves
+        // this drew before reached the full level. Drawn in short pieces, so every moment of it is
+        // within a hair of the curve and never a ramp longer than a piece.
+        for t in stride(from: 1201.0, to: 1400.0, by: 7.0) {
+            let at = CMTime(seconds: t / 1000, preferredTimescale: 1_000_000)
+            let want = Double(Fades.gain(at: t / 1000, start: 1, end: 1.6, volume: 1, fadeIn: 0.4, fadeOut: 0.4))
+            let got = RobustnessSupport.volume(of: both, at: at)
+            XCTAssertEqual(Double(got ?? -1), want, accuracy: 0.01, "the level at \(t) ms")
+        }
+        XCTAssertEqual(Double(RobustnessSupport.volume(of: both, at: ms(1300)) ?? -1), 0.5625, accuracy: 0.002)
+        let piece = RobustnessSupport.ramp(of: both, at: CMTime(seconds: 1.303, preferredTimescale: 1_000_000))
+        XCTAssertLessThan(piece?.range.duration.seconds ?? 1, 0.01)
+    }
+
+    func testALoopedMusicsFadesRunAcrossItsSeams() {
         // A 300 ms piece looped across a second: 0-300, 300-600, 600-900 and a last pass of 100 ms.
-        let first = CMTimeRange(start: .zero, duration: ms(300))
-        let last = CMTimeRange(start: ms(900), duration: ms(100))
+        // Nothing here knows where the seams are, which is the point: the fades are the second's.
+        let heard = CMTimeRange(start: .zero, duration: ms(1000))
 
-        // Android fades only the last pass, at its slope: a quarter of the way down, not to silence
-        // across the seam before it.
+        // The fade out starts in the pass before the last and reaches silence at the end, where
+        // it used to cover only the last 100 ms and stop at three quarters of the level.
         let out = AVMutableAudioMixInputParameters()
-        Fades.apply(out, first: first, last: last, volume: 1, fadeInMs: 0, fadeOutMs: 400)
+        Fades.apply(out, heard: heard, volume: 1, fadeInMs: 0, fadeOutMs: 400)
         let fadeOut = RobustnessSupport.ramp(of: out, at: ms(950))
-        XCTAssertEqual(fadeOut?.range, last)
+        XCTAssertEqual(fadeOut?.range, CMTimeRange(start: ms(600), duration: ms(400)))
         XCTAssertEqual(fadeOut?.from, 1)
-        XCTAssertEqual(Double(fadeOut?.to ?? -1), 0.75, accuracy: 0.001)
-        let before = RobustnessSupport.ramp(of: out, at: ms(700))
-        XCTAssertTrue(before?.from == 1 && before?.to == 1, "nothing fades before the last pass, got \(String(describing: before))")
+        XCTAssertEqual(fadeOut?.to, 0)
 
-        // The fade-in stops with the first pass, at 300/500 of the level, and the second pass
-        // starts at the level.
+        // The fade in runs on across the first seam to the level, rather than stopping at 300/500
+        // of it and jumping at the seam.
         let into = AVMutableAudioMixInputParameters()
-        Fades.apply(into, first: first, last: last, volume: 1, fadeInMs: 500, fadeOutMs: 0)
-        let fadeIn = try XCTUnwrap(RobustnessSupport.ramp(of: into, at: ms(100)))
-        XCTAssertEqual(fadeIn.range.start, .zero)
-        XCTAssertEqual(Double(msOf(fadeIn.range.end)), 300, accuracy: 1)
-        XCTAssertEqual(Double(fadeIn.to), 0.6, accuracy: 0.005)
-        let second = RobustnessSupport.ramp(of: into, at: ms(400))
-        XCTAssertTrue(second?.from == 1 && second?.to == 1, "the second pass plays at the level, got \(String(describing: second))")
+        Fades.apply(into, heard: heard, volume: 1, fadeInMs: 500, fadeOutMs: 0)
+        let fadeIn = RobustnessSupport.ramp(of: into, at: ms(400))
+        XCTAssertEqual(fadeIn?.range, CMTimeRange(start: .zero, duration: ms(500)))
+        XCTAssertEqual(fadeIn?.from, 0)
+        XCTAssertEqual(fadeIn?.to, 1)
+    }
+
+    /*
+     * A loop stopped 50 ms past a seam: the last pass is a sliver, shorter than the fade. The fade out
+     * used to hang off that pass alone, so the music played at full level to the seam and then cut
+     * off at 95% of it. Android drops a pass shorter than a frame and fades the one before; with the
+     * fade on the window, every engine reaches silence at the stop whatever the last pass is.
+     */
+    func testAFadeOutReachesSilenceWhenTheLastPassIsASliver() async throws {
+        let video = try await TestMedia.video(file("black.mp4"), durationMs: 3000, color: .black, audio: false)
+        let tone = try RobustnessSupport.wav(file("tone.wav"), durationMs: 1000)
+        let options = TestSpecs.spec([TestSpecs.clip("v", video, outMs: 3000)], [
+            "audio": ["originalMuted": false, "originalVolume": 1, "voiceover": [Any](),
+                      "music": ["uri": tone.absoluteString, "startMs": 0, "inMs": 0, "outMs": 1000, "endMs": 2050,
+                                "volume": 1, "loop": true, "fadeInMs": 0, "fadeOutMs": 1000]],
+        ])
+        let (out, _) = try await TestRender.render(options, to: file("out.mp4"))
+
+        let reference = try await RobustnessSupport.rms(of: tone, from: 0.1, to: 0.9)
+        try await RobustnessSupport.assertHeld(out, from: 0.1, to: 1.0, near: reference, "the music before its fade")
+        // Half way down the fade, which starts in the second pass, at 1.05 s.
+        let half = try await RobustnessSupport.rms(of: out, from: 1.5, to: 1.6)
+        XCTAssertEqual(half / reference, 0.5, accuracy: 0.12, "half way through the fade out")
+        // The last 100 ms before the stop are the last tenth of the fade, not the full level.
+        let end = try await RobustnessSupport.rms(of: out, from: 1.95, to: 2.05)
+        XCTAssertLessThan(end / reference, 0.15, "the fade out should reach silence at the stop")
+    }
+
+    /*
+     * The preview multiplies a fade in by a fade out where they overlap, and so do Android and the
+     * web. iOS used to give each half of the music, reaching the full level in the middle: about 5 dB
+     * louder than what was previewed.
+     */
+    func testAShortSoundWithBothFadesPeaksWhereThePreviewDoes() async throws {
+        let video = try await TestMedia.video(file("black.mp4"), durationMs: 2000, color: .black, audio: false)
+        let tone = try RobustnessSupport.wav(file("tone.wav"), durationMs: 1500)
+        let options = TestSpecs.spec([TestSpecs.clip("v", video, outMs: 2000)], [
+            "audio": ["originalMuted": false, "originalVolume": 1, "voiceover": [Any](),
+                      "music": ["uri": tone.absoluteString, "startMs": 0, "inMs": 0, "outMs": 600_000,
+                                "volume": 1, "loop": false, "fadeInMs": 1000, "fadeOutMs": 1000]],
+        ])
+        let (out, _) = try await TestRender.render(options, to: file("out.mp4"))
+
+        let reference = try await RobustnessSupport.rms(of: tone, from: 0.1, to: 0.9)
+        // 0.75 x 0.75 at 0.75 s, and 0.5 x 1 a quarter of a second before it, where the halves this
+        // drew before read 1 and 0.67.
+        let middle = try await RobustnessSupport.rms(of: out, from: 0.7, to: 0.8)
+        XCTAssertEqual(middle / reference, 0.5625, accuracy: 0.08, "the middle of the sound")
+        let early = try await RobustnessSupport.rms(of: out, from: 0.45, to: 0.55)
+        XCTAssertEqual(early / reference, 0.5, accuracy: 0.08, "a quarter of a second before the middle")
     }
 
     // MARK: - An in-point past the footage
@@ -450,6 +519,14 @@ enum RobustnessSupport {
         CGImageDestinationAddImage(dest, image, nil)
         guard CGImageDestinationFinalize(dest) else { throw TestError("png finalize") }
         return "data:image/png;base64," + (data as Data).base64EncodedString()
+    }
+
+    /// The volume a ramp gives at `time`, along the straight line it draws; nil when no ramp is in
+    /// force there.
+    static func volume(of p: AVAudioMixInputParameters, at time: CMTime) -> Float? {
+        guard let r = ramp(of: p, at: time), r.range.duration > .zero else { return nil }
+        let into = (time - r.range.start).seconds / r.range.duration.seconds
+        return r.from + (r.to - r.from) * Float(into)
     }
 
     /// The volume ramp in force at `time`, or nil when there is none.

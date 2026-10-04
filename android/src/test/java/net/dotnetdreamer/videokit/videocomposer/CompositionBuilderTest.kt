@@ -1,7 +1,9 @@
 package net.dotnetdreamer.videokit.videocomposer
 
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.VideoCompositorSettings
+import androidx.media3.common.audio.GainProcessor
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.RgbMatrix
 import org.junit.Assert.assertArrayEquals
@@ -612,6 +614,43 @@ class CompositionBuilderTest {
         // The base's own slowed clip has its own, and the incoming clip at 1x has none.
         assertEquals(0L, slowMotionOf(sequences[0].editedMediaItems[0])!!.windowStartUs)
         assertEquals(null, slowMotionOf(sequences[0].editedMediaItems[1]))
+    }
+
+    /*
+     * A looping sound's passes, as Media3 is handed them. Clipped at 12.000 s, each pass of the 12 s
+     * AAC test tone lost its last frame to the file's priming and played 18.5 ms of silence at every
+     * seam on a phone; unclipped at the end, the decoder drops the priming and the padding itself, and
+     * the length processor holds the pass to its piece of the timeline on the sample.
+     */
+    @Test
+    fun `a looping sound's passes run to the end of the file and are held to their length`() {
+        val music = Music("file:///m.m4a", 2_000, 0, 3_600_000, 0.8f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 30_000))).copy(audio = Audio(true, 1f, music, emptyList())),
+            mapOf("file:///a.mp4" to probe(30_000), "file:///m.m4a" to probe(12_000)),
+        )
+        val sequence = CompositionBuilder.toComposition(plan, emptyList(), null).sequences.last()
+        // The leading gap, two whole passes and the four seconds the video leaves the third.
+        assertEquals(4, sequence.editedMediaItems.size)
+        assertTrue(isGap(sequence.editedMediaItems[0]))
+        val passes = sequence.editedMediaItems.drop(1)
+        assertEquals(C.TIME_END_OF_SOURCE, clippingOf(passes[0]).endPositionUs)
+        assertEquals(C.TIME_END_OF_SOURCE, clippingOf(passes[1]).endPositionUs)
+        assertEquals(4_000_000L + RenderPlan.DECODE_PAST_US, clippingOf(passes[2]).endPositionUs)
+        assertTrue(passes.all { clippingOf(it).startPositionUs == 0L })
+
+        // Held to their lengths, FIRST, so the gain after it counts the samples that play...
+        val lengths = passes.map { it.effects.audioProcessors[0] as ExactLengthAudioProcessor }
+        // Decoded past their ends, they come back to their lengths - and the start of each is still
+        // its start for the gain after it, which is handed positions through this (see the
+        // processor's own tests: a start mapped to the end once silenced every fade).
+        assertEquals(listOf(12_000_000L, 12_000_000L, 4_000_000L), lengths.map { it.getDurationAfterProcessorApplied(12_500_000L) })
+        assertTrue(lengths.all { it.getDurationAfterProcessorApplied(0L) == 0L })
+        assertTrue(passes.all { it.effects.audioProcessors[1] is GainProcessor })
+        // ...and end to end on the sample from the gap on: 2 s, 14 s, 26 s and 30 s at 44.1 kHz.
+        val gapSamples = 88_200L
+        assertEquals(listOf(529_200L, 529_200L, 176_400L), lengths.map { it.framesAt(44_100) })
+        assertEquals(30L * 44_100L, gapSamples + lengths.sumOf { it.framesAt(44_100) })
     }
 
     @Test

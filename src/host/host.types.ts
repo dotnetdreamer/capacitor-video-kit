@@ -96,6 +96,30 @@ export interface EditorEditingOptions {
    * `src/mcp/tools.ts` and the README's "No zoom on the server at all" have the whole of it.
    */
   zoom?: boolean;
+
+  /**
+   * Whether this host keeps the edit as a draft while it is being made, so that leaving the editor
+   * loses none of it. Defaults to FALSE.
+   *
+   * It changes one thing: the question Back asks of an edit with changes in it. Off, that is
+   * "Discard edits?", and Discard is a red button, because on a host that files nothing the changes
+   * really do go with the editor. On, the same question would be a lie - the host filed every change
+   * from [VeEditor.veChange] as it was made, so nothing is discarded - and the customer who
+   * believed it would either stay in an editor they wanted to leave, or leave thinking their work
+   * was gone and start it again. So on, it asks "Save and exit?", says the changes are kept as a
+   * draft, and its button is Save and exit in the ordinary colour.
+   *
+   * What the answer DOES is the same either way: Keep editing stays, the other button emits
+   * `veCancel('back')`, and a dismissal stays. The editor saves nothing itself - it has nowhere to
+   * put a draft - which is why this is the host's to say rather than something the editor can find
+   * out. A host turns it on only if it really does keep every change from `veChange` somewhere the
+   * customer can reopen it; one that saves only on Next, or on some screens and not others, has
+   * changes that are lost on Back and should leave it off.
+   *
+   * The words do not name the place the draft is kept. This package cannot know what a host calls
+   * that screen, or whether it has one; "kept as a draft" is true on every host that turns this on.
+   */
+  savesDrafts?: boolean;
 }
 
 /**
@@ -533,6 +557,14 @@ export interface EditorPlatformHost {
    * Presents a confirmation. Resolves with the `role` of the button pressed, or null on a dismiss.
    * Defaults to the package's own alert; a host may supply its own AlertController so the two alerts keep
    * looking native.
+   *
+   * The answer is the button's `role` exactly as the request carried it, for every role, including
+   * ones the host's dialog has no styling for: the editor's are `cancel`, `destructive`, `plain`,
+   * `retry` and `save`, and more may come. A dialog that answers only for the roles it knows, or
+   * with its own name for a button, leaves the editor reading a press as a dismissal - the customer
+   * taps Save and exit and stays where they are. Ionic's `AlertController` hands the role back as it
+   * was given, and reports a tap outside and the hardware back button as `backdrop`, which a host
+   * turns into null because it is not a button anybody pressed.
    */
   confirm?(request: ConfirmRequest): Promise<string | null>;
 
@@ -579,6 +611,11 @@ export interface EditorKeyboardHost {
 export interface ConfirmRequest {
   header: string;
   message: string;
+  /**
+   * In the order they are shown. `role` is what comes back as the answer, and it is also the only
+   * thing a host's dialog should style by: `destructive` is the one that throws something away and
+   * `cancel` is the one that stays, and every other role is an ordinary button.
+   */
   buttons: readonly { text: string; role: string }[];
 }
 
@@ -631,6 +668,7 @@ export interface ResolvedEditingOptions {
   replaceKeepsLength: boolean;
   pictures: boolean;
   zoom: boolean;
+  savesDrafts: boolean;
 }
 
 export interface ResolvedOutputOptions {

@@ -109,8 +109,13 @@ enum TestMedia {
     ///
     /// `compression` is merged over the encoder's properties, for a test that needs two files whose
     /// pictures are the same size but whose streams were encoded differently.
+    ///
+    /// `soundMs` ends the tone before the picture does, for a test that needs a file whose sound and
+    /// picture are not the same length. The sound is marked finished as soon as the last of it is in:
+    /// left open, it would be the writer holding the rest of the picture back for sound that is never
+    /// coming, which is the hang above.
     static func video(_ url: URL, durationMs: Int64, width: Int = 320, height: Int = 240,
-                      color: RGB, fps: Int32 = 30, audio: Bool = true,
+                      color: RGB, fps: Int32 = 30, audio: Bool = true, soundMs: Int64? = nil,
                       compression: [String: Any] = [:]) async throws -> URL {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
@@ -149,10 +154,11 @@ enum TestMedia {
 
         let frames = max(1, Int(Int64(fps) * durationMs / 1000))
         let buffer = try pixelBuffer(width: width, height: height, color: color)
-        let samples = aIn == nil ? 0 : rate * Int(durationMs) / 1000
+        let samples = aIn == nil ? 0 : rate * Int(min(soundMs ?? durationMs, durationMs)) / 1000
         let samplesPerFrame = rate / Int(fps)
         var framesDone = 0
         var samplesDone = 0
+        var soundFinished = false
         while framesDone < frames || samplesDone < samples {
             var moved = false
             if framesDone < frames, vIn.isReadyForMoreMediaData {
@@ -170,6 +176,10 @@ enum TestMedia {
                 }
                 samplesDone += count
                 moved = true
+                if samplesDone == samples, soundMs != nil {
+                    aIn.markAsFinished()
+                    soundFinished = true
+                }
             }
             if !moved {
                 // A writer that has failed never makes an input ready again, so waiting on one
@@ -179,9 +189,48 @@ enum TestMedia {
             }
         }
         vIn.markAsFinished()
-        aIn?.markAsFinished()
+        if !soundFinished { aIn?.markAsFinished() }
 
         writer.endSession(atSourceTime: ms(durationMs))
+        await writer.finishWriting()
+        if writer.status != .completed { throw writer.error ?? TestError("finishWriting") }
+        return url
+    }
+
+    /// A sound file and nothing else: `durationMs` of the same 440 Hz tone, AAC in an `.m4a`, as a
+    /// picked song or a voice take is. Written the way AVFoundation writes one, which trims the
+    /// encoder's priming with an iTunSMPB note rather than an edit list; a test that needs the other
+    /// kind rewrites it (`ProbeLengthTests`).
+    static func sound(_ url: URL, durationMs: Int64) async throws -> URL {
+        try? FileManager.default.removeItem(at: url)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
+        let rate = 44_100
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: rate,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64_000,
+        ])
+        input.expectsMediaDataInRealTime = true
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? TestError("startWriting") }
+        writer.startSession(atSourceTime: .zero)
+
+        let samples = rate * Int(durationMs) / 1000
+        var samplesDone = 0
+        while samplesDone < samples {
+            if input.isReadyForMoreMediaData {
+                let count = min(rate / 30, samples - samplesDone)
+                guard input.append(try toneBuffer(start: samplesDone, count: count, rate: rate)) else {
+                    throw writer.error ?? TestError("append audio")
+                }
+                samplesDone += count
+            } else {
+                if writer.status == .failed { throw writer.error ?? TestError("writer failed") }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+        input.markAsFinished()
         await writer.finishWriting()
         if writer.status != .completed { throw writer.error ?? TestError("finishWriting") }
         return url

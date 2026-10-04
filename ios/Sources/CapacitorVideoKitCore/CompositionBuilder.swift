@@ -1178,14 +1178,16 @@ enum CompositionBuilder {
             throw BuildError.internalFailure("music track")
         }
 
+        // The whole of the file when the spec did not trim its end - an `outMs` longer than any file,
+        // clamped above to the track's own end. That end is the audio track's, not the asset's:
+        // AVFoundation reads a 12 s AAC `.m4a` as an asset of 11975 ms whose track runs the full
+        // 12000, and the 25 ms between them is the song, so stopping short of it clicked at every
+        // loop seam.
         let piece = CMTimeRange(start: ms(m.inMs), end: ms(outEffMs))
         // Nothing pads the lead gap: the track is empty before the first insert and AVFoundation
         // writes that empty segment itself, which is Android's `addGap(leadGapUs)`.
-        var at = ms(m.startMs)
-        // Where the first repetition and the last one landed on the output timeline, which is what
-        // the fades hang off. The same range when the piece plays once.
-        var first: CMTimeRange?
-        var last: CMTimeRange?
+        let start = ms(m.startMs)
+        var at = start
         var slices = 0
         repeat {
             let room = stop - at
@@ -1198,20 +1200,18 @@ enum CompositionBuilder {
             } catch {
                 throw BuildError.unreadable("music", "insert: \(error)")
             }
-            let placed = CMTimeRange(start: at, duration: slice.duration)
-            if first == nil { first = placed }
-            last = placed
-            at = placed.end
+            at = at + slice.duration
             slices += 1
         } while m.loop && at < stop && slices < maxMusicSlices
 
-        guard let first, let last else { return nil }
+        guard slices > 0 else { return nil }
 
         let p = AVMutableAudioMixInputParameters(track: track)
         p.audioTimePitchAlgorithm = .spectral
+        // Heard from its start to where the last pass stopped: the stop, the end of the video, or the
+        // end of a section that plays once. The fades belong to that window, seams and all.
         Fades.apply(p,
-                    first: first,
-                    last: last,
+                    heard: CMTimeRange(start: start, end: at),
                     volume: Float(min(1, max(0, m.volume))),
                     fadeInMs: m.fadeInMs,
                     fadeOutMs: m.fadeOutMs)
@@ -1308,72 +1308,87 @@ enum CompositionBuilder {
 }
 
 enum Fades {
-    /// Android's `RampGainProvider`, attached where `planMusic` attaches it, and the web's
-    /// `fadeGain` with it: the fade-in belongs to the FIRST repetition and the fade-out to the LAST,
-    /// because a fade belongs to the start of the track and the end of the video and not to every
-    /// loop. Each is linear in amplitude at a fixed slope - `t / fadeIn` up from the first
-    /// repetition's start, `1 - t / fadeOut` down from the point that leaves the fade-out room to
-    /// finish at the last repetition's end - and a `setVolumeRamp` between two scalars is that same
-    /// straight line. When the fade is longer than its repetition, both engines cut the line short
-    /// rather than steepening it: a fade-in stops below the level and the next repetition starts at
-    /// the level, and a fade-out starts at the repetition's start and ends above silence. So this
-    /// does too, which keeps a loop whose last pass is a sliver from sliding to silence across the
-    /// seam before it, as one ramp hung off the end of the music would.
+    /// How many straight pieces draw the stretch where the two fades overlap. There the level is
+    /// the PRODUCT of two lines, a curve no single ramp can draw, and a chord across 1/32 of it is
+    /// under 0.3 dB below the curve. The worst piece is the one leaving silence: its chord starts at
+    /// `1 - 1/32` of the curve, 0.28 dB under it, and sits at `(1 - 1/32) / (1 - 1/64)` of it, 0.14 dB,
+    /// at its middle - the largest gap where the music is quietest, and every other piece is closer.
+    static let overlapPieces = 32
+
+    /// The music's fades, as the preview's `musicFadeAt`, Android's `RampGainProvider` and the web's
+    /// `fadeGain` all have them: they belong to the window the music is HEARD in, `heard` - from
+    /// where it starts to where its last repetition stops - and not to any one repetition. The level
+    /// at `t` is `volume * min(1, (t - start) / fadeIn) * min(1, (end - t) / fadeOut)`, each factor 1
+    /// when its fade is 0: straight lines in amplitude, and their product where they overlap.
     ///
-    /// `first` and `last` are where those two repetitions landed, and the same range when the music
-    /// plays once.
-    static func apply(_ p: AVMutableAudioMixInputParameters, first: CMTimeRange, last: CMTimeRange,
+    /// The ramps go on the one composition track every repetition was inserted into, and a ramp
+    /// there runs across the seams between them. They used to hang off the first and the last
+    /// repetition instead, each cut to that repetition's length, and a last repetition shorter than
+    /// the fade - a stop dropped just past a seam, a video a sliver longer than a whole number of
+    /// passes - left the music at full level into a hard cut. Where the fades overlapped, each got
+    /// half of the music, which the other engines never did, so the export peaked at the full level
+    /// where the preview heard a little over half of it.
+    ///
+    /// Drawn as consecutive `setVolumeRamp`s that meet end to end: one straight ramp for a stretch
+    /// where one fade moves, none across the plateau between them (a ramp holds its end volume,
+    /// and the step at `.zero` holds it when there is no fade in), and [overlapPieces] of them where
+    /// both move. They never overlap, which AVFoundation does not allow, and each starts at the
+    /// volume the one before it ended at - an export starts a ramp from its predecessor's end
+    /// volume, measured, whatever it was asked to start from.
+    static func apply(_ p: AVMutableAudioMixInputParameters, heard: CMTimeRange,
                       volume: Float, fadeInMs: Int64, fadeOutMs: Int64) {
-        // The plateau. A ramp holds its end volume afterwards, so the fade-in already carries the
-        // level across the middle; this step is what sets the level when there is no fade-in at
-        // all, because AVFoundation's volume before the first one set is 1.0, not ours. Setting it
-        // at zero rather than at the music's start is harmless: the track is silent before then.
+        // The plateau. AVFoundation's volume before the first one set is 1.0, not ours, so this is
+        // what sets the level when there is no fade in. Setting it at zero rather than at the
+        // music's start is harmless: the track is silent before then.
         p.setVolume(volume, at: .zero)
 
         let fadeIn = max(0, fadeInMs)
         let fadeOut = max(0, fadeOutMs)
-        let presence = CMTimeRange(start: first.start, end: last.end)
-        let presenceMs = msOf(presence.duration)
-        let inMs = min(fadeIn, msOf(first.duration))
-        let outMs = min(fadeOut, msOf(last.duration))
+        guard heard.duration > .zero, fadeIn > 0 || fadeOut > 0 else { return }
 
-        // Only music that plays once can hold both fades in one repetition, and only when the two
-        // meet. Android multiplies them there, because it evaluates a function per sample, and the
-        // product of two lines is no line a ramp can draw; overlapping ramps are undefined in
-        // AVFoundation. So each gets at most half of the music, from silence to the level and back,
-        // which is the one place this differs from Android and the web.
-        if inMs > 0 && outMs > 0 && inMs + outMs > presenceMs {
-            let half = presenceMs / 2
-            p.setVolumeRamp(fromStartVolume: 0, toEndVolume: volume,
-                            timeRange: CMTimeRange(start: presence.start, duration: ms(min(fadeIn, half))))
-            let out = ms(min(fadeOut, half))
-            p.setVolumeRamp(fromStartVolume: volume, toEndVolume: 0,
-                            timeRange: CMTimeRange(start: presence.end - out, duration: out))
-            return
+        let start = heard.start
+        let end = heard.end
+        // Where the fade in reaches the level and where the fade out leaves it, each either side of
+        // the window when its fade is longer than the music.
+        let levelFrom = start + ms(fadeIn)
+        let levelUntil = end - ms(fadeOut)
+        var corners = [start, end]
+        if fadeIn > 0 && levelFrom > start && levelFrom < end { corners.append(levelFrom) }
+        if fadeOut > 0 && levelUntil > start && levelUntil < end { corners.append(levelUntil) }
+        corners.sort()
+
+        func level(_ t: CMTime) -> Float {
+            gain(at: t.seconds, start: start.seconds, end: end.seconds, volume: volume,
+                 fadeIn: Double(fadeIn) / 1000, fadeOut: Double(fadeOut) / 1000)
         }
 
-        let outStart = last.end - ms(outMs)
-        if inMs > 0 {
-            // A fade-in cut short by its repetition's end, with another repetition after it, which
-            // starts at the level as Android's does. The ramp then stops a millisecond early, so the
-            // rise back to the level is a line of its own rather than a jump at the instant the
-            // ramp ends: where one ramp ends as the next begins, an export starts the second from
-            // the first one's end volume, measured, and a fade-out starting there would begin at
-            // the cut fade-in's level instead of the full one.
-            let cut = inMs < fadeIn && first.end < presence.end
-            let rampMs = cut ? inMs - 1 : inMs
-            if rampMs > 0 {
-                p.setVolumeRamp(fromStartVolume: 0, toEndVolume: volume * Float(rampMs) / Float(fadeIn),
-                                timeRange: CMTimeRange(start: first.start, duration: ms(rampMs)))
-            }
-            // The fade-out, when it starts right there, starts at the level itself.
-            if cut && first.end < outStart {
-                p.setVolume(volume, at: first.end)
+        for (a, b) in zip(corners, corners.dropFirst()) where b > a {
+            let fadingIn = fadeIn > 0 && a < levelFrom
+            let fadingOut = fadeOut > 0 && b > levelUntil
+            // The plateau, already held.
+            if !fadingIn && !fadingOut { continue }
+            let pieces = fadingIn && fadingOut ? overlapPieces : 1
+            // Microseconds, so a short overlap still splits into pieces rather than whole milliseconds
+            // of nothing.
+            let span = CMTimeConvertScale(b - a, timescale: 1_000_000, method: .roundHalfAwayFromZero)
+            var from = a
+            for k in 1...pieces {
+                let to = k == pieces ? b : a + CMTimeMultiplyByRatio(span, multiplier: Int32(k), divisor: Int32(pieces))
+                guard to > from else { continue }
+                p.setVolumeRamp(fromStartVolume: level(from), toEndVolume: level(to),
+                                timeRange: CMTimeRange(start: from, end: to))
+                from = to
             }
         }
-        if outMs > 0 {
-            p.setVolumeRamp(fromStartVolume: volume, toEndVolume: volume * Float(fadeOut - outMs) / Float(fadeOut),
-                            timeRange: CMTimeRange(start: outStart, end: last.end))
-        }
+    }
+
+    /// The level at `t` seconds, for music heard from `start` to `end` seconds: [apply]'s rule, and
+    /// `musicFadeAt`'s. The fades are in seconds, 0 for none.
+    static func gain(at t: Double, start: Double, end: Double, volume: Float,
+                     fadeIn: Double, fadeOut: Double) -> Float {
+        var g = Double(volume)
+        if fadeIn > 0 { g *= min(1, max(0, (t - start) / fadeIn)) }
+        if fadeOut > 0 { g *= min(1, max(0, (end - t) / fadeOut)) }
+        return Float(g)
     }
 }

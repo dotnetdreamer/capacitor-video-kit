@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { configureWebLabeling, labelMediaInBrowser, LabelingUnavailableError, type WebLabelingFiles } from './labels';
+import { configureWebLabeling, labelMediaInBrowser, LabelingUnavailableError, prepareWebLabeling, type WebLabelingFiles } from './labels';
 
 /*
  * The browser's recogniser, for real: MediaPipe's runtime and EfficientNet-Lite0 loaded in Chromium
@@ -84,5 +84,56 @@ describe('labelMedia in a browser, with MediaPipe', () => {
     configureWebLabeling({ modelUrl: '/web-assets/labeling/missing.tflite' });
     await expect(labelMediaInBrowser({ uri: await picture(), kind: 'image' })).rejects.toBeInstanceOf(LabelingUnavailableError);
     configureWebLabeling(FILES);
+  }, 60_000);
+
+  /*
+   * A browser with WebGL switched off, or a GPU it blocks. MediaPipe still CREATES the classifier
+   * there - it only logs that it got no context - and throws at every picture after, so this is the
+   * load's own one-pixel try at work: refused at the load, as unavailable, not failed clip by clip.
+   */
+  it('refuses as unavailable at the load where the browser gives it no WebGL, and loads where it does', async () => {
+    configureWebLabeling(FILES);
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    const withoutWebGl = function (this: HTMLCanvasElement, type: string, ...rest: unknown[]) {
+      return /webgl/i.test(type) ? null : (getContext as (...args: unknown[]) => unknown).call(this, type, ...rest);
+    };
+    HTMLCanvasElement.prototype.getContext = withoutWebGl as typeof getContext;
+    try {
+      expect(await prepareWebLabeling()).toBe(false);
+      await expect(labelMediaInBrowser({ uri: await picture(), kind: 'image' })).rejects.toBeInstanceOf(LabelingUnavailableError);
+    } finally {
+      HTMLCanvasElement.prototype.getContext = getContext;
+    }
+
+    configureWebLabeling(FILES);
+    expect(await prepareWebLabeling()).toBe(true);
+  }, 60_000);
+
+  /* A GPU reset, or a page holding more WebGL contexts than the browser allows: the oldest goes. */
+  it('loads its classifier again after the browser takes its WebGL context back', async () => {
+    // A load of its own, so the canvas MediaPipe is handed is made while this test is watching.
+    configureWebLabeling(FILES);
+    const canvases: HTMLCanvasElement[] = [];
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(((tag: string, options?: ElementCreationOptions) => {
+      const element = createElement(tag, options);
+      if (element instanceof HTMLCanvasElement) canvases.push(element);
+      return element;
+    }) as typeof document.createElement);
+    try {
+      expect((await labelMediaInBrowser({ uri: await picture(), kind: 'image' })).frames[0]!.labels.length).toBeGreaterThan(0);
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    // Every other canvas here has a 2D context already, and one of those asked for WebGL answers null.
+    const context = canvases.map(canvas => canvas.getContext('webgl2') ?? canvas.getContext('webgl')).find(found => found !== null);
+    expect(context).toBeTruthy();
+    const lost = new Promise(resolve => context!.canvas.addEventListener('webglcontextlost', resolve, { once: true }));
+    context!.getExtension('WEBGL_lose_context')!.loseContext();
+    await lost;
+
+    const again = await labelMediaInBrowser({ uri: await picture(), kind: 'image' });
+    expect(again.frames[0]!.labels.length).toBeGreaterThan(0);
   }, 60_000);
 });

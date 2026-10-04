@@ -691,12 +691,19 @@ object CompositionBuilder {
      * sequence including its leading gap, and a non-looping audio sequence longer than the video
      * would extend the composition. Clipping the last repetition to the exact remaining time avoids
      * both.
+     *
+     * Each pass is decoded to [RenderPlan.MusicItem.decodeEndUs] and held to exactly its own piece
+     * of the timeline by an [ExactLengthAudioProcessor], FIRST among its processors, so the passes
+     * join on the sample and the fade after it is handed the samples that actually play. Clipped at
+     * its own end instead, every pass of an AAC sound lost its last frame to the file's priming and
+     * Media3 played silence in its place: a tick at every seam (see `planMusic` in [RenderPlan]).
      */
     private fun musicSequence(plan: RenderPlan.MusicPlan): EditedMediaItemSequence {
         val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
         if (plan.leadGapUs > 0L) builder.addGap(plan.leadGapUs)
         for (item in plan.items) {
-            builder.addItem(audioItem(plan.uri, item.inUs, item.outUs, item.gain))
+            val length = ExactLengthAudioProcessor(item.atUs, item.atUs + (item.outUs - item.inUs))
+            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length))
         }
         return builder.build()
     }
@@ -712,11 +719,17 @@ object CompositionBuilder {
         return builder.build()
     }
 
+    /**
+     * An audio-only item: [startUs]..[endUs] of the file, [endUs] being [C.TIME_END_OF_SOURCE] for
+     * no clip at the end at all, which is not the same thing as a clip at the file's own length -
+     * see `planMusic` in [RenderPlan]. [length], when there is one, goes ahead of the gain.
+     */
     private fun audioItem(
         uri: String,
         startUs: Long,
         endUs: Long,
         gain: RampGainProvider,
+        length: ExactLengthAudioProcessor? = null,
     ): EditedMediaItem {
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(uri))
@@ -729,8 +742,10 @@ object CompositionBuilder {
                     .build(),
             )
             .build()
-        val processors: List<AudioProcessor> =
-            if (gain.isNoOp()) emptyList() else listOf(GainProcessor(gain))
+        val processors: List<AudioProcessor> = listOfNotNull(
+            length,
+            if (gain.isNoOp()) null else GainProcessor(gain),
+        )
         return EditedMediaItem.Builder(mediaItem)
             .setRemoveVideo(true)
             .setEffects(Effects(processors, ImmutableList.of()))

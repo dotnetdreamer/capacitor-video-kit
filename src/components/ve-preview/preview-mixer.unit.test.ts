@@ -749,6 +749,43 @@ describe('PreviewMixer', () => {
     one.release();
     other.release();
   });
+
+  it('says an element is routed from the play that sends it in, before the context has come back, and for good after', async () => {
+    // What the player judges a routed element's stall by: from its very first put, which on the first
+    // play of a page comes a few milliseconds before the context is running and the element handed over.
+    vi.resetModules();
+    useSession(autoSession());
+    const { PreviewMixer } = await import('./preview-mixer');
+    const music = new FakeMedia(false);
+    const refused = new FakeMedia(false);
+    const other = new FakeMedia(false);
+    music.src = 'capacitor://localhost/_capacitor_file_/sounds/track.m4a';
+    refused.src = music.src;
+    other.src = 'https://cdn.example.com/track.m4a';
+    const mixer = new PreviewMixer([music, refused, other] as unknown as HTMLAudioElement[]);
+    const el = (media: FakeMedia) => media as unknown as HTMLAudioElement;
+    expect(mixer.isRouted(el(music))).toBe(false);
+
+    FakeContext.refuses = refused;
+    mixer.start(true);
+    // On its way in: the context is still coming back from the tap.
+    expect(FakeContext.made[0].state).toBe('suspended');
+    expect(mixer.isRouted(el(music))).toBe(true);
+    // Never: another origin's file, which the graph would hear as silence and so is left out.
+    expect(mixer.isRouted(el(other))).toBe(false);
+    await settle();
+    expect(FakeContext.made[0].routed()).toEqual([music]);
+    expect(mixer.isRouted(el(music))).toBe(true);
+    // The context would not take it, so it plays on the speaker as it always did.
+    expect(mixer.isRouted(el(refused))).toBe(false);
+
+    // Paused: the context is let go of, and the element is in the graph all the same.
+    mixer.stop();
+    await settle();
+    expect(mixer.isRouted(el(music))).toBe(true);
+    expect(mixer.isRouted(el(other))).toBe(false);
+    mixer.release();
+  });
 });
 
 describe('the preview on a WebView that honours volume', () => {

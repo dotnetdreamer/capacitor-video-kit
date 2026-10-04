@@ -142,6 +142,37 @@ ve-sheet {
   color: var(--ve-dim, rgba(255, 255, 255, 0.6));
 }
 
+/*
+ * A toggle's name, written as the button's own text and hidden from sight. It is on the toggles
+ * that show only an icon or a glyph: Mute, Record voiceover, a sound's Play, the text sheet's Font,
+ * Colour, Background and Stroke, and the font tiles.
+ *
+ * Text rather than an `aria-label`, because of what Chrome does with a button that has
+ * `aria-pressed`. The button becomes a toggle button, and Chrome's Android layer names a toggle
+ * button from an attribute only through Android's supplemental description: a toggle button is not
+ * one of the roles Chromium lets an `aria-label` stand in for its text (`ComputeAndroidNameTo` and
+ * `SupportsNamingWithChildContent`). On WebView 151 on Android 17 the Mute button therefore reached
+ * the tree as a ToggleButton with no text and no content description, uiautomator marked it NAF,
+ * and Maestro could not find "Mute". A name made of the button's own text is the node's text on
+ * every role, so the name is there for TalkBack and Maestro, while `aria-pressed` still says
+ * whether the button is on. WebKit and desktop browsers name the button from this text exactly as
+ * they did from the attribute, so VoiceOver and every test that finds a button by name see the same
+ * words as before.
+ *
+ * Hidden the way the timeline hides a short layer's words: out of the flow, one pixel, clipped to
+ * nothing. Never `display: none` or `visibility: hidden`, which take the words out of the
+ * accessibility tree as well. Out of the flow also means it takes no part in the button's grid, so
+ * the icon stays exactly where it was.
+ */
+.sheet__hidden-name {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* ------------------------------------------------------------------------------------- mouse */
 
 /*

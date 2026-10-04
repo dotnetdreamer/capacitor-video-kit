@@ -49,7 +49,10 @@ Two things are worth knowing before driving it:
 functions return the manifest unchanged for a clip id that is not there, which is right for a UI,
 where the button belongs to a clip that exists. An agent can name anything, usually by carrying an
 id over from an earlier version of the edit, and a silent no-op leaves it unable to tell "refused"
-from "ignored". So the error names the id and lists the ones there are.
+from "ignored". So the error names the id and lists the ones there are. A music edit the editor would
+not keep - a section or a stop under 100 ms - is refused the same way, with the reason; a `patchMusic`
+with only a `startMs` moves the stop along with the sound, as the editor's Move does; and both fades
+run from 0 to 10000 ms.
 
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different
@@ -118,7 +121,7 @@ against the other, and the line the server writes to stderr when it starts says 
 
 In code it is the editor's own `editing` type, so a host can pass on the setting it already has,
 held in a variable or written out with the editor's other fields beside `zoom`. Only `zoom` is read
-here; `pictures` and `replaceKeepsLength` are taken and have no op to govern:
+here; `pictures`, `replaceKeepsLength` and `savesDrafts` are taken and have no op to govern:
 
 ```ts
 const server = createVideoKitMcpServer({ version: '1.3.0', editing: { pictures: true, zoom: false } });

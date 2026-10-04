@@ -806,6 +806,74 @@ describe('the soundtrack, through the container and back', () => {
     },
     RENDER_TIMEOUT_MS,
   );
+
+  /*
+   * Two things the plan's unit tests pin in arithmetic, heard through a real decoder. A sound not
+   * trimmed at its end asks for the end of its file, which only the decode knows, so the repetitions
+   * are laid against what `decodeAudioData` gave; and its fades belong to the whole time it is heard,
+   * so a stop 20 ms past a seam still fades out to silence rather than cutting off at full level.
+   */
+  it(
+    'loops a sound at the length its file decodes to, and fades a sliver of a last pass out to silence',
+    async ctx => {
+      const support = await supportFor(160, 284, 10);
+      needs(ctx, support.engine === 'webcodecs', 'the fixture needs a WebCodecs encoder');
+      needs(ctx, support.audioCodec.length > 0, 'this browser encodes no audio');
+      needs(ctx, canDecodeAvc(), 'this browser cannot decode H.264');
+
+      const source = URL.createObjectURL(await makeSourceVideo('#333'));
+      // Half a second of 440 Hz is a whole number of cycles, so the seams themselves are smooth.
+      const music = URL.createObjectURL(makeTone(0.5, 440));
+      try {
+        const first = spec(source).clips[0]!;
+        const outcome = await renderSpec(
+          spec(source, {
+            jobId: 'job-audio-sliver',
+            clips: [{ ...first, outMs: 1000 }, { ...first, key: 'c2', outMs: 1000 }],
+            audio: {
+              originalMuted: true,
+              originalVolume: 1,
+              voiceover: [],
+              // "To the end of the file", as the editor sends a sound it was not asked to trim, and a
+              // stop 20 ms into the fourth pass.
+              music: { uri: music, startMs: 0, inMs: 0, outMs: 3_600_000, endMs: 1520, volume: 1, loop: true, fadeInMs: 0, fadeOutMs: 500 },
+            },
+          }),
+          { signal: new AbortController().signal, onProgress: () => {} },
+        );
+        expect(outcome.hasAudio).toBe(true);
+
+        const context = new OfflineAudioContext(2, 1, 48_000);
+        const decoded = await context.decodeAudioData(await outcome.blob.arrayBuffer());
+        const channel = decoded.getChannelData(0);
+        const rms = (fromS: number, toS: number): number => {
+          const from = Math.floor(fromS * decoded.sampleRate);
+          const to = Math.min(channel.length, Math.floor(toS * decoded.sampleRate));
+          let sum = 0;
+          for (let i = from; i < to; i++) sum += (channel[i] ?? 0) ** 2;
+          return to > from ? Math.sqrt(sum / (to - from)) : 0;
+        };
+
+        const level = rms(0.1, 0.4);
+        expect(level).toBeGreaterThan(0.2);
+        // The second pass is heard: laid at the file's half second, not as one pass as long as the
+        // end asked for, which would have run out of samples at 0.5 s.
+        expect(rms(0.6, 0.9) / level).toBeGreaterThan(0.85);
+        // Half way down the fade, which starts in the third pass at 1.02 s...
+        const half = rms(1.2, 1.3) / level;
+        expect(half).toBeGreaterThan(0.35);
+        expect(half).toBeLessThan(0.75);
+        // ...and nearly silent across the seam at 1.5 s and the 20 ms after it, where the fade that
+        // belonged to that sliver alone left the full level.
+        expect(rms(1.45, 1.52) / level).toBeLessThan(0.25);
+        expect(rms(1.6, 1.9) / level).toBeLessThan(0.05);
+      } finally {
+        URL.revokeObjectURL(source);
+        URL.revokeObjectURL(music);
+      }
+    },
+    RENDER_TIMEOUT_MS,
+  );
 });
 
 describe('the MediaRecorder fallback', () => {

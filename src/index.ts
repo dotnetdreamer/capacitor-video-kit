@@ -51,6 +51,7 @@
 export type {
   ConfirmRequest,
   EditorCancelReason,
+  EditorEditingOptions,
   EditorEncodeSupport,
   EditorInsets,
   EditorKeyboardHost,
@@ -69,6 +70,7 @@ export type {
   ReleaseRequest,
   RenderFailureCode,
   RenderRequest,
+  ResolvedEditingOptions,
   ResolvedEditorHost,
   ResolvedOutputOptions,
   ResolvedPlatformHost,

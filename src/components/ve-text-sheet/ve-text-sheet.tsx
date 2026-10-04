@@ -561,7 +561,6 @@ export class VeTextSheet {
       <button
         type="button"
         class={{ 'ts__tool': true, 'ts__tool--on': on }}
-        aria-label={label}
         // A string, because the vdom removes an attribute set to boolean false and a button with no
         // `aria-pressed` at all is announced as an ordinary one rather than as an unpressed toggle.
         aria-pressed={String(on)}
@@ -569,6 +568,13 @@ export class VeTextSheet {
         onClick={() => this.togglePanel(panel)}
       >
         {glyph}
+        {/*
+          The name is the button's own hidden text and NOT an `aria-label`. With `aria-pressed`
+          beside it, an `aria-label` reached Android's WebView as a ToggleButton with no name, so
+          only "Alignment: ..." (a plain button) was left with one and the flows could not find
+          "Font". See `.sheet__hidden-name` in sheet-common.css.
+        */}
+        <span class="sheet__hidden-name">{label}</span>
       </button>
     );
   }
@@ -606,13 +612,20 @@ export class VeTextSheet {
               key={style.id}
               class={{ 'ts__font-tile': true, 'ts__font-tile--on': style.id === activeStyleId }}
               aria-pressed={String(style.id === activeStyleId)}
-              aria-label={style.label}
               onMouseDown={keepFocus}
               onClick={() => this.pickStyle(style.id)}
             >
-              <span class="ts__font-name" style={style.css}>
+              {/*
+                The sample is only a picture of the name: it is drawn in the style itself, and a
+                style may be all capitals (Tallhaus), which a browser may pass on as "TALLHAUS".
+                The name is the hidden copy beside it instead of an `aria-label`, because an
+                `aria-label` beside `aria-pressed` never reaches Android's WebView as the name (see
+                `.sheet__hidden-name` in sheet-common.css). It reads exactly as the label did.
+              */}
+              <span class="ts__font-name" style={style.css} aria-hidden="true">
                 {style.label}
               </span>
+              <span class="sheet__hidden-name">{style.label}</span>
             </button>
           ))}
         </div>
@@ -709,6 +722,21 @@ export class VeTextSheet {
               Never bound to `value` and never moved: `loadField` writes the text in by hand, which
               only holds while the vdom leaves this element and its content alone. Hence the key and
               the fixed position among two conditional siblings of another tag.
+
+              Named "Text" by `aria-label`, with "Enter text" as its placeholder, and on Android that is
+              what Google's TalkBack reads. On this field, open in the sheet on the emulator (WebView
+              153, TalkBack 17, 2026-09-30), it said "Enter text. Editing. Text. Edit box", and
+              "Editing. QA caption. Text. Edit box" once those words were typed. Samsung's own TalkBack
+              has not been tried: if it skips the supplemental description, as ve-slider says it may,
+              the name "Text" is lost there. A test reading the tree gets none of it. The EditText's
+              text is only what has been typed, the label goes to Android's supplemental description,
+              which uiautomator does not dump, and the placeholder reaches the hint only while a screen
+              reader is running. A `<label>`, `aria-labelledby` and `title` were each tried in its place
+              and put nothing more there either. Only `aria-describedby` reaches the hint, and a
+              description saying "Text" is the name read out a second time. So nothing is added for a
+              test's sake: the field takes the focus by itself as the sheet opens (`componentDidLoad`),
+              and that is how the Maestro flows type into it on Android. A `title` would also put a
+              tooltip over the field in every desktop browser.
             */}
             <textarea
               key="field"

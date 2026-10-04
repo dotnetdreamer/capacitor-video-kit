@@ -1,8 +1,9 @@
+import { BufferTarget, EncodedAudioPacketSource, EncodedPacket, Mp4OutputFormat, Output } from 'mediabunny';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ComposeClip, ComposeSpec } from '../definitions';
 
-import { MIX_SAMPLE_RATE, mixdown, sourceUses } from './audio';
+import { MIX_SAMPLE_RATE, mixdown, presentedSoundUs, sourceUses } from './audio';
 import { buildPlan, type ProbedInput } from './plan';
 
 /*
@@ -121,5 +122,95 @@ describe('mixdown', () => {
       'file:///m.m4a': 1,
       'file:///v.m4a': 1,
     });
+  });
+});
+
+/*
+ * Where a sound not trimmed at its end goes round, when the browser decodes more of the file than
+ * the file presents. WebKit decodes the seeded 12 s tone (`qa-sample.m4a`: 518 AAC frames, 1024
+ * samples of priming, presented as 529200 samples at 44.1 kHz) to 576226 samples at 48 kHz - the
+ * priming trimmed, the last frame's padding kept - where Chromium, iOS and Android all have 12.000 s.
+ * Looped at the decode, every pass on WebKit ended in 4.7 ms of silence and the seams drifted late.
+ * The file here is laid out the same way, by mediabunny's own muxer, so its edit list is a real one;
+ * the "decode" is WebKit's length, as a ramp, so where each pass starts can be read off the mix.
+ */
+describe('the music\'s length', () => {
+  const TONE = 'file:///tone.m4a';
+  const CLIP = 'file:///clip.mp4';
+  /** What WebKit decoded `qa-sample.m4a` to, at the mix's rate. */
+  const WEBKIT_DECODED = 576_226;
+  /** 12.000 s at the mix's rate: where every other engine goes round. */
+  const PRESENTED = 12 * MIX_SAMPLE_RATE;
+
+  /** An AAC-LC `.m4a` of `frames` frames, `priming` samples of them before 0 and `padding` after the end. */
+  async function aacFile(frames: number, priming: number, padding: number, sampleRate = 44_100): Promise<ArrayBuffer> {
+    const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
+    const source = new EncodedAudioPacketSource('aac');
+    output.addAudioTrack(source);
+    await output.start();
+    // The payload is never decoded here; the AudioSpecificConfig says AAC-LC, 44.1 kHz, mono.
+    const payload = new Uint8Array([0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c]);
+    const config = { decoderConfig: { codec: 'mp4a.40.2', sampleRate, numberOfChannels: 1, description: new Uint8Array([0x12, 0x08]) } };
+    for (let i = 0; i < frames; i++) {
+      const samples = i === frames - 1 ? 1024 - padding : 1024;
+      await source.add(new EncodedPacket(payload, 'key', (i * 1024 - priming) / sampleRate, samples / sampleRate), i === 0 ? config : undefined);
+    }
+    await output.finalize();
+    return output.target.buffer!;
+  }
+
+  /** Sample `i` of the stand-in decode: a ramp, so every sample says where in the file it came from. */
+  const ramp = (i: number): number => (i + 1) / 1_000_000;
+
+  /** Thirty seconds of a muted clip under `TONE`, not trimmed at its end, looping. */
+  function tonePlan() {
+    const spec = post();
+    spec.clips = [clip('v', CLIP, 0, 30_000, { muted: true })];
+    spec.tracks = [];
+    spec.audio.music = { uri: TONE, startMs: 0, inMs: 0, outMs: 3_600_000, volume: 1, loop: true, fadeInMs: 0, fadeOutMs: 0 };
+    spec.audio.voiceover = [];
+    return buildPlan(spec, new Map([[CLIP, { ...probe, durationMs: 30_000 }]]));
+  }
+
+  /** `fetch` answers `bytes` for the tone, and the context decodes whatever it is given to `decodedLength` samples. */
+  function serve(bytes: ArrayBuffer, decodedLength: number): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob([bytes]) })),
+    );
+    vi.stubGlobal(
+      'OfflineAudioContext',
+      class {
+        async decodeAudioData() {
+          const channel = Float32Array.from({ length: decodedLength }, (_, i) => ramp(i));
+          return { numberOfChannels: 1, sampleRate: MIX_SAMPLE_RATE, length: channel.length, duration: decodedLength / MIX_SAMPLE_RATE, getChannelData: () => channel };
+        }
+      },
+    );
+  }
+
+  it('reads the length the container presents, without the priming or the padding', async () => {
+    expect(await presentedSoundUs(await aacFile(518, 1024, 208))).toBe(12_000_000);
+    // A file of no kind it reads, and one with no edit list to speak of.
+    expect(await presentedSoundUs(new TextEncoder().encode('RIFF....WAVE').buffer)).toBeNull();
+    expect(await presentedSoundUs(await aacFile(10, 0, 0))).toBe(Math.round(((10 * 1024) / 44_100) * 1_000_000));
+  });
+
+  it('goes round where the file presents its end, not where a decode that kept the padding ends', async () => {
+    serve(await aacFile(518, 1024, 208), WEBKIT_DECODED);
+    const out = (await mixdown(tonePlan(), new AbortController().signal))!.channels[0]!;
+
+    // The last sample of the first pass, then the first of the second and of the third.
+    expect(out[PRESENTED - 1]).toBeCloseTo(ramp(PRESENTED - 1), 6);
+    expect(out[PRESENTED]).toBeCloseTo(ramp(0), 6);
+    expect(out[2 * PRESENTED]).toBeCloseTo(ramp(0), 6);
+  });
+
+  it('keeps the decoded length where the container says nothing', async () => {
+    serve(new TextEncoder().encode('not a container').buffer, WEBKIT_DECODED);
+    const out = (await mixdown(tonePlan(), new AbortController().signal))!.channels[0]!;
+
+    expect(out[PRESENTED]).toBeCloseTo(ramp(PRESENTED), 6);
+    expect(out[WEBKIT_DECODED]).toBeCloseTo(ramp(0), 6);
   });
 });

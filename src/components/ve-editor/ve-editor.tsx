@@ -23,7 +23,7 @@ import { EditorStore } from '../../state/editor-store';
 import type { EditorPanel } from '../../state/editor.types';
 import { OverlayBitmaps } from '../../state/overlay-bitmap';
 import { isPictureSource } from '../../web-runtime/picture';
-import { DISCARD_EDITS, EditorConfirm, RENDER_UNAVAILABLE, renderFailed } from '../ve-alert/editor-confirm';
+import { EditorConfirm, leaveQuestion, RENDER_UNAVAILABLE, renderFailed } from '../ve-alert/editor-confirm';
 import { formatClock, shellLayout } from './shell-layout';
 
 /**
@@ -70,7 +70,8 @@ const NUDGE_COARSE_MS = 2000;
  * and the finished video comes from the host's renderer reading the same manifest.
  *
  * This element is only the frame: it loads the sources, lays the parts out, owns which panel is
- * open, and owns leaving - back, discard, and the render on Next. The parts do the editing.
+ * open, and owns leaving - back, the question it asks on the way out, and the render on Next. The
+ * parts do the editing.
  */
 @Component({
   tag: 've-editor',
@@ -668,16 +669,26 @@ export class VeEditor {
     return true;
   }
 
-  /** Leaving with changes asks first: the sources stay either way, the edits would not. */
+  /**
+   * Leaving with changes asks first. The sources stay either way; whether the edits do is the host's
+   * to say, and the question says what the host said.
+   *
+   * On a host that keeps the edit as a draft while it is made (`editing.savesDrafts`) the customer is
+   * asked to Save and exit, and on one that does not, to Discard. Either answer that leaves does the same
+   * thing here, which is emit `back`: this element never saved anything and has nothing to throw
+   * away, so the difference is only in the words, and in what the customer believes is about to
+   * happen to their work. See [leaveQuestion].
+   */
   private async leave(): Promise<void> {
     if (this.leaving) return;
     this.store.pause();
     if (this.store.dirty.value) {
       this.leaving = true;
-      const role = await this.confirm.ask(DISCARD_EDITS);
+      const { request, leaves } = leaveQuestion(this.store.host.editing.savesDrafts);
+      const role = await this.confirm.ask(request);
       this.leaving = false;
       if (this.destroyed) return;
-      if (role !== 'destructive') return;
+      if (role !== leaves) return;
     }
     this.veCancel.emit('back');
   }

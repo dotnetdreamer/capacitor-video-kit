@@ -315,12 +315,19 @@ export interface EditMusic {
   sourceDurationMs: number;
   /** The section of the track that is used. `outMs` of 0 means "to the end of the track". */
   inMs: number;
+  /**
+   * The end of the section, or 0 for "to the end of the track". One that is not 0 lies at least
+   * [MIN_LAYER_MS] after `inMs`: [normaliseManifest] clears a shorter one to 0, and `patchMusic`
+   * refuses a change that would leave one.
+   */
   outMs: number;
   /** Where the track starts on the OUTPUT timeline. */
   startMs: number;
   /**
    * Where the sound stops on the OUTPUT timeline. 0 means "until the end" - the end of the video for
-   * a looping track, the end of the section for one that plays once, whichever comes first.
+   * a looping track, the end of the section for one that plays once, whichever comes first. One that
+   * is not 0 lies at least [MIN_LAYER_MS] after `startMs`: [normaliseManifest] clears a shorter one
+   * to 0, and `patchMusic` refuses a change that would leave one.
    */
   endMs: number;
   volume: number;
@@ -1808,16 +1815,31 @@ export function normaliseManifest(input: unknown): EditManifest {
   // Assigned only when there is one, below, so a post with the old black canvas has no key at all.
   const background = normaliseBackground(raw['background']);
 
+  /*
+   * An end that is not 0 - the section's `outMs`, the stop's `endMs` - lies at least MIN_LAYER_MS
+   * past its start, in the whole milliseconds `patchMusic` measures in, or it is read as 0: "to the
+   * end of the track" for a section, "until the end" for a stop. `patchMusic` refuses every change to
+   * a sound that breaks that rule by handing the manifest back as it was, and every control on the
+   * music goes through it - the volume, both fades, Loop, Start here, the drag - so a draft that
+   * broke it opened with a sound nobody could hear and no way to change it but the one handle that
+   * happened to be a trim. Such drafts exist: `setMusic` holds no rule, and an older build of the MCP
+   * server's op took a stop before the start without a word. Cleared rather than pushed out to the
+   * shortest length, because a stop before its start says nothing about where the sound was meant to
+   * stop, and "until the end" is where every sound stopped before there were stops.
+   */
   const m = raw['music'];
+  const endAfter = (startMs: number, endMs: number): number => (endMs > 0 && Math.round(endMs) - Math.round(startMs) < MIN_LAYER_MS ? 0 : endMs);
+  const musicInMs = m ? Math.max(0, num(m.inMs, 0)) : 0;
+  const musicStartMs = m ? Math.max(0, num(m.startMs, 0)) : 0;
   const music: EditMusic | null = m
     ? {
         uri: String(m.uri),
         fileName: String(m.fileName ?? 'Music'),
         sourceDurationMs: Math.max(0, num(m.sourceDurationMs, 0)),
-        inMs: Math.max(0, num(m.inMs, 0)),
-        outMs: Math.max(0, num(m.outMs, 0)),
-        startMs: Math.max(0, num(m.startMs, 0)),
-        endMs: Math.max(0, num(m.endMs, 0)),
+        inMs: musicInMs,
+        outMs: endAfter(musicInMs, Math.max(0, num(m.outMs, 0))),
+        startMs: musicStartMs,
+        endMs: endAfter(musicStartMs, Math.max(0, num(m.endMs, 0))),
         volume: clamp(num(m.volume, 0.6), 0, 1),
         loop: m.loop ?? true,
         // Only when there is one, so a sound saved before fades in existed reads back as it was.

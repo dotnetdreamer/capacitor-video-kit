@@ -216,12 +216,15 @@ export class VeFilterSheet {
                   `aria-label="Filter strength"`, and hiding the word was on the reasoning that a
                   screen reader hears the name from the control itself.
 
-                  It does not. On a current Chromium the slider reaches Android as an
+                  Not everywhere. On a current Chromium the slider reaches Android as an
                   `android.widget.SeekBar` marked `important-for-accessibility=false` and carrying
-                  no name at all, so with this hidden the whole row - the only control for how
-                  strong the filter is - was announced as nothing whatsoever. A visible word that is
-                  also readable is the cheap half of that fix, and the half that does not depend on
-                  which WebView the app happens to be running on.
+                  no text and no description, so with this hidden the whole row - the only control
+                  for how strong the filter is - was nothing whatsoever to the tree uiautomator
+                  reads. Google's TalkBack 17 on WebView 153 does read the slider's own name, which
+                  Chromium keeps in Android's supplemental description (see ve-slider), but a screen
+                  reader that does not read that field hears nothing. A visible word that is also
+                  readable is the cheap half of that fix, and the half that does not depend on which
+                  WebView and which screen reader the app happens to be running with.
                 */}
                 <span class="fs__strength-label">Intensity</span>
                 {/*

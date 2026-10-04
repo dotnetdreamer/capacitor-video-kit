@@ -103,6 +103,21 @@ function muteButton(sheet: HTMLElement): HTMLButtonElement | null {
   return sheet.shadowRoot?.querySelector<HTMLButtonElement>('.vol__mute') ?? null;
 }
 
+/**
+ * A button's name as its content makes it: the text inside it, less anything `aria-hidden`. With no
+ * `aria-label` on the button this is the accessible name every browser computes, and it is the only
+ * name of a toggle that Android's WebView passes on (see `.sheet__hidden-name`).
+ */
+function textName(el: Element | null | undefined): string {
+  if (!el) return '';
+  let out = '';
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) out += node.textContent ?? '';
+    else if (node instanceof Element && node.getAttribute('aria-hidden') !== 'true') out += textName(node);
+  }
+  return out.trim();
+}
+
 function applyToAll(sheet: HTMLElement): HTMLButtonElement | null {
   return sheet.shadowRoot?.querySelector<HTMLButtonElement>('.sheet__apply-all') ?? null;
 }
@@ -209,7 +224,7 @@ describe('ve-volume-sheet', () => {
     // by the button into a silence that looks like the button doing nothing.
     drag(sheet, 60, 0);
     expect(store.manifest.value.clips[0]).toMatchObject({ volume: 0, muted: true });
-    await until('the button to offer to unmute', () => muteButton(sheet)?.getAttribute('aria-label') === 'Unmute');
+    await until('the button to offer to unmute', () => textName(muteButton(sheet)) === 'Unmute');
 
     muteButton(sheet)!.click();
 
@@ -222,7 +237,7 @@ describe('ve-volume-sheet', () => {
 
   it('gives a clip that was already silent a level to come back to', async () => {
     const { store, sheet } = await mount({ kind: 'clip', id: 'seg-0' }, 2, 0, true);
-    expect(muteButton(sheet)?.getAttribute('aria-label')).toBe('Unmute');
+    expect(textName(muteButton(sheet))).toBe('Unmute');
 
     muteButton(sheet)!.click();
 
@@ -242,12 +257,37 @@ describe('ve-volume-sheet', () => {
     expect(store.manifest.value.clips[0].muted).toBe(false);
   });
 
+  it('names the mute button by its own words, which Android’s WebView passes on, and says it is pressed', async () => {
+    const { sheet } = await mount({ kind: 'clip', id: 'seg-0' });
+    const button = () => muteButton(sheet)!;
+
+    // No `aria-label`: beside `aria-pressed` it was the name everywhere except Android, where the
+    // button arrived as a ToggleButton with no name and the flows could not find "Mute".
+    expect(button().hasAttribute('aria-label')).toBe(false);
+    expect(textName(button())).toBe('Mute');
+    expect(button().getAttribute('aria-pressed')).toBe('false');
+
+    // The words are for a reader only. The icon is still the whole of what is seen, in the middle
+    // of the button, because the hidden copy takes no room in its grid.
+    const words = button().querySelector('.sheet__hidden-name')!;
+    expect(words.getBoundingClientRect().width).toBeLessThanOrEqual(1);
+    const box = button().getBoundingClientRect();
+    const icon = button().querySelector('ve-icon')!.getBoundingClientRect();
+    expect(icon.left + icon.width / 2).toBeCloseTo(box.left + box.width / 2, 0);
+    expect(icon.top + icon.height / 2).toBeCloseTo(box.top + box.height / 2, 0);
+
+    button().click();
+    await until('the button to offer to unmute', () => textName(button()) === 'Unmute');
+    expect(button().getAttribute('aria-pressed')).toBe('true');
+    expect(button().hasAttribute('aria-label')).toBe(false);
+  });
+
   it('mutes music by taking it to zero, since nothing in the manifest remembers where it was', async () => {
     const { store, sheet } = await mount({ kind: 'music' });
 
     muteButton(sheet)!.click();
     expect(store.manifest.value.music?.volume).toBe(0);
-    await until('the button to offer to unmute', () => muteButton(sheet)?.getAttribute('aria-label') === 'Unmute');
+    await until('the button to offer to unmute', () => textName(muteButton(sheet)) === 'Unmute');
 
     muteButton(sheet)!.click();
     expect(store.manifest.value.music?.volume).toBe(START_LEVEL);

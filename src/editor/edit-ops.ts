@@ -1274,29 +1274,28 @@ export function musicSourceMsAt(music: EditMusic, outputMs: number, totalMs: num
 }
 
 /**
- * What the music's fades leave of its level at an output time, 0..1: up from silence over the start
- * of the FIRST repetition and down over the end of the LAST, the ramps [ComposeMusic] describes and
- * every engine draws. The preview multiplies by this, so a fade is heard before it is rendered.
+ * What the music's fades leave of its level at an output time, 0..1: up from silence over the first
+ * `fadeInMs` of the window it is heard in ([musicWindow]) and down to silence over the last
+ * `fadeOutMs` of it, each a straight line in amplitude, and the product of the two where they
+ * overlap - the rule [ComposeMusic] states and every engine draws. The preview multiplies by this,
+ * so a fade is heard before it is rendered.
+ *
+ * The fades belong to that WINDOW, and a looping sound's seams play no part in them. They used to
+ * belong to its first and last repetitions, cut to each one's length, and that lost the fade out
+ * whenever the last repetition was short: the end handle can stop a loop anywhere, and a video is
+ * almost never a whole number of passes long - WebKit even reads a 12 s song as 11975 ms, which left
+ * a 60 s post a 125 ms last pass. The sound then ran at full level into a hard cut while the Volume
+ * sheet said "Fade out 10.0s". Now a fade out always reaches silence exactly where the sound stops.
  */
 export function musicFadeAt(music: EditMusic, outputMs: number, totalMs: number): number {
   const { startMs, endMs } = musicWindow(music, totalMs);
-  const heardMs = endMs - startMs;
-  if (heardMs <= 0) return 1;
-  const section = musicSectionMs(music);
-  const repeats = music.loop && section > 0;
-  const firstEndMs = repeats ? startMs + Math.min(section, heardMs) : endMs;
-  const lastStartMs = repeats ? startMs + (Math.ceil(heardMs / section) - 1) * section : startMs;
+  if (endMs <= startMs) return 1;
 
   let gain = 1;
   const fadeInMs = music.fadeInMs ?? 0;
-  if (fadeInMs > 0 && outputMs < firstEndMs) gain *= clamp((outputMs - startMs) / fadeInMs, 0, 1);
-  // From `fadeOutMs` before the end or the last repetition's start, whichever is later: a last
-  // repetition shorter than the fade ends above silence, as it does in the render.
+  if (fadeInMs > 0) gain *= clamp((outputMs - startMs) / fadeInMs, 0, 1);
   const fadeOutMs = music.fadeOutMs;
-  if (fadeOutMs > 0) {
-    const fromMs = Math.max(lastStartMs, endMs - fadeOutMs);
-    if (outputMs >= fromMs) gain *= Math.max(0, 1 - (outputMs - fromMs) / fadeOutMs);
-  }
+  if (fadeOutMs > 0) gain *= clamp((endMs - outputMs) / fadeOutMs, 0, 1);
   return gain;
 }
 

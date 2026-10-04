@@ -247,8 +247,9 @@ describe('no op makes a zoom on a post that has none', () => {
     setOverlayWindow: [{ op: 'setOverlayWindow', id: 't1', startMs: 1000, endMs: 4000 }],
     splitOverlay: [{ op: 'splitOverlay', id: 't1', atMs: 2000, newId: 't1c' }],
     setMusic: [{ op: 'setMusic', music: { uri: 'file:///n.mp3', sourceDurationMs: 20_000 } }],
-    // The other open-ended patch, tried the same way.
-    patchMusic: [{ op: 'patchMusic', patch: { volume: 0.5, zooms: [sneaked] } }],
+    // Not open-ended any more: a field that is not a sound's, a zoom list among them, is refused by
+    // name (music-ops.unit.test.ts), so what is left to try here is a real change.
+    patchMusic: [{ op: 'patchMusic', patch: { volume: 0.5 } }],
     addVoiceover: [{ op: 'addVoiceover', id: 'vo2', uri: 'file:///vo2.m4a', startMs: 8000, durationMs: 1000 }],
     patchVoiceover: [{ op: 'patchVoiceover', id: 'vo', volume: 0.5 }],
     moveVoiceover: [{ op: 'moveVoiceover', id: 'vo', startMs: 500 }],

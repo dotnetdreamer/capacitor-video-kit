@@ -74,6 +74,8 @@ let context: AudioContext | null = null;
 const routes = new WeakMap<HTMLMediaElement, GainNode>();
 /** Each routed element's stand-in, made the first time it had a file the graph cannot play. */
 const standIns = new WeakMap<HTMLMediaElement, HTMLAudioElement>();
+/** Elements the context would not take (see [PreviewMixer.route]): not on their way in, whatever a play says. */
+const refused = new WeakSet<HTMLMediaElement>();
 /** The level last asked of each element, which is what its gain starts at when it is routed. */
 const levels = new WeakMap<HTMLMediaElement, number>();
 /** The mixers playing through the context now. It runs while there is one and is suspended when there is none. */
@@ -122,6 +124,24 @@ export class PreviewMixer {
   /** Whether any of this player's elements is in the graph, and so heard through nothing else. */
   private get routed(): boolean {
     return this.elements.some(element => routes.has(element));
+  }
+
+  /**
+   * Whether `element` plays through the graph: it is in it, which is for good, or it is one of this
+   * player's and is on its way in on this play - the context is still coming back from the tap, and
+   * the element will be handed over the moment it has (see [start]), which on the first play of a
+   * page is a few milliseconds after the player has already put the element and started it.
+   *
+   * [PreviewPlayer] asks, because on iOS a routed element's clock stands still after a start or a seek
+   * for far longer, and far more unevenly, than one that is not; see its [SLOW_SEEK_SETTLE_MS]. Asked
+   * about an element on its way in, it puts it with a routed element's lead from the first put, rather
+   * than with the other kind's and then find it a quarter of a second behind for the rest of the play.
+   */
+  isRouted(element: HTMLMediaElement): boolean {
+    if (routes.has(element)) return true;
+    if (!this.holding || refused.has(element) || !this.elements.includes(element as HTMLAudioElement)) return false;
+    // Left out of the graph by [route] for as long as it holds a file from somewhere else.
+    return !(element.src && !playableHere(element.src));
   }
 
   /**
@@ -253,6 +273,7 @@ export class PreviewMixer {
         source.connect(gain);
       } catch (error) {
         if (gain && !routes.has(element)) gain.disconnect();
+        if (!routes.has(element)) refused.add(element);
         debugWarn('[ve-preview] an element could not be put through the sound mixer', error);
       }
     }

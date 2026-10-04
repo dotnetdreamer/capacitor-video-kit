@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ComposeClip, ComposeSpec } from '../definitions';
+import type { ComposeClip, ComposeMusic, ComposeSpec } from '../definitions';
 
-import { buildPlan, clipIndexAt, evenOutput, sourceTimeUs, transitionAt, visibleIndexAt, type ProbedInput } from './plan';
+import { buildPlan, clipIndexAt, evenOutput, musicForSource, sourceTimeUs, transitionAt, visibleIndexAt, type MusicPlan, type ProbedInput } from './plan';
 
 /**
  * The layout every other part of the render is measured against: where each clip lands, how long
@@ -237,9 +237,8 @@ describe('music', () => {
     expect(items).toHaveLength(3);
     expect(items[2]?.atUs).toBe(2_000_000);
     expect((items[2]?.outUs ?? 0) - (items[2]?.inUs ?? 0)).toBe(500_000);
-    // A fade belongs to the end of the VIDEO, not to every repetition.
-    expect(items[0]?.fadeOutStartUs).toBe(-1);
-    expect(items[2]?.fadeOutStartUs).toBe(0);
+    // The fades belong to the whole window, not to a repetition: one pair of them, over 0..2.5 s.
+    expect(plan.music).toMatchObject({ startUs: 0, stopUs: 2_500_000, fadeInUs: 0, fadeOutUs: 500_000 });
   });
 
   it('does not loop when it was not asked to', () => {
@@ -294,7 +293,7 @@ describe('music', () => {
     expect(items).toHaveLength(2);
     expect(items[1]?.atUs).toBe(1_000_000);
     expect((items[1]?.outUs ?? 0) - (items[1]?.inUs ?? 0)).toBe(700_000);
-    expect(items[1]?.fadeOutStartUs).toBe(200_000);
+    expect(plan.music?.stopUs).toBe(1_700_000);
   });
 
   it('cuts a section that plays once at its stop, and ignores a stop past the end of the video', () => {
@@ -307,6 +306,98 @@ describe('music', () => {
     expect((early[0]?.outUs ?? 0) - (early[0]?.inUs ?? 0)).toBe(1_200_000);
     const late = at(9000);
     expect((late[0]?.outUs ?? 0) - (late[0]?.inUs ?? 0)).toBe(3_000_000);
+  });
+
+  /*
+   * THE FADE OUT'S END. WebKit reads a 12 s song as 11975 ms, which gave a 60 s post five passes and
+   * a 125 ms sixth. The fade out used to belong to that sixth alone; the window's stop is where it
+   * ends now, whatever the last pass is.
+   */
+  it('ends the fades where the last repetition stops, however short it is', () => {
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: 60_000 })],
+        audio: {
+          originalMuted: true,
+          originalVolume: 1,
+          voiceover: [],
+          music: { uri: 'file:///m.m4a', startMs: 0, inMs: 0, outMs: 11_975, volume: 1, loop: true, fadeInMs: 0, fadeOutMs: 10_000 },
+        },
+      }),
+      new Map(),
+    );
+    const music = plan.music;
+    expect(music?.items).toHaveLength(6);
+    expect((music?.items[5]?.outUs ?? 0) - (music?.items[5]?.inUs ?? 0)).toBe(125_000);
+    expect(music?.stopUs).toBe(60_000_000);
+  });
+
+  it('stops a section that plays once where the section ends, and the fades with it', () => {
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: 10_000 })],
+        audio: {
+          originalMuted: true,
+          originalVolume: 1,
+          voiceover: [],
+          music: { uri: 'file:///m.m4a', startMs: 2000, inMs: 0, outMs: 3000, volume: 1, loop: false, fadeInMs: 2000, fadeOutMs: 2000 },
+        },
+      }),
+      new Map(),
+    );
+    expect(plan.music).toMatchObject({ startUs: 2_000_000, stopUs: 5_000_000, untilUs: 10_000_000 });
+  });
+});
+
+/*
+ * The web has no measure of a sound's length but the samples the mix decodes, and a sound not
+ * trimmed at its end asks for "the end of the file" in a number longer than any file. So the mix
+ * lays the repetitions again against what it decoded.
+ */
+describe('music laid against its decoded file', () => {
+  function planned(music: Partial<ComposeMusic>, videoMs = 30_000): MusicPlan {
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: videoMs })],
+        audio: {
+          originalMuted: true,
+          originalVolume: 1,
+          voiceover: [],
+          music: { uri: 'file:///m.m4a', startMs: 0, inMs: 0, outMs: 3_600_000, volume: 1, loop: true, fadeInMs: 0, fadeOutMs: 1000, ...music },
+        },
+      }),
+      new Map(),
+    );
+    if (!plan.music) throw new Error('no music planned');
+    return plan.music;
+  }
+
+  it('loops a sound asked for to the end of its file at the length the file turned out to be', () => {
+    // Before decoding, one pass as long as the whole post, since the file could be that long.
+    const asked = planned({});
+    expect(asked.items).toHaveLength(1);
+    const laid = musicForSource(asked, 12_000_000);
+    expect(laid?.items.map((item) => item.atUs)).toEqual([0, 12_000_000, 24_000_000]);
+    expect(laid?.items.map((item) => item.outUs - item.inUs)).toEqual([12_000_000, 12_000_000, 6_000_000]);
+    expect(laid?.stopUs).toBe(30_000_000);
+  });
+
+  it('ends a sound that plays once where its file ends, and its fade out there', () => {
+    const laid = musicForSource(planned({ loop: false, startMs: 1000 }), 4_000_000);
+    expect(laid?.items).toEqual([{ inUs: 0, outUs: 4_000_000, atUs: 1_000_000 }]);
+    expect(laid?.stopUs).toBe(5_000_000);
+  });
+
+  it('keeps the plan as it was when the section fits in the file', () => {
+    const asked = planned({ inMs: 1000, outMs: 5000 });
+    expect(musicForSource(asked, 12_000_000)).toBe(asked);
+  });
+
+  it('keeps an in point, and leaves the music out when it is past the end of the file', () => {
+    const laid = musicForSource(planned({ inMs: 2000 }), 12_000_000);
+    expect(laid?.items[0]).toEqual({ inUs: 2_000_000, outUs: 12_000_000, atUs: 0 });
+    expect(laid?.items[1]?.atUs).toBe(10_000_000);
+    expect(musicForSource(planned({ inMs: 13_000 }), 12_000_000)).toBeNull();
   });
 });
 
