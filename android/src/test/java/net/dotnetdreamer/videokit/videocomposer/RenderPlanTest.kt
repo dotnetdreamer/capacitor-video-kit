@@ -798,6 +798,64 @@ class RenderPlanTest {
         assertEquals(10_000_000L, total)
     }
 
+    @Test
+    fun `music phase beyond a cycle starts partway through then loops the whole section`() {
+        val music = Music(
+            "file:///m.m4a", 1_000, 2_000, 5_000, 1f,
+            loop = true, fadeInMs = 500, fadeOutMs = 400, endMs = 7_500, phaseMs = 7_500,
+        )
+        val plan = musicPlan(music, videoMs = 10_000, trackMs = 12_000)
+        val items = plan.music!!.items
+        assertEquals(1_000_000L, plan.music!!.leadGapUs)
+        assertEquals(listOf(3_500_000L, 2_000_000L, 2_000_000L), items.map { it.inUs })
+        assertEquals(listOf(5_000_000L, 5_000_000L, 4_000_000L), items.map { it.outUs })
+        assertEquals(listOf(1_000_000L, 2_500_000L, 5_500_000L), items.map { it.atUs })
+        assertEquals(7_500_000L, items.last().atUs + items.last().outUs - items.last().inUs)
+        assertEquals(1f, musicGainAt(plan, 2_500_000L), 1e-6f)
+        assertEquals(0.5f, musicGainAt(plan, 7_300_000L), 1e-3f)
+    }
+
+    @Test
+    fun `music phase wraps against the probed section length`() {
+        // The editor can send an open-ended outMs, and its WebView duration may differ from the
+        // device probe. The device's actual 12 s section sets the phase and the loop seam.
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 1f,
+            loop = true, fadeInMs = 0, fadeOutMs = 0, phaseMs = 25_000)
+        val items = musicPlan(music, videoMs = 24_000, trackMs = 12_000).music!!.items
+        assertEquals(listOf(1_000_000L, 0L, 0L), items.map { it.inUs })
+        assertEquals(listOf(12_000_000L, 12_000_000L, 1_000_000L), items.map { it.outUs })
+        assertEquals(listOf(0L, 11_000_000L, 23_000_000L), items.map { it.atUs })
+    }
+
+    @Test
+    fun `negative music phase wraps against the probed section length`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 1f,
+            loop = true, fadeInMs = 0, fadeOutMs = 0, phaseMs = -5_000)
+        val items = musicPlan(music, videoMs = 12_000, trackMs = 12_000).music!!.items
+        assertEquals(listOf(7_000_000L, 0L), items.map { it.inUs })
+        assertEquals(listOf(12_000_000L, 7_000_000L), items.map { it.outUs })
+        assertEquals(listOf(0L, 5_000_000L), items.map { it.atUs })
+    }
+
+    @Test
+    fun `non-looping music phase plays only the remaining first pass`() {
+        val music = Music("file:///m.m4a", 0, 2_000, 5_000, 1f,
+            loop = false, fadeInMs = 0, fadeOutMs = 0, phaseMs = 4_500)
+        val items = musicPlan(music, videoMs = 10_000, trackMs = 12_000).music!!.items
+        assertEquals(1, items.size)
+        assertEquals(3_500_000L, items.single().inUs)
+        assertEquals(5_000_000L, items.single().outUs)
+    }
+
+    @Test
+    fun `phase near section end does not produce an empty first pass`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_000, 1f,
+            loop = true, fadeInMs = 0, fadeOutMs = 0, phaseMs = 2_999)
+        val items = musicPlan(music, videoMs = 3_000, trackMs = 3_000).music!!.items
+        assertEquals(listOf(1_000L, 2_999_000L), items.map { it.outUs - it.inUs })
+        assertTrue(items.all { it.outUs > it.inUs })
+    }
+
     /*
      * THE DROP DID NOT EXPORT ON A PHONE. Its 16 s score looped under a post whose speeds summed to
      * 16.000074 s, and the plan added a second repetition 74 us long. Media3 measures an item's

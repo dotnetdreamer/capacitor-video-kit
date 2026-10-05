@@ -141,6 +141,7 @@ enum ComposeSpecParser {
                          startMs: m.startMs,
                          inMs: m.inMs,
                          outMs: m.outMs,
+                         phaseMs: m.phaseMs,
                          endMs: m.endMs,
                          volume: clamp01(m.volume),
                          loop: m.loop,
@@ -1461,6 +1462,7 @@ private struct MusicDTO: Decodable {
     let startMs: Int64
     let inMs: Int64
     let outMs: Int64
+    let phaseMs: Int64
     let endMs: Int64
     let volume: Double
     let loop: Bool
@@ -1468,7 +1470,7 @@ private struct MusicDTO: Decodable {
     let fadeOutMs: Int64
 
     private enum K: String, CodingKey {
-        case uri, startMs, inMs, outMs, endMs, volume, loop, fadeInMs, fadeOutMs
+        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs
     }
 
     /// Throws the full `audio.music.*` path itself: there is no index to splice in, so there is
@@ -1480,6 +1482,7 @@ private struct MusicDTO: Decodable {
         inMs = max(0, c.long(.inMs, 0))
         outMs = c.long(.outMs, 0)
         if outMs <= inMs { throw SpecError("audio.music.outMs") }
+        phaseMs = c.long(.phaseMs, 0)
         startMs = max(0, c.long(.startMs, 0))
         endMs = max(0, c.long(.endMs, 0))
         volume = c.double(.volume, 1)

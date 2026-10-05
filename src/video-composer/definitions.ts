@@ -628,6 +628,8 @@ export interface ComposeMusic {
   uri: string;
   /** Where the track starts on the OUTPUT timeline. */
   startMs: number;
+  /** Signed elapsed time into the trimmed section at the first output frame; the engine wraps it at its measured source length. */
+  phaseMs?: number;
   /**
    * Trim inside the track itself. An `outMs` past the end of the file is the end of the file, which
    * every engine reads for itself - the file's audio track on iOS, its probe on Android, the samples

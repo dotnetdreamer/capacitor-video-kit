@@ -328,6 +328,8 @@ data class Music(
      * through the trimmed section, when it does not loop).
      */
     val endMs: Long = 0L,
+    /** Signed offset into [inMs]..[outMs] at the first playback, wrapping within the section. */
+    val phaseMs: Long = 0L,
 )
 
 data class Voiceover(

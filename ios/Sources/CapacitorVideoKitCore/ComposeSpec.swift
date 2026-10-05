@@ -384,6 +384,8 @@ struct ComposeMusic: Sendable {
     /// length. `CompositionBuilder` clamps it to the source, so a huge value here is normal input
     /// and not an error.
     let outMs: Int64
+    /// Signed offset into the trimmed section for its first pass. Subsequent loops play the full section.
+    let phaseMs: Int64
     /// Where the music stops on the OUTPUT timeline; 0 plays it to the end of the video (or once
     /// through the piece, when it does not loop).
     let endMs: Int64

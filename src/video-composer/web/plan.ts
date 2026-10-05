@@ -154,6 +154,8 @@ export interface MusicPlan {
   /** The section in the file, as asked - `outUs` held to the probed length when there was one. */
   inUs: number;
   outUs: number;
+  /** Offset into the first pass; later passes use `inUs..outUs`. */
+  phaseUs?: number;
   loop: boolean;
   /** Where the music starts on the OUTPUT timeline. */
   startUs: number;
@@ -543,6 +545,7 @@ function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, Probe
     volume: clamp(music.volume, 0, 1),
     inUs: Math.round(music.inMs * 1000),
     outUs: Math.round(outMs * 1000),
+    ...(music.phaseMs ? { phaseUs: Math.round(music.phaseMs * 1000) } : {}),
     loop: music.loop,
     startUs,
     untilUs: music.endMs !== undefined && music.endMs > 0 ? Math.min(totalUs, Math.round(music.endMs * 1000)) : totalUs,
@@ -577,17 +580,20 @@ function layMusic(ask: Omit<MusicPlan, 'stopUs' | 'items'>): MusicPlan | null {
   const availableUs = ask.untilUs - ask.startUs;
   if (availableUs <= 0) return null;
 
-  const reps = ask.loop ? Math.max(1, Math.ceil(availableUs / trackLenUs)) : 1;
-  const lastLenUs = ask.loop ? availableUs - (reps - 1) * trackLenUs : Math.min(trackLenUs, availableUs);
-  if (lastLenUs <= 0) return null;
-
   const items: MusicItem[] = [];
   let atUs = ask.startUs;
-  for (let k = 0; k < reps; k++) {
-    const lenUs = k === reps - 1 ? lastLenUs : trackLenUs;
-    items.push({ inUs: ask.inUs, outUs: ask.inUs + lenUs, atUs });
+  const phaseUs = (((ask.phaseUs ?? 0) % trackLenUs) + trackLenUs) % trackLenUs;
+  let first = true;
+  while (atUs < ask.untilUs) {
+    const fromUs = ask.inUs + (first ? phaseUs : 0);
+    const lenUs = Math.min(ask.outUs - fromUs, ask.untilUs - atUs);
+    if (lenUs <= 0) break;
+    items.push({ inUs: fromUs, outUs: fromUs + lenUs, atUs });
     atUs += lenUs;
+    if (!ask.loop) break;
+    first = false;
   }
+  if (items.length === 0) return null;
   return { ...ask, stopUs: atUs, items };
 }
 

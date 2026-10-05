@@ -90,6 +90,7 @@ describe('setMusic', () => {
       endMs: 7500,
       volume: 0.4,
       loop: true,
+      phaseMs: 2500,
       fadeInMs: 800,
       fadeOutMs: 1200,
     };
@@ -102,6 +103,12 @@ describe('setMusic', () => {
     const music = applyEditOps(post(), set({ endMs: null, fileName: null, fadeInMs: null })).music;
     expect(music).toMatchObject({ endMs: 0, fileName: '' });
     expect('fadeInMs' in music!).toBe(false);
+  });
+
+  it('accepts a signed phase and treats zero as the absent default', () => {
+    const before = withMusic();
+    expect(applyEditOps(before, patch({ phaseMs: 0 }))).toBe(before);
+    expect(applyEditOps(before, patch({ phaseMs: -5000 })).music?.phaseMs).toBe(-5000);
   });
 
   /*

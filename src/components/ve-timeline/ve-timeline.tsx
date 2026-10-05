@@ -16,6 +16,7 @@ import {
   findVideoTrack,
   moveLayerTo,
   musicMovedTo,
+  musicPhaseMs,
   musicSectionMs,
   musicSourceMsAt,
   musicWindow,
@@ -853,6 +854,7 @@ export class VeTimeline {
       music.uri,
       music.inMs,
       music.outMs,
+      music.phaseMs ?? 0,
       music.startMs,
       music.endMs,
       music.loop ? 1 : 0,
@@ -898,7 +900,7 @@ export class VeTimeline {
          * section and not to the section's end. `heardMs % section` of 0 means the post ended
          * exactly on a join, and the pass that finished there ran the whole way.
          */
-        endsAtMs: music.inMs + (repeats ? heardMs % section || section : heardMs),
+        endsAtMs: music.inMs + (repeats ? (musicPhaseMs(music) + heardMs) % section || section : musicPhaseMs(music) + heardMs),
         // A track that repeats shows the same stretch of itself several times over, and the bar
         // that straddles the join hears the end of one pass and the start of the next.
         repeat: repeats ? { fromMs: music.inMs, toMs: music.inMs + section } : null,

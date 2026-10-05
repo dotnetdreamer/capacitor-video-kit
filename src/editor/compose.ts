@@ -182,6 +182,7 @@ export async function toComposeSpec(
         ? {
             uri: music.uri,
             startMs: Math.max(0, Math.round(music.startMs)),
+            ...(music.phaseMs ? { phaseMs: Math.round(music.phaseMs) } : {}),
             inMs: Math.max(0, Math.round(music.inMs)),
             // A trim the customer made, or "to the end of the file" - never the page's own measure of
             // that end. WebKit reads a 12 s m4a as 11975 ms, which AVFoundation and Chromium read as

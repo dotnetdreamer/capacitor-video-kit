@@ -425,12 +425,13 @@ export const OP_REFERENCE: Record<string, string> = {
 
   /* sound */
   setMusic:
-    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, volume?, loop?, fadeInMs?, fadeOutMs?}) or null to take it away. ' +
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?}) or null to take it away. ' +
     'inMs..outMs is the section of the track (outMs 0: to the end of the track), startMs where it starts on the post, and endMs where it ' +
-    'stops (0, the default: until the end); a looping section repeats until endMs, or until the video ends. An outMs or endMs that is ' +
+    'stops (0, the default: until the end); a looping section repeats until endMs, or until the video ends. phaseMs offsets ' +
+    'the first pass within the section and wraps at its end; it may be negative, and later passes use the full section. An outMs or endMs that is ' +
     `not 0 is at least ${MIN_LAYER_MS}ms after inMs or startMs, or the op is refused. volume 0..1 (default 1); loop defaults to false. ` +
     `fadeInMs rises from silence over the start of the sound and fadeOutMs falls to silence at the end of what is heard, each 0 (none, ` +
-    `the default) to ${MAX_MUSIC_FADE_MS}ms. Every time is in milliseconds and none is negative. sourceDurationMs is the track's ` +
+    `the default) to ${MAX_MUSIC_FADE_MS}ms. Times are in milliseconds; all but phaseMs are nonnegative. sourceDurationMs is the track's ` +
     'length: without it or an outMs, where a sound played once ends is not known until it plays. Any other field is refused; a field ' +
     'sent as null takes its default.',
   patchMusic:

@@ -31,6 +31,19 @@ function music(over: Partial<EditMusic> = {}): EditMusic {
 const read = (m: EditMusic) => normaliseManifest({ ...emptyManifest(), music: m });
 
 describe('reading a stored sound whose stop is not after its start', () => {
+  it('keeps a looping start trim beyond one source cycle when reopening a draft', () => {
+    expect(read(music({ sourceDurationMs: 4000, outMs: 0, startMs: 10_000, phaseMs: 10_000 })).music).toMatchObject({
+      startMs: 10_000,
+      phaseMs: 10_000,
+      inMs: 0,
+      outMs: 0,
+    });
+  });
+
+  it('keeps a negative phase so the render can wrap it against its own file length', () => {
+    expect(read(music({ startMs: 0, phaseMs: -5000 })).music?.phaseMs).toBe(-5000);
+  });
+
   it('clears a stop before the start, at it, or less than MIN_LAYER_MS after it', () => {
     for (const endMs of [1000, 2000, 2000 + MIN_LAYER_MS - 1]) {
       expect(read(music({ startMs: 2000, endMs })).music?.endMs, `endMs ${endMs}`).toBe(0);

@@ -1239,6 +1239,13 @@ export function musicSectionMs(music: EditMusic): number {
   return out > 0 ? Math.max(0, out - music.inMs) : 0;
 }
 
+/** The first pass's offset into the section, wrapped after a whole number of loops. */
+export function musicPhaseMs(music: EditMusic): number {
+  const section = musicSectionMs(music);
+  const phase = Math.round(music.phaseMs ?? 0);
+  return section > 0 ? ((phase % section) + section) % section : 0;
+}
+
 /** The latest the music can be heard until: its own stop when it has one, or the end of the video. */
 export function musicStopMs(music: Pick<EditMusic, 'endMs'>, totalMs: number): number {
   return music.endMs > 0 ? Math.min(music.endMs, totalMs) : totalMs;
@@ -1249,7 +1256,7 @@ export function musicWindow(music: EditMusic, totalMs: number): { startMs: numbe
   const section = musicSectionMs(music);
   const startMs = Math.min(music.startMs, totalMs);
   const stopMs = musicStopMs(music, totalMs);
-  const endMs = music.loop || section === 0 ? stopMs : Math.min(stopMs, music.startMs + section);
+  const endMs = music.loop || section === 0 ? stopMs : Math.min(stopMs, music.startMs + section - musicPhaseMs(music));
   return { startMs, endMs: Math.max(startMs, endMs) };
 }
 
@@ -1270,7 +1277,8 @@ export function musicSourceMsAt(music: EditMusic, outputMs: number, totalMs: num
   if (outputMs < startMs || outputMs >= endMs) return null;
   const section = musicSectionMs(music);
   const into = outputMs - startMs;
-  return music.inMs + (section > 0 && music.loop ? into % section : into);
+  const from = musicPhaseMs(music) + into;
+  return music.inMs + (section > 0 && music.loop ? from % section : from);
 }
 
 /**
@@ -1312,6 +1320,10 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
   next.startMs = Math.max(0, Math.round(next.startMs));
   // `|| 0` for music a host built before the field existed.
   next.endMs = Math.max(0, Math.round(next.endMs || 0));
+  if (next.phaseMs !== undefined) {
+    next.phaseMs = Math.round(next.phaseMs || 0);
+    if (next.phaseMs === 0) delete next.phaseMs;
+  }
   next.fadeOutMs = Math.max(0, Math.round(next.fadeOutMs || 0));
   // Left absent on music that never had one, so a patch of something else is not a change.
   if (next.fadeInMs !== undefined) next.fadeInMs = Math.max(0, Math.round(next.fadeInMs || 0));

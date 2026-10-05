@@ -382,6 +382,21 @@ describe('music laid against its decoded file', () => {
     expect(laid?.stopUs).toBe(30_000_000);
   });
 
+  it('starts a later loop at its phase and then repeats the full decoded section', () => {
+    const laid = musicForSource(planned({ startMs: 10_000, phaseMs: 14_000 }, 30_000), 12_000_000);
+    expect(laid?.items).toEqual([
+      { inUs: 2_000_000, outUs: 12_000_000, atUs: 10_000_000 },
+      { inUs: 0, outUs: 10_000_000, atUs: 20_000_000 },
+    ]);
+    expect(laid?.stopUs).toBe(30_000_000);
+  });
+
+  it('wraps a negative phase against the decoded section length', () => {
+    const laid = musicForSource(planned({ phaseMs: -5000 }, 20_000), 12_000_000);
+    expect(laid?.items[0]).toEqual({ inUs: 7_000_000, outUs: 12_000_000, atUs: 0 });
+    expect(laid?.items[1]).toEqual({ inUs: 0, outUs: 12_000_000, atUs: 5_000_000 });
+  });
+
   it('ends a sound that plays once where its file ends, and its fade out there', () => {
     const laid = musicForSource(planned({ loop: false, startMs: 1000 }), 4_000_000);
     expect(laid?.items).toEqual([{ inUs: 0, outUs: 4_000_000, atUs: 1_000_000 }]);

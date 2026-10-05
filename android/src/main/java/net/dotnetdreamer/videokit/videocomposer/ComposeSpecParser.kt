@@ -759,6 +759,7 @@ object ComposeSpecParser {
                 fadeInMs = musicJson.optLong("fadeInMs", 0L).coerceAtLeast(0L),
                 fadeOutMs = musicJson.optLong("fadeOutMs", 0L).coerceAtLeast(0L),
                 endMs = musicJson.optLong("endMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
+                phaseMs = musicJson.optLong("phaseMs", 0L),
             )
         }
         val voJson = o.optJSONArray("voiceover") ?: JSONArray()

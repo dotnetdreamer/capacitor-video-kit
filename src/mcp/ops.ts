@@ -422,7 +422,7 @@ const ASPECTS: readonly OutputAspect[] = ['9:16', '16:9'];
 /* -------------------------------------------------------------------------------------------- */
 
 /** The music's times: where its section is on the track, and where it is heard on the post. */
-const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs'] as const satisfies readonly (keyof EditMusic)[];
+const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs', 'phaseMs'] as const satisfies readonly (keyof EditMusic)[];
 const MUSIC_FADES = ['fadeInMs', 'fadeOutMs'] as const satisfies readonly (keyof EditMusic)[];
 /** Every field a sound has, in the order the editor writes them - what a refusal lists. */
 const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES] as const satisfies readonly (keyof EditMusic)[];
@@ -476,6 +476,10 @@ function musicFields(raw: Record<string, unknown>, path: string): Partial<EditMu
       if (typeof value !== 'number' || !(value >= 0 && value <= MAX_MUSIC_FADE_MS)) {
         throw new Error(`${name} must be a length in milliseconds from 0 (no fade) to ${MAX_MUSIC_FADE_MS}, the longest the volume sheet sets`);
       }
+    } else if (key === 'phaseMs') {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new Error(`${name} must be a finite number of milliseconds`);
+      }
     } else if ((MUSIC_TIMES as readonly string[]).includes(key)) {
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
         throw new Error(`${name} must be a number of milliseconds, 0 or more${MUSIC_ZERO[key] ?? ''}`);
@@ -520,6 +524,7 @@ function asksForChange(music: EditMusic, patch: Partial<EditMusic>): boolean {
   const had = music as unknown as Record<string, unknown>;
   return Object.entries(patch).some(([key, value]) => {
     const was = had[key];
+    if (key === 'phaseMs' && typeof value === 'number') return Math.round(value) !== Math.round(typeof was === 'number' ? was : 0);
     const isTime = (MUSIC_TIMES as readonly string[]).includes(key) || (MUSIC_FADES as readonly string[]).includes(key);
     return isTime && typeof value === 'number' && typeof was === 'number' ? Math.round(value) !== Math.round(was) : value !== was;
   });
@@ -884,6 +889,7 @@ const OPS: Record<string, Apply> = {
       endMs: given.endMs ?? 0,
       volume: given.volume ?? 1,
       loop: given.loop ?? false,
+      ...(given.phaseMs ? { phaseMs: given.phaseMs } : {}),
       // Only when there is one, as the editor's own picker and the manifest's reader both have it:
       // absent is no fade in, and a 0 written in would be a sound neither of them would have made.
       ...(fadeInMs > 0 ? { fadeInMs } : {}),

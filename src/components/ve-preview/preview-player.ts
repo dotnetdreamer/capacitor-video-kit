@@ -3,6 +3,7 @@ import {
   compileTransition,
   findClip,
   musicFadeAt,
+  musicPhaseMs,
   musicSourceMsAt,
   musicWindow,
   sourceMsAt,
@@ -1897,7 +1898,7 @@ export class PreviewPlayer implements EditorPlayer {
     const musicLead = music && live ? this.leadWindow(this.musicEl) : 0;
     const heard = music ? musicWindow(music, total) : null;
     const musicAt =
-      music && heard && live ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= musicLead ? music.inMs + ms - heard.startMs : null)) : null;
+      music && heard && live ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= musicLead ? music.inMs + musicPhaseMs(music) + ms - heard.startMs : null)) : null;
     if (music && heard && musicAt !== null) {
       // The render fades the track in and out; the preview follows along.
       this.playAt(this.musicEl, musicAt, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running, musicSpan(music, heard.endMs - ms));

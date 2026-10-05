@@ -669,8 +669,26 @@ class ComposeSpecParserTest {
         assertEquals(400L, audio.music!!.fadeOutMs)
         // No stop on the wire: it plays to the end of the video.
         assertEquals(0L, audio.music!!.endMs)
+        assertEquals(0L, audio.music!!.phaseMs)
         assertEquals(1, audio.voiceover.size)
         assertEquals(1500L, audio.voiceover[0].durationMs)
+    }
+
+    @Test
+    fun `music phase is read with its sign`() {
+        val json = minimalJson().apply {
+            getJSONObject("audio").put(
+                "music",
+                JSONObject()
+                    .put("uri", "file:///m.m4a")
+                    .put("inMs", 2_000)
+                    .put("outMs", 5_000)
+                    .put("phaseMs", 7_500),
+            )
+        }
+        assertEquals(7_500L, ComposeSpecParser.parse(json).audio.music!!.phaseMs)
+        json.getJSONObject("audio").getJSONObject("music").put("phaseMs", -100)
+        assertEquals(-100L, ComposeSpecParser.parse(json).audio.music!!.phaseMs)
     }
 
     @Test

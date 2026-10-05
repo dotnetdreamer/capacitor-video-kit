@@ -1099,8 +1099,14 @@ class RenderPlan private constructor(
             // How long the file is, as far as the probe can say; null when it could not say.
             val probedMs = probes[music.uri]?.durationMs?.takeIf { it > 0L }
             val outMs = if (probedMs != null) min(music.outMs, probedMs) else music.outMs
-            val trackLenUs = (outMs - music.inMs) * 1000L
+            val sectionMs = outMs - music.inMs
+            val trackLenUs = sectionMs * 1000L
             if (trackLenUs <= 0L) return null
+
+            // A trim from the start advances the first pass within the selected section. Later
+            // passes still begin at its original in point, so the offset never grows each loop.
+            val phaseUs = Math.floorMod(music.phaseMs, sectionMs) * 1000L
+            val inUs = music.inMs * 1000L
 
             val startUs = music.startMs * 1000L
             // The end of the video, or the music's own stop when it has one before that.
@@ -1108,10 +1114,14 @@ class RenderPlan private constructor(
             val availableUs = stopUs - startUs
             if (availableUs <= 0L) return null
 
-            var reps = if (music.loop) {
-                max(1, ceil(availableUs.toDouble() / trackLenUs.toDouble()).toInt())
+            val firstLenUs = min(trackLenUs - phaseUs, availableUs)
+            // The same floor for music that starts under a millisecond before the end: nothing to hear.
+            if (firstLenUs < MIN_CLIP_US) return null
+            val remainingUs = if (music.loop) availableUs - firstLenUs else 0L
+            var fullReps = if (music.loop && remainingUs > 0L) {
+                ceil(remainingUs.toDouble() / trackLenUs.toDouble()).toInt()
             } else {
-                1
+                0
             }
             /*
              * A last repetition shorter than a frame is the video's rounding, not music, and is left
@@ -1121,21 +1131,19 @@ class RenderPlan private constructor(
              * duration of 0, and `Util.percentInt` in `ExoPlayerAssetLoader.getProgress` divided by
              * it and failed the export the moment progress was polled on it.
              */
-            if (reps > 1 && availableUs - (reps - 1) * trackLenUs < minRepetitionUs) reps--
-            val lastLenUs = if (music.loop) {
-                min(trackLenUs, availableUs - (reps - 1) * trackLenUs)
+            if (fullReps > 0 && remainingUs - (fullReps - 1) * trackLenUs < minRepetitionUs) fullReps--
+            val lastFullLenUs = if (fullReps > 0) {
+                min(trackLenUs, remainingUs - (fullReps - 1) * trackLenUs)
             } else {
-                min(trackLenUs, availableUs)
+                0L
             }
-            // The same floor for music that starts under a millisecond before the end: nothing to hear.
-            if (lastLenUs < MIN_CLIP_US) return null
 
-            val inUs = music.inMs * 1000L
             val fadeInUs = max(0L, music.fadeInMs) * 1000L
             val fadeOutUs = max(0L, music.fadeOutMs) * 1000L
             // Where the music really stops: the end of the last repetition laid, which is short of
             // `stopUs` by the sliver left off above, or the end of a section that plays once.
-            val endUs = startUs + (reps - 1) * trackLenUs + lastLenUs
+            val endUs = startUs + firstLenUs +
+                (if (fullReps > 0) (fullReps - 1) * trackLenUs + lastFullLenUs else 0L)
 
             /*
              * The fades belong to the window the music is heard in, `startUs..endUs`, and not to any
@@ -1147,14 +1155,15 @@ class RenderPlan private constructor(
              * each one's length, and a last repetition shorter than the fade out - a stop dropped
              * just past a seam - ended the music near full level with a hard cut.
              */
-            val items = (0 until reps).map { k ->
-                val atUs = startUs + k * trackLenUs
-                val lenUs = if (k == reps - 1) lastLenUs else trackLenUs
+            val items = (0..fullReps).map { k ->
+                val atUs = if (k == 0) startUs else startUs + firstLenUs + (k - 1) * trackLenUs
+                val itemInUs = if (k == 0) inUs + phaseUs else inUs
+                val lenUs = if (k == 0) firstLenUs else if (k == fullReps) lastFullLenUs else trackLenUs
                 val fadesIn = fadeInUs > 0L && atUs < startUs + fadeInUs
                 val fadesOut = fadeOutUs > 0L && atUs + lenUs > endUs - fadeOutUs
                 MusicItem(
-                    inUs = inUs,
-                    outUs = inUs + lenUs,
+                    inUs = itemInUs,
+                    outUs = itemInUs + lenUs,
                     gain = RampGainProvider(
                         level = music.volume,
                         fadeInUs = if (fadesIn) fadeInUs else 0L,
@@ -1163,7 +1172,7 @@ class RenderPlan private constructor(
                         fadeOutUs = if (fadesOut) fadeOutUs else 0L,
                     ),
                     atUs = atUs,
-                    decodeEndUs = decodeEndUs(inUs + lenUs, probedMs),
+                    decodeEndUs = decodeEndUs(itemInUs + lenUs, probedMs),
                 )
             }
             return MusicPlan(uri = music.uri, leadGapUs = startUs, items = items)

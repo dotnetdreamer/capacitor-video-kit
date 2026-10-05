@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MIN_LAYER_MS, type EditMusic } from '../../editor';
+import { MIN_LAYER_MS, musicSourceMsAt, type EditMusic } from '../../editor';
 import { musicEndTrim, musicStartTrim } from './timeline-drags';
 
 /** A thirty second track, used whole, laid at the start of the video. */
@@ -72,7 +72,43 @@ describe('musicStartTrim', () => {
 
   it('leaves some sound before the stop, when the track has one', () => {
     const music = track({ loop: true, startMs: 0, inMs: 0, endMs: 6000 });
-    expect(musicStartTrim(music, 9000, 20_000)).toEqual({ startMs: 6000 - MIN_LAYER_MS, inMs: 6000 - MIN_LAYER_MS });
+    expect(musicStartTrim(music, 9000, 20_000)).toEqual({ startMs: 6000 - MIN_LAYER_MS, phaseMs: 6000 - MIN_LAYER_MS });
+  });
+
+  it('trims a loop past its source duration without changing later sound', () => {
+    const music = track({ loop: true, outMs: 4000 });
+    const patch = musicStartTrim(music, 10_000, 20_000);
+    expect(patch).toEqual({ startMs: 10_000, phaseMs: 10_000 });
+    const trimmed = { ...music, ...patch };
+    for (const t of [10_000, 11_999, 12_000, 14_000, 18_000]) {
+      expect(musicSourceMsAt(trimmed, t, 20_000)).toBe(musicSourceMsAt(music, t, 20_000));
+    }
+  });
+
+  it('can drag a loop back across a seam after trimming it', () => {
+    const music = track({ loop: true, outMs: 4000, startMs: 10_000, phaseMs: 2000 });
+    expect(musicStartTrim(music, 9000, 20_000)).toEqual({ startMs: 9000, phaseMs: 1000 });
+    expect(musicStartTrim(music, 7000, 20_000)).toEqual({ startMs: 7000, phaseMs: -1000 });
+  });
+
+  it('keeps signed phase when extending left across a loop seam', () => {
+    const music = track({ loop: true, sourceDurationMs: 11_975, startMs: 5000 });
+    const patch = musicStartTrim(music, 0, 20_000);
+    expect(patch).toEqual({ startMs: 0, phaseMs: -5000 });
+    expect(musicSourceMsAt({ ...music, ...patch }, 5000, 20_000)).toBe(0);
+  });
+
+  it('keeps a first-pass offset when a loop is turned off and trimmed again', () => {
+    const music = track({ loop: false, inMs: 1000, outMs: 8000, phaseMs: 2000, startMs: 5000 });
+    expect(musicStartTrim(music, 6000, 20_000)).toEqual({ startMs: 6000, inMs: 4000, phaseMs: 0 });
+    expect(musicEndTrim(music, 7500, 20_000)).toEqual({ outMs: 5500, endMs: 0, inMs: 3000, phaseMs: 0 });
+  });
+
+  it('does not change the first source sample when trimming the end after turning Loop off', () => {
+    const music = track({ loop: false, outMs: 4000, phaseMs: 10_000 });
+    const patch = musicEndTrim(music, 1000, 20_000);
+    expect(patch).toEqual({ outMs: 3000, endMs: 0, inMs: 2000, phaseMs: 0 });
+    expect(musicSourceMsAt({ ...music, ...patch }, 0, 20_000)).toBe(musicSourceMsAt(music, 0, 20_000));
   });
 });
 

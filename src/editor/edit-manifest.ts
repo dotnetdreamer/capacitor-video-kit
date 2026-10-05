@@ -333,6 +333,8 @@ export interface EditMusic {
   volume: number;
   /** Repeat the section until the video ends, or until `endMs` when it is set. */
   loop: boolean;
+  /** Signed elapsed time into the repeated section at the first output frame; may span multiple loops. */
+  phaseMs?: number;
   /**
    * Up from silence at the start of the sound. Absent is no fade in, which is every sound added
    * before there was one - and every template's score, which comes in on the beat.
@@ -1842,6 +1844,7 @@ export function normaliseManifest(input: unknown): EditManifest {
         endMs: endAfter(musicStartMs, Math.max(0, num(m.endMs, 0))),
         volume: clamp(num(m.volume, 0.6), 0, 1),
         loop: m.loop ?? true,
+        ...(num(m.phaseMs, 0) !== 0 ? { phaseMs: Math.round(num(m.phaseMs, 0)) } : {}),
         // Only when there is one, so a sound saved before fades in existed reads back as it was.
         ...(num(m.fadeInMs, 0) > 0 ? { fadeInMs: num(m.fadeInMs, 0) } : {}),
         fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),

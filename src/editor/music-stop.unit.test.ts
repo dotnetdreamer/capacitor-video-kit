@@ -51,6 +51,21 @@ describe('musicWindow', () => {
     expect(musicSourceMsAt(m, 9499, 20_000)).toBe(1499);
     expect(musicSourceMsAt(m, 9500, 20_000)).toBeNull();
   });
+
+  it('starts partway through a loop, then repeats its full section', () => {
+    const m = music({ phaseMs: 2500 });
+    expect(musicSourceMsAt(m, 0, 20_000)).toBe(2500);
+    expect(musicSourceMsAt(m, 1499, 20_000)).toBe(3999);
+    expect(musicSourceMsAt(m, 1500, 20_000)).toBe(0);
+    expect(musicSourceMsAt(m, 5500, 20_000)).toBe(0);
+  });
+
+  it('plays only the rest of the first pass when looping is turned off', () => {
+    const m = music({ loop: false, phaseMs: 2500 });
+    expect(musicWindow(m, 20_000)).toEqual({ startMs: 0, endMs: 1500 });
+    expect(musicSourceMsAt(m, 1000, 20_000)).toBe(3500);
+    expect(musicSourceMsAt(m, 1500, 20_000)).toBeNull();
+  });
 });
 
 describe('musicMovedTo', () => {
@@ -109,6 +124,10 @@ describe('on the wire', () => {
 
   it('sends a stop that cuts the sound short', async () => {
     expect((await wire(music({ endMs: 9500 }))).audio.music?.endMs).toBe(9500);
+  });
+
+  it('sends the first-pass phase of a trimmed loop', async () => {
+    expect((await wire(music({ phaseMs: 2500 }))).audio.music?.phaseMs).toBe(2500);
   });
 
   it('leaves the key off for a sound that plays to the end, so the spec is the one it always was', async () => {

@@ -1150,7 +1150,7 @@ enum CompositionBuilder {
 
     /// Lays the music out as explicit repetitions of the trimmed piece, which is what Android does:
     /// a looping sequence would repeat the leading gap, and a non-looping one longer than the video
-    /// would extend the whole composition.
+    /// would extend the whole composition. Only the first pass begins at the requested phase.
     private static func addMusic(_ m: ComposeMusic,
                                  to comp: AVMutableComposition,
                                  total: CMTime,
@@ -1184,6 +1184,13 @@ enum CompositionBuilder {
         // 12000, and the 25 ms between them is the song, so stopping short of it clicked at every
         // loop seam.
         let piece = CMTimeRange(start: ms(m.inMs), end: ms(outEffMs))
+        // Use the effective section length after the source-end clamp. Swift's remainder can be
+        // negative, so wrap it into the section for a phase that moves the loop start earlier.
+        let sectionMs = outEffMs - m.inMs
+        let remainderMs = m.phaseMs % sectionMs
+        let offsetMs = remainderMs < 0 ? remainderMs + sectionMs : remainderMs
+        let firstStartMs = m.inMs + offsetMs
+        let firstPiece = CMTimeRange(start: ms(firstStartMs), end: ms(outEffMs))
         // Nothing pads the lead gap: the track is empty before the first insert and AVFoundation
         // writes that empty segment itself, which is Android's `addGap(leadGapUs)`.
         let start = ms(m.startMs)
@@ -1194,7 +1201,8 @@ enum CompositionBuilder {
             guard room > .zero else { break }
             // The last pass is clipped to the room left, never allowed past the end of the video or
             // the stop. That is Android's `lastLenUs = available - (reps - 1) * trackLen`.
-            let slice = CMTimeRange(start: piece.start, duration: CMTimeMinimum(piece.duration, room))
+            let pass = slices == 0 ? firstPiece : piece
+            let slice = CMTimeRange(start: pass.start, duration: CMTimeMinimum(pass.duration, room))
             do {
                 try track.insertTimeRange(slice, of: src.track, at: at)
             } catch {

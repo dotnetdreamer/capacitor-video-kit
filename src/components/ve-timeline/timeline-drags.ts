@@ -1,4 +1,4 @@
-import { MIN_LAYER_MS, clamp, musicStopMs, type ClipDropTarget, type EditMusic } from '../../editor';
+import { MIN_LAYER_MS, clamp, musicPhaseMs, musicSectionMs, musicStopMs, type ClipDropTarget, type EditMusic } from '../../editor';
 import type { CoalesceKey } from '../../state/editor-store';
 
 import type { DropRow } from './timeline-geometry';
@@ -293,20 +293,30 @@ export type TimelineDrag =
   | ScrubDrag;
 
 /**
- * The music's left handle trims the START of what is heard: the track's in point and its place on
- * the timeline move together, so the sound that was under the handle stays where it was on the
- * video. It can go neither before the start of the video nor before the start of the track, and
- * must leave at least [MIN_LAYER_MS] of section, and of sound before its stop.
+ * The music's left handle trims the START of what is heard. For a single play, the source in point
+ * and timeline start move together. A loop keeps its full source section and moves its first-play
+ * phase with the timeline start, allowing the edge to cross any number of repeats while the sound
+ * at later points in the video remains the same.
  */
 export function musicStartTrim(music0: EditMusic, newStartMs: number, totalMs: number): Partial<EditMusic> {
+  if (music0.loop && musicSectionMs(music0) > 0) {
+    const minDelta = -music0.startMs;
+    const maxDelta = musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs;
+    const delta = Math.round(clamp(newStartMs - music0.startMs, minDelta, Math.max(minDelta, maxDelta)));
+    const phase = (music0.phaseMs ?? 0) + delta;
+    // Keep whole cycles on the wire: the native reader may measure an AAC file a few milliseconds
+    // differently from the WebView, and must wrap against its own measured section length.
+    return { startMs: music0.startMs + delta, phaseMs: phase };
+  }
   const out = music0.outMs > 0 ? music0.outMs : music0.sourceDurationMs;
-  const minDelta = Math.max(-music0.startMs, -music0.inMs);
+  const inMs = music0.inMs + musicPhaseMs(music0);
+  const minDelta = Math.max(-music0.startMs, -inMs);
   const maxDelta = Math.min(
     musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs,
-    out > 0 ? out - MIN_LAYER_MS - music0.inMs : Number.POSITIVE_INFINITY,
+    out > 0 ? out - MIN_LAYER_MS - inMs : Number.POSITIVE_INFINITY,
   );
   const delta = Math.round(clamp(newStartMs - music0.startMs, minDelta, Math.max(minDelta, maxDelta)));
-  return { startMs: music0.startMs + delta, inMs: music0.inMs + delta };
+  return { startMs: music0.startMs + delta, inMs: inMs + delta, ...(music0.phaseMs ? { phaseMs: 0 } : {}) };
 }
 
 /**
@@ -326,9 +336,10 @@ export function musicEndTrim(music0: EditMusic, newEndMs: number, totalMs: numbe
     const end = Math.round(clamp(newEndMs, music0.startMs + MIN_LAYER_MS, totalMs));
     return { endMs: end >= totalMs ? 0 : end };
   }
-  const maxLength = music0.sourceDurationMs > 0 ? music0.sourceDurationMs - music0.inMs : Number.POSITIVE_INFINITY;
+  const inMs = music0.inMs + musicPhaseMs(music0);
+  const maxLength = music0.sourceDurationMs > 0 ? music0.sourceDurationMs - inMs : Number.POSITIVE_INFINITY;
   const length = clamp(Math.min(newEndMs, totalMs) - music0.startMs, MIN_LAYER_MS, Math.max(MIN_LAYER_MS, maxLength));
-  return { outMs: Math.round(music0.inMs + length), endMs: 0 };
+  return { outMs: Math.round(inMs + length), endMs: 0, ...(music0.phaseMs ? { inMs, phaseMs: 0 } : {}) };
 }
 
 /**

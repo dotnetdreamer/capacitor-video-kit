@@ -255,6 +255,7 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
         ? {
             uri: nonEmpty(music.uri, 'audio.music.uri'),
             startMs: Math.max(0, finite(music.startMs, 0)),
+            ...(finite(music.phaseMs, 0) !== 0 ? { phaseMs: finite(music.phaseMs, 0) } : {}),
             inMs: Math.max(0, finite(music.inMs, 0)),
             outMs: Math.max(0, finite(music.outMs, 0)),
             ...(finite(music.endMs, 0) > 0 ? { endMs: finite(music.endMs, 0) } : {}),

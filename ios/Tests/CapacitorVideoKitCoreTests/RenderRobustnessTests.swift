@@ -114,6 +114,66 @@ final class RenderRobustnessTests: RenderTestCase {
 
     // MARK: - Music
 
+    func testMusicPhaseDefaultsToZeroAndRetainsSignedValues() throws {
+        let url = file("a.mp4")
+        var music: [String: Any] = ["uri": file("tone.wav").absoluteString, "inMs": 200, "outMs": 1000]
+        func parse() throws -> ComposeSpec {
+            try TestCalls.parse(TestSpecs.spec([TestSpecs.clip("v", url, outMs: 1000)], [
+                "audio": ["music": music],
+            ]))
+        }
+
+        XCTAssertEqual(try parse().audio.music?.phaseMs, 0)
+        music["phaseMs"] = -400
+        XCTAssertEqual(try parse().audio.music?.phaseMs, -400)
+        music["phaseMs"] = 1150
+        XCTAssertEqual(try parse().audio.music?.phaseMs, 1150)
+    }
+
+    func testMusicPhaseOffsetsOnlyTheFirstLoopPass() async throws {
+        let video = try await TestMedia.video(file("red.mp4"), durationMs: 2000, color: .red, audio: false)
+        let music = try RobustnessSupport.wav(file("tone.wav"), durationMs: 1200)
+        let options = TestSpecs.spec([TestSpecs.clip("v", video, outMs: 2000)], [
+            "audio": ["originalMuted": false, "originalVolume": 1, "voiceover": [Any](),
+                      "music": ["uri": music.absoluteString, "startMs": 100, "inMs": 200,
+                                "outMs": 1000, "phaseMs": -500, "endMs": 1750,
+                                "volume": 1, "loop": true, "fadeInMs": 0, "fadeOutMs": 0]],
+        ])
+        let built = try await RobustnessSupport.build(options)
+        let track = try XCTUnwrap(built.composition.tracks(withMediaType: .audio).first)
+        let passes = track.segments.filter { !$0.isEmpty }
+        // -500 wraps to 300 inside an 800 ms section: first 500...1000, then the
+        // full 200...1000, then the last 350 ms up to the output stop at 1750.
+        let expected: [(source: Double, target: Double, duration: Double)] = [
+            (0.5, 0.1, 0.5), (0.2, 0.6, 0.8), (0.2, 1.4, 0.35),
+        ]
+        XCTAssertEqual(passes.count, expected.count)
+        for (pass, want) in zip(passes, expected) {
+            XCTAssertEqual(pass.timeMapping.source.start.seconds, want.source, accuracy: 0.001)
+            XCTAssertEqual(pass.timeMapping.target.start.seconds, want.target, accuracy: 0.001)
+            XCTAssertEqual(pass.timeMapping.target.duration.seconds, want.duration, accuracy: 0.001)
+        }
+    }
+
+    func testNonLoopingMusicPhasePlaysOnlyTheRemainder() async throws {
+        let video = try await TestMedia.video(file("red.mp4"), durationMs: 2000, color: .red, audio: false)
+        let music = try RobustnessSupport.wav(file("tone.wav"), durationMs: 1200)
+        let options = TestSpecs.spec([TestSpecs.clip("v", video, outMs: 2000)], [
+            "audio": ["originalMuted": false, "originalVolume": 1, "voiceover": [Any](),
+                      "music": ["uri": music.absoluteString, "startMs": 100, "inMs": 200,
+                                "outMs": 1000, "phaseMs": 1150,
+                                "volume": 1, "loop": false, "fadeInMs": 0, "fadeOutMs": 0]],
+        ])
+        let built = try await RobustnessSupport.build(options)
+        let track = try XCTUnwrap(built.composition.tracks(withMediaType: .audio).first)
+        let passes = track.segments.filter { !$0.isEmpty }
+        XCTAssertEqual(passes.count, 1)
+        let pass = try XCTUnwrap(passes.first)
+        XCTAssertEqual(pass.timeMapping.source.start.seconds, 0.55, accuracy: 0.001)
+        XCTAssertEqual(pass.timeMapping.target.start.seconds, 0.1, accuracy: 0.001)
+        XCTAssertEqual(pass.timeMapping.target.duration.seconds, 0.45, accuracy: 0.001)
+    }
+
     func testMusicTrimmedPastTheEndOfItsFileIsDropped() async throws {
         let video = try await TestMedia.video(file("red.mp4"), durationMs: 1000, color: .red, audio: false)
         let music = try RobustnessSupport.wav(file("tone.wav"), durationMs: 1000)
