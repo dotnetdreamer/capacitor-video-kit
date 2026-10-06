@@ -3455,7 +3455,8 @@ export class VeTimeline {
             {/* Fixed over everything, never part of the scrolling content. */}
             <div class="tl__playhead" key="playhead" aria-hidden="true"></div>
 
-            {reorder ? this.reorderRail(reorder) : compact ? null : [this.addButton(), store.timelineAddMenuOpen.value ? this.addMenu() : null]}
+            {/* In compact mode as well: the slim timeline under a sheet is where clips are added too. */}
+            {reorder ? this.reorderRail(reorder) : [this.addButton(), store.timelineAddMenuOpen.value ? this.addMenu() : null]}
           </div>
         </Host>
       );

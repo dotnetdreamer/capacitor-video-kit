@@ -6,7 +6,7 @@ import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.
 import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
-import { clipWaveKey, type Filmstrip } from './editor.types';
+import { clipWaveKey, type Filmstrip, type SoundReplaceTarget } from './editor.types';
 
 /** One filmstrip frame per second of source, the TikTok density at the default zoom. */
 const FILMSTRIP_STEP_MS = 1000;
@@ -490,16 +490,21 @@ export class EditorMedia {
 
   /**
    * The door every "Add sound" in the editor goes through: the Sound menu, the timeline's own
-   * button and the music row's Replace.
+   * buttons, and with `replace` a sound row's Replace, whose pick goes in place of that sound.
    *
    * A host with a library gets the Sound sheet, where extracting one is the first thing on it. A
    * host without one gets the file picker straight away, exactly as every host did before the
    * library existed - a sheet whose only content is one button is worse than the button.
    */
-  openSound(): void {
+  openSound(replace: SoundReplaceTarget | null = null): void {
     this.store.pause();
-    if (this.host.media.sounds) this.store.openPanel('sound');
-    else void this.pickMusic();
+    if (this.host.media.sounds) {
+      this.store.openSoundSheet(replace);
+    } else {
+      // No sheet to hold the choice, so it is held for the picker's one answer; see [pickMusic].
+      this.store.soundReplaceTarget.value = replace;
+      void this.pickMusic();
+    }
   }
 
   async pickMusic(): Promise<void> {
@@ -523,6 +528,8 @@ export class EditorMedia {
       this.useTrack(picked.uri, picked.fileName || 'Music', picked.sourceDurationMs);
     } finally {
       this.busy.value = false;
+      // A Replace with no sheet to stay open on was for this one answer, a pick or a cancel.
+      if (this.store.panel.value !== 'sound') this.store.soundReplaceTarget.value = null;
     }
   }
 
@@ -693,12 +700,19 @@ export class EditorMedia {
   /**
    * Puts a track on the post, from wherever it came from.
    *
-   * Each pick is another sound on the output timeline. The selected audio lane is tried first,
-   * directly after its selected clip; otherwise the playhead is used. When that lane has no room,
-   * the store finds another lane or opens one.
+   * From a Replace it goes in place of that sound ([EditorStore.soundReplaceTarget]). Otherwise each
+   * pick is another sound on the output timeline. The selected audio lane is tried first, directly
+   * after its selected clip; otherwise the playhead is used. When that lane has no room, the store
+   * finds another lane or opens one.
    */
   private useTrack(uri: string, fileName: string, sourceDurationMs: number): void {
     this.landOpenTextEdit();
+    const replacing = this.store.soundReplaceTarget.value;
+    if (replacing?.kind === 'audio' && this.store.replaceAudioClip(replacing.id, { uri, fileName, sourceDurationMs })) return;
+    if (replacing?.kind === 'music' && this.store.manifest.value.music) {
+      this.replaceMusic(uri, fileName, sourceDurationMs);
+      return;
+    }
     const selected = this.store.selectedAudio.value;
     const legacy = this.store.selection.value?.kind === 'music' ? this.store.manifest.value.music : null;
     const anchor = selected ?? legacy;
@@ -724,6 +738,34 @@ export class EditorMedia {
     if (this.store.addAudioClip(sound)) return;
     this.store.showToast('There is no room for that audio on this timeline');
     this.store.haptic('warning');
+  }
+
+  /**
+   * An older edit's one sound swapped for another, as Replace did it before there were lanes. The
+   * volume and the two fades are carried over: they are what the volume sheet sets by hand, and having
+   * them reset every time a different song is tried is the difference between comparing two tracks
+   * and setting the sound up twice.
+   */
+  private replaceMusic(uri: string, fileName: string, sourceDurationMs: number): void {
+    const existing = this.store.manifest.value.music;
+    if (!existing) return;
+    const fadeInMs = existing.fadeInMs ?? 0;
+    this.store.setMusic(
+      {
+        uri,
+        fileName,
+        sourceDurationMs,
+        inMs: 0,
+        outMs: 0,
+        startMs: 0,
+        endMs: 0,
+        volume: existing.volume,
+        loop: true,
+        ...(fadeInMs > 0 ? { fadeInMs } : {}),
+        fadeOutMs: existing.fadeOutMs,
+      },
+      'Replace sound',
+    );
   }
 
   private landOpenTextEdit(): void {

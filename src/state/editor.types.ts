@@ -39,6 +39,9 @@ export type ToolbarMode = 'root' | 'text';
  */
 export type VolumeTarget = { kind: 'clip'; id: string } | { kind: 'music' } | { kind: 'audio'; id: string } | { kind: 'voice'; id: string };
 
+/** The sound the Sound sheet's next pick goes in place of, while a Replace tile has it open. */
+export type SoundReplaceTarget = { kind: 'music' } | { kind: 'audio'; id: string };
+
 /** Frames cut from one source clip for the filmstrip, one every `stepMs` of SOURCE time. */
 /**
  * What a video source's own sound is filed under in `store.waveforms`.

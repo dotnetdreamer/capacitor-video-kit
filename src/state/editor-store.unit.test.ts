@@ -183,6 +183,21 @@ describe('EditorStore', () => {
     expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.startMs)).toEqual([2000, 4000]);
   });
 
+  it('forgets what the Sound sheet was replacing once the sheet goes', () => {
+    store.openSoundSheet({ kind: 'music' });
+    expect(store.panel.value).toBe('sound');
+    expect(store.soundReplaceTarget.value).toEqual({ kind: 'music' });
+    store.openPanel('volume');
+    expect(store.soundReplaceTarget.value).toBeNull();
+
+    store.openSoundSheet({ kind: 'audio', id: 'a' });
+    store.closePanel();
+    expect(store.soundReplaceTarget.value).toBeNull();
+    // Every other way in adds.
+    store.openSoundSheet();
+    expect(store.soundReplaceTarget.value).toBeNull();
+  });
+
   it('migrates selected legacy music in the same add step and undo restores the old edit', () => {
     const original = load({ music: { ...MUSIC, sourceDurationMs: 2000, loop: false } });
     store.select({ kind: 'music' });

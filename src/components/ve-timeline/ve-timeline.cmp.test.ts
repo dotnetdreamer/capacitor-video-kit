@@ -1281,6 +1281,30 @@ describe('the timeline add button', () => {
   });
 });
 
+describe('the timeline add button under a compact sheet', () => {
+  it('stays on the slim timeline, with its choices in a row beside it', async () => {
+    const { tl } = await mount();
+    // What ve-editor gives the timeline while a compact sheet is open.
+    tl.parentElement!.style.height = '96px';
+    (tl as HTMLElement & { compact: boolean }).compact = true;
+    await until('the compact timeline', () => !!root(tl).querySelector('.tl--compact'));
+    const add = root(tl).querySelector<HTMLButtonElement>('.tl__add');
+    expect(add).not.toBeNull();
+
+    add!.click();
+    await until('the add choices', () => !!root(tl).querySelector('.tl__add-menu'));
+    const host = tl.getBoundingClientRect();
+    const menu = root(tl).querySelector('.tl__add-menu')!.getBoundingClientRect();
+    const button = add!.getBoundingClientRect();
+    // All of it inside the 96px the timeline has - the host clips anything past that - and none of
+    // it over the button.
+    expect(menu.top).toBeGreaterThanOrEqual(host.top);
+    expect(menu.bottom).toBeLessThanOrEqual(host.bottom);
+    expect(menu.right).toBeLessThanOrEqual(button.left);
+    expect([...root(tl).querySelectorAll('.tl__add-menu button')].map(choice => choice.textContent)).toEqual(['Video', 'Audio']);
+  });
+});
+
 describe('audio lanes', () => {
   it('shows sequential clips together, overlaps on another lane, and drops a clip between lanes', async () => {
     const { store, tl } = await mount();

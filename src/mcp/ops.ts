@@ -54,6 +54,7 @@ import {
   qualityOf,
   totalDurationMs,
   type EditAdjust,
+  type EditAudioClip,
   type EditClip,
   type EditFit,
   type EditManifest,
@@ -71,9 +72,15 @@ import {
 import { OVERLAY_ANIMATIONS, normaliseOverlayAnimation } from '../editor/motion';
 import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
 import {
+  addAudioClip,
   addOverlay,
   addVideoTrack,
   addVoiceover,
+  findAudioClip,
+  moveAudioClipToTrack,
+  patchAudioClip,
+  removeAudioClip,
+  type AudioDropTarget,
   duplicateClip,
   duplicateOverlay,
   findClip,
@@ -317,6 +324,18 @@ function requireVoiceover(manifest: EditManifest, id: string): EditVoiceover {
   return take;
 }
 
+function requireAudio(manifest: EditManifest, id: string): EditAudioClip {
+  const clip = findAudioClip(manifest, id);
+  const ids = (manifest.audioTracks ?? []).flatMap(track => track.clips.map(one => one.id));
+  if (!clip) throw new Error(`no sound "${id}" on the audio lanes - sounds on this post: ${ids.join(', ') || 'none'}`);
+  return clip;
+}
+
+function requireAudioLane(manifest: EditManifest, trackId: string): void {
+  const ids = (manifest.audioTracks ?? []).map(track => track.id);
+  if (!ids.includes(trackId)) throw new Error(`no audio lane "${trackId}" - lanes on this post: ${ids.join(', ') || 'none'}`);
+}
+
 /** Every clip id on the post, base track and video tracks together - the ids an op may name. */
 function clipIds(manifest: EditManifest): string[] {
   return [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)].map(clip => clip.id);
@@ -514,6 +533,41 @@ function musicRefusal(music: Pick<EditMusic, 'inMs' | 'outMs' | 'startMs' | 'end
     return `the sound would stop at "endMs" ${endMs}, and "endMs" must be 0 (until the end) or at least ${MIN_LAYER_MS}ms after "startMs", which is ${startMs}`;
   }
   return null;
+}
+
+/**
+ * A whole sound out of an op's object - `setMusic`'s `music`, `addAudio`'s `sound` - with the defaults
+ * and the refusals both share; `path` names it in a message.
+ *
+ * A null field is the default here, as an absent one is everywhere in this file. Only a sound's own
+ * field is dropped for being null, though: any other key goes on to [musicFields] and is refused there
+ * by name. Dropped with the rest, `fadeOut: null` for `fadeOutMs` was taken without a word - the
+ * misspelling the op reference promises to refuse, let through because the value it was sent with
+ * happened to be the one that means "the default".
+ */
+function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
+  const given = musicFields(Object.fromEntries(Object.entries(raw).filter(([key, value]) => value !== null || !(MUSIC_FIELDS as readonly string[]).includes(key))), path);
+  if (given.uri === undefined) throw new Error(`"${path}.uri" must be a non-empty string`);
+  const fadeInMs = given.fadeInMs ?? 0;
+  const music: EditMusic = {
+    uri: given.uri,
+    fileName: given.fileName ?? '',
+    sourceDurationMs: given.sourceDurationMs ?? 0,
+    inMs: given.inMs ?? 0,
+    outMs: given.outMs ?? 0,
+    startMs: given.startMs ?? 0,
+    endMs: given.endMs ?? 0,
+    volume: given.volume ?? 1,
+    loop: given.loop ?? false,
+    ...(given.phaseMs ? { phaseMs: given.phaseMs } : {}),
+    // Only when there is one, as the editor's own picker and the manifest's reader both have it:
+    // absent is no fade in, and a 0 written in would be a sound neither of them would have made.
+    ...(fadeInMs > 0 ? { fadeInMs } : {}),
+    fadeOutMs: given.fadeOutMs ?? 0,
+  };
+  const refusal = musicRefusal(music);
+  if (refusal) throw new Error(refusal);
+  return music;
 }
 
 /**
@@ -871,33 +925,7 @@ const OPS: Record<string, Apply> = {
   setMusic: (manifest, op) => {
     const raw = nullableObject(op, 'music');
     if (raw === null) return setMusic(manifest, null);
-    // A null field is the default here, as an absent one is everywhere in this file. Only a sound's
-    // own field is dropped for being null, though: any other key goes on to [musicFields] and is
-    // refused there by name. Dropped with the rest, `fadeOut: null` for `fadeOutMs` was taken
-    // without a word - the misspelling the op reference promises to refuse, let through because
-    // the value it was sent with happened to be the one that means "the default".
-    const given = musicFields(Object.fromEntries(Object.entries(raw).filter(([key, value]) => value !== null || !(MUSIC_FIELDS as readonly string[]).includes(key))), 'music');
-    if (given.uri === undefined) throw new Error('"music.uri" must be a non-empty string');
-    const fadeInMs = given.fadeInMs ?? 0;
-    const music: EditMusic = {
-      uri: given.uri,
-      fileName: given.fileName ?? '',
-      sourceDurationMs: given.sourceDurationMs ?? 0,
-      inMs: given.inMs ?? 0,
-      outMs: given.outMs ?? 0,
-      startMs: given.startMs ?? 0,
-      endMs: given.endMs ?? 0,
-      volume: given.volume ?? 1,
-      loop: given.loop ?? false,
-      ...(given.phaseMs ? { phaseMs: given.phaseMs } : {}),
-      // Only when there is one, as the editor's own picker and the manifest's reader both have it:
-      // absent is no fade in, and a 0 written in would be a sound neither of them would have made.
-      ...(fadeInMs > 0 ? { fadeInMs } : {}),
-      fadeOutMs: given.fadeOutMs ?? 0,
-    };
-    const refusal = musicRefusal(music);
-    if (refusal) throw new Error(refusal);
-    return setMusic(manifest, music);
+    return setMusic(manifest, soundOf(raw, 'music'));
   },
 
   /*
@@ -931,6 +959,63 @@ const OPS: Record<string, Apply> = {
       throw new Error(reason ?? `the editor did not take ${JSON.stringify(patch)}, and the music is as it was`);
     }
     return next;
+  },
+
+  /*
+   * The audio lanes: sounds placed anywhere on the post, more than one at a time. A lane plays one
+   * sound at a time, so a sound goes on the lane the agent names, or on the first lane with room for
+   * it, or on a lane of its own - which is how two sounds overlap. A post's music, the one sound an
+   * edit had before there were lanes, joins them as the first lane on the first add, exactly as it
+   * does in the editor ([addAudioClip]).
+   */
+  addAudio: (manifest, op) => {
+    const id = str(op, 'id');
+    if (findAudioClip(manifest, id)) throw new Error(`sound id "${id}" is already on this post`);
+    const sound = soundOf(object(op, 'sound'), 'sound');
+    const trackId = optionalStr(op, 'trackId');
+    if (trackId !== undefined) requireAudioLane(manifest, trackId);
+    const newTrackId = optionalStr(op, 'newTrackId') ?? `lane-${id}`;
+    const next = addAudioClip(manifest, { ...sound, id }, newTrackId, trackId);
+    if (!next) {
+      throw new Error(
+        trackId !== undefined
+          ? `"${id}" does not fit on lane "${trackId}" at ${sound.startMs}ms - sounds on one lane never overlap; leave trackId out for a lane with room, or a new one`
+          : `"${id}" cannot go on the post at ${sound.startMs}ms - a sound is heard for at least ${MIN_LAYER_MS}ms before the post ends, and a new lane needs an id ("${newTrackId}") no lane has`,
+      );
+    }
+    return next;
+  },
+
+  /* [patchMusic]'s rules, for one sound on the lanes, and refused when it would meet its neighbour. */
+  patchAudio: (manifest, op) => {
+    const id = str(op, 'id');
+    const clip = requireAudio(manifest, id);
+    const patch = musicFields(object(op, 'patch'), 'patch');
+    if (patch.startMs !== undefined && patch.endMs === undefined && clip.endMs > 0) {
+      Object.assign(patch, musicMovedTo(clip, patch.startMs, totalDurationMs(manifest)));
+    }
+    const next = patchAudioClip(manifest, id, patch);
+    if (next === manifest && asksForChange(clip, patch)) {
+      const reason = musicRefusal({ ...clip, ...patch });
+      throw new Error(reason ?? `the editor did not take ${JSON.stringify(patch)} - "${id}" would meet another sound on its lane or go unheard, and is as it was`);
+    }
+    return next;
+  },
+
+  moveAudioToTrack: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudio(manifest, id);
+    const target = readAudioDropTarget(manifest, object(op, 'target'));
+    const newTrackId = optionalStr(op, 'newTrackId') ?? `lane-${id}`;
+    const next = moveAudioClipToTrack(manifest, id, target, num(op, 'atMs'), newTrackId);
+    if (!next) throw new Error(`"${id}" cannot be moved there - the lane has no gap that holds it whole, or a new lane needs an id ("${newTrackId}") no lane has`);
+    return next;
+  },
+
+  removeAudio: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudio(manifest, id);
+    return removeAudioClip(manifest, id);
   },
 
   addVoiceover: (manifest, op) => {
@@ -1252,5 +1337,14 @@ function readDropTarget(manifest: EditManifest, raw: Record<string, unknown>): C
   if (kind === 'new') return { kind: 'new', index: num(raw, 'index') };
   const trackId = str(raw, 'trackId');
   requireTrack(manifest, trackId);
+  return { kind: 'track', trackId };
+}
+
+/** [readDropTarget] for the audio lanes, which have no base row: a lane, or a new one at `index`. */
+function readAudioDropTarget(manifest: EditManifest, raw: Record<string, unknown>): AudioDropTarget {
+  const kind = oneOf(raw, 'kind', ['track', 'new'] as const);
+  if (kind === 'new') return { kind: 'new', index: num(raw, 'index') };
+  const trackId = str(raw, 'trackId');
+  requireAudioLane(manifest, trackId);
   return { kind: 'track', trackId };
 }

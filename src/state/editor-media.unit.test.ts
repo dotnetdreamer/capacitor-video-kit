@@ -434,6 +434,40 @@ describe('EditorMedia', () => {
       expect(store.manifest.value.music).toBeNull();
     });
 
+    it('puts a pick in place of the sound a Replace was opened for, keeping its place, level and fades', async () => {
+      const picks = vi
+        .fn()
+        .mockResolvedValueOnce({ uri: 'blob:first', fileName: 'first.m4a', sourceDurationMs: 3000 })
+        .mockResolvedValue({ uri: 'blob:other', fileName: 'other.m4a', sourceDurationMs: 4000 });
+      open(fakeMedia({ pickAudio: picks }));
+      await media.pickMusic();
+      const id = store.selectedAudio.value!.id;
+      store.commitAudioClip(id, { volume: 0.25, fadeOutMs: 2000 }, 'Volume');
+      const { startMs } = store.selectedAudio.value!;
+
+      media.openSound({ kind: 'audio', id });
+      await vi.waitFor(() => expect(store.selectedAudio.value?.uri).toBe('blob:other'));
+
+      expect(store.manifest.value.audioTracks?.flatMap(track => track.clips)).toEqual([
+        expect.objectContaining({ id, uri: 'blob:other', fileName: 'other.m4a', sourceDurationMs: 4000, startMs, volume: 0.25, fadeOutMs: 2000 }),
+      ]);
+      // That Replace was for one pick: the next one adds a sound.
+      expect(store.soundReplaceTarget.value).toBeNull();
+      await media.pickMusic();
+      expect(store.manifest.value.audioTracks?.flatMap(track => track.clips)).toHaveLength(2);
+    });
+
+    it("replaces an older edit's one sound in place, keeping its level and fades, as before there were lanes", async () => {
+      open(fakeMedia({ pickAudio: vi.fn(async () => ({ uri: 'blob:other', fileName: 'other.m4a', sourceDurationMs: 4000 })) }));
+      store.setMusic({ uri: 'blob:legacy', fileName: 'legacy', sourceDurationMs: 2000, inMs: 0, outMs: 0, startMs: 0, endMs: 0, volume: 0.25, loop: true, fadeInMs: 300, fadeOutMs: 900 });
+
+      media.openSound({ kind: 'music' });
+      await vi.waitFor(() => expect(store.manifest.value.music?.uri).toBe('blob:other'));
+
+      expect(store.manifest.value.music).toMatchObject({ fileName: 'other.m4a', volume: 0.25, fadeInMs: 300, fadeOutMs: 900, loop: true, startMs: 0 });
+      expect(store.manifest.value.audioTracks).toBeUndefined();
+    });
+
     it('appends new picks after selected legacy music on the same lane', async () => {
       open(fakeMedia({ pickAudio: vi.fn(async () => ({ uri: 'blob:short', fileName: 'short.m4a', sourceDurationMs: 2000 })) }));
       store.setMusic({ uri: 'blob:legacy', fileName: 'legacy', sourceDurationMs: 2000, inMs: 0, outMs: 0, startMs: 0, endMs: 0, volume: 0.5, loop: false, fadeOutMs: 0 });

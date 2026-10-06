@@ -1490,6 +1490,34 @@ export function setAudioLoop(manifest: EditManifest, id: string, loop: boolean):
   return patchAudioClip(manifest, id, next ? { loop, endMs: next.startMs } : { loop });
 }
 
+/**
+ * Another file under a placed sound, which is what Replace is for: trying a different song in the same
+ * place. Where it starts, its lane, its level, its fades and its loop are the customer's and stay; the
+ * trim was cut from the old file and goes. A sound that ran on with no stop is stopped where the next
+ * one on its lane begins, since the new file may be longer than the gap. Null when it would not fit.
+ */
+export function replaceAudioClip(manifest: EditManifest, id: string, file: Pick<EditMusic, 'uri' | 'fileName' | 'sourceDurationMs'>): EditManifest | null {
+  const clip = findAudioClip(manifest, id);
+  const lane = manifest.audioTracks?.find(track => track.clips.some(one => one.id === id));
+  if (!clip || !lane || !file.uri) return null;
+  const next = lane.clips.find(one => one.startMs > clip.startMs);
+  const { phaseMs: _trimmed, ...kept } = clip;
+  const replaced: EditAudioClip = {
+    ...kept,
+    uri: file.uri,
+    fileName: file.fileName,
+    sourceDurationMs: Math.max(0, file.sourceDurationMs),
+    inMs: 0,
+    outMs: 0,
+    endMs: clip.endMs > 0 ? clip.endMs : next ? next.startMs : 0,
+  };
+  if (!audioFits(replaced, lane.clips.filter(one => one.id !== id), totalDurationMs(manifest))) return null;
+  return {
+    ...manifest,
+    audioTracks: manifest.audioTracks!.map(track => (track === lane ? { ...track, clips: track.clips.map(one => (one.id === id ? replaced : one)) } : track)),
+  };
+}
+
 /** Where a sound lifted from a lane is being dropped. */
 export type AudioDropTarget = { kind: 'track'; trackId: string } | { kind: 'new'; index: number };
 

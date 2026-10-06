@@ -218,6 +218,22 @@ describe('ve-sound-sheet', () => {
     expect(store.panel.value).toBeNull();
   });
 
+  it('puts a file in place of the sound a Replace opened it for, and closes', async () => {
+    const { store, sheet } = await mount();
+    await until('the list', () => rows(sheet).length === 2);
+    rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__pick')!.click();
+    const id = store.selectedAudio.value!.id;
+
+    store.openSoundSheet({ kind: 'audio', id });
+    await until('the sheet', () => actions(sheet).length === 2);
+    actions(sheet)[1].click();
+
+    await until('the sound to be replaced', () => store.selectedAudio.value?.uri !== SAVED[0].uri);
+    await until('the sheet to close', () => store.panel.value === null);
+    // In its place: the same sound, and still the only one.
+    expect(store.manifest.value.audioTracks?.flatMap(track => track.clips.map(clip => clip.id))).toEqual([id]);
+  });
+
   it('greys both doors while an extraction is running', async () => {
     let finish = (_: SavedSound | null) => undefined as void;
     const extract = vi.fn(() => new Promise<SavedSound | null>(resolve => {

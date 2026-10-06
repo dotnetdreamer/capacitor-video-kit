@@ -794,11 +794,10 @@ export class VeToolbar {
           run: () => this.startSoundHere(),
         },
         {
-          // Another sound beside this one: a pick lands on the audio lanes, which this sound joins.
-          id: 'add-audio',
-          label: 'Add audio',
-          icon: 'add',
-          run: () => this.ctx.media.openSound(),
+          id: 'replace',
+          label: 'Replace',
+          icon: 'swap-horizontal-outline',
+          run: () => this.ctx.media.openSound({ kind: 'music' }),
         },
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.removeMusic() },
       ],
@@ -838,6 +837,15 @@ export class VeToolbar {
           run: () => {
             const clip = store.selectedAudio.value;
             if (clip) store.startAudioHere(clip.id);
+          },
+        },
+        {
+          id: 'replace',
+          label: 'Replace',
+          icon: 'swap-horizontal-outline',
+          run: () => {
+            const clip = store.selectedAudio.value;
+            if (clip) this.ctx.media.openSound({ kind: 'audio', id: clip.id });
           },
         },
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.removeSelectedAudio() },

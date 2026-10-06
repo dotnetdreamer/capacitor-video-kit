@@ -440,6 +440,16 @@ export const OP_REFERENCE: Record<string, string> = {
     'it, so what is heard keeps its length, and a stop carried to the end of the post or past it becomes 0 (until the end). Send ' +
     `endMs as well to put the stop somewhere else. A patch that would leave the section or the stop under ${MIN_LAYER_MS}ms is ` +
     'refused, not ignored. Fails when the post has no music yet.',
+  addAudio:
+    'id, sound (the fields setMusic takes, with its defaults and refusals), trackId?, newTrackId? - one more sound, placed at its ' +
+    'startMs. Sounds on one lane play one after another and never overlap; lanes play together. It goes on trackId when given ' +
+    '(refused if it does not fit there), else on the first lane with room, else on a new lane with the id newTrackId (default ' +
+    '"lane-" + id). A post’s music joins the lanes as their first sound on the first add.',
+  patchAudio: 'id, patch - as patchMusic, for one sound on the lanes; refused when it would meet another sound on its lane.',
+  moveAudioToTrack:
+    'id, target ({kind:"track",trackId} | {kind:"new",index}), atMs, newTrackId? - onto a lane, or a new one at index; it lands in ' +
+    'the gap nearest atMs that holds it whole, and a lane left empty goes.',
+  removeAudio: 'id - a lane left empty goes with it.',
   addVoiceover: 'id, uri, startMs, durationMs, volume? - takes never overlap.',
   patchVoiceover: 'id, volume.',
   moveVoiceover: 'id, startMs - held clear of the takes either side.',

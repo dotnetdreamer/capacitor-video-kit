@@ -1039,6 +1039,25 @@
 }
 
 /*
+ * Under a compact sheet the timeline is 96px tall, too short to hang the choices below the button, so
+ * they sit in a row beside it, level with the filmstrip. The button never stands left of the middle
+ * (the playhead cannot be scrolled past the end of the video), so there is room on its left on any
+ * phone. Unmeasured, `left` is invalid and `right` keeps the row clear of the button at its edge.
+ */
+/* 154px across with its padding and border, and 8px clear of the button. */
+.tl--compact .tl__add-menu {
+  top: calc(var(--ruler-h) + var(--track-top) + (var(--track-h) - 54px) / 2);
+  left: clamp(8px, calc(var(--tl-add-x) - 162px), calc(100% - 214px));
+  right: 68px;
+  grid-auto-flow: column;
+  grid-template-columns: 1fr 1fr;
+}
+
+.tl--compact .tl__add-menu button {
+  text-align: center;
+}
+
+/*
  * While a segment is lifted, the row it came off becomes a rail of square thumbnails the finger can
  * carry. The whole timeline, because the lifted tile is carried DOWN it as well as along: the layer
  * rows are the other half of what a lift can do.

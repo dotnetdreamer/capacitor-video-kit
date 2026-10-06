@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RasterContext } from './raster-context';
 import { toComposeSpec } from './compose';
-import { addAudioClip, audioClipWindow, moveAudioClip, moveAudioClipToTrack, patchAudioClip, removeAudioClip, setAudioLoop } from './edit-ops';
+import { addAudioClip, audioClipWindow, moveAudioClip, moveAudioClipToTrack, patchAudioClip, removeAudioClip, replaceAudioClip, setAudioLoop } from './edit-ops';
 import { defaultClipEdit, emptyManifest, isUntouched, normaliseManifest, type EditAudioClip, type EditManifest } from './edit-manifest';
 
 const post = (): EditManifest => ({
@@ -118,6 +118,23 @@ describe('independent audio lanes', () => {
     expect(audioClipWindow(looped.audioTracks![0]!.clips[0]!, 20_000)).toEqual({ startMs: 1000, endMs: 9000 });
     expect(setAudioLoop(lane, 'b', true).audioTracks?.[0]?.clips[1]).toMatchObject({ loop: true, endMs: 0 });
     expect(setAudioLoop(looped, 'a', false).audioTracks?.[0]?.clips[0]?.loop).toBe(false);
+  });
+
+  it('replaces the file under a sound, keeping its place, level and fades, and stops it before the next one', () => {
+    const lane: EditManifest = {
+      ...post(),
+      audioTracks: [{ id: 'at-1', clips: [sound('a', 1000, { inMs: 500, phaseMs: 200, volume: 0.4, fadeInMs: 300, fadeOutMs: 700 }), sound('b', 9000)] }],
+    };
+    const file = { uri: 'file:///long.m4a', fileName: 'long.m4a', sourceDurationMs: 30_000 };
+    const replaced = replaceAudioClip(lane, 'a', file)!;
+    // The trim was cut from the old file, so it goes; everything set on the sound itself stays.
+    expect(replaced.audioTracks?.[0]?.clips[0]).toEqual({ ...sound('a', 1000, { volume: 0.4, fadeInMs: 300, fadeOutMs: 700 }), ...file, endMs: 9000 });
+    expect(audioClipWindow(replaced.audioTracks![0]!.clips[0]!, 20_000)).toEqual({ startMs: 1000, endMs: 9000 });
+    // The last sound on its lane has nothing to stop for, and a stop it already had is kept.
+    expect(replaceAudioClip(lane, 'b', file)?.audioTracks?.[0]?.clips[1]?.endMs).toBe(0);
+    const stopped = { ...lane, audioTracks: [{ id: 'at-1', clips: [sound('a', 1000, { endMs: 3000 })] }] };
+    expect(replaceAudioClip(stopped, 'a', file)?.audioTracks?.[0]?.clips[0]?.endMs).toBe(3000);
+    expect(replaceAudioClip(lane, 'missing', file)).toBeNull();
   });
 
   it('requires a render when an otherwise untouched video has added audio', () => {

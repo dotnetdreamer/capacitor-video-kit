@@ -108,15 +108,19 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
   const sound: string[] = [];
   sound.push(manifest.originalMuted ? 'Original sound: muted' : 'Original sound: on');
   if (manifest.music) {
-    const music = manifest.music;
-    const section = music.outMs > 0 ? `${time(music.inMs)}..${time(music.outMs)}` : `from ${time(music.inMs)}`;
-    const stop = music.endMs > 0 ? `, stopping at ${time(music.endMs)}` : '';
-    const loop = music.loop ? ', looped' : '';
-    const fadeIn = (music.fadeInMs ?? 0) > 0 ? `, fades in over ${time(music.fadeInMs ?? 0)}` : '';
-    const fade = fadeIn + (music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '');
-    sound.push(`Music: ${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${loop}${fade}; ${heard(music, totalMs)}`);
+    sound.push(`Music: ${describeSound(manifest.music, totalMs)}`);
   } else {
     sound.push('Music: none');
+  }
+  const lanes = manifest.audioTracks ?? [];
+  if (lanes.length === 0) {
+    sound.push('Audio lanes: none');
+  } else {
+    sound.push(`Audio lanes: ${count(lanes.length, 'lane')} (sounds on one lane play one after another; lanes play together)`);
+    for (const lane of lanes) {
+      sound.push(`  lane "${lane.id}": ${count(lane.clips.length, 'sound')}`);
+      for (const clip of lane.clips) sound.push(`    "${clip.id}" ${describeSound(clip, totalMs)}`);
+    }
   }
   if (manifest.voiceovers.length === 0) {
     sound.push('Voiceover: none');
@@ -289,6 +293,16 @@ function describeZoomRamps(zoom: EditZoom): string {
  * turn it into an answer. A looping sound has no such gap: it repeats until its stop whatever its
  * length, which is what the window says.
  */
+/** One sound in words - the music, or one on a lane, which keep the same rules ([audioClipWindow]). */
+function describeSound(music: EditMusic, totalMs: number): string {
+  const section = music.outMs > 0 ? `${time(music.inMs)}..${time(music.outMs)}` : `from ${time(music.inMs)}`;
+  const stop = music.endMs > 0 ? `, stopping at ${time(music.endMs)}` : '';
+  const loop = music.loop ? ', looped' : '';
+  const fadeIn = (music.fadeInMs ?? 0) > 0 ? `, fades in over ${time(music.fadeInMs ?? 0)}` : '';
+  const fade = fadeIn + (music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '');
+  return `${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${loop}${fade}; ${heard(music, totalMs)}`;
+}
+
 function heard(music: EditMusic, totalMs: number): string {
   const { startMs, endMs } = musicWindow(music, totalMs);
   if (endMs <= startMs) {

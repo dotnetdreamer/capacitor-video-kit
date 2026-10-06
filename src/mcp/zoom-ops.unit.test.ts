@@ -250,6 +250,19 @@ describe('no op makes a zoom on a post that has none', () => {
     // Not open-ended any more: a field that is not a sound's, a zoom list among them, is refused by
     // name (music-ops.unit.test.ts), so what is left to try here is a real change.
     patchMusic: [{ op: 'patchMusic', patch: { volume: 0.5 } }],
+    addAudio: [{ op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } }],
+    patchAudio: [
+      { op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } },
+      { op: 'patchAudio', id: 'au', patch: { volume: 0.5 } },
+    ],
+    moveAudioToTrack: [
+      { op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } },
+      { op: 'moveAudioToTrack', id: 'au', target: { kind: 'new', index: 0 }, atMs: 3000 },
+    ],
+    removeAudio: [
+      { op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } },
+      { op: 'removeAudio', id: 'au' },
+    ],
     addVoiceover: [{ op: 'addVoiceover', id: 'vo2', uri: 'file:///vo2.m4a', startMs: 8000, durationMs: 1000 }],
     patchVoiceover: [{ op: 'patchVoiceover', id: 'vo', volume: 0.5 }],
     moveVoiceover: [{ op: 'moveVoiceover', id: 'vo', startMs: 500 }],

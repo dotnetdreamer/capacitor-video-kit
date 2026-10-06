@@ -12,7 +12,7 @@
 ## The MCP server
 
 An agent that can call these tools can build a post: lay out the base track, trim and split it, put
-a second video over it, add text, stickers, photos and effects, place music and voiceover, choose
+a second video over it, add text, stickers, photos and effects, place sounds and voiceover, choose
 the frame. What it produces is an `EditManifest`, the same document the editor's own UI produces,
 because the tools call the same functions the UI's buttons call. Hand the result to `<ve-editor>`
 through its `manifest` property, or straight to `toComposeSpec`, and it renders exactly as an edit
@@ -52,7 +52,11 @@ id over from an earlier version of the edit, and a silent no-op leaves it unable
 from "ignored". So the error names the id and lists the ones there are. A music edit the editor would
 not keep - a section or a stop under 100 ms - is refused the same way, with the reason; a `patchMusic`
 with only a `startMs` moves the stop along with the sound, as the editor's Move does; and both fades
-run from 0 to 10000 ms.
+run from 0 to 10000 ms. Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
+one lane play one after another and lanes play together, so a sound that would overlap another goes
+on a lane of its own, and one the agent puts on a named lane where it does not fit is refused. A
+post's single `music` joins the lanes as their first sound on the first `addAudio`, as it does in the
+editor.
 
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different

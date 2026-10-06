@@ -57,6 +57,7 @@ import {
   patchVoiceover,
   removeClip,
   removeAudioClip,
+  replaceAudioClip as replaceAudioClipOp,
   setAudioLoop,
   removeOverlay,
   removeVideoTrack,
@@ -128,7 +129,7 @@ import {
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
-import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, ToolbarMode, VolumeTarget } from './editor.types';
+import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, ToolbarMode, VolumeTarget } from './editor.types';
 import { sameUrl } from './same-url';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
@@ -523,6 +524,11 @@ export class EditorStore {
   /** What the volume sheet is adjusting while it is open. */
   readonly volumeTarget = signal<VolumeTarget | null>(null);
   /**
+   * The sound the Sound sheet's next pick goes in place of, while a Replace tile has the sheet open.
+   * Null is every other way into the sheet, all of which add a sound. Goes with the sheet.
+   */
+  readonly soundReplaceTarget = signal<SoundReplaceTarget | null>(null);
+  /**
    * The boundary the transition sheet is dressing while it is open, named by its INCOMING clip -
    * the clip that holds the transition. Null whenever the sheet is shut.
    */
@@ -911,6 +917,7 @@ export class EditorStore {
     if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
     // A layout opening still being played is the layout sheet's, and goes with it.
     if (this.panel.value === 'layout' && panel !== 'layout') this.endAudition();
+    if (panel !== 'sound') this.soundReplaceTarget.value = null;
     this.panel.value = panel;
   }
 
@@ -920,11 +927,18 @@ export class EditorStore {
     if (this.panel.value === 'layout') this.endAudition();
     this.panel.value = null;
     this.volumeTarget.value = null;
+    this.soundReplaceTarget.value = null;
   }
 
   openVolume(target: VolumeTarget): void {
     this.volumeTarget.value = target;
     this.openPanel('volume');
+  }
+
+  /** The Sound sheet, adding a sound or, from a Replace tile, putting one in place of `replace`. */
+  openSoundSheet(replace: SoundReplaceTarget | null = null): void {
+    this.openPanel('sound');
+    this.soundReplaceTarget.value = replace;
   }
 
   /** The "Edit" tool: selects the segment under the playhead. */
@@ -2041,6 +2055,14 @@ export class EditorStore {
 
   commitAudioClip(id: string, patch: Partial<EditMusic>, label: string): void {
     this.commit(label, m => patchAudioClip(m, id, patch));
+  }
+
+  /** Another file under a placed sound, which stays selected; see [replaceAudioClip] for what is kept. */
+  replaceAudioClip(id: string, file: Pick<EditMusic, 'uri' | 'fileName' | 'sourceDurationMs'>): boolean {
+    if (!this.commit('Replace audio', m => replaceAudioClipOp(m, id, file))) return false;
+    this.select({ kind: 'audio', id });
+    this.haptic('light');
+    return true;
   }
 
   /** Read at tap time, as the music's Loop is, and named the same way in the undo toast. */
