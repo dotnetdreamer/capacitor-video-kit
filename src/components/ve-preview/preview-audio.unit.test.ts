@@ -730,6 +730,28 @@ describe('several audio lanes', () => {
     expect(held.currentTime).toBeGreaterThan(2);
     expect(held.paused).toBe(false);
   });
+
+  // The halves of the audio row's Cut: one file, the left half's section ending where the right's begins.
+  it('plays the halves of a cut straight on through on one element, handing nothing over at the cut', async () => {
+    const uri = 'blob:capacitor://localhost/cut';
+    const left = { ...LOOPED, id: 'left', uri, loop: false, outMs: 1500 };
+    const right = { ...LOOPED, id: 'right', uri, loop: false, inMs: 1500, startMs: 1500 };
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [left, right] }] });
+    await playFrom(r, 0);
+    await playTo(r, 1200);
+    const [held, spare] = r.lanes;
+    expect(held.src).toBe(uri);
+    expect(held.paused).toBe(false);
+
+    await playTo(r, 2500);
+    // Still playing, past the cut in its file, and never put anywhere on the way: two elements would
+    // have swapped at the cut, and no stall is learned well enough to put that on the sample.
+    expect(held.paused).toBe(false);
+    expect(held.currentTime).toBeGreaterThan(2);
+    expect(putsBetween(held, 1300, 2500)).toEqual([]);
+    expect(spare.src).toBe('');
+    expect(spare.paused).toBe(true);
+  });
 });
 
 /*

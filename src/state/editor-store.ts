@@ -32,6 +32,7 @@ import {
   canJoinWithNext,
   clipsDurationMs,
   cssFor,
+  duplicateAudioClip as duplicateAudioClipOp,
   duplicateClip,
   duplicateOverlay,
   cutPostTo,
@@ -51,6 +52,7 @@ import {
   neutralAdjust,
   patchClip,
   patchAudioClip,
+  musicAsAudioLane,
   musicMovedTo,
   patchMusic,
   patchOverlay,
@@ -75,6 +77,7 @@ import {
   setPostDuration,
   slotAt,
   sourceMsAt,
+  splitAudioClipAt,
   splitClipAt,
   splitOverlayAt,
   swapTrackZ,
@@ -2030,6 +2033,61 @@ export class EditorStore {
   removeSelectedAudio(): void {
     const selected = this.selectedAudio.value;
     if (selected && this.commit('Remove audio', m => removeAudioClip(m, selected.id))) this.select(null);
+  }
+
+  /**
+   * Cuts the selected sound in two at the playhead and selects the right half, as Cut does to a clip
+   * and a layer; see [splitAudioClipAt] for what each half keeps.
+   */
+  splitSelectedAudioAtPlayhead(): void {
+    const sound = this.selectedSoundOnLane();
+    if (!sound) return;
+    const newId = this.newId('audio');
+    const at = this.playheadMs.value;
+    const cut = this.commit('Cut', m => {
+      const onLane = sound.onLane(m);
+      return onLane && splitAudioClipAt(onLane, sound.id, at, newId);
+    });
+    if (cut) {
+      this.select({ kind: 'audio', id: newId });
+      this.haptic('light');
+      return;
+    }
+    this.showToast(`Move the playhead inside the ${sound.noun} to cut it`);
+    this.haptic('warning');
+  }
+
+  /** A copy of the selected sound, selected; see [duplicateAudioClip] for where it goes. */
+  duplicateSelectedAudio(): void {
+    const sound = this.selectedSoundOnLane();
+    if (!sound) return;
+    const newId = this.newId('audio');
+    const trackId = this.newId('at');
+    const copied = this.commit('Duplicate', m => {
+      const onLane = sound.onLane(m);
+      return onLane && duplicateAudioClipOp(onLane, sound.id, newId, trackId);
+    });
+    if (copied) {
+      this.select({ kind: 'audio', id: newId });
+      this.haptic('light');
+      return;
+    }
+    this.showToast(`There is no room for a copy of that ${sound.noun}`);
+    this.haptic('warning');
+  }
+
+  /**
+   * The selected sound as one on a lane, which is where Cut and Duplicate leave two of it: its id there,
+   * and the step that puts it there inside the same undo step - none for a lane's own sound, and
+   * [musicAsAudioLane] for the music, which has no lane until then. `noun` is what each row calls it.
+   */
+  private selectedSoundOnLane(): { id: string; noun: 'audio' | 'sound'; onLane: (m: EditManifest) => EditManifest | null } | null {
+    const audio = this.selectedAudio.value;
+    if (audio) return { id: audio.id, noun: 'audio', onLane: m => m };
+    if (!this.musicSelected.value) return null;
+    const id = this.newId('audio');
+    const trackId = this.newId('at');
+    return { id, noun: 'sound', onLane: m => musicAsAudioLane(m, id, trackId) };
   }
 
   /**

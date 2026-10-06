@@ -769,6 +769,11 @@ export class VeToolbar {
     };
   }
 
+  /**
+   * The post's music: an older edit's one sound, or a template's score. Cut and Duplicate both leave two
+   * of it, and only a lane holds two, so they put it on a lane first and select the result there - the
+   * row after either is the audio row.
+   */
   private musicRow(): ToolRow {
     const store = this.ctx.store;
     const loops = this.musicLoops.value;
@@ -777,6 +782,7 @@ export class VeToolbar {
       label: 'Sound tools',
       collapse: this.deselect('Close sound tools'),
       tiles: [
+        { id: 'split', label: 'Cut', icon: 'cut-outline', run: () => store.splitSelectedAudioAtPlayhead() },
         {
           id: 'volume',
           label: 'Volume',
@@ -797,6 +803,7 @@ export class VeToolbar {
           icon: 'play-skip-back-outline',
           run: () => this.startSoundHere(),
         },
+        { id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: () => store.duplicateSelectedAudio() },
         {
           id: 'replace',
           label: 'Replace',
@@ -815,6 +822,8 @@ export class VeToolbar {
       label: 'Audio tools',
       collapse: this.deselect('Close audio tools'),
       tiles: [
+        // Labelled Cut, as on the clip row: the sound in two at the playhead. `split` is its id there too.
+        { id: 'split', label: 'Cut', icon: 'cut-outline', run: () => store.splitSelectedAudioAtPlayhead() },
         {
           id: 'volume',
           label: 'Volume',
@@ -844,6 +853,7 @@ export class VeToolbar {
             if (clip) store.startAudioHere(clip.id);
           },
         },
+        { id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: () => store.duplicateSelectedAudio() },
         {
           id: 'replace',
           label: 'Replace',

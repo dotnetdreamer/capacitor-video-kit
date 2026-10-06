@@ -61,8 +61,33 @@ describe('the audio lane ops', () => {
     expect(summariseManifest(post())).toMatch(/\nMusic: none\nAudio lanes: none\nVoiceover: none/);
   });
 
+  it('cuts a sound in two on its lane, as the audio row’s Cut does, and says why a cut cannot land', () => {
+    const manifest = applyEditOps(post(), [add('a', 1000)]);
+    const cut = applyEditOps(manifest, [{ op: 'splitAudio', id: 'a', atMs: 3000, newId: 'a2' }]);
+    expect(lanesOf(cut)).toEqual(['lane-a: a@1000 a2@3000']);
+    expect(cut.audioTracks?.[0]?.clips.map(clip => [clip.inMs, clip.outMs])).toEqual([
+      [0, 2000],
+      [2000, 0],
+    ]);
+    expect(() => applyEditOps(manifest, [{ op: 'splitAudio', id: 'a', atMs: 1050, newId: 'a2' }])).toThrow(
+      /"a" cannot be cut at 1050ms - both halves need to be heard for at least 100ms/,
+    );
+    expect(() => applyEditOps(manifest, [{ op: 'splitAudio', id: 'a', atMs: 3000, newId: 'a' }])).toThrow(/sound id "a" is already on this post/);
+    expect(() => applyEditOps(manifest, [{ op: 'splitAudio', id: 'zz', atMs: 3000, newId: 'a2' }])).toThrow(/no sound "zz" on the audio lanes/);
+  });
+
+  it('copies a sound straight after it, or onto a new lane when its own has no room', () => {
+    const manifest = applyEditOps(post(), [add('a', 1000), add('b', 7000)]);
+    expect(lanesOf(applyEditOps(manifest, [{ op: 'duplicateAudio', id: 'b', newId: 'b2' }]))).toEqual(['lane-a: a@1000 b@7000 b2@12000']);
+    // `b` is in the way on a's lane, so the copy opens a lane, named for it unless the agent names it.
+    expect(lanesOf(applyEditOps(manifest, [{ op: 'duplicateAudio', id: 'a', newId: 'a2' }]))).toEqual(['lane-a: a@1000 b@7000', 'lane-a2: a2@6000']);
+    expect(lanesOf(applyEditOps(manifest, [{ op: 'duplicateAudio', id: 'a', newId: 'a2', newTrackId: 'more' }]))).toEqual(['lane-a: a@1000 b@7000', 'more: a2@6000']);
+    expect(() => applyEditOps(manifest, [{ op: 'duplicateAudio', id: 'a', newId: 'a2', newTrackId: 'lane-a' }])).toThrow(/a new lane needs an id \("lane-a"\) no lane has/);
+    expect(() => applyEditOps(manifest, [{ op: 'duplicateAudio', id: 'a', newId: 'b' }])).toThrow(/sound id "b" is already on this post/);
+  });
+
   it('has a line in the op reference for each op', () => {
-    for (const op of ['addAudio', 'patchAudio', 'moveAudioToTrack', 'removeAudio']) expect(OP_REFERENCE[op]).toBeTruthy();
+    for (const op of ['addAudio', 'patchAudio', 'moveAudioToTrack', 'splitAudio', 'duplicateAudio', 'removeAudio']) expect(OP_REFERENCE[op]).toBeTruthy();
   });
 });
 

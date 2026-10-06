@@ -1427,6 +1427,19 @@ function nearestAudioPlacement(clip: EditAudioClip, others: readonly EditAudioCl
   return choices[0] ?? null;
 }
 
+/**
+ * The post's music as sound `id`, alone on a new first lane `trackId`. The music is one sound with no
+ * lane, so anything that makes a second sound out of it - a cut, a copy, another sound added - puts it
+ * on a lane first. Null when there is no music, or when either id is already taken.
+ */
+export function musicAsAudioLane(manifest: EditManifest, id: string, trackId: string): EditManifest | null {
+  const music = manifest.music;
+  const existing = manifest.audioTracks ?? [];
+  if (!music || findAudioClip(manifest, id) || existing.some(track => track.id === trackId)) return null;
+  const track: EditAudioTrack = { id: trackId, clips: [{ ...music, id }] };
+  return { ...manifest, music: null, audioTracks: [track, ...existing] };
+}
+
 /** Turns the old single sound into the first audio lane only when an added clip can land. */
 function withLegacyAudioLane(manifest: EditManifest, incomingClipId: string, incomingTrackId: string): EditManifest {
   if (!manifest.music) return manifest;
@@ -1438,9 +1451,7 @@ function withLegacyAudioLane(manifest: EditManifest, incomingClipId: string, inc
     for (let suffix = 1; used.has(id); suffix++) id = `${base}-${suffix}`;
     return id;
   };
-  const clip: EditAudioClip = { ...manifest.music, id: unique('legacy-music', clipIds) };
-  const track: EditAudioTrack = { id: unique('legacy-audio-track', trackIds), clips: [clip] };
-  return { ...manifest, music: null, audioTracks: [track, ...existing] };
+  return musicAsAudioLane(manifest, unique('legacy-music', clipIds), unique('legacy-audio-track', trackIds)) ?? manifest;
 }
 
 /** Adds a sound at its requested output time, on the first lane with room or a new lane. */
@@ -1619,6 +1630,132 @@ export function moveAudioClip(manifest: EditManifest, id: string, atMs: number):
   const others = manifest.audioTracks!.find(track => track.id === trackId)!.clips.filter(one => one.id !== id);
   const next = nearestAudioPlacement(clip, others, atMs, total);
   return next ? patchAudioClip(manifest, id, { startMs: next.startMs, endMs: next.endMs }) : manifest;
+}
+
+/**
+ * Cuts a sound in two at `atMs` on the post, both halves on its lane: the left keeps the sound's id and
+ * the right is `newId`. Played one after the other they are the sound as it was, so each half is what
+ * its own handle would have made of it ([musicEndTrim], [musicStartTrim] in the timeline). A sound
+ * played once is cut in its FILE: the left half's section ends where the right half's begins, and a
+ * stop it had goes with the right half. A looping sound keeps its whole section in both halves: the
+ * left stops repeating at the cut, and the right takes the repeats up where they had got to, as the
+ * phase of its first pass.
+ *
+ * The fades are shared out as a cut shares out a layer's animation ([splitOverlayAt]): the left half
+ * keeps how the sound comes in and the right half how it goes out, so the cut is not a dip to silence.
+ * Null when either half would be heard for less than [MIN_LAYER_MS], or trimmed to less of its file.
+ */
+export function splitAudioClipAt(manifest: EditManifest, id: string, atMs: number, newId: string): EditManifest | null {
+  const clip = findAudioClip(manifest, id);
+  const lane = manifest.audioTracks?.find(track => track.clips.some(one => one.id === id));
+  if (!clip || !lane || findAudioClip(manifest, newId)) return null;
+  const total = totalDurationMs(manifest);
+  const heard = audioClipWindow(clip, total);
+  const cut = Math.round(atMs);
+  if (cut - heard.startMs < MIN_LAYER_MS || heard.endMs - cut < MIN_LAYER_MS) return null;
+  // The file goes by at the sound's speed, so the cut is that much further into it.
+  const into = (cut - clip.startMs) * musicSpeed(clip);
+  const { phaseMs: _phase, fadeInMs: _fadeIn, ...plain } = clip;
+  let left: EditAudioClip;
+  let right: EditAudioClip;
+  if (clip.loop) {
+    // Not wrapped, as the start handle leaves it: each engine wraps it against the section it measures.
+    const phaseMs = (clip.phaseMs ?? 0) + Math.round(into);
+    left = { ...clip, endMs: cut, fadeOutMs: 0 };
+    right = { ...plain, id: newId, startMs: cut, ...(phaseMs !== 0 ? { phaseMs } : {}) };
+  } else {
+    // A sped-up sound rarely reaches the cut on a whole millisecond of its file: the left half's end is
+    // rounded down and the right half's start up, so neither runs into the other.
+    const inMs = clip.inMs + musicPhaseMs(clip);
+    const fadeIn = clip.fadeInMs !== undefined ? { fadeInMs: clip.fadeInMs } : {};
+    left = { ...plain, ...fadeIn, inMs, outMs: Math.floor(inMs + into), endMs: 0, fadeOutMs: 0 };
+    right = { ...plain, id: newId, inMs: Math.ceil(inMs + into), startMs: cut };
+  }
+  const others = lane.clips.filter(one => one.id !== id);
+  if (!trimsHold(left) || !trimsHold(right) || !audioFits(left, others, total) || !audioFits(right, [...others, left], total)) return null;
+  return {
+    ...manifest,
+    audioTracks: manifest.audioTracks!.map(track => (track === lane ? { ...track, clips: [...others, left, right].sort((a, b) => a.startMs - b.startMs) } : track)),
+  };
+}
+
+/**
+ * A lane's sounds with every run that plays on unbroken as the one sound it is: the halves of a cut
+ * that nothing has been done to since, which are the same stretch of the same file, at the same
+ * speed and level, with no fade where they meet. What goes to the engines and to the preview, so a cut
+ * is heard as nothing at all - two items of one file meet with a seam the engines cannot close
+ * ([splitAudioClipAt]; Media3 starts a sound inside its file on a codec frame, without the frame
+ * before it). Each run keeps its first sound's id; a sound alone is returned as it was.
+ */
+export function joinContinuousAudio(clips: readonly EditAudioClip[]): EditAudioClip[] {
+  const joined: EditAudioClip[] = [];
+  clips.forEach((clip, index) => {
+    const before = clips[index - 1];
+    const run = joined[joined.length - 1];
+    if (before && run && playsOn(before, clip)) {
+      // The run is its first sound heard on to where the last one ends.
+      joined[joined.length - 1] = { ...run, outMs: run.loop ? run.outMs : clip.outMs, endMs: clip.endMs, fadeOutMs: clip.fadeOutMs };
+    } else {
+      joined.push(clip);
+    }
+  });
+  return joined;
+}
+
+/**
+ * Whether `next` carries `sound` on unbroken: the same file at the same speed and level, nothing
+ * fading where they meet, and `next` starting where `sound` stops - on the post and in the file, to
+ * within the millisecond a cut rounds a sped-up sound by. A loop goes on in the same section, its
+ * repeats where the earlier one's had got to; a sound played once ends on its section, which the
+ * next one starts its own on.
+ */
+function playsOn(sound: EditAudioClip, next: EditAudioClip): boolean {
+  if (next.uri !== sound.uri || musicSpeed(next) !== musicSpeed(sound) || next.volume !== sound.volume || next.loop !== sound.loop) return false;
+  if (sound.fadeOutMs > 0 || (next.fadeInMs ?? 0) > 0) return false;
+  const speed = musicSpeed(sound);
+  if (sound.loop) {
+    const phase = (sound.phaseMs ?? 0) + (next.startMs - sound.startMs) * speed;
+    return next.inMs === sound.inMs && next.outMs === sound.outMs && sound.endMs > 0 && next.startMs === sound.endMs && Math.abs((next.phaseMs ?? 0) - phase) <= 1;
+  }
+  if (!(sound.outMs > 0) || sound.endMs > 0) return false;
+  const endsMs = sound.startMs + (sound.outMs - sound.inMs - musicPhaseMs(sound)) / speed;
+  return Math.abs(next.startMs - endsMs) <= 1 && Math.abs(next.inMs + musicPhaseMs(next) - sound.outMs) <= 1;
+}
+
+/**
+ * A copy of a sound, straight after it on the post: on its own lane when the whole copy fits there,
+ * else on the first lane it fits on, else on a new lane `newTrackId` under its own. A sound heard to the
+ * end of the post has no after, so its copy goes where it is, on another lane, as a layer's copy goes
+ * over the layer ([duplicateOverlay]). The copy is the sound's in everything else - its trim, level,
+ * fades, loop and speed - and a stop the sound has moves with it ([musicMovedTo]).
+ *
+ * Null when the copy could not be heard anywhere, or when either id is taken.
+ */
+export function duplicateAudioClip(manifest: EditManifest, id: string, newId: string, newTrackId: string): EditManifest | null {
+  const clip = findAudioClip(manifest, id);
+  const tracks = manifest.audioTracks ?? [];
+  const own = tracks.findIndex(track => track.clips.some(one => one.id === id));
+  if (!clip || own < 0 || findAudioClip(manifest, newId)) return null;
+  const total = totalDurationMs(manifest);
+  // Up to a whole millisecond, as a sound picked after it is: a sped-up sound rarely ends on one.
+  const end = Math.ceil(wholeAudioWindow(clip).endMs);
+  const after = Number.isFinite(end) && end + MIN_LAYER_MS <= total;
+  const copy: EditAudioClip = { ...clip, id: newId, ...(after ? musicMovedTo(clip, end, total) : {}) };
+  const fits = (track: EditAudioTrack): boolean => audioFits(copy, track.clips, total);
+  const target = after && fits(tracks[own]) ? tracks[own] : tracks.find((track, index) => index !== own && fits(track));
+  if (target) {
+    return {
+      ...manifest,
+      audioTracks: tracks.map(track => (track === target ? { ...track, clips: [...track.clips, copy].sort((a, b) => a.startMs - b.startMs) } : track)),
+    };
+  }
+  if (tracks.some(track => track.id === newTrackId) || !audioFits(copy, [], total)) return null;
+  return { ...manifest, audioTracks: [...tracks.slice(0, own + 1), { id: newTrackId, clips: [copy] }, ...tracks.slice(own + 1)] };
+}
+
+/** Whether a sound's trim and its stop each leave [MIN_LAYER_MS], the floor [patchMusic] holds both to. */
+function trimsHold(sound: EditMusic): boolean {
+  return !(sound.outMs > 0 && sound.outMs - sound.inMs < MIN_LAYER_MS) && !(sound.endMs > 0 && sound.endMs - sound.startMs < MIN_LAYER_MS);
 }
 
 export function findVoiceover(manifest: EditManifest, id: string): EditVoiceover | null {

@@ -275,12 +275,12 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'music' });
     await until('the sound row', () => label(bar) === 'Sound tools');
-    expect(ids(bar)).toEqual(['volume', 'speed', 'loop', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
 
     const audio = store.addAudioClip({ ...store.manifest.value.music!, startMs: 0 })!;
     await until('the audio row', () => label(bar) === 'Audio tools');
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
-    expect(ids(bar)).toEqual(['volume', 'speed', 'loop', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
     // Speed opens the sheet on the sound, which stays selected: the sheet reads it off the selection.
     tile(bar, 'speed').click();
     expect(store.panel.value).toBe('speed');
@@ -297,6 +297,38 @@ describe('ve-toolbar', () => {
     expect(ids(bar)).toEqual(['add-text', 'captions']);
     root(bar).querySelector<HTMLButtonElement>('.tile--collapse')!.click();
     await until('the root row', () => label(bar) === 'Editing tools');
+  });
+
+  it('gives a sound the clip row’s Cut and Duplicate, on the sound row and the audio row', async () => {
+    const { store, bar } = await mount();
+    const lanes = () => (store.manifest.value.audioTracks ?? []).map(track => track.clips.map(clip => clip.startMs));
+
+    // The music has no lane to hold two halves on, so Cut puts it on one, and the row that comes
+    // back is the audio row, on the right half.
+    store.select({ kind: 'music' });
+    await until('the sound row', () => label(bar) === 'Sound tools');
+    expect(tile(bar, 'split').textContent?.trim()).toBe('Cut');
+    store.seek(4000);
+    tile(bar, 'split').click();
+    await until('the audio row', () => label(bar) === 'Audio tools');
+    expect(store.manifest.value.music).toBeNull();
+    expect(lanes()).toEqual([[0, 4000]]);
+    expect(store.selection.value).toEqual({ kind: 'audio', id: store.manifest.value.audioTracks![0]!.clips[1]!.id });
+
+    // The right half loops to the end of the post, so there is no after for a copy: it goes under it.
+    expect(tile(bar, 'duplicate').textContent?.trim()).toBe('Duplicate');
+    tile(bar, 'duplicate').click();
+    await until('the copy', () => lanes().length === 2);
+    expect(lanes()).toEqual([[0, 4000], [4000]]);
+    expect(store.selection.value).toEqual({ kind: 'audio', id: store.manifest.value.audioTracks![1]!.clips[0]!.id });
+    expect(label(bar)).toBe('Audio tools');
+
+    // A cut that cannot land says where the playhead has to be.
+    store.seek(1000);
+    tile(bar, 'split').click();
+    await until('the reason', () => store.toast.value !== null);
+    expect(store.toast.value?.text).toBe('Move the playhead inside the audio to cut it');
+    expect(lanes()).toEqual([[0, 4000], [4000]]);
   });
 
   it('offers Animation on every layer row, and opens its sheet on the layer', async () => {

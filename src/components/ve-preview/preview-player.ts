@@ -2,6 +2,7 @@ import {
   clamp,
   compileTransition,
   findClip,
+  joinContinuousAudio,
   musicFadeAt,
   musicPhaseMs,
   musicSourceMsAt,
@@ -1932,7 +1933,9 @@ export class PreviewPlayer implements EditorPlayer {
 
     for (const track of manifest.audioTracks ?? []) {
       const lane = this.audioLanes.get(track.id);
-      if (lane) this.syncLane(track.clips, lane, ms, total, live, running);
+      // The halves of a cut as the one sound they still are, which one element plays straight on
+      // through: two would hand over at the cut, and no lead puts that on the sample.
+      if (lane) this.syncLane(joinContinuousAudio(track.clips), lane, ms, total, live, running);
     }
 
     const voiceLead = live ? this.leadWindow(this.voiceEl) : 0;

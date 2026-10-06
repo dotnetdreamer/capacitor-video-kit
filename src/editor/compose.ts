@@ -22,7 +22,7 @@ import {
   type EditPlacement,
   type EditRect,
 } from './edit-manifest';
-import { musicSpeed, overlayEndMs } from './edit-ops';
+import { joinContinuousAudio, musicSpeed, overlayEndMs } from './edit-ops';
 import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
@@ -208,21 +208,26 @@ export async function toComposeSpec(
           durationMs: Math.max(0, Math.round(take.durationMs)),
           volume: take.volume,
         })),
-      ...(manifest.audioTracks?.length ? {
-        musicTracks: manifest.audioTracks.map(track => track.clips.map(sound => ({
-          uri: sound.uri,
-          startMs: Math.max(0, Math.round(sound.startMs)),
-          ...(sound.phaseMs ? { phaseMs: Math.round(sound.phaseMs) } : {}),
-          inMs: Math.max(0, Math.round(sound.inMs)),
-          outMs: Math.round(sound.outMs > 0 ? sound.outMs : UNKNOWN_TRACK_END_MS),
-          ...(sound.endMs > 0 && sound.endMs < totalMs ? { endMs: Math.round(sound.endMs) } : {}),
-          volume: sound.volume,
-          loop: sound.loop,
-          fadeInMs: Math.max(0, Math.round(sound.fadeInMs ?? 0)),
-          fadeOutMs: Math.max(0, Math.round(sound.fadeOutMs)),
-          ...wireSpeed(sound),
-        }))),
-      } : {}),
+      ...(manifest.audioTracks?.length
+        ? {
+            // The halves of a cut go as the one sound they still are, so no engine has a seam to close.
+            musicTracks: manifest.audioTracks.map(track =>
+              joinContinuousAudio(track.clips).map(sound => ({
+                uri: sound.uri,
+                startMs: Math.max(0, Math.round(sound.startMs)),
+                ...(sound.phaseMs ? { phaseMs: Math.round(sound.phaseMs) } : {}),
+                inMs: Math.max(0, Math.round(sound.inMs)),
+                outMs: Math.round(sound.outMs > 0 ? sound.outMs : UNKNOWN_TRACK_END_MS),
+                ...(sound.endMs > 0 && sound.endMs < totalMs ? { endMs: Math.round(sound.endMs) } : {}),
+                volume: sound.volume,
+                loop: sound.loop,
+                fadeInMs: Math.max(0, Math.round(sound.fadeInMs ?? 0)),
+                fadeOutMs: Math.max(0, Math.round(sound.fadeOutMs)),
+                ...wireSpeed(sound),
+              })),
+            ),
+          }
+        : {}),
     },
     // A little way in, so the poster is a frame of the video rather than a fade from black.
     posterAtMs: Math.min(500, Math.max(0, totalMs - 1)),

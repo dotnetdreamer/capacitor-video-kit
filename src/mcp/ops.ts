@@ -86,6 +86,7 @@ import {
   patchAudioClip,
   removeAudioClip,
   type AudioDropTarget,
+  duplicateAudioClip,
   duplicateClip,
   duplicateOverlay,
   findClip,
@@ -124,6 +125,7 @@ import {
   setTrackLayoutAnimation,
   setTrackOpacity,
   setTrackStart,
+  splitAudioClipAt,
   splitClipAt,
   splitOverlayAt,
   swapTrackZ,
@@ -1031,6 +1033,29 @@ const OPS: Record<string, Apply> = {
     const newTrackId = optionalStr(op, 'newTrackId') ?? `lane-${id}`;
     const next = moveAudioClipToTrack(manifest, id, target, num(op, 'atMs'), newTrackId);
     if (!next) throw new Error(`"${id}" cannot be moved there - the lane has no gap that holds it whole, or a new lane needs an id ("${newTrackId}") no lane has`);
+    return next;
+  },
+
+  /* The audio row's Cut and Duplicate, by the very functions its tiles call. */
+  splitAudio: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudio(manifest, id);
+    const newId = str(op, 'newId');
+    if (findAudioClip(manifest, newId)) throw new Error(`sound id "${newId}" is already on this post`);
+    const atMs = num(op, 'atMs');
+    const next = splitAudioClipAt(manifest, id, atMs, newId);
+    if (!next) throw new Error(`"${id}" cannot be cut at ${atMs}ms - both halves need to be heard for at least ${MIN_LAYER_MS}ms, and to keep that much of the file`);
+    return next;
+  },
+
+  duplicateAudio: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudio(manifest, id);
+    const newId = str(op, 'newId');
+    if (findAudioClip(manifest, newId)) throw new Error(`sound id "${newId}" is already on this post`);
+    const newTrackId = optionalStr(op, 'newTrackId') ?? `lane-${newId}`;
+    const next = duplicateAudioClip(manifest, id, newId, newTrackId);
+    if (!next) throw new Error(`"${id}" cannot be copied - the copy is heard nowhere on the post, or a new lane needs an id ("${newTrackId}") no lane has`);
     return next;
   },
 

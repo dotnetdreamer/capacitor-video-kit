@@ -215,6 +215,82 @@ describe('EditorStore', () => {
     expect(store.manifest.value.audioTracks?.[0]?.clips[0]?.id).toBe('legacy-music');
   });
 
+  it('cuts the selected sound in two at the playhead, selects the right half, and undoes in one step', () => {
+    const id = store.addAudioClip({ ...MUSIC, sourceDurationMs: 4000, loop: false, startMs: 0 })!;
+    store.playheadMs.value = 1500;
+    store.splitSelectedAudioAtPlayhead();
+
+    const clips = store.manifest.value.audioTracks![0]!.clips;
+    expect(clips.map(clip => [clip.id === id, clip.startMs, clip.inMs, clip.outMs])).toEqual([
+      [true, 0, 0, 1500],
+      [false, 1500, 1500, 0],
+    ]);
+    expect(store.selection.value).toEqual({ kind: 'audio', id: clips[1]!.id });
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Cut');
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.id)).toEqual([id]);
+  });
+
+  it('says where the playhead has to be when a cut cannot land, and changes nothing', () => {
+    store.addAudioClip({ ...MUSIC, sourceDurationMs: 2000, loop: false, startMs: 0 });
+    store.playheadMs.value = 3000;
+    const before = store.manifest.value;
+    store.splitSelectedAudioAtPlayhead();
+    expect(store.manifest.value).toBe(before);
+    expect(store.toast.value?.text).toBe('Move the playhead inside the audio to cut it');
+  });
+
+  it('cuts the music on a lane of its own in the same step, and undo gives the music back', () => {
+    const original = load({ music: { ...MUSIC, sourceDurationMs: 2000 } });
+    store.select({ kind: 'music' });
+    // The music row calls it a sound, and a cut it refuses leaves it the music.
+    store.playheadMs.value = 5950;
+    store.splitSelectedAudioAtPlayhead();
+    expect(store.toast.value?.text).toBe('Move the playhead inside the sound to cut it');
+    expect(store.manifest.value).toBe(original);
+
+    store.playheadMs.value = 3000;
+    store.splitSelectedAudioAtPlayhead();
+    expect(store.manifest.value.music).toBeNull();
+    const clips = store.manifest.value.audioTracks![0]!.clips;
+    // A two-second loop: the right half takes it up three seconds in.
+    expect(clips.map(clip => [clip.startMs, clip.endMs, clip.phaseMs ?? 0])).toEqual([
+      [0, 3000, 0],
+      [3000, 0, 3000],
+    ]);
+    expect(store.selection.value).toEqual({ kind: 'audio', id: clips[1]!.id });
+    store.undo();
+    expect(store.manifest.value).toBe(original);
+  });
+
+  it('copies the selected sound straight after it, selects the copy, and undoes in one step', () => {
+    const id = store.addAudioClip({ ...MUSIC, sourceDurationMs: 2000, loop: false, startMs: 0 })!;
+    store.duplicateSelectedAudio();
+
+    const clips = store.manifest.value.audioTracks![0]!.clips;
+    expect(clips.map(clip => [clip.id === id, clip.startMs])).toEqual([
+      [true, 0],
+      [false, 2000],
+    ]);
+    expect(store.selection.value).toEqual({ kind: 'audio', id: clips[1]!.id });
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Duplicate');
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.id)).toEqual([id]);
+  });
+
+  it('copies music that plays to the end onto a lane under it, the music going onto the first', () => {
+    const original = load({ music: { ...MUSIC, sourceDurationMs: 2000 } });
+    store.select({ kind: 'music' });
+    store.duplicateSelectedAudio();
+
+    expect(store.manifest.value.music).toBeNull();
+    const tracks = store.manifest.value.audioTracks!;
+    expect(tracks.map(track => track.clips.map(clip => clip.startMs))).toEqual([[0], [0]]);
+    expect(store.selection.value).toEqual({ kind: 'audio', id: tracks[1]!.clips[0]!.id });
+    store.undo();
+    expect(store.manifest.value).toBe(original);
+  });
+
   describe('commit', () => {
     it('does nothing for a change that is not possible or not a change', () => {
       expect(store.commit('Nothing', () => null)).toBe(false);

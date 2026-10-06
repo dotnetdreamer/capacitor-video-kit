@@ -58,7 +58,8 @@ Speed sheet does. Sounds sit on audio lanes: `addAudio` places one at its `start
 one lane play one after another and lanes play together, so a sound that would overlap another goes
 on a lane of its own, and one the agent puts on a named lane where it does not fit is refused. A
 post's single `music` joins the lanes as their first sound on the first `addAudio`, as it does in the
-editor.
+editor. `splitAudio` cuts a sound in two on its lane and `duplicateAudio` puts a copy straight after
+it, as the audio row's Cut and Duplicate do; a cut that leaves a half under 100 ms is refused.
 
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different
