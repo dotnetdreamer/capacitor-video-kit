@@ -1476,17 +1476,16 @@ private struct MusicDTO: Decodable {
         case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs
     }
 
-    /// Throws the full `audio.music.*` path itself: there is no index to splice in, so there is
-    /// nothing for the parent to add.
+    /// Throws the full `audio.music.*` path itself. A sound on a lane cannot name its own lane and
+    /// index: Capacitor's decoder gives an array element a decoder whose `codingPath` is empty. The
+    /// lane loop in `AudioDTO` moves the path under `audio.musicTracks[i][j]` instead.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
         uri = c.string(.uri)
-        let indices = decoder.codingPath.compactMap(\.intValue)
-        let path = indices.count == 2 ? "audio.musicTracks[\(indices[0])][\(indices[1])]" : "audio.music"
-        if uri.isEmpty { throw SpecError("\(path).uri") }
+        if uri.isEmpty { throw SpecError("audio.music.uri") }
         inMs = max(0, c.long(.inMs, 0))
         outMs = c.long(.outMs, 0)
-        if outMs <= inMs { throw SpecError("\(path).outMs") }
+        if outMs <= inMs { throw SpecError("audio.music.outMs") }
         phaseMs = c.long(.phaseMs, 0)
         startMs = max(0, c.long(.startMs, 0))
         endMs = max(0, c.long(.endMs, 0))
@@ -1564,6 +1563,8 @@ private struct AudioDTO: Decodable {
                     let j = clips.currentIndex
                     do {
                         lane.append(try clips.decode(MusicDTO.self))
+                    } catch let e as SpecError where e.path.hasPrefix("audio.music.") {
+                        throw SpecError("audio.musicTracks[\(i)][\(j)]\(e.path.dropFirst("audio.music".count))")
                     } catch let e as SpecError {
                         throw e
                     } catch {

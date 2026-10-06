@@ -149,6 +149,16 @@ final class RenderRobustnessTests: RenderTestCase {
         XCTAssertThrowsError(try TestCalls.parse(options)) { error in
             XCTAssertEqual((error as? SpecError)?.path, "audio.musicTracks[0][0].outMs")
         }
+
+        // Past the first lane and the first sound, and the other field MusicDTO checks. Capacitor's
+        // decoder hands an array element an empty `codingPath`, so the index has to come from the loop.
+        let good: [String: Any] = ["uri": file("tone.wav").absoluteString, "inMs": 0, "outMs": 1000]
+        let second = TestSpecs.spec([TestSpecs.clip("v", file("a.mp4"), outMs: 2000)], [
+            "audio": ["musicTracks": [[good], [good, ["uri": "", "inMs": 0, "outMs": 1000]]]],
+        ])
+        XCTAssertThrowsError(try TestCalls.parse(second)) { error in
+            XCTAssertEqual((error as? SpecError)?.path, "audio.musicTracks[1][1].uri")
+        }
     }
 
     func testMusicPhaseDefaultsToZeroAndRetainsSignedValues() throws {
