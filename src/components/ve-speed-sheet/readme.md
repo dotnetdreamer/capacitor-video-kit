@@ -7,9 +7,10 @@
 
 ## Overview
 
-Speed for the selected clip segment: a readout, TikTok's preset chips, a fine slider that snaps to
-1x, and - with more than one segment - the offer to give them all the same speed. Every change
-stretches the timeline, so the timeline above follows it live.
+Speed for the selected clip segment or sound: a readout, TikTok's preset chips, a fine slider that
+snaps to 1x, and - for a segment, with more than one - the offer to give them all the same speed.
+Every change stretches the timeline, so the timeline above follows it live. A sound keeps its pitch
+at any speed, as a clip's does, and keeps its place on the post: it only runs longer or shorter.
 
 ## Properties
 

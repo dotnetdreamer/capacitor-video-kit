@@ -545,7 +545,10 @@ export class VeToolbar {
     return { kind: 'clip', label: 'Clip tools', collapse: this.deselect('Close clip tools'), tiles };
   }
 
-  /** The selected segment's speed sheet. On both clip rows, and on neither for a picture. */
+  /**
+   * The speed sheet for whatever is selected: a segment - on both clip rows, and on neither for a
+   * picture - or a sound, on both sound rows. The sheet reads its target off the selection.
+   */
   private speedTile(): ToolTile {
     const store = this.ctx.store;
     return { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') };
@@ -780,6 +783,7 @@ export class VeToolbar {
           icon: 'volume-high-outline',
           run: () => store.openVolume({ kind: 'music' }),
         },
+        this.speedTile(),
         {
           id: 'loop',
           label: 'Loop',
@@ -820,6 +824,7 @@ export class VeToolbar {
             if (clip) store.openVolume({ kind: 'audio', id: clip.id });
           },
         },
+        this.speedTile(),
         {
           id: 'loop',
           label: 'Loop',

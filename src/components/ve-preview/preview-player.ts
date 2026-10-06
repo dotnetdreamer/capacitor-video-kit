@@ -5,6 +5,7 @@ import {
   musicFadeAt,
   musicPhaseMs,
   musicSourceMsAt,
+  musicSpeed,
   musicWindow,
   sourceMsAt,
   transitionWindowAt,
@@ -28,6 +29,7 @@ import {
   SEEK_EPSILON_S,
   applyClipAudio,
   applyPitch,
+  applySoundRate,
   atFileEnd,
   audioEndGuardMs,
   audioSlowToSeekOnItsOwn,
@@ -350,6 +352,8 @@ interface LaneSlot {
   element: HTMLAudioElement;
   uri: string | null;
   clipId: string | null;
+  /** That clip's speed, which can decide [element] as its file can; see [PreviewMixer.elementFor]. */
+  rate: number;
 }
 
 export interface PreviewMedia {
@@ -511,6 +515,8 @@ export class PreviewPlayer implements EditorPlayer {
   private tail: { fromMs: number; wallMs: number } | null = null;
 
   private musicUri: string | null = null;
+  /** The music's speed as [setSource] last put it on [musicEl]; the takes are always at 1x. */
+  private musicRate = 1;
   private voiceUri: string | null = null;
   /** Audio elements started or seeked and not yet checked: where they were put (ms), and how often. */
   private readonly settling = new Map<HTMLAudioElement, { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number; learn: boolean }>();
@@ -1917,7 +1923,7 @@ export class PreviewPlayer implements EditorPlayer {
     this.ensureAudioLanes();
 
     const music = manifest.music;
-    this.setSource('music', music?.uri ?? null);
+    this.setSource('music', music?.uri ?? null, music ? musicSpeed(music) : 1);
     // Sound that is about to be due is started NOW, a stall before it is needed: the position it is
     // put at is still counted from the playhead, so what comes out starts exactly on time - and the
     // first moment of a track or a take is heard rather than swallowed by the output starting up.
@@ -1970,13 +1976,17 @@ export class PreviewPlayer implements EditorPlayer {
     else if (!spare.element.paused) spare.element.pause();
   }
 
-  /** The same trim, phase, loop, level and fades for legacy music and every lane clip. */
+  /**
+   * The same trim, phase, loop, speed, level and fades for legacy music and every lane clip. A sound
+   * not due yet is put that far before its first moment in the FILE - the time to go, at its speed.
+   */
   private syncMusicClip(music: EditMusic, el: HTMLAudioElement, ms: number, total: number, live: boolean, running: boolean): void {
     const heard = musicWindow(music, total);
     const lead = live ? this.leadWindow(el) : 0;
     const at =
       heard && live
-        ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= lead ? music.inMs + musicPhaseMs(music) + ms - heard.startMs : null))
+        ? (musicSourceMsAt(music, ms, total) ??
+          (ms < heard.startMs && heard.startMs - ms <= lead ? music.inMs + musicPhaseMs(music) + (ms - heard.startMs) * musicSpeed(music) : null))
         : null;
     if (heard && at !== null) {
       this.playAt(el, at, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running, musicSpan(music, heard.endMs - ms));
@@ -1987,12 +1997,19 @@ export class PreviewPlayer implements EditorPlayer {
 
   /**
    * Keeps one audio element where the playhead wants it: `positionMs` into its file, at `volume`, on
-   * the stretch of the file `span` says is heard.
+   * the stretch of the file `span` says is heard, at the span's rate.
+   *
+   * Positions here are in the FILE and every allowance - a stall, a drift - is WALL time, which at a
+   * rate other than 1x covers that many times as much of the file: an allowance is multiplied by
+   * `span.rate` before it meets a position, and a distance between two positions divided by it before
+   * it is weighed as one. At 1x both are the numbers this has always used.
    *
    * @param running see [syncAudio].
    */
   private playAt(el: HTMLAudioElement, positionMs: number, volume: number, running: boolean, span: SoundSpan): void {
     this.mixer.setLevel(el, volume);
+    // Before anything below starts it, so it never starts at the speed it had for another sound.
+    applySoundRate(el, span.rate);
     // Sound goes with a picture that is MOVING. Left to run through a clock that stood still, it ran
     // ahead of the picture by the length of the stall and was seeked back as soon as the picture
     // moved - a second of music heard twice on the first play of a template on the iOS simulator. The
@@ -2016,7 +2033,7 @@ export class PreviewPlayer implements EditorPlayer {
       // it is going to, and is left there; see [playedOut]. Only one seen playing up to it as the post
       // played on: a seek back to just short of the end forgets that, and it is heard again from there.
       if (this.audioFinishing.has(el)) {
-        if (playedOut(el.currentTime * 1000, positionMs, span, fileEndMs(el), guardMs, this.maxLeadMs(el) + this.driftAllowedMs(el))) return;
+        if (playedOut(el.currentTime * 1000, positionMs, span, fileEndMs(el), guardMs, (this.maxLeadMs(el) + this.driftAllowedMs(el)) * span.rate)) return;
         this.audioFinishing.delete(el);
       }
       // Not measured after a reload: the load is in the stall, and no lead makes up for that.
@@ -2033,7 +2050,7 @@ export class PreviewPlayer implements EditorPlayer {
     const seekLeadMs = this.leadsFor(el).seek ?? this.fallbackLeadMs(el, 'seek');
     const endMs = Math.min(span.outMs, fileEndMs(el));
     const zoneMs = this.wrapZoneMs(el, span, guardMs);
-    if (atMs >= span.inMs && endMs - atMs <= zoneMs && atMs - endMs <= AUDIO_DRIFT_MS) {
+    if (atMs >= span.inMs && endMs - atMs <= zoneMs && atMs - endMs <= AUDIO_DRIFT_MS * span.rate) {
       if (passFollows(atMs, positionMs, span)) {
         this.wrapAudio(el, atMs, positionMs, span, seekLeadMs, zoneMs, running);
         return;
@@ -2045,8 +2062,9 @@ export class PreviewPlayer implements EditorPlayer {
         return;
       }
     }
-    // How far it is from where it should be - round the loop, at a seam; see [soundOffsetMs].
-    const offsetMs = soundOffsetMs(atMs, positionMs, span);
+    // How far it is from where it should be - round the loop, at a seam; see [soundOffsetMs] - in the
+    // wall time it would take to catch up, which is what a drift and a lead are both measured in.
+    const offsetMs = soundOffsetMs(atMs, positionMs, span) / span.rate;
     // Slow to seek - on WebKit, or played through the mixer - its stall is judged over
     // [SLOW_SEEK_SETTLE_MS] and allowed [SLOW_SEEK_DRIFT_MS]; Chromium's exactly as it always was.
     const slow = this.slowToSeek(el);
@@ -2057,7 +2075,7 @@ export class PreviewPlayer implements EditorPlayer {
       const sinceMs = performance.now() - settling.wallMs;
       if (sinceMs > (slow ? SLOW_SEEK_SETTLE_TIMEOUT_MS : AUDIO_SETTLE_TIMEOUT_MS)) {
         this.settling.delete(el);
-      } else if (soundOffsetMs(atMs, settling.putAtMs, span) < AUDIO_SETTLED_MS || (slow && sinceMs < SLOW_SEEK_SETTLE_MS)) {
+      } else if (soundOffsetMs(atMs, settling.putAtMs, span) < AUDIO_SETTLED_MS * span.rate || (slow && sinceMs < SLOW_SEEK_SETTLE_MS)) {
         // Inside the stall the element is expected to be off by up to its lead; only something
         // further out than that is a drift to correct now. A slow-to-seek element is inside it for
         // the whole of [SLOW_SEEK_SETTLE_MS], however far its clock has got: it moves before it
@@ -2109,7 +2127,8 @@ export class PreviewPlayer implements EditorPlayer {
     const leadMs = this.leadsFor(el)[kind] ?? this.fallbackLeadMs(el, kind);
     const guardMs = audioEndGuardMs();
     // A negative position is sound that is not due yet (see [syncAudio]); it starts at its beginning.
-    const putAtMs = soundPutMs(positionMs, leadMs, span, fileEndMs(el), guardMs, this.wrapZoneMs(el, span, guardMs));
+    // The stall is wall time, and the file goes by at the span's rate through it.
+    const putAtMs = soundPutMs(positionMs, leadMs * span.rate, span, fileEndMs(el), guardMs, this.wrapZoneMs(el, span, guardMs));
     if (putAtMs === null) return false;
     this.seekAudio(el, putAtMs, kind, leadMs, learn);
     return true;
@@ -2141,10 +2160,14 @@ export class PreviewPlayer implements EditorPlayer {
    * is sooner - a playing element is sent round to the next pass: its seek stall, and never less than
    * the checks need to see it there in time; see [LOOP_WRAP_EARLY_MS]. A section so short that this
    * would be most of it is sent round from halfway, so each pass is heard at all.
+   *
+   * In the FILE's milliseconds, as the positions it is measured from are: the stall and the checks'
+   * spacing are wall time, and cover the span's rate times as much of the file. The end guard is a
+   * place in the file already.
    */
   private wrapZoneMs(el: HTMLAudioElement, span: SoundSpan, guardMs: number): number {
     const seekLeadMs = this.leadsFor(el).seek ?? this.fallbackLeadMs(el, 'seek');
-    return Math.min(Math.max(seekLeadMs, guardMs + LOOP_WRAP_EARLY_MS), passMs(span) / 2 || Infinity);
+    return Math.min(Math.max(seekLeadMs * span.rate, guardMs + LOOP_WRAP_EARLY_MS * span.rate), passMs(span) / 2 || Infinity);
   }
 
   /**
@@ -2159,7 +2182,8 @@ export class PreviewPlayer implements EditorPlayer {
    * sent on round to the in point at once instead.
    */
   private wrapAudio(el: HTMLAudioElement, atMs: number, positionMs: number, span: SoundSpan, leadMs: number, zoneMs: number, running: boolean): void {
-    let aimMs = wrapAimMs(atMs, positionMs, leadMs, span);
+    // The stall is wall time; the aim is a place in the file, which goes by at the span's rate.
+    let aimMs = wrapAimMs(atMs, positionMs, leadMs * span.rate, span);
     if (aimMs >= Math.min(span.outMs, fileEndMs(el)) - zoneMs) aimMs -= passMs(span);
     this.seekAudio(el, Math.max(span.inMs, aimMs), 'seek', leadMs, running && aimMs >= span.inMs);
   }
@@ -2308,21 +2332,28 @@ export class PreviewPlayer implements EditorPlayer {
   /**
    * Puts the music or the voiceover on `uri`, on the element [PreviewMixer.elementFor] says it is to
    * play on - which is the component's own everywhere but where that element has been routed and the
-   * file is one the graph would hear as silence. An element the sound moves off is stripped, as the
-   * preview strips every element it has finished with, so it holds no decoder and has nothing to play.
+   * file is one the graph would hear as silence, or the sound is played at a `rate` the graph cannot
+   * take. An element the sound moves off is stripped, as the preview strips every element it has
+   * finished with, so it holds no decoder and has nothing to play. A new speed for the same file on
+   * the same element is only a new rate, with nothing loaded again.
    */
-  private setSource(which: 'music' | 'voice', uri: string | null): void {
+  private setSource(which: 'music' | 'voice', uri: string | null, rate = 1): void {
     const current = which === 'music' ? this.musicUri : this.voiceUri;
-    if (current === uri) return;
+    if (current === uri && (which === 'voice' || this.musicRate === rate)) return;
     const url = uri ? this.store.host.platform.fileUrl(uri) : null;
     const was = which === 'music' ? this.musicEl : this.voiceEl;
-    const el = url ? this.mixer.elementFor(this.ownAudio[which], url) : this.ownAudio[which];
+    const el = url ? this.mixer.elementFor(this.ownAudio[which], url, rate) : this.ownAudio[which];
     if (which === 'music') {
       this.musicUri = uri;
+      this.musicRate = rate;
       this.musicEl = el;
     } else {
       this.voiceUri = uri;
       this.voiceEl = el;
+    }
+    if (current === uri && el === was) {
+      applySoundRate(el, rate);
+      return;
     }
     if (was !== el) {
       was.pause();
@@ -2343,6 +2374,8 @@ export class PreviewPlayer implements EditorPlayer {
       el.removeAttribute('src');
     }
     el.load();
+    // After the load, which puts an element back to its default rate - set here as well.
+    applySoundRate(el, rate);
   }
 
   /** Makes two elements per audio lane, and releases a lane once the edit no longer has it. */
@@ -2352,7 +2385,7 @@ export class PreviewPlayer implements EditorPlayer {
       const own = this.makeAudio();
       own.preload = 'auto';
       this.mixer.add(own);
-      return { own, element: own, uri: null, clipId: null };
+      return { own, element: own, uri: null, clipId: null, rate: 1 };
     };
     for (const track of this.store.manifest.value.audioTracks ?? []) {
       wanted.add(track.id);
@@ -2378,27 +2411,39 @@ export class PreviewPlayer implements EditorPlayer {
     return [...this.audioLanes.values()].flatMap(lane => lane.map(slot => slot.element));
   }
 
+  /**
+   * Puts `clip` on one of a lane's slots. The same file stays loaded on the same element - for the next
+   * clip along that uses it, or for a new speed of the same clip - unless that speed moves the sound
+   * between the mixer's element and its stand-in; see [PreviewMixer.elementFor].
+   */
   private setLaneSource(lane: LaneSlot, clip?: EditAudioClip): void {
     const uri = clip?.uri ?? null;
     const id = clip?.id ?? null;
-    if (lane.uri === uri && lane.clipId === id) return;
-    if (lane.uri === uri) {
-      // Two consecutive clips can use the same file. Their windows are still separate playback
-      // decisions, including when the first was already marked as finishing at its out point.
-      lane.element.pause();
-      this.settling.delete(lane.element);
-      this.audioFinishing.delete(lane.element);
+    const rate = clip ? musicSpeed(clip) : 1;
+    if (lane.uri === uri && lane.clipId === id && lane.rate === rate) return;
+    const url = uri ? this.store.host.platform.fileUrl(uri) : null;
+    const wanted = url ? this.mixer.elementFor(lane.own, url, rate) : lane.own;
+    if (lane.uri === uri && wanted === lane.element) {
+      if (lane.clipId !== id) {
+        // Two consecutive clips can use the same file. Their windows are still separate playback
+        // decisions, including when the first was already marked as finishing at its out point.
+        lane.element.pause();
+        this.settling.delete(lane.element);
+        this.audioFinishing.delete(lane.element);
+      }
     } else {
-      lane.element = this.changeAudioSource(lane.own, lane.element, uri);
+      lane.element = this.changeAudioSource(lane.own, lane.element, uri, rate);
     }
+    applySoundRate(lane.element, rate);
     lane.uri = uri;
     lane.clipId = id;
+    lane.rate = rate;
   }
 
   /** Chooses the routed element or its stand-in and forgets the old file's timing. */
-  private changeAudioSource(own: HTMLAudioElement, was: HTMLAudioElement, uri: string | null): HTMLAudioElement {
+  private changeAudioSource(own: HTMLAudioElement, was: HTMLAudioElement, uri: string | null, rate = 1): HTMLAudioElement {
     const url = uri ? this.store.host.platform.fileUrl(uri) : null;
-    const el = url ? this.mixer.elementFor(own, url) : own;
+    const el = url ? this.mixer.elementFor(own, url, rate) : own;
     if (was !== el) {
       was.pause();
       was.removeAttribute('src');

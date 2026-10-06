@@ -330,6 +330,13 @@ data class Music(
     val endMs: Long = 0L,
     /** Signed offset into [inMs]..[outMs] at the first playback, wrapping within the section. */
     val phaseMs: Long = 0L,
+    /**
+     * How fast the section plays, 0.25..4, pitch preserved - a clip's [Clip.speed], for a sound.
+     * [inMs], [outMs] and [phaseMs] stay places in the FILE, so one pass lasts `(outMs - inMs) /
+     * speed` of the output; [startMs], [endMs] and the fades stay places on the output. Last and
+     * defaulted, so every sound built without one is the 1x sound it always was.
+     */
+    val speed: Float = 1f,
 )
 
 data class Voiceover(

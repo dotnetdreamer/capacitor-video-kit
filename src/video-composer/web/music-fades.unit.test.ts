@@ -119,3 +119,31 @@ describe('the music fades in the web mix', () => {
     expect(gain(1500)).toBeCloseTo(0.15, 4);
   });
 });
+
+/*
+ * Music at a speed, stretched by the mix. A constant level stretched is the same constant level, so
+ * every sample where the music should play reads its gain whatever the stretch did - and a sample of
+ * silence is a pass laid short, which at a loop's seam is a gap heard every time round.
+ */
+describe('music at a speed in the web mix', () => {
+  it('lays a sped-up loop at its section divided by the speed, heard right across every seam', async () => {
+    const gain = await gainsOf(post({ uri: 'file:///tone-3000.m4a', outMs: 3000, speed: 2 }, 10_000));
+    // Passes of 1.5 s: seams at 1.5, 3, 4.5 ... 9 s.
+    for (const ms of [10, 1499, 1501, 2999, 3001, 4500, 8999, 9001, 9990]) expect(gain(ms)).toBeCloseTo(1, 3);
+  });
+
+  it('plays a slowed sound once, for twice as long, and then nothing', async () => {
+    const gain = await gainsOf(post({ uri: 'file:///tone-3000.m4a', outMs: 3000, loop: false, speed: 0.5 }, 10_000));
+    for (const ms of [10, 2000, 4000, 5900]) expect(gain(ms)).toBeCloseTo(1, 3);
+    expect(gain(6100)).toBe(0);
+    expect(gain(9000)).toBe(0);
+  });
+
+  it('fades a sped-up sound over the window it is heard in, seams and all', async () => {
+    const gain = await gainsOf(post({ uri: 'file:///tone-4000.m4a', outMs: 4000, speed: 2, fadeOutMs: 1000 }, 5000));
+    expect(gain(2000)).toBeCloseTo(1, 3);
+    expect(gain(4000)).toBeCloseTo(1, 3);
+    expect(gain(4500)).toBeCloseTo(0.5, 3);
+    expect(gain(4999.98)).toBeLessThan(0.001);
+  });
+});

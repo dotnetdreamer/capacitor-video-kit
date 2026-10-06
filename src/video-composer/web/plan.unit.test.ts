@@ -434,6 +434,74 @@ describe('music laid against its decoded file', () => {
     expect(laid?.items[1]?.atUs).toBe(10_000_000);
     expect(musicForSource(planned({ inMs: 13_000 }), 12_000_000)).toBeNull();
   });
+
+  it('lays a sped-up sound again at its speed, against the file it turned out to be', () => {
+    const laid = musicForSource(planned({ speed: 2 }, 15_000), 12_000_000);
+    // Twelve seconds of file at 2x is six of the post: two whole passes, and three seconds of a third.
+    expect(laid?.items.map(item => [item.atUs, item.lengthUs])).toEqual([
+      [0, 6_000_000],
+      [6_000_000, 6_000_000],
+      [12_000_000, 3_000_000],
+    ]);
+    expect(laid?.items[2]).toMatchObject({ inUs: 0, outUs: 6_000_000 });
+    expect(laid?.stopUs).toBe(15_000_000);
+  });
+});
+
+/*
+ * Music at a speed. The section is still a stretch of the FILE and the phase a place in it, while each
+ * pass is laid at its OUTPUT length - the file's divided by the speed - which the mix stretches it to.
+ * The same cases `RenderPlanTest` pins for Android.
+ */
+describe('music at a speed', () => {
+  function laid(music: Partial<ComposeMusic>, videoMs: number): MusicPlan {
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: videoMs })],
+        audio: {
+          originalMuted: true,
+          originalVolume: 1,
+          voiceover: [],
+          music: { uri: 'file:///m.m4a', startMs: 0, inMs: 0, outMs: 3000, volume: 1, loop: true, fadeInMs: 0, fadeOutMs: 0, ...music },
+        },
+      }),
+      new Map(),
+    );
+    if (!plan.music) throw new Error('no music planned');
+    return plan.music;
+  }
+
+  it('lays a sped-up loop pass by pass at its section divided by the speed', () => {
+    const music = laid({ speed: 2 }, 10_000);
+    expect(music.speed).toBe(2);
+    expect(music.items.map(item => item.lengthUs)).toEqual([...Array(6).fill(1_500_000), 1_000_000]);
+    expect(music.items.map(item => item.outUs - item.inUs)).toEqual([...Array(6).fill(3_000_000), 2_000_000]);
+    for (let k = 1; k < music.items.length; k++) {
+      expect(music.items[k]?.atUs).toBe((music.items[k - 1]?.atUs ?? 0) + (music.items[k - 1]?.lengthUs ?? 0));
+    }
+    expect(music.stopUs).toBe(10_000_000);
+  });
+
+  it('plays a slowed sound once for its section divided by the speed', () => {
+    const music = laid({ speed: 0.5, loop: false, startMs: 500 }, 10_000);
+    expect(music.items).toEqual([{ inUs: 0, outUs: 3_000_000, atUs: 500_000, lengthUs: 6_000_000 }]);
+    expect(music.stopUs).toBe(6_500_000);
+  });
+
+  it('starts a sped-up sound at its phase in the file', () => {
+    const music = laid({ speed: 2, outMs: 4000, phaseMs: 1000 }, 5000);
+    expect(music.items.map(item => [item.inUs, item.outUs, item.atUs, item.lengthUs])).toEqual([
+      [1_000_000, 4_000_000, 0, 1_500_000],
+      [0, 4_000_000, 1_500_000, 2_000_000],
+      [0, 3_000_000, 3_500_000, 1_500_000],
+    ]);
+  });
+
+  it('lays a sound at 1x exactly as it always did', () => {
+    const music = laid({}, 10_000);
+    expect(music).not.toHaveProperty('speed');
+    expect(music.items.every(item => !('lengthUs' in item))).toBe(true);
+  });
 });
 
 describe('voiceovers', () => {

@@ -17,6 +17,7 @@ import {
   isFullFrameRect,
   normaliseBackground,
   normalisePlacement,
+  normaliseSpeed,
   normaliseZoom,
   normaliseRect,
   sameRect,
@@ -208,7 +209,7 @@ export function patchClip(
 /** A picture keeps 1x: a still sped up is only a shorter still, which is what trimming it is for. */
 export function setClipSpeed(manifest: EditManifest, clipId: string, speed: number): EditManifest {
   if (findClip(manifest, clipId)?.image) return manifest;
-  return patchClip(manifest, clipId, { speed: Math.round(clamp(speed, MIN_SPEED, MAX_SPEED) * 100) / 100 });
+  return patchClip(manifest, clipId, { speed: normaliseSpeed(speed) });
 }
 
 /** What an absent rectangle already means, spelled out for the one op that has to turn it. */
@@ -1240,10 +1241,22 @@ function clampSpan(startMs: number, endMs: number, lo: number, hi: number, prevS
 /* Sound                                                                                          */
 /* -------------------------------------------------------------------------------------------- */
 
-/** The length of the music section itself, before any looping. 0 when the track length is unknown. */
+/**
+ * The length of the music section itself, before any looping, in the FILE's milliseconds: one pass
+ * lasts this divided by [musicSpeed] on the post. 0 when the track length is unknown.
+ */
 export function musicSectionMs(music: EditMusic): number {
   const out = music.outMs > 0 ? music.outMs : music.sourceDurationMs;
   return out > 0 ? Math.max(0, out - music.inMs) : 0;
+}
+
+/**
+ * How fast the music's section plays: its [EditMusic.speed], or 1x for a sound that has none. Held
+ * to the range here too, because `setMusic` stores whatever it is handed.
+ */
+export function musicSpeed(music: Pick<EditMusic, 'speed'>): number {
+  const speed = music.speed;
+  return speed !== undefined && Number.isFinite(speed) && speed > 0 ? clamp(speed, MIN_SPEED, MAX_SPEED) : 1;
 }
 
 /** The first pass's offset into the section, wrapped after a whole number of loops. */
@@ -1258,12 +1271,15 @@ export function musicStopMs(music: Pick<EditMusic, 'endMs'>, totalMs: number): n
   return music.endMs > 0 ? Math.min(music.endMs, totalMs) : totalMs;
 }
 
-/** Where the music is heard on the output timeline. */
+/**
+ * Where the music is heard on the output timeline. A sound played once runs for what is left of its
+ * section after the phase, at its speed - so not always a whole number of milliseconds.
+ */
 export function musicWindow(music: EditMusic, totalMs: number): { startMs: number; endMs: number } {
   const section = musicSectionMs(music);
   const startMs = Math.min(music.startMs, totalMs);
   const stopMs = musicStopMs(music, totalMs);
-  const endMs = music.loop || section === 0 ? stopMs : Math.min(stopMs, music.startMs + section - musicPhaseMs(music));
+  const endMs = music.loop || section === 0 ? stopMs : Math.min(stopMs, music.startMs + (section - musicPhaseMs(music)) / musicSpeed(music));
   return { startMs, endMs: Math.max(startMs, endMs) };
 }
 
@@ -1283,7 +1299,8 @@ export function musicSourceMsAt(music: EditMusic, outputMs: number, totalMs: num
   const { startMs, endMs } = musicWindow(music, totalMs);
   if (outputMs < startMs || outputMs >= endMs) return null;
   const section = musicSectionMs(music);
-  const into = outputMs - startMs;
+  // Into the file, which goes by at the sound's speed.
+  const into = (outputMs - startMs) * musicSpeed(music);
   const from = musicPhaseMs(music) + into;
   return music.inMs + (section > 0 && music.loop ? from % section : from);
 }
@@ -1334,6 +1351,11 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
   next.fadeOutMs = Math.max(0, Math.round(next.fadeOutMs || 0));
   // Left absent on music that never had one, so a patch of something else is not a change.
   if (next.fadeInMs !== undefined) next.fadeInMs = Math.max(0, Math.round(next.fadeInMs || 0));
+  // And taken off at 1x, which is what a sound with no speed plays at.
+  if (next.speed !== undefined) {
+    next.speed = normaliseSpeed(next.speed);
+    if (next.speed === 1) delete next.speed;
+  }
   if (next.outMs > 0 && next.outMs - next.inMs < MIN_LAYER_MS) return manifest;
   if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;
@@ -1388,13 +1410,14 @@ function audioFits(clip: EditAudioClip, others: readonly EditAudioClip[], totalM
 function nearestAudioPlacement(clip: EditAudioClip, others: readonly EditAudioClip[], atMs: number, totalMs: number): EditAudioClip | null {
   const wanted = Math.max(0, Math.round(atMs));
   // Whole lengths, which is what [audioFits] keeps apart. One that plays to the end has no edge
-  // before another sound, and the non-finite candidates that gives are dropped.
+  // before another sound, and the non-finite candidates that gives are dropped. A sped-up sound's
+  // length is rarely whole milliseconds, so each edge is rounded away from the sound it meets.
   const own = wholeAudioWindow(clip);
   const length = own.endMs - own.startMs;
-  const edges = [wanted, 0, totalMs - length];
+  const edges = [wanted, 0, Math.floor(totalMs - length)];
   for (const other of others) {
     const taken = wholeAudioWindow(other);
-    edges.push(taken.endMs, taken.startMs - length);
+    edges.push(Math.ceil(taken.endMs), Math.floor(taken.startMs - length));
   }
   const choices = edges
     .filter(start => Number.isFinite(start))
@@ -1488,6 +1511,34 @@ export function setAudioLoop(manifest: EditManifest, id: string, loop: boolean):
   // Sorted by start, so the first one starting later is the next one along.
   const next = loop && !(clip.endMs > 0) ? lane.clips.find(one => one.startMs > clip.startMs) : undefined;
   return patchAudioClip(manifest, id, next ? { loop, endMs: next.startMs } : { loop });
+}
+
+/**
+ * What a sound at another speed is patched with: the speed, and - when slowing it down would run it
+ * into the next sound on its lane - a stop where that one begins, as Loop stops at it. A lane plays one
+ * sound at a time, and refusing the slower speed outright would leave the Speed sheet's knob springing
+ * back with nothing said. Its place, its trim and a stop it already has all stay; a stop it has is
+ * before that neighbour by construction, so it needs no other.
+ */
+export function audioSpeedPatch(manifest: EditManifest, id: string, speed: number): Partial<EditMusic> {
+  const patch: Partial<EditMusic> = { speed: normaliseSpeed(speed) };
+  const clip = findAudioClip(manifest, id);
+  const lane = manifest.audioTracks?.find(track => track.clips.some(one => one.id === id));
+  if (!clip || !lane || clip.endMs > 0) return patch;
+  // Sorted by start, so the first one starting later is the next one along.
+  const next = lane.clips.find(one => one.startMs > clip.startMs);
+  if (!next || wholeAudioWindow({ ...clip, ...patch }).endMs <= next.startMs) return patch;
+  return { ...patch, endMs: next.startMs };
+}
+
+/** One sound on the lanes at another speed; see [audioSpeedPatch] for what else may change with it. */
+export function setAudioSpeed(manifest: EditManifest, id: string, speed: number): EditManifest {
+  return patchAudioClip(manifest, id, audioSpeedPatch(manifest, id, speed));
+}
+
+/** The post's music at another speed. Nothing shares its lane, so it only ever runs longer or shorter. */
+export function setMusicSpeed(manifest: EditManifest, speed: number): EditManifest {
+  return patchMusic(manifest, { speed: normaliseSpeed(speed) });
 }
 
 /**

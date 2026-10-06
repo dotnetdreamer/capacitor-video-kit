@@ -675,6 +675,19 @@ export interface ComposeMusic {
   fadeInMs: number;
   /** Down to silence where the music stops, linear in amplitude at a slope of `1 / fadeOutMs`: see [fadeInMs]. */
   fadeOutMs: number;
+  /**
+   * 0.25..4, pitch preserved, as a clip's [ComposeClip.speed] is. Absent is 1, which is every spec
+   * written before this key, and the builder never sends 1 - an engine takes the path it always took
+   * for a sound with none.
+   *
+   * It is the TRIMMED SECTION that is sped up: `inMs`, `outMs` and `phaseMs` are still places in the
+   * file, so one pass of the section lasts `(outMs - inMs) / speed` of the output, and the first pass
+   * `(outMs - inMs - phase) / speed`, the phase wrapped into the section as it always is. `startMs`,
+   * `endMs` and both fades are on the OUTPUT timeline and mean exactly what they say above: the passes
+   * are laid end to end from `startMs` at their sped-up lengths, the last cut where the music stops,
+   * and the fades follow the window it is heard in. Every engine holds a speed outside the range to it.
+   */
+  speed?: number;
 }
 
 export interface ComposeVoiceover {

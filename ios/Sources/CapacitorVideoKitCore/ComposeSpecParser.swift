@@ -146,7 +146,9 @@ enum ComposeSpecParser {
                          volume: clamp01(m.volume),
                          loop: m.loop,
                          fadeInMs: m.fadeInMs,
-                         fadeOutMs: m.fadeOutMs)
+                         fadeOutMs: m.fadeOutMs,
+                         // Held to the clips' range, as a clip's own speed is; absent is 1x.
+                         speed: clamp(m.speed, ComposeSpecParser.minSpeed, ComposeSpecParser.maxSpeed))
         }
         let music = d.audio.music.map(makeMusic)
         let musicTracks = d.audio.musicTracks.map { $0.map(makeMusic) }
@@ -1471,9 +1473,10 @@ private struct MusicDTO: Decodable {
     let loop: Bool
     let fadeInMs: Int64
     let fadeOutMs: Int64
+    let speed: Double
 
     private enum K: String, CodingKey {
-        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs
+        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs, speed
     }
 
     /// Throws the full `audio.music.*` path itself. A sound on a lane cannot name its own lane and
@@ -1493,6 +1496,7 @@ private struct MusicDTO: Decodable {
         loop = c.flag(.loop, false)
         fadeInMs = max(0, c.long(.fadeInMs, 0))
         fadeOutMs = max(0, c.long(.fadeOutMs, 0))
+        speed = c.double(.speed, 1)
     }
 }
 

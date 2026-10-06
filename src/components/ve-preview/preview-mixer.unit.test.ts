@@ -583,6 +583,48 @@ describe('the preview on a WebView that ignores volume', () => {
     expect(r.standIns).toHaveLength(1);
   });
 
+  /*
+   * A sound sped up in the editor. The graph reads a routed element at its own real-time rate, so a
+   * sped-up sound is never played through it: it goes straight to the speaker, at full volume as a
+   * clip's own sound does on iOS, on an element that never went in - or on the stand-in, when the one
+   * it was on already has.
+   */
+  it('plays a sped-up sound on an element kept out of the graph, at its speed', async () => {
+    const fast = { ...MUSIC, id: 'fast', uri: 'capacitor://localhost/_capacitor_file_/sounds/fast.m4a', speed: 2 };
+    const r = await rig(post({ music: MUSIC, audioTracks: [{ id: 'lane', clips: [fast] }] }));
+    await playFrom(r, 1000);
+
+    const [context] = FakeContext.made;
+    const [played, spare] = r.lanes;
+    expect(context.routed()).toContain(r.music);
+    expect(context.routed()).toContain(spare);
+    expect(context.routed()).not.toContain(played);
+    expect(played.src).toBe(fast.uri);
+    expect(played.playbackRate).toBe(2);
+    expect(played.paused).toBe(false);
+  });
+
+  it('moves a sound onto the stand-in when it is sped up after its element went into the graph', async () => {
+    const song = { ...MUSIC, id: 'song', uri: 'capacitor://localhost/_capacitor_file_/sounds/song.m4a' };
+    const r = await rig(post({ audioTracks: [{ id: 'lane', clips: [song] }] }));
+    await playFrom(r, 1000);
+    const [context] = FakeContext.made;
+    const [played] = r.lanes;
+    expect(context.routed()).toContain(played);
+    r.player.pause();
+    await settle();
+
+    r.store.manifest.value = post({ audioTracks: [{ id: 'lane', clips: [{ ...song, speed: 2 }] }] });
+    await playFrom(r, 1000);
+    expect(r.standIns).toHaveLength(1);
+    const [standIn] = r.standIns;
+    expect(standIn.src).toBe(song.uri);
+    expect(standIn.playbackRate).toBe(2);
+    expect(standIn.paused).toBe(false);
+    expect(context.routed()).not.toContain(standIn);
+    expect(played.src).toBe('');
+  });
+
   it("leaves out of the graph an element still holding another origin's file", async () => {
     const remoteTake: EditVoiceover = { ...TAKE, uri: 'https://cdn.example.com/take.m4a' };
     const r = await rig(post({ voiceovers: [remoteTake] }));

@@ -51,8 +51,10 @@ where the button belongs to a clip that exists. An agent can name anything, usua
 id over from an earlier version of the edit, and a silent no-op leaves it unable to tell "refused"
 from "ignored". So the error names the id and lists the ones there are. A music edit the editor would
 not keep - a section or a stop under 100 ms - is refused the same way, with the reason; a `patchMusic`
-with only a `startMs` moves the stop along with the sound, as the editor's Move does; and both fades
-run from 0 to 10000 ms. Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
+with only a `startMs` moves the stop along with the sound, as the editor's Move does; both fades
+run from 0 to 10000 ms; and a sound's `speed` runs from 0.25 to 4, as a clip's does, a slower one
+sent to `patchAudio` on its own stopping where the next sound on its lane begins, as the editor's
+Speed sheet does. Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
 one lane play one after another and lanes play together, so a sound that would overlap another goes
 on a lane of its own, and one the agent puts on a named lane where it does not fit is refused. A
 post's single `music` joins the lanes as their first sound on the first `addAudio`, as it does in the

@@ -114,9 +114,10 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
       // "the end of the file" when the sound is not trimmed at its end. See [soundLengthUs].
       const music = source ? musicForSource(planned, soundLengthUs(source)) : null;
       if (source && music) {
-        for (const item of music.items) {
+        for (let i = 0; i < music.items.length; i++) {
           throwIfAborted(signal);
-          anything = placeMusic(mix, source, item, music) || anything;
+          const item = music.items[i];
+          if (item) anything = placeMusic(mix, source, item, music, music.items[i + 1]) || anything;
         }
       }
       decoder.done(planned.uri);
@@ -206,12 +207,17 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
  * fade in runs on across a seam when it is longer than the first pass, and the fade out starts in
  * whichever pass it has to - an earlier one, when the last is shorter than the fade - to reach
  * silence exactly where the music stops ([MusicPlan]).
+ *
+ * A repetition of music played at another speed is stretched first, at its own pitch, and laid at the
+ * length the plan gave it on the output; see [stretchedPass] for what `next` is for.
  */
-function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, music: MusicPlan): boolean {
+function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, music: MusicPlan, next?: MusicItem): boolean {
   const from = samplesAt(item.inUs, mix.sampleRate);
   const to = samplesAt(item.outUs, mix.sampleRate);
   const at = samplesAt(item.atUs, mix.sampleRate);
-  const count = Math.min(to - from, mix.length - at);
+  const speed = music.speed ?? 1;
+  const sped = speed !== 1 && item.lengthUs !== undefined;
+  const count = Math.min(sped ? samplesAt(item.lengthUs ?? 0, mix.sampleRate) : to - from, mix.length - at);
   if (count <= 0) return false;
 
   // Where this repetition's first sample falls in the window, and the fades in the window's terms.
@@ -222,17 +228,49 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, mus
   const fadeOut = samplesAt(music.fadeOutUs, mix.sampleRate);
   const fadeOutFrom = samplesAt(music.stopUs, mix.sampleRate) - start - fadeOut;
 
+  // A mono file is both channels; it is stretched once, not once for each.
+  const stretched = new Map<Float32Array, Float32Array>();
   for (let channel = 0; channel < MIX_CHANNELS; channel++) {
-    const input = channelOf(source, channel);
+    const whole = channelOf(source, channel);
     const out = mix.channels[channel];
     if (!out) continue;
+    let input = whole;
+    let offset = from;
+    if (sped) {
+      input = stretched.get(whole) ?? stretchedPass(whole, from, to, next, speed, mix.sampleRate);
+      stretched.set(whole, input);
+      offset = 0;
+    }
     for (let i = 0; i < count; i++) {
-      const sample = input[from + i];
+      const sample = input[offset + i];
       if (sample === undefined) break;
       out[at + i] = (out[at + i] ?? 0) + sample * fadeGain(music.volume, into + i, fadeIn, fadeOutFrom, fadeOut);
     }
   }
   return true;
+}
+
+/** How much of what follows a sped-up repetition is stretched along with it, in seconds of the file. */
+const STRETCH_RUN_ON_S = 0.1;
+
+/**
+ * One repetition of sped-up music, `from..to` of the file, stretched to its speed at its own pitch.
+ *
+ * Stretched with a little of what FOLLOWS it in the post - the start of the next repetition, or the
+ * file running on past `to` when this is the last - and then cut at its length by the caller. The
+ * stretch works a frame at a time and runs out of input a frame or so short of the end of what it is
+ * given, which on a loop would be a gap of silence at every seam; with the next pass's first moments
+ * behind it, it reaches its length, and its last frames blend into the very sound that comes next.
+ */
+function stretchedPass(whole: Float32Array, from: number, to: number, next: MusicItem | undefined, speed: number, sampleRate: number): Float32Array {
+  const own = whole.subarray(Math.min(from, whole.length), Math.min(to, whole.length));
+  const followFrom = next ? samplesAt(next.inUs, sampleRate) : to;
+  const runOn = Math.round(STRETCH_RUN_ON_S * sampleRate);
+  const follow = whole.subarray(Math.min(followFrom, whole.length), Math.min(followFrom + runOn, whole.length));
+  const input = new Float32Array(own.length + follow.length);
+  input.set(own);
+  input.set(follow, own.length);
+  return timeStretch(input, speed, sampleRate);
 }
 
 /**

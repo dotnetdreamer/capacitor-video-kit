@@ -86,12 +86,12 @@ describe('applyPitch', () => {
 
 /** A 12 s track looped whole under the post, with `leftMs` of the post still to come. */
 function whole(leftMs: number): SoundSpan {
-  return { inMs: 0, outMs: 12_000, loop: true, leftMs };
+  return { inMs: 0, outMs: 12_000, loop: true, leftMs, rate: 1 };
 }
 
 /** Seconds 2 to 5 of the track, looped. */
 function section(leftMs: number): SoundSpan {
-  return { inMs: 2000, outMs: 5000, loop: true, leftMs };
+  return { inMs: 2000, outMs: 5000, loop: true, leftMs, rate: 1 };
 }
 
 describe('the spans the music and a take are played on', () => {
@@ -109,16 +109,22 @@ describe('the spans the music and a take are played on', () => {
   };
 
   it('is the section of the track, to the end of the file when the section has no out point', () => {
-    expect(musicSpan(music, 5000)).toEqual({ inMs: 0, outMs: 11_975, loop: true, leftMs: 5000 });
-    expect(musicSpan({ ...music, inMs: 2000, outMs: 5000 }, 5000)).toEqual({ inMs: 2000, outMs: 5000, loop: true, leftMs: 5000 });
+    expect(musicSpan(music, 5000)).toEqual({ inMs: 0, outMs: 11_975, loop: true, leftMs: 5000, rate: 1 });
+    expect(musicSpan({ ...music, inMs: 2000, outMs: 5000 }, 5000)).toEqual({ inMs: 2000, outMs: 5000, loop: true, leftMs: 5000, rate: 1 });
   });
 
   it('knows no out point, and does not repeat, for a track whose length is not known', () => {
-    expect(musicSpan({ ...music, sourceDurationMs: 0 }, 5000)).toEqual({ inMs: 0, outMs: Infinity, loop: false, leftMs: 5000 });
+    expect(musicSpan({ ...music, sourceDurationMs: 0 }, 5000)).toEqual({ inMs: 0, outMs: Infinity, loop: false, leftMs: 5000, rate: 1 });
+  });
+
+  it('is played at the sound’s speed, with what is left of it counted in the file', () => {
+    // Five seconds of the post at 2x is ten seconds of the track still to play.
+    expect(musicSpan({ ...music, speed: 2 }, 5000)).toEqual({ inMs: 0, outMs: 11_975, loop: true, leftMs: 10_000, rate: 2 });
+    expect(musicSpan({ ...music, speed: 0.5 }, 5000)).toMatchObject({ leftMs: 2500, rate: 0.5 });
   });
 
   it('is a take from its first moment to its last', () => {
-    expect(takeSpan({ id: 't', uri: 'take.m4a', startMs: 3000, durationMs: 1000, volume: 1 }, 3400)).toEqual({ inMs: 0, outMs: 1000, loop: false, leftMs: 600 });
+    expect(takeSpan({ id: 't', uri: 'take.m4a', startMs: 3000, durationMs: 1000, volume: 1 }, 3400)).toEqual({ inMs: 0, outMs: 1000, loop: false, leftMs: 600, rate: 1 });
   });
 });
 
@@ -181,7 +187,7 @@ describe('soundPutMs', () => {
 
   it('waits for the seam where the put would land inside the end guard, rather than start the next pass early', () => {
     // The track as WebKit reads it, looped whole.
-    const track: SoundSpan = { inMs: 0, outMs: 11_975, loop: true, leftMs: 10_000 };
+    const track: SoundSpan = { inMs: 0, outMs: 11_975, loop: true, leftMs: 10_000, rate: 1 };
     // 45 ms short of the end: inside WebKit's guard, where it is not put. Round onto the next pass it
     // would have to go 45 ms before the in point, so it is not put at all yet - and goes round exactly
     // a check later, once the stall carries it past the end.
@@ -264,7 +270,7 @@ describe('passFollows, for an element past the out point', () => {
 
 describe('playedOut', () => {
   /** Seconds 2 to 5 of the track, heard once. */
-  const once: SoundSpan = { inMs: 2000, outMs: 5000, loop: false, leftMs: 100 };
+  const once: SoundSpan = { inMs: 2000, outMs: 5000, loop: false, leftMs: 100, rate: 1 };
 
   it('is an element stopped at the out point of the last of the sound, a little ahead of the playhead', () => {
     expect(playedOut(5000, 4890, once, 11_975, 0, 600)).toBe(true);

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest } from '../../editor';
+import { emptyManifest, findAudioClip, type EditAudioClip, type EditManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
+import type { EditorSelection } from '../../state/editor.types';
 
 /*
  * A browser rather than the mock DOM, and `speed-curve.unit.test.ts` beside this file is why: the
@@ -43,13 +44,36 @@ function manifest(clips: number): EditManifest {
 
 /** The sheet over a store with the segment selected, which is the state the toolbar hands it. */
 async function mount(select = true, clips = 2): Promise<{ store: EditorStore; sheet: HTMLElement }> {
+  return mountOn(manifest(clips), select ? { kind: 'clip', id: 'seg-0' } : null);
+}
+
+/** A four-second sound at the start of a twenty-second post, and another on its lane from `nextAt`. */
+function withSounds(nextAt: number): EditManifest {
+  const sound = (id: string, startMs: number): EditAudioClip => ({
+    id,
+    uri: `file:///${id}.m4a`,
+    fileName: `${id}.m4a`,
+    sourceDurationMs: 4000,
+    inMs: 0,
+    outMs: 0,
+    startMs,
+    endMs: 0,
+    volume: 0.8,
+    loop: false,
+    fadeOutMs: 0,
+  });
+  return { ...manifest(1), durationMs: 20_000, music: sound('old', 0), audioTracks: [{ id: 'lane', clips: [sound('song', 0), sound('next', nextAt)] }] };
+}
+
+/** The sheet over `m` with `selection` selected, as the toolbar's Speed tile leaves it. */
+async function mountOn(m: EditManifest, selection: EditorSelection | null): Promise<{ store: EditorStore; sheet: HTMLElement }> {
   const host = resolveEditorHost({});
   const store = new EditorStore(host);
   const ctx: EditorContext = { store, media: new EditorMedia(store, host) };
-  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), manifest(clips));
+  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), m);
   // Selected first: `select` closes an open speed panel, because a sheet about the old segment says
   // nothing about the new one.
-  if (select) store.select({ kind: 'clip', id: 'seg-0' });
+  if (selection) store.select(selection);
   store.openPanel('speed');
 
   /* The editor's own column on the phone it was drawn for, so a width is a measurement. */
@@ -253,5 +277,68 @@ describe('ve-speed-sheet', () => {
     head(sheet, '[aria-label="Done"]')!.click();
 
     expect(store.panel.value).toBe(null);
+  });
+});
+
+/*
+ * The same sheet for a sound: the Audio tools row's Speed tile opens it on a sound on a lane, and the
+ * Sound tools row's on an older edit's one sound. Its name says which, and a sound has nothing to give
+ * its speed to, so there is no offer to.
+ */
+describe('ve-speed-sheet for a sound', () => {
+  const songOf = (store: EditorStore) => findAudioClip(store.manifest.value, 'song');
+
+  it('names the sound it is about, and sets that sound’s speed in one step', async () => {
+    const { store, sheet } = await mountOn(withSounds(9000), { kind: 'audio', id: 'song' });
+
+    expect(head(sheet, '.sheet__title')?.textContent).toBe('Audio speed');
+    expect(readout(sheet)).toBe('1x');
+    expect(sheet.shadowRoot?.querySelector('.sheet__apply-all')).toBe(null);
+
+    chip(sheet, '2x').click();
+    expect(songOf(store)?.speed).toBe(2);
+    await until('the row to follow', () => readout(sheet) === '2x');
+    // The clips are not what it was about.
+    expect(speedOf(store)).toBe(START_SPEED);
+
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Speed');
+    expect(songOf(store)).not.toHaveProperty('speed');
+  });
+
+  it('slows a sound only as far as the next one on its lane', async () => {
+    const { store, sheet } = await mountOn(withSounds(6000), { kind: 'audio', id: 'song' });
+
+    // Four seconds at 0.5x would run to eight, over `next` at six.
+    chip(sheet, '0.5x').click();
+    expect(songOf(store)).toMatchObject({ speed: 0.5, endMs: 6000 });
+    expect(findAudioClip(store.manifest.value, 'next')?.startMs).toBe(6000);
+  });
+
+  it('takes the stop away again when a drag slows a sound into its neighbour and brings it back', async () => {
+    const { store, sheet } = await mountOn(withSounds(6000), { kind: 'audio', id: 'song' });
+    const bar = slider(sheet)!.shadowRoot!.querySelector('.sl__track')!.getBoundingClientRect();
+    const at = (value: number) => bar.left + (value / 100) * bar.width;
+
+    // Down at 1x, over to 0.5x - stopped at the neighbour - and on up to 2x, then let go.
+    pointerId += 1;
+    fire(sheet, 'pointerdown', at(ONE_X_UNITS));
+    fire(sheet, 'pointermove', at(25));
+    expect(songOf(store)).toMatchObject({ speed: 0.5, endMs: 6000 });
+    fire(sheet, 'pointermove', at(75));
+    fire(sheet, 'pointerup', at(75));
+
+    expect(songOf(store)).toMatchObject({ speed: 2, endMs: 0 });
+    store.undo();
+    expect(songOf(store)).toMatchObject({ endMs: 0 });
+    expect(songOf(store)).not.toHaveProperty('speed');
+  });
+
+  it('names an older edit’s one sound, and sets its speed', async () => {
+    const { store, sheet } = await mountOn(withSounds(9000), { kind: 'music' });
+
+    expect(head(sheet, '.sheet__title')?.textContent).toBe('Sound speed');
+    chip(sheet, '1.5x').click();
+    expect(store.manifest.value.music?.speed).toBe(1.5);
   });
 });

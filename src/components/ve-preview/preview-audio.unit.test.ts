@@ -155,9 +155,15 @@ class FakeMedia extends EventTarget {
   videoHeight = 0;
   duration = Number.NaN;
   error = null;
-  playbackRate = 1;
   preservesPitch = true;
   volume = 1;
+  /**
+   * Its clock goes at `playbackRate`, as a sound's element does when its sound is sped up. Set by the
+   * rig for the music, the voiceover and every lane; the clips' own elements run at the wall clock's
+   * rate as they always have here.
+   */
+  honoursRate = false;
+  private rate = 1;
   preload = 'auto';
   seeking = false;
   paused = true;
@@ -203,6 +209,26 @@ class FakeMedia extends EventTarget {
 
   get ended(): boolean {
     return Number.isFinite(this.duration) && this.position() >= this.duration;
+  }
+
+  get playbackRate(): number {
+    return this.rate;
+  }
+
+  /** From here on at the new rate: the clock keeps where it has got to, and runs the rest at this. */
+  set playbackRate(rate: number) {
+    if (this.honoursRate && !this.paused) {
+      this.at = this.position();
+      this.since = performance.now();
+      this.stills = this.stills.filter(([, to]) => to > this.since);
+    }
+    this.rate = rate;
+    this.planEnd();
+  }
+
+  /** How much of the file one millisecond of the clock running covers. */
+  private fileRate(): number {
+    return this.honoursRate ? this.rate : 1;
   }
 
   get currentTime(): number {
@@ -308,7 +334,7 @@ class FakeMedia extends EventTarget {
   private position(): number {
     const end = Number.isFinite(this.duration) ? this.duration : Infinity;
     if (this.paused) return Math.min(this.at, end);
-    return Math.min(this.at + this.runMs(performance.now()) / 1000, end);
+    return Math.min(this.at + (this.runMs(performance.now()) * this.fileRate()) / 1000, end);
   }
 
   /** Starts the stall a start or a seek costs, from now. */
@@ -357,7 +383,7 @@ class FakeMedia extends EventTarget {
     this.endTimer = null;
     if (this.paused || !Number.isFinite(this.duration)) return;
     const now = performance.now();
-    const inMs = this.wallFor(Math.max(0, (this.duration - this.at) * 1000 - this.runMs(now)), now);
+    const inMs = this.wallFor(Math.max(0, ((this.duration - this.at) * 1000) / this.fileRate() - this.runMs(now)), now);
     this.endTimer = setTimeout(() => this.reachEnd(), Math.max(0, inMs));
   }
 
@@ -530,8 +556,10 @@ async function rig(engine: Engine, music: EditMusic | null, { take, audioTracks 
   const stall = stallMs ?? (engine === 'webkit' ? 100 : 30);
   const musicEl = new FakeMedia(TRACK_S, engine, stall);
   musicEl.playhead = () => store.playheadMs.value;
+  musicEl.honoursRate = true;
   const voiceEl = new FakeMedia(take?.fileS ?? 1, engine, stall);
   voiceEl.playhead = () => store.playheadMs.value;
+  voiceEl.honoursRate = true;
   const lanes: FakeMedia[] = [];
   const player = new PreviewPlayer(store, {
     video: deck(),
@@ -541,6 +569,7 @@ async function rig(engine: Engine, music: EditMusic | null, { take, audioTracks 
     makeAudio: () => {
       const el = new FakeMedia(TRACK_S, engine, stall);
       el.playhead = () => store.playheadMs.value;
+      el.honoursRate = true;
       lanes.push(el);
       return el as unknown as HTMLAudioElement;
     },
@@ -700,6 +729,81 @@ describe('several audio lanes', () => {
     expect(held.loads).toBe(loads);
     expect(held.currentTime).toBeGreaterThan(2);
     expect(held.paused).toBe(false);
+  });
+});
+
+/*
+ * A sound at a speed. Its element plays its file at that speed, and everything the player reckons in
+ * wall time - the stall it puts an element ahead by, the drift it lets one wander - is turned into the
+ * file's terms with it. Reckoned at 1x, a 2x sound came out of every stall half its lead short and was
+ * judged a drift on every check after, and put back again and again.
+ */
+describe('a sound at a speed', () => {
+  const fast = { ...LOOPED, id: 'fast', uri: 'blob:capacitor://localhost/fast', loop: false, speed: 2 };
+
+  /** How far, in WALL time, the element is from where the playhead wants it at `rate` from `startMs`. */
+  const offWallMs = (r: Rig, el: FakeMedia, rate: number, startMs = 0): number => Math.abs(el.currentTime * 1000 - rate * (r.store.playheadMs.value - startMs)) / rate;
+
+  it('plays its element at its speed, in step with the playhead, and then leaves it to play', async () => {
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [fast] }] });
+    const [el] = r.lanes;
+    await playFrom(r, 0);
+    await playTo(r, 1000);
+    expect(el.playbackRate).toBe(2);
+    expect(el.paused).toBe(false);
+    const puts = el.puts.length;
+
+    // Twice as far into its file as the playhead is into the post - within the drift allowed, which
+    // is wall time: the first put's lead is the default, a stall longer than the rig's - and never
+    // put again on the way.
+    await playTo(r, 4000);
+    expect(offWallMs(r, el, 2)).toBeLessThan(200);
+    expect(el.puts.length).toBe(puts);
+  });
+
+  it('uses a stall learned at 1x, which is wall time, for the same sound sped up', async () => {
+    // A stall long enough that leading by it in the file's terms rather than the wall's shows: 100 ms
+    // at 2x is 200 ms of file, and put only 100 ms ahead the sound would come out 50 ms late.
+    const plain = { ...fast, speed: undefined };
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [plain] }], stallMs: 100 });
+    const [el] = r.lanes;
+    await playFrom(r, 0);
+    await playTo(r, 1500);
+    r.player.pause();
+    await run(0);
+
+    r.store.setAudioSpeed('fast', 2);
+    r.player.refreshAudio();
+    await playFrom(r, 1000);
+    await playTo(r, 1600);
+    expect(el.playbackRate).toBe(2);
+    expect(offWallMs(r, el, 2)).toBeLessThan(20);
+  });
+
+  it('starts a sound that is not due yet so it comes in on time, at its speed', async () => {
+    const later = { ...fast, startMs: 2000 };
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [later] }] });
+    const [el] = r.lanes;
+    await playFrom(r, 0);
+    await playTo(r, 3000);
+    // A second in at 2x is two seconds into the file.
+    expect(el.paused).toBe(false);
+    expect(offWallMs(r, el, 2, 2000)).toBeLessThan(200);
+  });
+
+  it('takes a new speed on the element it is on, without loading its file again', async () => {
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [fast] }] });
+    const [el] = r.lanes;
+    await playFrom(r, 0);
+    await playTo(r, 1000);
+    const loads = el.loads;
+
+    r.store.setAudioSpeed('fast', 0.5);
+    r.player.refreshAudio();
+    await playTo(r, 2500);
+    expect(el.loads).toBe(loads);
+    expect(el.playbackRate).toBe(0.5);
+    expect(offWallMs(r, el, 0.5)).toBeLessThan(200);
   });
 });
 

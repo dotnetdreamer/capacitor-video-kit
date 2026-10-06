@@ -17,7 +17,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 14;
+export const MANIFEST_VERSION = 15;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -342,6 +342,17 @@ export interface EditMusic {
   fadeInMs?: number;
   /** Down to silence at the end of what is heard. */
   fadeOutMs: number;
+  /**
+   * How fast the section plays, [MIN_SPEED]..[MAX_SPEED], at its own pitch: a video clip's
+   * [EditClip.speed], for a sound. Absent is 1x, which is every sound of every manifest written before
+   * version 15, and absent is what [toComposeSpec] turns into a sound with no `speed` on the wire.
+   *
+   * It is the SECTION that is sped up. `inMs`, `outMs` and `phaseMs` are still places in the file, so
+   * one pass of the section lasts `(outMs - inMs) / speed` of the post; `startMs`, `endMs` and both
+   * fades are on the output timeline and mean what they always did. Never stored as 1:
+   * [normaliseManifest] and `patchMusic` take the key off instead.
+   */
+  speed?: number;
 }
 
 /** One independently placed sound on an audio lane. Its timing is on the output timeline. */
@@ -885,6 +896,15 @@ const FULL_FRAME_EPSILON = 1e-4;
 export const SPEED_CHIPS = [0.5, 1, 1.5, 2, 3] as const;
 export const MIN_SPEED = 0.25;
 export const MAX_SPEED = 4;
+
+/**
+ * A speed as the manifest stores it: held to [MIN_SPEED]..[MAX_SPEED] and rounded to the hundredth the
+ * Speed sheet's slider moves in. Anything that is not a number is 1x. One function for a clip and a
+ * sound, so the two can never come to store the same speed differently.
+ */
+export function normaliseSpeed(speed: number): number {
+  return Number.isFinite(speed) ? Math.round(clamp(speed, MIN_SPEED, MAX_SPEED) * 100) / 100 : 1;
+}
 
 export const TEXT_COLORS = [
   '#ffffff',
@@ -1735,6 +1755,11 @@ export function emptyManifest(): EditManifest {
  *
  * Version 13 to version 14 adds independent audio lanes. Older drafts have no `audioTracks` key;
  * their `music` stays as it was and continues to produce the original render specification.
+ *
+ * Version 14 to version 15 adds a sound's [EditMusic.speed], and nothing is written into an older
+ * manifest: a version-14 sound has no `speed`, which is 1x, and [toComposeSpec] sends it with none -
+ * byte for byte the spec version 14 produced. Bumped because an older build reading a version-15 draft
+ * plays a sped-up sound at 1x, and runs a slowed one over whatever follows it on its lane.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1849,6 +1874,7 @@ export function normaliseManifest(input: unknown): EditManifest {
   const readMusic = (m: any): EditMusic => {
     const musicInMs = Math.max(0, num(m.inMs, 0));
     const musicStartMs = Math.max(0, num(m.startMs, 0));
+    const speed = normaliseSpeed(num(m.speed, 1));
     return {
       uri: String(m.uri),
       fileName: String(m.fileName ?? 'Music'),
@@ -1863,6 +1889,8 @@ export function normaliseManifest(input: unknown): EditManifest {
       // Only when there is one, so a sound saved before fades in existed reads back as it was.
       ...(num(m.fadeInMs, 0) > 0 ? { fadeInMs: num(m.fadeInMs, 0) } : {}),
       fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
+      // The same rule, for a sound played at its own speed.
+      ...(speed !== 1 ? { speed } : {}),
     };
   };
   const music: EditMusic | null = raw['music'] ? readMusic(raw['music']) : null;
@@ -1882,7 +1910,8 @@ export function normaliseManifest(input: unknown): EditManifest {
   const audioEnd = (clip: EditAudioClip): number => {
     const out = clip.outMs > 0 ? clip.outMs : clip.sourceDurationMs;
     const section = Math.max(0, out - clip.inMs);
-    const natural = clip.loop || section === 0 ? Number.POSITIVE_INFINITY : clip.startMs + Math.max(0, section - (clip.phaseMs ?? 0));
+    // The section is in the file and the lane is on the post, so a sped-up one takes less of it.
+    const natural = clip.loop || section === 0 ? Number.POSITIVE_INFINITY : clip.startMs + Math.max(0, section - (clip.phaseMs ?? 0)) / (clip.speed ?? 1);
     return clip.endMs > 0 ? Math.min(clip.endMs, natural) : natural;
   };
   if (Array.isArray(raw['audioTracks'])) {

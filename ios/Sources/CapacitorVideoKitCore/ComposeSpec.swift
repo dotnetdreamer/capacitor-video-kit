@@ -393,6 +393,11 @@ struct ComposeMusic: Sendable {
     let loop: Bool
     let fadeInMs: Int64
     let fadeOutMs: Int64
+    /// How fast the section plays, 0.25..4, pitch preserved - a clip's speed, for a sound. `inMs`,
+    /// `outMs` and `phaseMs` stay places in the FILE, so one pass lasts `(outMs - inMs) / speed` of the
+    /// output; `startMs`, `endMs` and the fades stay places on the output. A defaulted `var`, so the
+    /// memberwise initialiser every caller already uses still builds the 1x sound it always did.
+    var speed: Double = 1
 }
 
 struct ComposeVoiceover: Sendable {

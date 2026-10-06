@@ -128,10 +128,16 @@ export interface OverlayPlacement {
 
 /** One repetition of the music's section. It carries no fade: the fades are the whole window's. */
 export interface MusicItem {
+  /** The stretch of the FILE this repetition plays. */
   inUs: number;
   outUs: number;
   /** Where this repetition starts on the OUTPUT timeline. */
   atUs: number;
+  /**
+   * How long it runs on the OUTPUT timeline, for music played at a speed other than 1x - see
+   * [MusicPlan.speed]. Absent, it is `outUs - inUs`, which is every repetition at 1x.
+   */
+  lengthUs?: number;
 }
 
 /**
@@ -165,6 +171,11 @@ export interface MusicPlan {
   stopUs: number;
   fadeInUs: number;
   fadeOutUs: number;
+  /**
+   * How fast the section plays, [ComposeMusic.speed]: each repetition is `outUs - inUs` of the file
+   * and `lengthUs` of the output, stretched to it by the mix at its own pitch. Absent at 1x.
+   */
+  speed?: number;
   items: MusicItem[];
 }
 
@@ -545,7 +556,10 @@ function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, Probe
   const probed = probes.get(music.uri);
   const outMs = probed && probed.durationMs > 0 ? Math.min(music.outMs, probed.durationMs) : music.outMs;
   const startUs = Math.max(0, Math.round(music.startMs * 1000));
+  // Held to the range the clips are, and left off at 1x so that music is laid exactly as it was.
+  const speed = music.speed !== undefined && Number.isFinite(music.speed) ? clamp(music.speed, 0.25, 4) : 1;
   return layMusic({
+    ...(speed !== 1 ? { speed } : {}),
     uri: music.uri,
     volume: clamp(music.volume, 0, 1),
     inUs: Math.round(music.inMs * 1000),
@@ -578,12 +592,16 @@ export function musicForSource(music: MusicPlan, sourceUs: number): MusicPlan | 
  * The repetitions of the section, from `startUs`: as many as it takes to reach `untilUs` when the
  * music loops, the last cut there, and the section once, cut there if it has to be, when it does not.
  * `stopUs` is where the last one ends. Null when nothing would be heard.
+ *
+ * At a speed other than 1x each repetition is laid at its OUTPUT length - what is left of the section
+ * divided by the speed, in whole microseconds - and plays the stretch of the file that length covers.
  */
 function layMusic(ask: Omit<MusicPlan, 'stopUs' | 'items'>): MusicPlan | null {
   const trackLenUs = ask.outUs - ask.inUs;
   if (trackLenUs <= 0) return null;
   const availableUs = ask.untilUs - ask.startUs;
   if (availableUs <= 0) return null;
+  const speed = ask.speed ?? 1;
 
   const items: MusicItem[] = [];
   let atUs = ask.startUs;
@@ -591,10 +609,17 @@ function layMusic(ask: Omit<MusicPlan, 'stopUs' | 'items'>): MusicPlan | null {
   let first = true;
   while (atUs < ask.untilUs) {
     const fromUs = ask.inUs + (first ? phaseUs : 0);
-    const lenUs = Math.min(ask.outUs - fromUs, ask.untilUs - atUs);
-    if (lenUs <= 0) break;
-    items.push({ inUs: fromUs, outUs: fromUs + lenUs, atUs });
-    atUs += lenUs;
+    if (speed === 1) {
+      const lenUs = Math.min(ask.outUs - fromUs, ask.untilUs - atUs);
+      if (lenUs <= 0) break;
+      items.push({ inUs: fromUs, outUs: fromUs + lenUs, atUs });
+      atUs += lenUs;
+    } else {
+      const lengthUs = Math.min(Math.floor((ask.outUs - fromUs) / speed), ask.untilUs - atUs);
+      if (lengthUs <= 0) break;
+      items.push({ inUs: fromUs, outUs: Math.min(ask.outUs, fromUs + Math.round(lengthUs * speed)), atUs, lengthUs });
+      atUs += lengthUs;
+    }
     if (!ask.loop) break;
     first = false;
   }

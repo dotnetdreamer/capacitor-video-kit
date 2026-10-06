@@ -1201,6 +1201,12 @@ enum CompositionBuilder {
         // Nothing pads the lead gap: the track is empty before the first insert and AVFoundation
         // writes that empty segment itself, which is Android's `addGap(leadGapUs)`.
         let start = ms(m.startMs)
+        // Clamped again for the clips' reason (see `minSpeed`). At a speed other than 1x each pass is
+        // a stretch of the FILE that lasts that stretch divided by the speed on the output, so the
+        // room left is turned into file time to cut it, and the pass scaled into its place once it is
+        // in. Microseconds, so a loop's passes do not drift by a millisecond's rounding each.
+        let speed = min(maxSpeed, max(minSpeed, m.speed))
+        let fine = { (t: CMTime) in CMTimeConvertScale(t, timescale: 1_000_000, method: .roundHalfAwayFromZero) }
         var at = start
         var slices = 0
         repeat {
@@ -1209,13 +1215,23 @@ enum CompositionBuilder {
             // The last pass is clipped to the room left, never allowed past the end of the video or
             // the stop. That is Android's `lastLenUs = available - (reps - 1) * trackLen`.
             let pass = slices == 0 ? firstPiece : piece
-            let slice = CMTimeRange(start: pass.start, duration: CMTimeMinimum(pass.duration, room))
+            let fileRoom = speed == 1 ? room : CMTimeMultiplyByFloat64(fine(room), multiplier: speed)
+            let slice = CMTimeRange(start: pass.start, duration: CMTimeMinimum(pass.duration, fileRoom))
+            // Where it lands on the output: the slice itself at 1x, and otherwise the slice divided by
+            // the speed, held to the room, which the rounding could pass by a microsecond.
+            let played = speed == 1 ? slice.duration : CMTimeMinimum(room, CMTimeMultiplyByFloat64(fine(slice.duration), multiplier: 1 / speed))
+            guard played > .zero else { break }
             do {
                 try track.insertTimeRange(slice, of: src.track, at: at)
             } catch {
                 throw BuildError.unreadable("music", "insert: \(error)")
             }
-            at = at + slice.duration
+            // Scaled at once, before the next pass goes in after it: `scaleTimeRange` ripples everything
+            // after the range it touches. The pitch is kept by the `.spectral` algorithm, below.
+            if speed != 1 {
+                track.scaleTimeRange(CMTimeRange(start: at, duration: slice.duration), toDuration: played)
+            }
+            at = at + played
             slices += 1
         } while m.loop && at < stop && slices < maxMusicSlices
 

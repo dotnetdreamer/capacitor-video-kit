@@ -169,3 +169,42 @@ describe('musicEndTrim', () => {
     });
   });
 });
+
+/*
+ * The handles of a sound at a speed. They move on the post; the in point, the out point and the phase
+ * are places in the file, which goes by at the sound's speed - so the file moves the handle's distance
+ * times the speed, and the sound under the handle that did not move stays where it was.
+ */
+describe('the handles on a sped-up sound', () => {
+  it('moves the in point through the file at the sound’s speed, and leaves the rest where it was', () => {
+    const music = track({ startMs: 5000, inMs: 2000, speed: 2 });
+    const patch = musicStartTrim(music, 7000, 20_000);
+    expect(patch).toEqual({ startMs: 7000, inMs: 6000 });
+    expect(musicSourceMsAt({ ...music, ...patch }, 8000, 20_000)).toBe(musicSourceMsAt(music, 8000, 20_000));
+  });
+
+  it('stops the start handle where the slowed sound’s file begins', () => {
+    // Two seconds of file at 0.5x is four seconds of the post.
+    expect(musicStartTrim(track({ startMs: 5000, inMs: 2000, speed: 0.5 }), 1000, 20_000)).toEqual({ startMs: 1000, inMs: 0 });
+  });
+
+  it('moves a loop’s phase through the file at its speed', () => {
+    const music = track({ loop: true, outMs: 4000, startMs: 10_000, phaseMs: 2000, speed: 2 });
+    const patch = musicStartTrim(music, 9000, 20_000);
+    expect(patch).toEqual({ startMs: 9000, phaseMs: 0 });
+    expect(musicSourceMsAt({ ...music, ...patch }, 12_000, 20_000)).toBe(musicSourceMsAt(music, 12_000, 20_000));
+  });
+
+  it('sets the out point from the handle’s length on the post, times the speed', () => {
+    expect(musicEndTrim(track({ speed: 2 }), 5000, 20_000)).toEqual({ outMs: 10_000, endMs: 0 });
+    // The whole thirty-second track at 2x is fifteen seconds, and the handle goes no further.
+    expect(musicEndTrim(track({ speed: 2 }), 19_000, 20_000)).toEqual({ outMs: 30_000, endMs: 0 });
+  });
+
+  it('keeps a section long enough to be heard, and long enough in the file', () => {
+    // At 4x, 400 ms of file to be heard for the shortest layer...
+    expect(musicEndTrim(track({ speed: 4 }), 10, 20_000)).toEqual({ outMs: 400, endMs: 0 });
+    // ...and at 0.5x the shortest layer of file, which is heard for twice that.
+    expect(musicEndTrim(track({ speed: 0.5 }), 50, 20_000)).toEqual({ outMs: MIN_LAYER_MS, endMs: 0 });
+  });
+});

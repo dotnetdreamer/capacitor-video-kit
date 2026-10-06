@@ -1,4 +1,4 @@
-import { clamp, musicSectionMs, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
+import { clamp, musicSectionMs, musicSpeed, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore } from '../../state/editor-store';
@@ -254,19 +254,45 @@ export interface SoundSpan {
   outMs: number;
   /** The stretch starts again from `inMs` when it reaches `outMs`, for as long as the sound goes on. */
   loop: boolean;
-  /** How much longer the sound goes on from this instant, in OUTPUT milliseconds. */
+  /**
+   * How much more of the FILE is played from this instant, every pass still to come counted: the
+   * post's milliseconds left, times [rate]. In the file's terms because everything it is weighed
+   * against - how far an element is from its out point - is a position in the file.
+   */
   leftMs: number;
+  /**
+   * How fast the element plays its file: the sound's speed, 1 for a take. Every stretch of WALL time
+   * the player reckons with - a stall it leads by, a drift it allows - covers this much more of the
+   * file, and is turned into the file's terms with it before it meets a position.
+   */
+  rate: number;
 }
 
 /** The music's section, heard for `leftMs` more of the post; see [musicSectionMs]. */
 export function musicSpan(music: EditMusic, leftMs: number): SoundSpan {
   const section = musicSectionMs(music);
-  return { inMs: music.inMs, outMs: section > 0 ? music.inMs + section : Infinity, loop: music.loop && section > 0, leftMs };
+  const rate = musicSpeed(music);
+  return { inMs: music.inMs, outMs: section > 0 ? music.inMs + section : Infinity, loop: music.loop && section > 0, leftMs: leftMs * rate, rate };
 }
 
 /** A voiceover take, from its first moment to its last, with the playhead at `outputMs`. */
 export function takeSpan(take: EditVoiceover, outputMs: number): SoundSpan {
-  return { inMs: 0, outMs: take.durationMs > 0 ? take.durationMs : Infinity, loop: false, leftMs: take.startMs + take.durationMs - outputMs };
+  return { inMs: 0, outMs: take.durationMs > 0 ? take.durationMs : Infinity, loop: false, leftMs: take.startMs + take.durationMs - outputMs, rate: 1 };
+}
+
+/**
+ * A sound's element at the speed its sound plays at, its pitch kept as the render keeps it. The
+ * DEFAULT rate as well as the rate, because `load()` puts an element back to its default: an element
+ * given a sped-up sound's file is at that sound's speed from the moment the file is on it, and the
+ * mixer reads the default to keep such an element out of its graph; see [PreviewMixer.elementFor].
+ *
+ * Written only when it differs, as every level in the preview is: each write is a message to the
+ * media process, and this is asked on every check of a playing sound.
+ */
+export function applySoundRate(el: HTMLMediaElement, rate: number): void {
+  if (rate !== 1 && el.preservesPitch === false) el.preservesPitch = true;
+  if (el.defaultPlaybackRate !== rate) el.defaultPlaybackRate = rate;
+  if (el.playbackRate !== rate) el.playbackRate = rate;
 }
 
 /** How long one pass of the span is; 0 when the file's length is not known. */

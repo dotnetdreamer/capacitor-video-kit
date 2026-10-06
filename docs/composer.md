@@ -93,6 +93,17 @@ dropped just past a seam, or a video a sliver longer than a whole number of pass
 repetition shorter than a frame is still left off (Media3 fails an item under a millisecond), and
 the fade out then ends where the one before it stops.
 
+**Music at a speed is sped up pass by pass, at its own pitch.** `ComposeMusic.speed` does to the
+trimmed section what a clip's speed does to its trim: `inMs`, `outMs` and `phaseMs` stay places in
+the file, and every length the plan lays is on the output, a pass being the section divided by the
+speed. Android puts Media3's Sonic time-stretch first among each pass's audio processors, ahead of
+its exact length and its gain, so both count in output time as the plan does. Not `setSpeed`, which a
+clip uses: Media3 refuses it beside a processor that changes an item's length, and the exact length is
+one. iOS scales each pass
+into its place as it inserts it, under the `.spectral` pitch algorithm the music track already has.
+The web stretches each pass with the SOLA the clips use, together with the first moments of the pass
+after it, so a loop has no gap at its seams.
+
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
 into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got
 it. Only `cleanup` deletes a job folder.

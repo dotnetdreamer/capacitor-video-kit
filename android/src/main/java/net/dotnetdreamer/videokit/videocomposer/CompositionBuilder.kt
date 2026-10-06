@@ -16,6 +16,7 @@ import androidx.media3.common.SpeedParameters
 import androidx.media3.common.VideoCompositorSettings
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.GainProcessor
+import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
@@ -703,8 +704,9 @@ object CompositionBuilder {
         val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
         if (plan.leadGapUs > 0L) builder.addGap(plan.leadGapUs)
         for (item in plan.items) {
-            val length = ExactLengthAudioProcessor(item.atUs, item.atUs + (item.outUs - item.inUs))
-            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length))
+            // Its length on the output, which for sped-up music is not the stretch of file it plays.
+            val length = ExactLengthAudioProcessor(item.atUs, item.atUs + item.lengthUs)
+            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length, item.speed))
         }
         return builder.build()
     }
@@ -724,6 +726,15 @@ object CompositionBuilder {
      * An audio-only item: [startUs]..[endUs] of the file, [endUs] being [C.TIME_END_OF_SOURCE] for
      * no clip at the end at all, which is not the same thing as a clip at the file's own length -
      * see `planMusic` in [RenderPlan]. [length], when there is one, goes ahead of the gain.
+     *
+     * At a [speed] other than 1x the FIRST processor is Media3's Sonic time-stretch at that speed and
+     * the file's own pitch, so [length] and the gain are handed sped-up sound and count in output time,
+     * which is what the plan gave them - and Sonic reports the sped-up length onwards, which is what
+     * Media3 stamps the next pass by. Not `setSpeed`, which a sped-up clip uses ([editedClip]) and
+     * which puts the same kind of processor in the same place: `EditedMediaItem` refuses it beside any
+     * processor that changes an item's length (`TransformerUtil.containsSpeedChangingEffects`, an
+     * `IllegalStateException` at `build()`), and [length] is one - it is what holds a pass to its
+     * length on the sample, so a loop's seams join. Measured on the A13 on 2026-10-06.
      */
     private fun audioItem(
         uri: String,
@@ -731,6 +742,7 @@ object CompositionBuilder {
         endUs: Long,
         gain: RampGainProvider,
         length: ExactLengthAudioProcessor? = null,
+        speed: Float = 1f,
     ): EditedMediaItem {
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(uri))
@@ -744,6 +756,7 @@ object CompositionBuilder {
             )
             .build()
         val processors: List<AudioProcessor> = listOfNotNull(
+            if (speed != 1f) timeStretch(speed) else null,
             length,
             if (gain.isNoOp()) null else GainProcessor(gain),
         )
@@ -751,6 +764,15 @@ object CompositionBuilder {
             .setRemoveVideo(true)
             .setEffects(Effects(processors, ImmutableList.of()))
             .build()
+    }
+
+    /**
+     * Sound played [speed] times as fast at its own pitch: Sonic with only its speed set, its pitch
+     * left at 1. [MAINTAIN_PITCH] is the rule every engine keeps, and what a clip's `setSpeed` asks for.
+     */
+    private fun timeStretch(speed: Float): SonicAudioProcessor {
+        check(MAINTAIN_PITCH) { "music keeps its pitch only while clips do" }
+        return SonicAudioProcessor().apply { setSpeed(speed) }
     }
 
     private fun layoutFor(fit: Fit): Int = when (fit) {

@@ -19,6 +19,7 @@ import {
   musicPhaseMs,
   musicSectionMs,
   musicSourceMsAt,
+  musicSpeed,
   musicWindow,
   overlayAnimationSpans,
   overlayEndMs,
@@ -897,6 +898,7 @@ export class VeTimeline {
       music.endMs,
       music.loop ? 1 : 0,
       music.sourceDurationMs,
+      music.speed ?? 1,
       store.totalMs.value,
       store.pps.value,
       // Everything the build reads off the measurement, so a key can never outlive its picture.
@@ -926,7 +928,8 @@ export class VeTimeline {
       const section = musicSectionMs(music);
       const win = this.renderWindow.value;
       const { startMs, endMs } = musicWindow(music, totalMs);
-      const heardMs = Math.max(0, endMs - startMs);
+      // How much of the FILE is heard: the time on the post at the sound's speed.
+      const heardMs = Math.max(0, endMs - startMs) * musicSpeed(music);
       const repeats = music.loop && section > 0;
       const source: WaveSource = {
         at: outputMs => musicSourceMsAt(music, outputMs, totalMs),
@@ -965,7 +968,7 @@ export class VeTimeline {
     for (const track of tracks)
       for (const clip of track.clips) {
         const wave = store.waveforms.value.get(clip.uri);
-        parts.push(clip.id, clip.uri, clip.inMs, clip.outMs, clip.phaseMs ?? 0, clip.startMs, clip.endMs, clip.loop ? 1 : 0, clip.sourceDurationMs);
+        parts.push(clip.id, clip.uri, clip.inMs, clip.outMs, clip.phaseMs ?? 0, clip.startMs, clip.endMs, clip.loop ? 1 : 0, clip.sourceDurationMs, clip.speed ?? 1);
         parts.push(wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '');
       }
     return parts.join('|');
@@ -987,7 +990,8 @@ export class VeTimeline {
           if (!lane || !wave) continue;
           const section = musicSectionMs(clip);
           const { startMs, endMs } = musicWindow(clip, totalMs);
-          const heardMs = Math.max(0, endMs - startMs);
+          // How much of the FILE is heard, as the music's is above.
+          const heardMs = Math.max(0, endMs - startMs) * musicSpeed(clip);
           const repeats = clip.loop && section > 0;
           const source: WaveSource = {
             at: outputMs => musicSourceMsAt(clip, outputMs, totalMs),

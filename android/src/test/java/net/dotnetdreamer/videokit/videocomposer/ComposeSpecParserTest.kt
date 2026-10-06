@@ -730,6 +730,23 @@ class ComposeSpecParserTest {
     }
 
     @Test
+    fun `music speed is read, held to the clips' range, and 1x when absent`() {
+        val json = minimalJson().apply {
+            getJSONObject("audio").put(
+                "music",
+                JSONObject().put("uri", "file:///m.m4a").put("inMs", 0).put("outMs", 5_000),
+            )
+        }
+        assertEquals(1f, ComposeSpecParser.parse(json).audio.music!!.speed, 1e-6f)
+        json.getJSONObject("audio").getJSONObject("music").put("speed", 1.5)
+        assertEquals(1.5f, ComposeSpecParser.parse(json).audio.music!!.speed, 1e-6f)
+        json.getJSONObject("audio").getJSONObject("music").put("speed", 99)
+        assertEquals(ComposeSpecParser.MAX_SPEED, ComposeSpecParser.parse(json).audio.music!!.speed, 1e-6f)
+        json.getJSONObject("audio").getJSONObject("music").put("speed", 0.01)
+        assertEquals(ComposeSpecParser.MIN_SPEED, ComposeSpecParser.parse(json).audio.music!!.speed, 1e-6f)
+    }
+
+    @Test
     fun `a missing audio block is treated as unedited sound`() {
         val json = minimalJson().apply { remove("audio") }
         val audio = ComposeSpecParser.parse(json).audio

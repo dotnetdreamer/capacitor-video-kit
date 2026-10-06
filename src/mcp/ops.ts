@@ -42,14 +42,17 @@ import {
   DEFAULT_ZOOM_SCALE,
   MAX_LAYERS,
   MAX_MUSIC_FADE_MS,
+  MAX_SPEED,
   MAX_VIDEO_TRACKS,
   MAX_ZOOMS,
   MIN_LAYER_MS,
+  MIN_SPEED,
   MIN_ZOOM_MS,
   ZOOM_EASES,
   aspectOf,
   defaultClipEdit,
   normaliseOutput,
+  normaliseSpeed,
   outputFor,
   qualityOf,
   totalDurationMs,
@@ -76,8 +79,10 @@ import {
   addOverlay,
   addVideoTrack,
   addVoiceover,
+  audioSpeedPatch,
   findAudioClip,
   moveAudioClipToTrack,
+  musicSpeed,
   patchAudioClip,
   removeAudioClip,
   type AudioDropTarget,
@@ -444,7 +449,7 @@ const ASPECTS: readonly OutputAspect[] = ['9:16', '16:9'];
 const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs', 'phaseMs'] as const satisfies readonly (keyof EditMusic)[];
 const MUSIC_FADES = ['fadeInMs', 'fadeOutMs'] as const satisfies readonly (keyof EditMusic)[];
 /** Every field a sound has, in the order the editor writes them - what a refusal lists. */
-const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES] as const satisfies readonly (keyof EditMusic)[];
+const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed'] as const satisfies readonly (keyof EditMusic)[];
 
 /*
  * And every one of them, held by the compiler. [musicFields] refuses any key not on the list, so a
@@ -491,6 +496,11 @@ function musicFields(raw: Record<string, unknown>, path: string): Partial<EditMu
       if (typeof value !== 'boolean') throw new Error(`${name} must be true or false`);
     } else if (key === 'volume') {
       if (typeof value !== 'number' || !(value >= 0 && value <= 1)) throw new Error(`${name} must be a number from 0 to 1`);
+    } else if (key === 'speed') {
+      // Refused out of range rather than held to it, as the volume is: the Speed sheet goes no further.
+      if (typeof value !== 'number' || !(value >= MIN_SPEED && value <= MAX_SPEED)) {
+        throw new Error(`${name} must be a number from ${MIN_SPEED} to ${MAX_SPEED} - 1 is the sound at its own speed`);
+      }
     } else if ((MUSIC_FADES as readonly string[]).includes(key)) {
       if (typeof value !== 'number' || !(value >= 0 && value <= MAX_MUSIC_FADE_MS)) {
         throw new Error(`${name} must be a length in milliseconds from 0 (no fade) to ${MAX_MUSIC_FADE_MS}, the longest the volume sheet sets`);
@@ -564,6 +574,8 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
     // absent is no fade in, and a 0 written in would be a sound neither of them would have made.
     ...(fadeInMs > 0 ? { fadeInMs } : {}),
     fadeOutMs: given.fadeOutMs ?? 0,
+    // The same for the speed, stored as the Speed sheet stores one and never as 1x.
+    ...(given.speed !== undefined && normaliseSpeed(given.speed) !== 1 ? { speed: normaliseSpeed(given.speed) } : {}),
   };
   const refusal = musicRefusal(music);
   if (refusal) throw new Error(refusal);
@@ -579,6 +591,8 @@ function asksForChange(music: EditMusic, patch: Partial<EditMusic>): boolean {
   return Object.entries(patch).some(([key, value]) => {
     const was = had[key];
     if (key === 'phaseMs' && typeof value === 'number') return Math.round(value) !== Math.round(typeof was === 'number' ? was : 0);
+    // A sound with no speed is at 1x, and a speed is kept to the hundredth.
+    if (key === 'speed' && typeof value === 'number') return normaliseSpeed(value) !== musicSpeed(music);
     const isTime = (MUSIC_TIMES as readonly string[]).includes(key) || (MUSIC_FADES as readonly string[]).includes(key);
     return isTime && typeof value === 'number' && typeof was === 'number' ? Math.round(value) !== Math.round(was) : value !== was;
   });
@@ -986,13 +1000,21 @@ const OPS: Record<string, Apply> = {
     return next;
   },
 
-  /* [patchMusic]'s rules, for one sound on the lanes, and refused when it would meet its neighbour. */
+  /*
+   * [patchMusic]'s rules, for one sound on the lanes, and refused when it would meet its neighbour -
+   * except for a slower `speed` on its own, which stops the sound where the next one on its lane begins,
+   * as the editor's Speed sheet does ([audioSpeedPatch]). Sent with a `startMs` or an `endMs` as well,
+   * the speed is taken as it is, and a sound that would then meet its neighbour is refused.
+   */
   patchAudio: (manifest, op) => {
     const id = str(op, 'id');
     const clip = requireAudio(manifest, id);
     const patch = musicFields(object(op, 'patch'), 'patch');
     if (patch.startMs !== undefined && patch.endMs === undefined && clip.endMs > 0) {
       Object.assign(patch, musicMovedTo(clip, patch.startMs, totalDurationMs(manifest)));
+    }
+    if (patch.speed !== undefined && patch.startMs === undefined && patch.endMs === undefined) {
+      Object.assign(patch, audioSpeedPatch(manifest, id, patch.speed));
     }
     const next = patchAudioClip(manifest, id, patch);
     if (next === manifest && asksForChange(clip, patch)) {

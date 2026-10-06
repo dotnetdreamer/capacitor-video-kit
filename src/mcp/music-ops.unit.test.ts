@@ -93,6 +93,7 @@ describe('setMusic', () => {
       phaseMs: 2500,
       fadeInMs: 800,
       fadeOutMs: 1200,
+      speed: 1.5,
     };
     expect(applyEditOps(post(), [{ op: 'setMusic', music }]).music).toEqual(music);
     const before = applyEditOps(post(), set({ sourceDurationMs: 60_000 }));

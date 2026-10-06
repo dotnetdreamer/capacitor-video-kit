@@ -9,6 +9,7 @@ import {
   defaultClipEdit,
   defaultPictureEdit,
   insertClip,
+  musicSpeed,
   musicWindow,
   replaceClipSource,
   uniqueClipKeys,
@@ -731,7 +732,9 @@ export class EditorMedia {
     const anchor = selected ?? legacy;
     const target = selected ? audioTrackIdOfClip(this.store.manifest.value, selected.id) : null;
     const total = this.store.totalMs.value;
-    const selectedEnd = anchor ? musicWindow(anchor, total).endMs : 0;
+    // Up to a whole millisecond: a sped-up sound rarely ends on one, and a start rounded down from its
+    // end would overlap it by the fraction and be turned away from its lane.
+    const selectedEnd = anchor ? Math.ceil(musicWindow(anchor, total).endMs) : 0;
     const at = anchor && selectedEnd + MIN_LAYER_MS <= total ? selectedEnd : Math.min(this.store.playheadMs.value, Math.max(0, total - Math.max(MIN_LAYER_MS, sourceDurationMs)));
     const sound = {
       uri,
@@ -753,14 +756,15 @@ export class EditorMedia {
 
   /**
    * An older edit's one sound swapped for another, as Replace did it before there were lanes. The
-   * volume and the two fades are carried over: they are what the volume sheet sets by hand, and having
-   * them reset every time a different song is tried is the difference between comparing two tracks
-   * and setting the sound up twice.
+   * volume, the two fades and the speed are carried over: they are what the volume and speed sheets
+   * set by hand, and having them reset every time a different song is tried is the difference between
+   * comparing two tracks and setting the sound up twice. A lane's Replace keeps them too.
    */
   private replaceMusic(uri: string, fileName: string, sourceDurationMs: number): void {
     const existing = this.store.manifest.value.music;
     if (!existing) return;
     const fadeInMs = existing.fadeInMs ?? 0;
+    const speed = musicSpeed(existing);
     this.store.setMusic(
       {
         uri,
@@ -774,6 +778,7 @@ export class EditorMedia {
         loop: true,
         ...(fadeInMs > 0 ? { fadeInMs } : {}),
         fadeOutMs: existing.fadeOutMs,
+        ...(speed !== 1 ? { speed } : {}),
       },
       'Replace sound',
     );

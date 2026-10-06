@@ -957,7 +957,7 @@ class RenderPlanTest {
         val music = plan.music!!
         var atUs = music.leadGapUs
         for (item in music.items) {
-            val lenUs = item.outUs - item.inUs
+            val lenUs = item.lengthUs
             if (outputUs < atUs + lenUs) {
                 return item.gain.getGainFactorAtSamplePosition((outputUs - atUs) * rate / 1_000_000, rate)
             }
@@ -1152,6 +1152,63 @@ class RenderPlanTest {
         val nearEndItems = musicPlan(nearEnd, videoMs = 20_000, trackMs = 12_000).music!!.items
         assertEquals(C.TIME_END_OF_SOURCE, nearEndItems[0].decodeEndUs)
         assertEquals(11_800_000L, nearEndItems[0].outUs)
+    }
+
+    /*
+     * Music at a speed. The section is still a stretch of the FILE - inUs..outUs, and the phase a place
+     * in it - while every length a pass is laid at is on the OUTPUT: the file's divided by the speed.
+     * The builder hands Media3 the speed per pass, and holds each pass to `lengthUs` on the sample.
+     */
+
+    @Test
+    fun `a sped-up loop lays each pass at its section divided by the speed`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0, speed = 2f)
+        val items = musicPlan(music, videoMs = 10_000, trackMs = 3_000).music!!.items
+        // A three-second section at 2x is 1.5 s a pass: six whole passes, and one second of a seventh.
+        assertEquals(7, items.size)
+        assertEquals(List(6) { 1_500_000L } + 1_000_000L, items.map { it.lengthUs })
+        assertEquals(List(6) { 3_000_000L } + 2_000_000L, items.map { it.outUs - it.inUs })
+        for (k in 1 until items.size) assertEquals("pass $k", items[k - 1].atUs + items[k - 1].lengthUs, items[k].atUs)
+        assertEquals(10_000_000L, items.last().atUs + items.last().lengthUs)
+        assertTrue(items.all { it.speed == 2f })
+    }
+
+    @Test
+    fun `a slowed sound played once runs for its section divided by the speed`() {
+        val music = Music("file:///m.m4a", 500, 0, 3_000, 1f, loop = false, fadeInMs = 0, fadeOutMs = 0, speed = 0.5f)
+        val items = musicPlan(music, videoMs = 10_000, trackMs = 3_000).music!!.items
+        assertEquals(1, items.size)
+        assertEquals(500_000L, items[0].atUs)
+        assertEquals(6_000_000L, items[0].lengthUs)
+        assertEquals(0L, items[0].inUs)
+        assertEquals(3_000_000L, items[0].outUs)
+    }
+
+    @Test
+    fun `a sped-up sound's phase is a place in its file`() {
+        val music = Music("file:///m.m4a", 0, 0, 4_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0, phaseMs = 1_000, speed = 2f)
+        val items = musicPlan(music, videoMs = 5_000, trackMs = 4_000).music!!.items
+        // Three seconds of file left in the first pass is 1.5 s of output, then 2 s passes to the end.
+        assertEquals(listOf(1_000_000L, 0L, 0L), items.map { it.inUs })
+        assertEquals(listOf(4_000_000L, 4_000_000L, 3_000_000L), items.map { it.outUs })
+        assertEquals(listOf(0L, 1_500_000L, 3_500_000L), items.map { it.atUs })
+        assertEquals(listOf(1_500_000L, 2_000_000L, 1_500_000L), items.map { it.lengthUs })
+    }
+
+    @Test
+    fun `a sped-up sound's fades are counted on the output`() {
+        val music = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 1_000, speed = 2f)
+        val plan = musicPlan(music, videoMs = 4_000, trackMs = 3_000)
+        // Heard to 4 s, so the fade out runs 3 s..4 s of the post, whichever pass that falls in.
+        assertEquals(1f, musicGainAt(plan, 2_900_000L), 1e-3f)
+        assertEquals(0.5f, musicGainAt(plan, 3_500_000L), 1e-3f)
+    }
+
+    @Test
+    fun `a sound at 1x is laid exactly as before`() {
+        val plain = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 0)
+        val items = musicPlan(plain, videoMs = 10_000, trackMs = 3_000).music!!.items
+        assertTrue(items.all { it.speed == 1f && it.lengthUs == it.outUs - it.inUs })
     }
 
     /* ------------------------------------------------------------------------------------- */

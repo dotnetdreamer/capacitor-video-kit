@@ -59,6 +59,8 @@ import {
   removeAudioClip,
   replaceAudioClip as replaceAudioClipOp,
   setAudioLoop,
+  setAudioSpeed as setAudioSpeedOp,
+  setMusicSpeed as setMusicSpeedOp,
   removeOverlay,
   removeVideoTrack,
   removeVoiceover,
@@ -2072,6 +2074,23 @@ export class EditorStore {
     const loop = !clip.loop;
     this.commit(loop ? 'Loop on' : 'Loop off', m => setAudioLoop(m, id, loop));
     this.haptic('light');
+  }
+
+  /**
+   * One sound on the lanes at another speed: live (the Speed sheet's slider, inside its gesture) or as
+   * a step, named as a clip's speed is. Live steps are made from where the gesture STARTED
+   * ([previewFromStart]): slowing a sound into the next one on its lane stops it there
+   * ([audioSpeedPatch]), and a drag back up has to take that stop away again rather than keep it.
+   */
+  setAudioSpeed(id: string, speed: number, live = false): void {
+    if (live) this.previewFromStart(m => setAudioSpeedOp(m, id, speed));
+    else this.commit('Speed', m => setAudioSpeedOp(m, id, speed));
+  }
+
+  /** The music at another speed, live or as a step; see [setAudioSpeed]. Nothing shares its row. */
+  setMusicSpeed(speed: number, live = false): void {
+    if (live) this.previewFromStart(m => setMusicSpeedOp(m, speed));
+    else this.commit('Speed', m => setMusicSpeedOp(m, speed));
   }
 
   /**

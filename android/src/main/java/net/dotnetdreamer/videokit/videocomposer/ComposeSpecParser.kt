@@ -794,6 +794,8 @@ object ComposeSpecParser {
             fadeOutMs = o.optLong("fadeOutMs", 0L).coerceAtLeast(0L),
             endMs = o.optLong("endMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
             phaseMs = o.optLong("phaseMs", 0L),
+            // Held to the clips' range, as a clip's own speed is; absent is 1x.
+            speed = o.optDouble("speed", 1.0).toFloat().coerceIn(MIN_SPEED, MAX_SPEED),
         )
     }
 

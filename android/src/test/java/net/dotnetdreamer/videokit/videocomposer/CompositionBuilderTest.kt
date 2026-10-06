@@ -4,6 +4,8 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.VideoCompositorSettings
 import androidx.media3.common.audio.GainProcessor
+import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.RgbMatrix
 import org.junit.Assert.assertArrayEquals
@@ -77,6 +79,48 @@ class CompositionBuilderTest {
         MediaItem.ClippingConfiguration = item.mediaItem.clippingConfiguration
 
     /* ------------------------------------------------------------------------------------- */
+
+    /**
+     * The device's spec on 2026-10-06: a minute of video with its own sound off, and on a lane the
+     * seeded 12 s tone at 2x, played once with a one-second fade out.
+     */
+    private fun spedSoundPlan(speed: Float = 2f): RenderPlan {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = false, fadeInMs = 0, fadeOutMs = 1_000, speed = speed)
+        return RenderPlan.build(
+            spec(listOf(clip("a", outMs = 60_000))).copy(audio = Audio(true, 1f, null, emptyList(), musicTracks = listOf(listOf(music)))),
+            mapOf("file:///a.mp4" to probe(60_000), "file:///m.m4a" to probe(12_000)),
+        )
+    }
+
+    /*
+     * It used to be handed to Media3 with `setSpeed`, as a sped-up clip is, and `EditedMediaItem`
+     * refused it at `build()` with an IllegalStateException: the exact length that holds every pass to
+     * its piece of the output changes an item's length, and Media3 takes any processor that does for a
+     * second speed change. So the speed is the item's first processor instead, a Sonic time-stretch
+     * that keeps the pitch, with the exact length and the gain after it, both in output time.
+     */
+    @Test
+    fun `a sped-up sound is stretched by its first processor, ahead of its exact length`() {
+        val plan = spedSoundPlan()
+        val pass = plan.musicTracks.single().items.single()
+        assertEquals(6_000_000L, pass.lengthUs)
+
+        val item = CompositionBuilder.toComposition(plan, emptyList(), null).sequences.last().editedMediaItems.single()
+        assertEquals(SpeedProvider.DEFAULT, item.speedProvider)
+        val processors = item.effects.audioProcessors
+        assertTrue(processors[0] is SonicAudioProcessor)
+        // Twelve seconds of file at 2x, as the item reports it onward, and as the exact length holds it.
+        assertEquals(6_000_000L, processors[0].getDurationAfterProcessorApplied(12_000_000L))
+        val length = processors[1] as ExactLengthAudioProcessor
+        assertEquals(6L * 48_000L, length.framesAt(48_000))
+        assertTrue(processors[2] is GainProcessor)
+    }
+
+    @Test
+    fun `a sound at 1x has no stretch at all`() {
+        val item = CompositionBuilder.toComposition(spedSoundPlan(speed = 1f), emptyList(), null).sequences.last().editedMediaItems.single()
+        assertTrue(item.effects.audioProcessors.none { it is SonicAudioProcessor })
+    }
 
     @Test
     fun `a clip is handed to media3 at the plan's own microsecond`() {

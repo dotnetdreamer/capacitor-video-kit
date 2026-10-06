@@ -1,4 +1,4 @@
-import { MIN_LAYER_MS, clamp, musicPhaseMs, musicSectionMs, musicStopMs, type ClipDropTarget, type EditMusic } from '../../editor';
+import { MIN_LAYER_MS, clamp, musicPhaseMs, musicSectionMs, musicSpeed, musicStopMs, type ClipDropTarget, type EditMusic } from '../../editor';
 import type { CoalesceKey } from '../../state/editor-store';
 
 import type { DropRow } from './timeline-geometry';
@@ -314,26 +314,39 @@ export type TimelineDrag =
  * and timeline start move together. A loop keeps its full source section and moves its first-play
  * phase with the timeline start, allowing the edge to cross any number of repeats while the sound
  * at later points in the video remains the same.
+ *
+ * The handle moves on the post and the in point and the phase are places in the file, so a sped-up
+ * sound's move through its file is the handle's times its speed ([musicSpeed]).
  */
 export function musicStartTrim(music0: EditMusic, newStartMs: number, totalMs: number): Partial<EditMusic> {
+  const speed = musicSpeed(music0);
   if (music0.loop && musicSectionMs(music0) > 0) {
     const minDelta = -music0.startMs;
     const maxDelta = musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs;
     const delta = Math.round(clamp(newStartMs - music0.startMs, minDelta, Math.max(minDelta, maxDelta)));
-    const phase = (music0.phaseMs ?? 0) + delta;
+    const phase = (music0.phaseMs ?? 0) + Math.round(delta * speed);
     // Keep whole cycles on the wire: the native reader may measure an AAC file a few milliseconds
     // differently from the WebView, and must wrap against its own measured section length.
     return { startMs: music0.startMs + delta, phaseMs: phase };
   }
   const out = music0.outMs > 0 ? music0.outMs : music0.sourceDurationMs;
   const inMs = music0.inMs + musicPhaseMs(music0);
-  const minDelta = Math.max(-music0.startMs, -inMs);
+  const minDelta = Math.max(-music0.startMs, -inMs / speed);
   const maxDelta = Math.min(
     musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs,
-    out > 0 ? out - MIN_LAYER_MS - inMs : Number.POSITIVE_INFINITY,
+    out > 0 ? (out - shortestSectionMs(speed) - inMs) / speed : Number.POSITIVE_INFINITY,
   );
   const delta = Math.round(clamp(newStartMs - music0.startMs, minDelta, Math.max(minDelta, maxDelta)));
-  return { startMs: music0.startMs + delta, inMs: inMs + delta, ...(music0.phaseMs ? { phaseMs: 0 } : {}) };
+  return { startMs: music0.startMs + delta, inMs: Math.max(0, inMs + Math.round(delta * speed)), ...(music0.phaseMs ? { phaseMs: 0 } : {}) };
+}
+
+/**
+ * The shortest section, in the FILE, a sound at `speed` may be trimmed to: [MIN_LAYER_MS] of file,
+ * which `patchMusic` holds, and long enough to be heard for [MIN_LAYER_MS] of the post, which a lane
+ * holds - so the longer of the two, which is the second for a sped-up sound.
+ */
+function shortestSectionMs(speed: number): number {
+  return MIN_LAYER_MS * Math.max(1, speed);
 }
 
 /**
@@ -353,10 +366,18 @@ export function musicEndTrim(music0: EditMusic, newEndMs: number, totalMs: numbe
     const end = Math.round(clamp(newEndMs, music0.startMs + MIN_LAYER_MS, totalMs));
     return { endMs: end >= totalMs ? 0 : end };
   }
+  // The handle's length is on the post; the section it sets is that times the speed, in the file.
+  const speed = musicSpeed(music0);
   const inMs = music0.inMs + musicPhaseMs(music0);
-  const maxLength = music0.sourceDurationMs > 0 ? music0.sourceDurationMs - inMs : Number.POSITIVE_INFINITY;
-  const length = clamp(Math.min(newEndMs, totalMs) - music0.startMs, MIN_LAYER_MS, Math.max(MIN_LAYER_MS, maxLength));
-  return { outMs: Math.round(inMs + length), endMs: 0, ...(music0.phaseMs ? { inMs, phaseMs: 0 } : {}) };
+  const shortest = shortestSectionMs(speed) / speed;
+  const maxLength = music0.sourceDurationMs > 0 ? (music0.sourceDurationMs - inMs) / speed : Number.POSITIVE_INFINITY;
+  const length = clamp(Math.min(newEndMs, totalMs) - music0.startMs, shortest, Math.max(shortest, maxLength));
+  const outMs = Math.round(inMs + length * speed);
+  return {
+    outMs: music0.sourceDurationMs > 0 ? Math.min(outMs, Math.round(music0.sourceDurationMs)) : outMs,
+    endMs: 0,
+    ...(music0.phaseMs ? { inMs, phaseMs: 0 } : {}),
+  };
 }
 
 /**

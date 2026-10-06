@@ -17,11 +17,12 @@ import {
   type EditClip,
   type EditFit,
   type EditManifest,
+  type EditMusic,
   type EditOverlay,
   type EditPlacement,
   type EditRect,
 } from './edit-manifest';
-import { overlayEndMs } from './edit-ops';
+import { musicSpeed, overlayEndMs } from './edit-ops';
 import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
@@ -196,6 +197,7 @@ export async function toComposeSpec(
             loop: music.loop,
             fadeInMs: Math.max(0, Math.round(music.fadeInMs ?? 0)),
             fadeOutMs: Math.max(0, Math.round(music.fadeOutMs)),
+            ...wireSpeed(music),
           }
         : null,
       voiceover: [...manifest.voiceovers]
@@ -218,6 +220,7 @@ export async function toComposeSpec(
           loop: sound.loop,
           fadeInMs: Math.max(0, Math.round(sound.fadeInMs ?? 0)),
           fadeOutMs: Math.max(0, Math.round(sound.fadeOutMs)),
+          ...wireSpeed(sound),
         }))),
       } : {}),
     },
@@ -252,6 +255,15 @@ export async function toComposeSpec(
   if (background) spec.background = backgroundRgb(background);
 
   return spec;
+}
+
+/**
+ * A sound's speed as the wire carries it: only when it is not 1x, so a sound nobody sped up is the
+ * music this package has always sent, byte for byte, and every engine keeps the path it takes for it.
+ */
+function wireSpeed(music: EditMusic): { speed?: number } {
+  const speed = musicSpeed(music);
+  return speed !== 1 ? { speed } : {};
 }
 
 /**

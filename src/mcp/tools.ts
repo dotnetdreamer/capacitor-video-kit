@@ -425,14 +425,16 @@ export const OP_REFERENCE: Record<string, string> = {
 
   /* sound */
   setMusic:
-    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?}) or null to take it away. ' +
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?, speed?}) or null to take it away. ' +
     'inMs..outMs is the section of the track (outMs 0: to the end of the track), startMs where it starts on the post, and endMs where it ' +
     'stops (0, the default: until the end); a looping section repeats until endMs, or until the video ends. phaseMs offsets ' +
     'the first pass within the section and wraps at its end; it may be negative, and later passes use the full section. An outMs or endMs that is ' +
     `not 0 is at least ${MIN_LAYER_MS}ms after inMs or startMs, or the op is refused. volume 0..1 (default 1); loop defaults to false. ` +
     `fadeInMs rises from silence over the start of the sound and fadeOutMs falls to silence at the end of what is heard, each 0 (none, ` +
     `the default) to ${MAX_MUSIC_FADE_MS}ms. Times are in milliseconds; all but phaseMs are nonnegative. sourceDurationMs is the track's ` +
-    'length: without it or an outMs, where a sound played once ends is not known until it plays. Any other field is refused; a field ' +
+    'length: without it or an outMs, where a sound played once ends is not known until it plays. speed (0.25..4, default 1) plays ' +
+    'the section faster or slower at its own pitch: inMs, outMs and phaseMs stay places in the track, so one pass lasts ' +
+    '(outMs - inMs) / speed on the post, while startMs, endMs and the fades stay places on the post. Any other field is refused; a field ' +
     'sent as null takes its default.',
   patchMusic:
     'patch - any of the fields setMusic takes, checked the same way; any other field is refused, and so is null - send 0 for no stop, ' +
@@ -445,7 +447,9 @@ export const OP_REFERENCE: Record<string, string> = {
     'startMs. Sounds on one lane play one after another and never overlap; lanes play together. It goes on trackId when given ' +
     '(refused if it does not fit there), else on the first lane with room, else on a new lane with the id newTrackId (default ' +
     '"lane-" + id). A post’s music joins the lanes as their first sound on the first add.',
-  patchAudio: 'id, patch - as patchMusic, for one sound on the lanes; refused when it would meet another sound on its lane.',
+  patchAudio:
+    'id, patch - as patchMusic, for one sound on the lanes; refused when it would meet another sound on its lane, except that a ' +
+    'slower speed sent on its own stops the sound where the next one on its lane begins, as the editor’s Speed sheet does.',
   moveAudioToTrack:
     'id, target ({kind:"track",trackId} | {kind:"new",index}), atMs, newTrackId? - onto a lane, or a new one at index; it lands in ' +
     'the gap nearest atMs that holds it whole, and a lane left empty goes.',

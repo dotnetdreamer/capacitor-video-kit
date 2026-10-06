@@ -339,7 +339,7 @@ class RenderPlan private constructor(
 
     /**
      * One pass of the music: [inUs]..[outUs] of the file, played from [atUs] on the output timeline
-     * for exactly `outUs - inUs`. The passes of a loop lie end to end - each one's [atUs] is where the
+     * for exactly [lengthUs]. The passes of a loop lie end to end - each one's [atUs] is where the
      * one before it stops - and the builder holds every pass to its length on the sample (see
      * [ExactLengthAudioProcessor]), so they join with neither a gap nor an overlap.
      */
@@ -357,6 +357,15 @@ class RenderPlan private constructor(
          * end at [outUs] itself leaves a hole of silence at every seam.
          */
         val decodeEndUs: Long,
+        /**
+         * How long the pass runs on the OUTPUT timeline: `outUs - inUs` at 1x, and that divided by
+         * [speed] otherwise. The gain's times and the exact length are in these terms - the builder
+         * puts the speed change ahead of every other processor the item has, so they all see sped-up
+         * sound.
+         */
+        val lengthUs: Long = outUs - inUs,
+        /** The music's speed, which the builder stretches this pass by; see [Music.speed]. */
+        val speed: Float = 1f,
     )
 
     data class MusicPlan(
@@ -1112,18 +1121,23 @@ class RenderPlan private constructor(
             val phaseUs = Math.floorMod(music.phaseMs, sectionMs) * 1000L
             val inUs = music.inMs * 1000L
 
+            // Every length from here on is on the OUTPUT timeline, where a pass of a sped-up section
+            // is shorter (or a slowed one longer) than the stretch of the file it plays: [onOutput].
+            val speed = music.speed
+            val passUs = onOutput(trackLenUs, speed)
+
             val startUs = music.startMs * 1000L
             // The end of the video, or the music's own stop when it has one before that.
             val stopUs = if (music.endMs > 0L) min(totalUs, music.endMs * 1000L) else totalUs
             val availableUs = stopUs - startUs
             if (availableUs <= 0L) return null
 
-            val firstLenUs = min(trackLenUs - phaseUs, availableUs)
+            val firstLenUs = min(onOutput(trackLenUs - phaseUs, speed), availableUs)
             // The same floor for music that starts under a millisecond before the end: nothing to hear.
             if (firstLenUs < MIN_CLIP_US) return null
             val remainingUs = if (music.loop) availableUs - firstLenUs else 0L
             var fullReps = if (music.loop && remainingUs > 0L) {
-                ceil(remainingUs.toDouble() / trackLenUs.toDouble()).toInt()
+                ceil(remainingUs.toDouble() / passUs.toDouble()).toInt()
             } else {
                 0
             }
@@ -1135,9 +1149,9 @@ class RenderPlan private constructor(
              * duration of 0, and `Util.percentInt` in `ExoPlayerAssetLoader.getProgress` divided by
              * it and failed the export the moment progress was polled on it.
              */
-            if (fullReps > 0 && remainingUs - (fullReps - 1) * trackLenUs < minRepetitionUs) fullReps--
+            if (fullReps > 0 && remainingUs - (fullReps - 1) * passUs < minRepetitionUs) fullReps--
             val lastFullLenUs = if (fullReps > 0) {
-                min(trackLenUs, remainingUs - (fullReps - 1) * trackLenUs)
+                min(passUs, remainingUs - (fullReps - 1) * passUs)
             } else {
                 0L
             }
@@ -1147,7 +1161,7 @@ class RenderPlan private constructor(
             // Where the music really stops: the end of the last repetition laid, which is short of
             // `stopUs` by the sliver left off above, or the end of a section that plays once.
             val endUs = startUs + firstLenUs +
-                (if (fullReps > 0) (fullReps - 1) * trackLenUs + lastFullLenUs else 0L)
+                (if (fullReps > 0) (fullReps - 1) * passUs + lastFullLenUs else 0L)
 
             /*
              * The fades belong to the window the music is heard in, `startUs..endUs`, and not to any
@@ -1160,14 +1174,17 @@ class RenderPlan private constructor(
              * just past a seam - ended the music near full level with a hard cut.
              */
             val items = (0..fullReps).map { k ->
-                val atUs = if (k == 0) startUs else startUs + firstLenUs + (k - 1) * trackLenUs
+                val atUs = if (k == 0) startUs else startUs + firstLenUs + (k - 1) * passUs
                 val itemInUs = if (k == 0) inUs + phaseUs else inUs
-                val lenUs = if (k == 0) firstLenUs else if (k == fullReps) lastFullLenUs else trackLenUs
+                val lenUs = if (k == 0) firstLenUs else if (k == fullReps) lastFullLenUs else passUs
+                // The stretch of the file the pass plays: its length on the output at its speed, and
+                // never past the end of the section, which the rounding could otherwise reach over.
+                val fileUs = if (speed == 1f) lenUs else min(inUs + trackLenUs - itemInUs, Math.round(lenUs * speed.toDouble()))
                 val fadesIn = fadeInUs > 0L && atUs < startUs + fadeInUs
                 val fadesOut = fadeOutUs > 0L && atUs + lenUs > endUs - fadeOutUs
                 MusicItem(
                     inUs = itemInUs,
-                    outUs = itemInUs + lenUs,
+                    outUs = itemInUs + fileUs,
                     gain = RampGainProvider(
                         level = music.volume,
                         fadeInUs = if (fadesIn) fadeInUs else 0L,
@@ -1176,11 +1193,22 @@ class RenderPlan private constructor(
                         fadeOutUs = if (fadesOut) fadeOutUs else 0L,
                     ),
                     atUs = atUs,
-                    decodeEndUs = decodeEndUs(itemInUs + lenUs, probedMs),
+                    decodeEndUs = decodeEndUs(itemInUs + fileUs, probedMs),
+                    lengthUs = lenUs,
+                    speed = speed,
                 )
             }
             return MusicPlan(uri = music.uri, leadGapUs = startUs, items = items)
         }
+
+        /**
+         * [fileUs] of a sound played at [speed], as a length on the OUTPUT timeline, in whole
+         * microseconds rounded down - so the passes of a loop, laid end to end, never run past the
+         * stop they were counted against. At 1x it is [fileUs] itself, which keeps every sound that is
+         * not sped up on exactly the arithmetic it always had.
+         */
+        private fun onOutput(fileUs: Long, speed: Float): Long =
+            if (speed == 1f) fileUs else floor(fileUs / speed.toDouble()).toLong()
 
         /**
          * Where Media3 is told to stop decoding a pass that plays to [outUs] of a file the probe

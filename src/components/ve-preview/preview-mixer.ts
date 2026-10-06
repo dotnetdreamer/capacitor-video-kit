@@ -24,8 +24,10 @@ import { debugWarn } from '../../host/debug';
  * at. A clip plays at anything from a quarter to four times its speed, and a transition's tail is
  * eased up to a quarter off its own rate whenever it drifts (see [catchUpRate]), so a clip's sound
  * put through the graph could not be trusted to come out whole - and an element, once routed, can
- * never be given back. The music and the takes only ever play at their own speed. A clip's own
- * sound on iOS keeps what it had: its mute, and a cut rather than a fade across a transition.
+ * never be given back. The takes only ever play at their own speed, and so does a sound nobody has
+ * sped up; one that has been is played on an element kept out of the graph, at full volume there as a
+ * clip's sound is (see [elementFor]). A clip's own sound on iOS keeps what it had: its mute, and a cut
+ * rather than a fade across a transition.
  *
  * NOTHING IS ROUTED unless all of these hold, because each one that did not would be silence where
  * the preview plays today:
@@ -156,8 +158,9 @@ export class PreviewMixer {
   isRouted(element: HTMLMediaElement): boolean {
     if (routes.has(element)) return true;
     if (!this.holding || refused.has(element) || !this.elements.has(element as HTMLAudioElement)) return false;
-    // Left out of the graph by [route] for as long as it holds a file from somewhere else.
-    return !(element.src && !playableHere(element.src));
+    // Left out of the graph by [route] for as long as it holds a file from somewhere else, or a
+    // sound played at another speed.
+    return !(element.src && !playableHere(element.src)) && !spedUp(element);
   }
 
   /**
@@ -231,9 +234,13 @@ export class PreviewMixer {
    * that has never been near the graph, and so plays it exactly as the preview played every file
    * before there was a mixer. It is made the first time one is needed, which wherever nothing is
    * routed is never.
+   *
+   * A sound played at a `rate` other than 1 goes on the stand-in too, whatever its file: the graph
+   * reads a routed element at its own real-time rate (the top of this file), so a sped-up sound
+   * through it would not come out whole. [route] keeps an element holding one out of the graph.
    */
-  elementFor(element: HTMLAudioElement, url: string): HTMLAudioElement {
-    if (!routes.has(element) || playableHere(url)) return element;
+  elementFor(element: HTMLAudioElement, url: string, rate = 1): HTMLAudioElement {
+    if (!routes.has(element) || (playableHere(url) && rate === 1)) return element;
     let standIn = standIns.get(element);
     if (!standIn) {
       standIn = document.createElement('audio');
@@ -278,7 +285,8 @@ export class PreviewMixer {
         known.connect(shared.destination);
         continue;
       }
-      if (element.src && !playableHere(element.src)) continue;
+      // The player sets an element's default rate when it gives it a sound's file, before any play.
+      if ((element.src && !playableHere(element.src)) || spedUp(element)) continue;
       let gain: GainNode | null = null;
       try {
         gain = shared.createGain();
@@ -294,6 +302,16 @@ export class PreviewMixer {
       }
     }
   }
+}
+
+/**
+ * Whether `element` holds a sound played at a speed other than 1x, which the graph cannot take: its
+ * DEFAULT rate, which the player sets as it gives the element the sound's file (`applySoundRate`), and
+ * so before any play could send the element in. One with no default rate at all is at 1x.
+ */
+function spedUp(element: HTMLMediaElement): boolean {
+  const rate = element.defaultPlaybackRate;
+  return typeof rate === 'number' && rate !== 1;
 }
 
 function audioSession(): AudioSessionLike | null {

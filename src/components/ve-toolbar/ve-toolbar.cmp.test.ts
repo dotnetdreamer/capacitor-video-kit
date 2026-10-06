@@ -275,12 +275,17 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'music' });
     await until('the sound row', () => label(bar) === 'Sound tools');
-    expect(ids(bar)).toEqual(['volume', 'loop', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['volume', 'speed', 'loop', 'start-here', 'replace', 'delete']);
 
     const audio = store.addAudioClip({ ...store.manifest.value.music!, startMs: 0 })!;
     await until('the audio row', () => label(bar) === 'Audio tools');
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
-    expect(ids(bar)).toEqual(['volume', 'loop', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['volume', 'speed', 'loop', 'start-here', 'replace', 'delete']);
+    // Speed opens the sheet on the sound, which stays selected: the sheet reads it off the selection.
+    tile(bar, 'speed').click();
+    expect(store.panel.value).toBe('speed');
+    expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
+    store.closePanel();
 
     store.select({ kind: 'voice', id: 'vo-1' });
     await until('the voiceover row', () => label(bar) === 'Voiceover tools');
