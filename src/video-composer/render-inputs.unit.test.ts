@@ -97,6 +97,19 @@ describe('withNativeRenderInputs', () => {
     expect(bridge.stageRenderInput).toHaveBeenCalledTimes(3);
   });
 
+  it('stages every extra audio clip and reuses one staged file across lanes', async () => {
+    const original = musicOnly('blob:app/music');
+    const first = { ...original.audio.music!, endMs: 1000 };
+    original.audio.musicTracks = [[first, { ...first, startMs: 1000, endMs: 2000, uri: 'blob:app/take' }], [{ ...first, startMs: 500, endMs: 1500 }]];
+    const prepared = await withNativeRenderInputs(original, async copy => copy);
+
+    expect(prepared.audio.musicTracks?.[0]?.[0]?.uri).toBe(prepared.audio.music?.uri);
+    expect(prepared.audio.musicTracks?.[1]?.[0]?.uri).toBe(prepared.audio.music?.uri);
+    expect(prepared.audio.musicTracks?.[0]?.[1]?.uri).toMatch(/^file:\/\/\/tmp\/videokit-render-inputs\//);
+    expect(fetchInput.mock.calls.map(([uri]) => uri).sort()).toEqual(['blob:app/music', 'blob:app/take']);
+    expect(bridge.releaseRenderInputs).toHaveBeenCalledWith({ uris: expect.arrayContaining([prepared.audio.music!.uri, prepared.audio.musicTracks![0]![1]!.uri]) });
+  });
+
   /* No bridge message carries more than a mebibyte of bytes, so no one string holds a whole WAV. */
   it('sends a mebibyte of bytes per call, appending every chunk after the first to the same file', async () => {
     const bytes = new Uint8Array(2 * MIB + 3);

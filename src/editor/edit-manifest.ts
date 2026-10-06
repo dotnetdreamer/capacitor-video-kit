@@ -17,7 +17,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 13;
+export const MANIFEST_VERSION = 14;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -344,6 +344,17 @@ export interface EditMusic {
   fadeOutMs: number;
 }
 
+/** One independently placed sound on an audio lane. Its timing is on the output timeline. */
+export interface EditAudioClip extends EditMusic {
+  id: string;
+}
+
+/** Sounds on one lane never overlap; sounds on different lanes may play together. */
+export interface EditAudioTrack {
+  id: string;
+  clips: EditAudioClip[];
+}
+
 export interface EditVoiceover {
   id: string;
   uri: string;
@@ -559,6 +570,8 @@ export interface EditManifest {
   /** Bottom to top: a later layer is drawn over an earlier one, in the preview and in the render. */
   overlays: EditOverlay[];
   music: EditMusic | null;
+  /** Absent in older drafts, which continue to use the single `music` field. */
+  audioTracks?: EditAudioTrack[];
   /** Sorted by `startMs`, never overlapping. */
   voiceovers: EditVoiceover[];
   /**
@@ -1719,6 +1732,9 @@ export function emptyManifest(): EditManifest {
  * background, which is black - and [toComposeSpec] sends neither, byte for byte the spec version 12
  * produced. Bumped because an older build reading a version-13 draft holds every split still and
  * paints a coloured canvas black.
+ *
+ * Version 13 to version 14 adds independent audio lanes. Older drafts have no `audioTracks` key;
+ * their `music` stays as it was and continues to produce the original render specification.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1829,27 +1845,68 @@ export function normaliseManifest(input: unknown): EditManifest {
    * shortest length, because a stop before its start says nothing about where the sound was meant to
    * stop, and "until the end" is where every sound stopped before there were stops.
    */
-  const m = raw['music'];
   const endAfter = (startMs: number, endMs: number): number => (endMs > 0 && Math.round(endMs) - Math.round(startMs) < MIN_LAYER_MS ? 0 : endMs);
-  const musicInMs = m ? Math.max(0, num(m.inMs, 0)) : 0;
-  const musicStartMs = m ? Math.max(0, num(m.startMs, 0)) : 0;
-  const music: EditMusic | null = m
-    ? {
-        uri: String(m.uri),
-        fileName: String(m.fileName ?? 'Music'),
-        sourceDurationMs: Math.max(0, num(m.sourceDurationMs, 0)),
-        inMs: musicInMs,
-        outMs: endAfter(musicInMs, Math.max(0, num(m.outMs, 0))),
-        startMs: musicStartMs,
-        endMs: endAfter(musicStartMs, Math.max(0, num(m.endMs, 0))),
-        volume: clamp(num(m.volume, 0.6), 0, 1),
-        loop: m.loop ?? true,
-        ...(num(m.phaseMs, 0) !== 0 ? { phaseMs: Math.round(num(m.phaseMs, 0)) } : {}),
-        // Only when there is one, so a sound saved before fades in existed reads back as it was.
-        ...(num(m.fadeInMs, 0) > 0 ? { fadeInMs: num(m.fadeInMs, 0) } : {}),
-        fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
+  const readMusic = (m: any): EditMusic => {
+    const musicInMs = Math.max(0, num(m.inMs, 0));
+    const musicStartMs = Math.max(0, num(m.startMs, 0));
+    return {
+      uri: String(m.uri),
+      fileName: String(m.fileName ?? 'Music'),
+      sourceDurationMs: Math.max(0, num(m.sourceDurationMs, 0)),
+      inMs: musicInMs,
+      outMs: endAfter(musicInMs, Math.max(0, num(m.outMs, 0))),
+      startMs: musicStartMs,
+      endMs: endAfter(musicStartMs, Math.max(0, num(m.endMs, 0))),
+      volume: clamp(num(m.volume, 0.6), 0, 1),
+      loop: m.loop ?? true,
+      ...(num(m.phaseMs, 0) !== 0 ? { phaseMs: Math.round(num(m.phaseMs, 0)) } : {}),
+      // Only when there is one, so a sound saved before fades in existed reads back as it was.
+      ...(num(m.fadeInMs, 0) > 0 ? { fadeInMs: num(m.fadeInMs, 0) } : {}),
+      fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
+    };
+  };
+  const music: EditMusic | null = raw['music'] ? readMusic(raw['music']) : null;
+
+  // Audio rows are optional so a draft from before them still writes precisely the old shape. A
+  // damaged row with overlapping clips is spread across new rows instead of losing either sound.
+  const audioTracks: EditAudioTrack[] = [];
+  const audioIds = new Set<string>();
+  const audioTrackIds = new Set<string>();
+  const uniqueAudioId = (asked: unknown, fallback: string, used: Set<string>): string => {
+    const base = typeof asked === 'string' && asked ? asked : fallback;
+    let id = base;
+    for (let suffix = 1; used.has(id); suffix++) id = `${base}-${suffix}`;
+    used.add(id);
+    return id;
+  };
+  const audioEnd = (clip: EditAudioClip): number => {
+    const out = clip.outMs > 0 ? clip.outMs : clip.sourceDurationMs;
+    const section = Math.max(0, out - clip.inMs);
+    const natural = clip.loop || section === 0 ? Number.POSITIVE_INFINITY : clip.startMs + Math.max(0, section - (clip.phaseMs ?? 0));
+    return clip.endMs > 0 ? Math.min(clip.endMs, natural) : natural;
+  };
+  if (Array.isArray(raw['audioTracks'])) {
+    for (const [rowIndex, row] of raw['audioTracks'].entries()) {
+      const clips: EditAudioClip[] = (Array.isArray(row?.clips) ? row.clips : [])
+        .filter((clip: any) => clip && typeof clip.uri === 'string' && clip.uri.length > 0)
+        .map((clip: any, index: number): EditAudioClip => ({
+          ...readMusic(clip),
+          id: uniqueAudioId(clip.id, `audio-${rowIndex}-${index}`, audioIds),
+        }))
+        .sort((a: EditAudioClip, b: EditAudioClip) => a.startMs - b.startMs);
+      if (clips.length === 0) continue;
+      const id = uniqueAudioId(row?.id, `at-${rowIndex}`, audioTrackIds);
+      const kept: EditAudioClip[] = [];
+      for (const clip of clips) {
+        if (kept.length > 0 && clip.startMs < audioEnd(kept[kept.length - 1]!)) {
+          audioTracks.push({ id: uniqueAudioId(`${id}-overflow`, `${id}-overflow`, audioTrackIds), clips: [clip] });
+        } else {
+          kept.push(clip);
+        }
       }
-    : null;
+      if (kept.length > 0) audioTracks.push({ id, clips: kept });
+    }
+  }
 
   return {
     version: MANIFEST_VERSION,
@@ -1873,6 +1930,7 @@ export function normaliseManifest(input: unknown): EditManifest {
     originalMuted: !!raw['originalMuted'],
     overlays,
     music,
+    ...(audioTracks.length > 0 ? { audioTracks } : {}),
     voiceovers: voiceovers.sort((a, b) => a.startMs - b.startMs),
     zooms: normaliseZooms(raw['zooms']),
     // Absent is [DEFAULT_OUTPUT], which is the frame every manifest written before version 7 was
@@ -2044,7 +2102,7 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   // On a clip that fills the frame it shows nowhere, and the file is the picture exactly.
   if (manifest.background && manifest.fit === 'contain' && !fillsFrame(sourceAspect, manifest.output)) return false;
   if (manifest.overlays.length > 0) return false;
-  if (manifest.music || manifest.voiceovers.length > 0) return false;
+  if (manifest.music || manifest.audioTracks?.some(track => track.clips.length > 0) || manifest.voiceovers.length > 0) return false;
   // [zoomWindow] is the same test the compiled camera makes, so a zoom the render would show is
   // never lost by posting the file as it is - and one parked past the end costs no re-encode.
   const totalMs = totalDurationMs(manifest);

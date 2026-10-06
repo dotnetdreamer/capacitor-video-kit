@@ -51,6 +51,7 @@ class RenderPlan private constructor(
     val colorMatrix: ColorMatrix?,
     val overlays: List<OverlayPlacement>,
     val music: MusicPlan?,
+    val musicTracks: List<MusicPlan>,
     val voice: VoicePlan?,
     val posterAtUs: Long,
     /**
@@ -377,7 +378,7 @@ class RenderPlan private constructor(
 
     /** How many audio-only sequences this plan adds beside the video ones. */
     val extraAudioSequences: Int
-        get() = (if (music != null) 1 else 0) + (if (voice != null) 1 else 0)
+        get() = (if (music != null) 1 else 0) + musicTracks.size + (if (voice != null) 1 else 0)
 
     /**
      * Whether the composition is ONE sequence, which is the only case [reweight] can answer for. The
@@ -497,6 +498,9 @@ class RenderPlan private constructor(
                 colorMatrix = colorMatrix,
                 overlays = overlays,
                 music = planMusic(spec.audio.music, probes, totalUs, minRepetitionUs = frameIntervalUs(spec.output)),
+                musicTracks = spec.audio.musicTracks.flatMap { track ->
+                    track.mapNotNull { clip -> planMusic(clip, probes, totalUs, minRepetitionUs = frameIntervalUs(spec.output)) }
+                },
                 voice = planVoice(spec.audio.voiceover, probes, totalUs),
                 posterAtUs = min(spec.posterAtMs * 1000L, max(0L, totalUs - 1L)),
                 camera = camera,

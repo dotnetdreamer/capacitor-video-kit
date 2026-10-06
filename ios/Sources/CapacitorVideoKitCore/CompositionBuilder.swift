@@ -612,6 +612,13 @@ enum CompositionBuilder {
            let p = try await addMusic(music, to: comp, total: total, batchId: spec.batchId) {
             params.append(p)
         }
+        for lane in spec.audio.musicTracks {
+            for clip in lane {
+                if let p = try await addMusic(clip, to: comp, total: total, batchId: spec.batchId) {
+                    params.append(p)
+                }
+            }
+        }
         if let p = try await addVoiceovers(spec.audio.voiceover, to: comp, totalMs: totalMs,
                                            batchId: spec.batchId) {
             params.append(p)

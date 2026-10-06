@@ -679,6 +679,30 @@
   flex: 0 0 var(--lane-h);
 }
 
+.lane--audio-drop {
+  border-radius: 8px;
+  background: rgba(11, 142, 135, 0.22);
+}
+
+.lane--audio-new-before::before,
+.lane--audio-new-after::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ve-lane-music, #0b8e87);
+}
+
+.lane--audio-new-before::before {
+  top: calc(var(--lane-gap) / -2 - 1px);
+}
+
+.lane--audio-new-after::after {
+  bottom: calc(var(--lane-gap) / -2 - 1px);
+}
+
 /*
  * Rows only animate while a layer is lifted. On the drop the rows swap places in the DOM in the
  * same frame their offsets are cleared, and a transition then would slide them back from the wrong
@@ -967,6 +991,51 @@
 
 .tl__add:active {
   transform: scale(0.94);
+}
+
+/* The plus button's name, kept in the accessibility tree and off the screen; see `.item--glyph`. */
+.tl__hidden-name {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.tl__add-menu {
+  position: absolute;
+  top: calc(var(--ruler-h) + var(--track-top) + var(--track-h) + 6px);
+  left: clamp(8px, calc(var(--tl-add-x) - 96px), calc(100% - 152px));
+  right: 12px;
+  z-index: 7;
+  display: grid;
+  width: 144px;
+  padding: 4px;
+  border: 1px solid var(--ve-faint, rgba(255, 255, 255, 0.35));
+  border-radius: 12px;
+  background: var(--ve-raised, #2c2c2e);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+
+.tl__add-menu button {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font: inherit;
+  text-align: left;
+}
+
+.tl__add-menu button:active,
+.tl__add-menu button:focus-visible {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.tl__add-menu button:disabled {
+  opacity: 0.4;
 }
 
 /*

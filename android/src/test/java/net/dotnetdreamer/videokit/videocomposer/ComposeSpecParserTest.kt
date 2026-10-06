@@ -1,5 +1,6 @@
 package net.dotnetdreamer.videokit.videocomposer
 
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -57,6 +58,25 @@ class ComposeSpecParserTest {
         assertEquals(720, spec.output.width)
         assertNull(spec.audio.music)
         assertTrue(spec.audio.voiceover.isEmpty())
+        assertTrue(spec.audio.musicTracks.isEmpty())
+    }
+
+    @Test
+    fun `extra music lanes preserve clip times and name invalid clips`() {
+        val sound = JSONObject("""{"uri":"file:///a.m4a","startMs":500,"endMs":1500,"inMs":100,"outMs":2100,"volume":0.4,"loop":false,"fadeInMs":50,"fadeOutMs":80}""")
+        val lanes = JSONArray().put(JSONArray().put(sound)).put(JSONArray().put(JSONObject(sound.toString()).put("uri", "file:///b.m4a")))
+        val json = minimalJson()
+        json.getJSONObject("audio").put("musicTracks", lanes)
+        val parsed = ComposeSpecParser.parse(json).audio.musicTracks
+        assertEquals(2, parsed.size)
+        assertEquals(500L, parsed[0][0].startMs)
+        assertEquals(1500L, parsed[0][0].endMs)
+        assertEquals("file:///b.m4a", parsed[1][0].uri)
+
+        expectInvalid("audio.musicTracks[1][0].outMs") {
+            getJSONObject("audio").put("musicTracks", lanes)
+            lanes.getJSONArray(1).getJSONObject(0).put("outMs", 0)
+        }
     }
 
     @Test

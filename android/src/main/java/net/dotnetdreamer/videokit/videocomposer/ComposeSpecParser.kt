@@ -742,25 +742,17 @@ object ComposeSpecParser {
 
     private fun parseAudio(o: JSONObject?): Audio {
         if (o == null) return Audio(originalMuted = false, originalVolume = 1f, music = null, voiceover = emptyList())
-        val musicJson = o.optJSONObject("music")
-        val music = if (musicJson == null) null else {
-            val uri = musicJson.optString("uri")
-            if (uri.isEmpty()) throw SpecException("audio.music.uri")
-            val inMs = musicJson.optLong("inMs", 0L).coerceAtLeast(0L)
-            val outMs = musicJson.optLong("outMs", 0L)
-            if (outMs <= inMs) throw SpecException("audio.music.outMs")
-            Music(
-                uri = uri,
-                startMs = musicJson.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
-                inMs = inMs,
-                outMs = outMs,
-                volume = musicJson.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
-                loop = musicJson.optBoolean("loop", false),
-                fadeInMs = musicJson.optLong("fadeInMs", 0L).coerceAtLeast(0L),
-                fadeOutMs = musicJson.optLong("fadeOutMs", 0L).coerceAtLeast(0L),
-                endMs = musicJson.optLong("endMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
-                phaseMs = musicJson.optLong("phaseMs", 0L),
-            )
+        val music = o.optJSONObject("music")?.let { parseMusic(it, "audio.music") }
+        val tracksValue = o.opt("musicTracks")
+        val musicTracks = if (tracksValue == null || tracksValue == JSONObject.NULL) emptyList() else {
+            val tracks = tracksValue as? JSONArray ?: throw SpecException("audio.musicTracks")
+            (0 until tracks.length()).map { i ->
+                val lane = tracks.optJSONArray(i) ?: throw SpecException("audio.musicTracks[$i]")
+                (0 until lane.length()).map { j ->
+                    val clip = lane.optJSONObject(j) ?: throw SpecException("audio.musicTracks[$i][$j]")
+                    parseMusic(clip, "audio.musicTracks[$i][$j]")
+                }
+            }
         }
         val voJson = o.optJSONArray("voiceover") ?: JSONArray()
         val voiceover = (0 until voJson.length()).map { i ->
@@ -781,6 +773,27 @@ object ComposeSpecParser {
             originalVolume = o.optDouble("originalVolume", 1.0).toFloat().coerceIn(0f, 1f),
             music = music,
             voiceover = voiceover,
+            musicTracks = musicTracks,
+        )
+    }
+
+    private fun parseMusic(o: JSONObject, path: String): Music {
+        val uri = o.optString("uri")
+        if (uri.isEmpty()) throw SpecException("$path.uri")
+        val inMs = o.optLong("inMs", 0L).coerceAtLeast(0L)
+        val outMs = o.optLong("outMs", 0L)
+        if (outMs <= inMs) throw SpecException("$path.outMs")
+        return Music(
+            uri = uri,
+            startMs = o.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
+            inMs = inMs,
+            outMs = outMs,
+            volume = o.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
+            loop = o.optBoolean("loop", false),
+            fadeInMs = o.optLong("fadeInMs", 0L).coerceAtLeast(0L),
+            fadeOutMs = o.optLong("fadeOutMs", 0L).coerceAtLeast(0L),
+            endMs = o.optLong("endMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
+            phaseMs = o.optLong("phaseMs", 0L),
         )
     }
 

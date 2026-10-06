@@ -692,6 +692,8 @@ export interface ComposeAudio {
   /** 0..1, multiplied into each clip's own `volume`. */
   originalVolume: number;
   music: ComposeMusic | null;
+  /** Additional audio lanes. Clip start/end times are absolute; lanes and legacy music may mix. */
+  musicTracks?: ComposeMusic[][];
   voiceover: ComposeVoiceover[];
 }
 

@@ -23,6 +23,8 @@ import {
   totalDurationMs,
   withoutLeadingTransition,
   type EditClip,
+  type EditAudioClip,
+  type EditAudioTrack,
   type EditFit,
   type EditManifest,
   type EditMusic,
@@ -593,6 +595,11 @@ export function cutPostTo(manifest: EditManifest, durationMs: number): EditManif
     videoTracks: manifest.videoTracks.map(track => ({ ...track, clips: cutClipRow(track.clips, end, Math.max(0, track.startMs)) })).filter(track => track.clips.length > 0),
     overlays: manifest.overlays.filter(overlay => overlay.startMs < end).map(overlay => (overlay.endMs > end ? { ...overlay, endMs: end } : overlay)),
     music: manifest.music && manifest.music.startMs < end ? manifest.music : null,
+    ...(manifest.audioTracks
+      ? {
+          audioTracks: manifest.audioTracks.map(track => ({ ...track, clips: track.clips.filter(clip => clip.startMs < end) })).filter(track => track.clips.length > 0),
+        }
+      : {}),
     voiceovers,
     zooms: cutZooms(manifest.zooms, end),
   };
@@ -1331,6 +1338,201 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
   if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;
   return { ...manifest, music: next };
+}
+
+/** A placed sound, regardless of which audio lane holds it. */
+export function findAudioClip(manifest: EditManifest, id: string): EditAudioClip | null {
+  for (const track of manifest.audioTracks ?? []) {
+    const clip = track.clips.find(one => one.id === id);
+    if (clip) return clip;
+  }
+  return null;
+}
+
+export function audioTrackIdOfClip(manifest: EditManifest, id: string): string | null {
+  return manifest.audioTracks?.find(track => track.clips.some(clip => clip.id === id))?.id ?? null;
+}
+
+/** A sound's audible interval. Its clip keeps the same timing rules as the original music. */
+export function audioClipWindow(clip: EditAudioClip, totalMs: number): { startMs: number; endMs: number } {
+  return musicWindow(clip, totalMs);
+}
+
+/** Where a sound sits whatever the post's length: one that plays to the end runs on for ever. */
+function wholeAudioWindow(clip: EditAudioClip): { startMs: number; endMs: number } {
+  return musicWindow(clip, Number.POSITIVE_INFINITY);
+}
+
+/**
+ * Whether a sound can share a lane with `others`.
+ *
+ * Neighbours are kept apart over the whole of each sound, not just the part this post's length lets
+ * be heard: a post cut shorter and then made longer again would otherwise bring two sounds on one
+ * lane together, and a lane plays one sound at a time. A post with a length must hear a moment of
+ * the sound; one with none yet, an edit whose first layer is a sound, takes it as it is.
+ */
+function audioFits(clip: EditAudioClip, others: readonly EditAudioClip[], totalMs: number): boolean {
+  const whole = wholeAudioWindow(clip);
+  if (!Number.isFinite(whole.startMs) || whole.endMs - whole.startMs < MIN_LAYER_MS) return false;
+  if (totalMs > 0) {
+    const heard = audioClipWindow(clip, totalMs);
+    if (heard.endMs - heard.startMs < MIN_LAYER_MS) return false;
+  }
+  return others.every(other => {
+    const taken = wholeAudioWindow(other);
+    return whole.endMs <= taken.startMs || whole.startMs >= taken.endMs;
+  });
+}
+
+/** The nearest gap that can hold a whole sound; a drop onto a clip snaps beside it. */
+function nearestAudioPlacement(clip: EditAudioClip, others: readonly EditAudioClip[], atMs: number, totalMs: number): EditAudioClip | null {
+  const wanted = Math.max(0, Math.round(atMs));
+  // Whole lengths, which is what [audioFits] keeps apart. One that plays to the end has no edge
+  // before another sound, and the non-finite candidates that gives are dropped.
+  const own = wholeAudioWindow(clip);
+  const length = own.endMs - own.startMs;
+  const edges = [wanted, 0, totalMs - length];
+  for (const other of others) {
+    const taken = wholeAudioWindow(other);
+    edges.push(taken.endMs, taken.startMs - length);
+  }
+  const choices = edges
+    .filter(start => Number.isFinite(start))
+    .map(start => ({ ...clip, ...musicMovedTo(clip, Math.max(0, Math.round(start)), totalMs) }))
+    .filter(next => audioFits(next, others, totalMs))
+    .sort((a, b) => Math.abs(a.startMs - wanted) - Math.abs(b.startMs - wanted));
+  return choices[0] ?? null;
+}
+
+/** Turns the old single sound into the first audio lane only when an added clip can land. */
+function withLegacyAudioLane(manifest: EditManifest, incomingClipId: string, incomingTrackId: string): EditManifest {
+  if (!manifest.music) return manifest;
+  const existing = manifest.audioTracks ?? [];
+  const clipIds = new Set([incomingClipId, ...existing.flatMap(track => track.clips.map(clip => clip.id))]);
+  const trackIds = new Set([incomingTrackId, ...existing.map(track => track.id)]);
+  const unique = (base: string, used: Set<string>): string => {
+    let id = base;
+    for (let suffix = 1; used.has(id); suffix++) id = `${base}-${suffix}`;
+    return id;
+  };
+  const clip: EditAudioClip = { ...manifest.music, id: unique('legacy-music', clipIds) };
+  const track: EditAudioTrack = { id: unique('legacy-audio-track', trackIds), clips: [clip] };
+  return { ...manifest, music: null, audioTracks: [track, ...existing] };
+}
+
+/** Adds a sound at its requested output time, on the first lane with room or a new lane. */
+export function addAudioClip(manifest: EditManifest, clip: EditAudioClip, newTrackId: string, targetTrackId?: string): EditManifest | null {
+  if (!clip.uri || findAudioClip(manifest, clip.id)) return null;
+  const total = totalDurationMs(manifest);
+  const placed: EditAudioClip = { ...clip, startMs: Math.max(0, Math.round(clip.startMs)) };
+  const base = withLegacyAudioLane(manifest, clip.id, newTrackId);
+  const tracks = base.audioTracks ?? [];
+  const target = targetTrackId ? tracks.find(track => track.id === targetTrackId) : tracks.find(track => audioFits(placed, track.clips, total));
+  if (targetTrackId && !target) return null;
+  if (target) {
+    if (!audioFits(placed, target.clips, total)) return null;
+    return {
+      ...base,
+      audioTracks: tracks.map(track => (track.id === target.id ? { ...track, clips: [...track.clips, placed].sort((a, b) => a.startMs - b.startMs) } : track)),
+    };
+  }
+  if (tracks.some(track => track.id === newTrackId)) return null;
+  if (!audioFits(placed, [], total)) return null;
+  return { ...base, audioTracks: [...tracks, { id: newTrackId, clips: [placed] }] };
+}
+
+/** Deletes one sound and removes its lane when it becomes empty. */
+export function removeAudioClip(manifest: EditManifest, id: string): EditManifest {
+  if (!findAudioClip(manifest, id)) return manifest;
+  const tracks = (manifest.audioTracks ?? []).map(track => ({ ...track, clips: track.clips.filter(clip => clip.id !== id) })).filter(track => track.clips.length > 0);
+  if (tracks.length > 0) return { ...manifest, audioTracks: tracks };
+  const { audioTracks: _removed, ...rest } = manifest;
+  return rest as EditManifest;
+}
+
+/** Updates one sound without allowing it to cover a neighbour on the same lane. */
+export function patchAudioClip(manifest: EditManifest, id: string, patch: Partial<EditMusic>): EditManifest {
+  const clip = findAudioClip(manifest, id);
+  const trackId = audioTrackIdOfClip(manifest, id);
+  if (!clip || !trackId) return manifest;
+  const updated = patchMusic({ ...manifest, music: clip }, patch).music;
+  if (!updated || sameFields(clip, updated)) return manifest;
+  const next: EditAudioClip = { ...updated, id };
+  const total = totalDurationMs(manifest);
+  const track = manifest.audioTracks!.find(one => one.id === trackId)!;
+  if (
+    !audioFits(
+      next,
+      track.clips.filter(one => one.id !== id),
+      total,
+    )
+  )
+    return manifest;
+  return {
+    ...manifest,
+    audioTracks: manifest.audioTracks!.map(one =>
+      one.id === trackId ? { ...one, clips: one.clips.map(item => (item.id === id ? next : item)).sort((a, b) => a.startMs - b.startMs) } : one,
+    ),
+  };
+}
+
+/**
+ * Loop on or off. A sound with another after it on its lane repeats up to that one: "until the end
+ * of the video" would run over it, and a lane plays one sound at a time. A stop it already has is
+ * kept, being before that neighbour by construction.
+ */
+export function setAudioLoop(manifest: EditManifest, id: string, loop: boolean): EditManifest {
+  const clip = findAudioClip(manifest, id);
+  const lane = manifest.audioTracks?.find(track => track.clips.some(one => one.id === id));
+  if (!clip || !lane) return manifest;
+  // Sorted by start, so the first one starting later is the next one along.
+  const next = loop && !(clip.endMs > 0) ? lane.clips.find(one => one.startMs > clip.startMs) : undefined;
+  return patchAudioClip(manifest, id, next ? { loop, endMs: next.startMs } : { loop });
+}
+
+/** Where a sound lifted from a lane is being dropped. */
+export type AudioDropTarget = { kind: 'track'; trackId: string } | { kind: 'new'; index: number };
+
+/** Moves a sound to another lane, opening one when dropped in a gap between rows. */
+export function moveAudioClipToTrack(manifest: EditManifest, id: string, target: AudioDropTarget, atMs: number, newTrackId: string): EditManifest | null {
+  const clip = findAudioClip(manifest, id);
+  const fromId = audioTrackIdOfClip(manifest, id);
+  if (!clip || !fromId) return null;
+  const original = manifest.audioTracks ?? [];
+  const fromIndex = original.findIndex(track => track.id === fromId);
+  const remaining = original.map(track => ({ ...track, clips: track.clips.filter(one => one.id !== id) })).filter(track => track.clips.length > 0);
+  const total = totalDurationMs(manifest);
+  const asked = Math.max(0, Math.round(atMs));
+  if (target.kind === 'track') {
+    const destination = remaining.find(track => track.id === target.trackId);
+    if (!destination) return null;
+    const moving = nearestAudioPlacement(clip, destination.clips, asked, total);
+    if (!moving) return null;
+    const tracks = remaining.map(track => (track.id === destination.id ? { ...track, clips: [...track.clips, moving].sort((a, b) => a.startMs - b.startMs) } : track));
+    return { ...manifest, audioTracks: tracks };
+  }
+  const emptied = remaining.length < original.length;
+  let index = clamp(Math.round(target.index), 0, original.length);
+  if (emptied && index > fromIndex) index--;
+  index = clamp(index, 0, remaining.length);
+  const ownRow = emptied && index === fromIndex ? original[fromIndex] : null;
+  if (!ownRow && remaining.some(track => track.id === newTrackId)) return null;
+  const moving = nearestAudioPlacement(clip, [], asked, total);
+  if (!moving) return null;
+  const tracks: EditAudioTrack[] = [...remaining];
+  tracks.splice(index, 0, { id: ownRow?.id ?? newTrackId, clips: [moving] });
+  return { ...manifest, audioTracks: tracks };
+}
+
+/** Moves a sound sideways inside its lane, stopping at other sounds and the post's ends. */
+export function moveAudioClip(manifest: EditManifest, id: string, atMs: number): EditManifest {
+  const clip = findAudioClip(manifest, id);
+  const trackId = audioTrackIdOfClip(manifest, id);
+  if (!clip || !trackId) return manifest;
+  const total = totalDurationMs(manifest);
+  const others = manifest.audioTracks!.find(track => track.id === trackId)!.clips.filter(one => one.id !== id);
+  const next = nearestAudioPlacement(clip, others, atMs, total);
+  return next ? patchAudioClip(manifest, id, { startMs: next.startMs, endMs: next.endMs }) : manifest;
 }
 
 export function findVoiceover(manifest: EditManifest, id: string): EditVoiceover | null {

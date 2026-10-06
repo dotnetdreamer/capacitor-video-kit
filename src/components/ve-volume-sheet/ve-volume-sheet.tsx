@@ -61,6 +61,8 @@ export class VeVolumeSheet {
       }
       case 'music':
         return m.music ? m.music.volume : null;
+      case 'audio':
+        return m.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === target.id)?.volume ?? null;
       case 'voice':
         return findVoiceover(m, target.id)?.volume ?? null;
     }
@@ -135,6 +137,7 @@ export class VeVolumeSheet {
       }
 
       case 'music':
+      case 'audio':
       case 'voice':
         if (level > 0) {
           this.restoreVolume = level;
@@ -166,8 +169,15 @@ export class VeVolumeSheet {
   private readonly toggleFadeOut = () => this.toggleFade('fadeOutMs', 'Fade out');
 
   /** Inside the fade slider's gesture, which the slider opened and names. */
-  private readonly onFadeInLive = (event: CustomEvent<number>) => this.ctx.store.previewMusic({ fadeInMs: event.detail });
-  private readonly onFadeOutLive = (event: CustomEvent<number>) => this.ctx.store.previewMusic({ fadeOutMs: event.detail });
+  private readonly onFadeInLive = (event: CustomEvent<number>) => this.previewFade({ fadeInMs: event.detail });
+  private readonly onFadeOutLive = (event: CustomEvent<number>) => this.previewFade({ fadeOutMs: event.detail });
+
+  private previewFade(patch: Partial<EditMusic>): void {
+    const { store } = this.ctx;
+    const target = store.volumeTarget.value;
+    if (target?.kind === 'music') store.previewMusic(patch);
+    else if (target?.kind === 'audio') store.previewAudioClip(target.id, patch);
+  }
 
   /**
    * The length each fade had when it was last switched off, so switching it back on while the sheet
@@ -181,12 +191,20 @@ export class VeVolumeSheet {
    */
   private toggleFade(field: 'fadeInMs' | 'fadeOutMs', name: string): void {
     const { store } = this.ctx;
-    const music = store.manifest.value.music;
+    const target = store.volumeTarget.value;
+    const music = target?.kind === 'music'
+      ? store.manifest.value.music
+      : target?.kind === 'audio'
+        ? store.manifest.value.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === target.id)
+        : null;
     if (!music) return;
     const current = music[field] ?? 0;
     if (current > 0) this.restoreFade[field] = current;
     const ms = current > 0 ? 0 : this.restoreFade[field];
-    store.commitMusic(field === 'fadeInMs' ? { fadeInMs: ms } : { fadeOutMs: ms }, current > 0 ? `${name} off` : `${name} on`);
+    const patch = field === 'fadeInMs' ? { fadeInMs: ms } : { fadeOutMs: ms };
+    const label = current > 0 ? `${name} off` : `${name} on`;
+    if (target?.kind === 'music') store.commitMusic(patch, label);
+    else if (target?.kind === 'audio') store.commitAudioClip(target.id, patch, label);
     store.haptic('light');
   }
 
@@ -254,7 +272,11 @@ export class VeVolumeSheet {
       const muted = level === 0;
       // Only a clip has siblings to be given its level, and only when there is more than one.
       const canApplyToAll = target?.kind === 'clip' && store.manifest.value.clips.length > 1;
-      const music: EditMusic | null = target?.kind === 'music' ? store.manifest.value.music : null;
+      const music: EditMusic | null = target?.kind === 'music'
+        ? store.manifest.value.music
+        : target?.kind === 'audio'
+          ? store.manifest.value.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === target.id) ?? null
+          : null;
 
       return (
         <ve-sheet heading={headingFor(target)} onVeConfirm={this.onConfirm}>
@@ -317,6 +339,8 @@ function headingFor(target: VolumeTarget | null): string {
   switch (target?.kind) {
     case 'music':
       return 'Sound volume';
+    case 'audio':
+      return 'Audio volume';
     case 'voice':
       return 'Voiceover volume';
     default:

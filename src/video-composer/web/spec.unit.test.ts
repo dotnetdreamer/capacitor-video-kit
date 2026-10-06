@@ -44,6 +44,25 @@ function spec(over: Partial<ComposeSpec> = {}): ComposeSpec {
 }
 
 describe('refusals', () => {
+  it('reads extra music lanes without changing a legacy music-only spec', () => {
+    const music = { uri: 'file:///sound.m4a', startMs: 500, inMs: 100, outMs: 900, endMs: 1300, volume: 0.7, loop: false, fadeInMs: 20, fadeOutMs: 30 };
+    const old = validateSpec(spec());
+    expect(old.audio).not.toHaveProperty('musicTracks');
+    const parsed = validateSpec(spec({ audio: { ...spec().audio, musicTracks: [[music], [music]] } }));
+    expect(parsed.audio.musicTracks).toEqual([[music], [music]]);
+    expect(parsed.audio.music).toBeNull();
+  });
+
+  it('names a malformed music lane or clip', () => {
+    const base = spec();
+    expect(() => validateSpec(spec({ audio: { ...base.audio, musicTracks: [null] as unknown as typeof base.audio.musicTracks } })))
+      .toThrow('invalid_spec:audio.musicTracks[0]');
+    expect(() => validateSpec(spec({ audio: { ...base.audio, musicTracks: [[{ uri: '' }]] as unknown as typeof base.audio.musicTracks } })))
+      .toThrow('invalid_spec:audio.musicTracks[0][0].uri');
+    expect(() => validateSpec(spec({ audio: { ...base.audio, musicTracks: [[{ uri: 'file:///a.m4a', inMs: 500, outMs: 0 }]] as unknown as typeof base.audio.musicTracks } })))
+      .toThrow('invalid_spec:audio.musicTracks[0][0].outMs');
+  });
+
   /* The ids that name no job folder of their own on a phone, refused here as `ComposeSpecParser` does. */
   it('refuses a batch id that is empty, a dot or two dots, and takes any other', () => {
     for (const batchId of ['', '.', '..', undefined]) {

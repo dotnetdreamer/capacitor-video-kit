@@ -136,7 +136,7 @@ enum ComposeSpecParser {
                            motion: o.motion)
         }
 
-        let music = d.audio.music.map { m in
+        let makeMusic: (MusicDTO) -> ComposeMusic = { m in
             ComposeMusic(uri: m.uri,
                          startMs: m.startMs,
                          inMs: m.inMs,
@@ -148,6 +148,8 @@ enum ComposeSpecParser {
                          fadeInMs: m.fadeInMs,
                          fadeOutMs: m.fadeOutMs)
         }
+        let music = d.audio.music.map(makeMusic)
+        let musicTracks = d.audio.musicTracks.map { $0.map(makeMusic) }
 
         let voiceover = d.audio.voiceover.map { v in
             ComposeVoiceover(uri: v.uri,
@@ -159,7 +161,8 @@ enum ComposeSpecParser {
         let audio = ComposeAudio(originalMuted: d.audio.originalMuted,
                                  originalVolume: clamp01(d.audio.originalVolume),
                                  music: music,
-                                 voiceover: voiceover)
+                                 voiceover: voiceover,
+                                 musicTracks: musicTracks)
 
         return ComposeSpec(jobId: d.jobId,
                            batchId: d.batchId,
@@ -1478,10 +1481,12 @@ private struct MusicDTO: Decodable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
         uri = c.string(.uri)
-        if uri.isEmpty { throw SpecError("audio.music.uri") }
+        let indices = decoder.codingPath.compactMap(\.intValue)
+        let path = indices.count == 2 ? "audio.musicTracks[\(indices[0])][\(indices[1])]" : "audio.music"
+        if uri.isEmpty { throw SpecError("\(path).uri") }
         inMs = max(0, c.long(.inMs, 0))
         outMs = c.long(.outMs, 0)
-        if outMs <= inMs { throw SpecError("audio.music.outMs") }
+        if outMs <= inMs { throw SpecError("\(path).outMs") }
         phaseMs = c.long(.phaseMs, 0)
         startMs = max(0, c.long(.startMs, 0))
         endMs = max(0, c.long(.endMs, 0))
@@ -1515,16 +1520,18 @@ private struct AudioDTO: Decodable {
     let originalMuted: Bool
     let originalVolume: Double
     let music: MusicDTO?
+    let musicTracks: [[MusicDTO]]
     let voiceover: [VoiceDTO]
 
-    static let empty = AudioDTO(originalMuted: false, originalVolume: 1, music: nil, voiceover: [])
+    static let empty = AudioDTO(originalMuted: false, originalVolume: 1, music: nil, musicTracks: [], voiceover: [])
 
-    private enum K: String, CodingKey { case originalMuted, originalVolume, music, voiceover }
+    private enum K: String, CodingKey { case originalMuted, originalVolume, music, musicTracks, voiceover }
 
-    private init(originalMuted: Bool, originalVolume: Double, music: MusicDTO?, voiceover: [VoiceDTO]) {
+    private init(originalMuted: Bool, originalVolume: Double, music: MusicDTO?, musicTracks: [[MusicDTO]], voiceover: [VoiceDTO]) {
         self.originalMuted = originalMuted
         self.originalVolume = originalVolume
         self.music = music
+        self.musicTracks = musicTracks
         self.voiceover = voiceover
     }
 
@@ -1535,6 +1542,38 @@ private struct AudioDTO: Decodable {
         // missing key and an `NSNull` as nil. A plain `decode` would throw on every spec without
         // music, which is most of them.
         music = try c.decodeIfPresent(MusicDTO.self, forKey: .music)
+
+        var lanes: [[MusicDTO]] = []
+        if c.contains(.musicTracks) && (try? c.decodeNil(forKey: .musicTracks)) == false {
+            var tracks: UnkeyedDecodingContainer
+            do {
+                tracks = try c.nestedUnkeyedContainer(forKey: .musicTracks)
+            } catch {
+                throw SpecError("audio.musicTracks")
+            }
+            while !tracks.isAtEnd {
+                let i = tracks.currentIndex
+                var clips: UnkeyedDecodingContainer
+                do {
+                    clips = try tracks.nestedUnkeyedContainer()
+                } catch {
+                    throw SpecError("audio.musicTracks[\(i)]")
+                }
+                var lane: [MusicDTO] = []
+                while !clips.isAtEnd {
+                    let j = clips.currentIndex
+                    do {
+                        lane.append(try clips.decode(MusicDTO.self))
+                    } catch let e as SpecError {
+                        throw e
+                    } catch {
+                        throw SpecError("audio.musicTracks[\(i)][\(j)]")
+                    }
+                }
+                lanes.append(lane)
+            }
+        }
+        musicTracks = lanes
 
         var takes: [VoiceDTO] = []
         if var v = try? c.nestedUnkeyedContainer(forKey: .voiceover) {

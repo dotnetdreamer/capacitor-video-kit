@@ -90,6 +90,7 @@ let tookSession = false;
 export function levelsInUse(manifest: EditManifest): boolean {
   const music = manifest.music;
   if (music && (music.volume < 1 || music.fadeOutMs > 0 || (music.fadeInMs ?? 0) > 0)) return true;
+  if (manifest.audioTracks?.some(track => track.clips.some(clip => clip.volume < 1 || clip.fadeOutMs > 0 || (clip.fadeInMs ?? 0) > 0))) return true;
   return manifest.voiceovers.some(take => take.volume < 1);
 }
 
@@ -118,12 +119,27 @@ export function playableHere(url: string): boolean {
 export class PreviewMixer {
   /** Started by a play and not stopped since, which is what [holders] counts. */
   private holding = false;
+  private readonly elements: Set<HTMLAudioElement>;
 
-  constructor(private readonly elements: readonly HTMLAudioElement[]) {}
+  constructor(elements: readonly HTMLAudioElement[]) {
+    this.elements = new Set(elements);
+  }
+
+  /** A lane added after the player was made joins the same mix as the existing sounds. */
+  add(element: HTMLAudioElement): void {
+    this.elements.add(element);
+    if (this.holding && context?.state === 'running') this.route(context, [element]);
+  }
+
+  /** A removed lane gives back its connection and can be collected with its element. */
+  remove(element: HTMLAudioElement): void {
+    routes.get(element)?.disconnect();
+    this.elements.delete(element);
+  }
 
   /** Whether any of this player's elements is in the graph, and so heard through nothing else. */
   private get routed(): boolean {
-    return this.elements.some(element => routes.has(element));
+    return [...this.elements].some(element => routes.has(element));
   }
 
   /**
@@ -139,7 +155,7 @@ export class PreviewMixer {
    */
   isRouted(element: HTMLMediaElement): boolean {
     if (routes.has(element)) return true;
-    if (!this.holding || refused.has(element) || !this.elements.includes(element as HTMLAudioElement)) return false;
+    if (!this.holding || refused.has(element) || !this.elements.has(element as HTMLAudioElement)) return false;
     // Left out of the graph by [route] for as long as it holds a file from somewhere else.
     return !(element.src && !playableHere(element.src));
   }
@@ -255,8 +271,8 @@ export class PreviewMixer {
    * element playing in silence for good, so nothing is left to come after it but a connection
    * between two nodes that already exist.
    */
-  private route(shared: AudioContext): void {
-    for (const element of this.elements) {
+  private route(shared: AudioContext, elements: Iterable<HTMLAudioElement> = this.elements): void {
+    for (const element of elements) {
       const known = routes.get(element);
       if (known) {
         known.connect(shared.destination);

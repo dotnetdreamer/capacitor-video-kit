@@ -299,9 +299,7 @@ async function lookAt(options: LabelMediaOptions, engine: Engine, deadline: numb
       looked.push({ timeMs, labels: look(engine, canvas, minConfidence) });
     }
     if (looked.length === 0) {
-      throw new LabelingUnreadableError(
-        blank > 0 ? `the browser decodes no picture in ${options.uri}` : `no frame of ${options.uri} could be read`,
-      );
+      throw new LabelingUnreadableError(blank > 0 ? `the browser decodes no picture in ${options.uri}` : `no frame of ${options.uri} could be read`);
     }
     return { engine: 'mediapipe', kind: 'video', frames: looked };
   } finally {

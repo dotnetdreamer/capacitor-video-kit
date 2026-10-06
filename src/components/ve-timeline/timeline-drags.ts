@@ -27,6 +27,9 @@ export type HitKind =
   | 'layer-start'
   | 'layer-end'
   | 'music'
+  | 'audio'
+  | 'audio-start'
+  | 'audio-end'
   /** The grip on the end of the ruler, which is how long the post runs. */
   | 'end'
   | 'music-start'
@@ -258,6 +261,19 @@ export interface LayerReorderDrag extends DragBase {
   row: HTMLElement | null;
 }
 
+/** A picked audio clip can move in time or be dropped onto another audio lane. */
+export interface AudioDrag extends DragBase {
+  kind: 'audio';
+  mode: 'start' | 'end' | 'move';
+  id: string;
+  fromTrackId: string;
+  music0: EditMusic;
+  end0: number;
+  targets: number[];
+  drop: { kind: 'track'; trackId: string } | { kind: 'new'; index: number } | null;
+  atMs: number;
+}
+
 /**
  * A mouse dragging the timeline along, which is the one gesture the browser does not give us: a
  * finger's sideways swipe is a native `pan-x` scroll with a fling on the end of it, and a mouse
@@ -284,6 +300,7 @@ export type TimelineDrag =
   | TrackDrag
   | EndDrag
   | LayerDrag
+  | AudioDrag
   | ZoomDrag
   | MusicDrag
   | VoiceDrag

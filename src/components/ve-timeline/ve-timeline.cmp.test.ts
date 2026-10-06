@@ -1246,6 +1246,86 @@ describe('the Add sound bar', () => {
   });
 });
 
+describe('the timeline add button', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('offers Video and Audio, and sends each choice to its picker', async () => {
+    const addVideo = vi.spyOn(EditorMedia.prototype, 'addClip').mockResolvedValue();
+    const addAudio = vi.spyOn(EditorMedia.prototype, 'openSound');
+    const { store, tl } = await mount();
+    const add = root(tl).querySelector<HTMLButtonElement>('.tl__add')!;
+    // Named by its own words: an `aria-label` beside `aria-haspopup` is no name on Android's WebView.
+    expect(add.hasAttribute('aria-label')).toBe(false);
+    expect(add.textContent?.trim()).toBe('Add to timeline');
+    expect(add.querySelector('.tl__hidden-name')!.getBoundingClientRect().width).toBeLessThanOrEqual(1);
+    expect(add.getAttribute('aria-haspopup')).toBe('menu');
+    expect(add.getAttribute('aria-expanded')).toBe('false');
+
+    add.click();
+    await until('the add choices', () => root(tl).querySelectorAll('.tl__add-menu button').length === 2);
+    expect(add.getAttribute('aria-expanded')).toBe('true');
+    expect(root(tl).querySelector('.tl__add-menu')!.getAttribute('role')).toBe('menu');
+    const choices = [...root(tl).querySelectorAll<HTMLButtonElement>('.tl__add-menu button')];
+    expect(choices.map(choice => choice.textContent)).toEqual(['Video', 'Audio']);
+    expect(choices.map(choice => choice.getAttribute('role'))).toEqual(['menuitem', 'menuitem']);
+    choices[1].click();
+    expect(addAudio).toHaveBeenCalledTimes(1);
+    expect(addVideo).not.toHaveBeenCalled();
+    expect(store.panel.value).toBe('sound');
+
+    store.closePanel();
+    add.click();
+    await until('the video choice', () => !!root(tl).querySelector('.tl__add-menu button'));
+    root(tl).querySelector<HTMLButtonElement>('.tl__add-menu button')!.click();
+    expect(addVideo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('audio lanes', () => {
+  it('shows sequential clips together, overlaps on another lane, and drops a clip between lanes', async () => {
+    const { store, tl } = await mount();
+    store.pps.value = 24;
+    const sound = (fileName: string, startMs: number) => ({
+      uri: `blob:${fileName}`,
+      fileName,
+      sourceDurationMs: 2000,
+      inMs: 0,
+      outMs: 0,
+      startMs,
+      endMs: 0,
+      volume: 0.8,
+      loop: false,
+      fadeOutMs: 0,
+    });
+    const first = store.addAudioClip(sound('first', 0))!;
+    const firstRow = store.manifest.value.audioTracks![0]!.id;
+    const second = store.addAudioClip(sound('second', 2000), firstRow)!;
+    const third = store.addAudioClip(sound('third', 0))!;
+    const secondRow = store.manifest.value.audioTracks![1]!.id;
+
+    await until('three audio bars', () => root(tl).querySelectorAll('[data-hit="audio"]').length === 3);
+    expect(root(tl).querySelectorAll(`[data-arow="${firstRow}"] [data-hit="audio"]`).length).toBe(2);
+    expect(root(tl).querySelectorAll(`[data-arow="${secondRow}"] [data-hit="audio"]`).length).toBe(1);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.id)).toEqual([first, second]);
+
+    store.select({ kind: 'audio', id: second });
+    await frames(2);
+    const clip = root(tl).querySelector<HTMLElement>(`[data-hit="audio"][data-id="${second}"]`)!;
+    const from = centre(clip);
+    const to = centre(root(tl).querySelector<HTMLElement>(`[data-arow="${secondRow}"]`)!);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(clip, 'pointerdown', from.x, from.y);
+    pointer(scroller, 'pointermove', from.x + 48, to.y);
+    await frames(2);
+    pointer(scroller, 'pointerup', from.x + 48, to.y);
+    await until('audio dropped', () => store.manifest.value.audioTracks![1]!.clips.length === 2);
+
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.id)).toEqual([first]);
+    expect(store.manifest.value.audioTracks![1]!.clips.map(clip => clip.id)).toEqual([third, second]);
+    expect(store.manifest.value.audioTracks![1]!.clips[1]!.startMs).toBe(4000);
+  });
+});
+
 /*
  * A video's own sound, on its filmstrip - and what turning that sound off does to it.
  */

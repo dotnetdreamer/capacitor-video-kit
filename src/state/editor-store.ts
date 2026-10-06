@@ -25,6 +25,7 @@ import {
   type EditZoom,
   type ZoomPatch,
   addOverlay,
+  addAudioClip as addAudioClipOp,
   addVideoTrack,
   addVoiceover,
   applyLayoutPreset,
@@ -36,20 +37,27 @@ import {
   cutPostTo,
   emptyManifest,
   findClip,
+  findAudioClip,
   findOverlay,
   findVideoTrack,
   findVoiceover,
   joinWithNext,
   moveClip,
+  moveAudioClip as moveAudioClipOp,
+  moveAudioClipToTrack as moveAudioClipToTrackOp,
   moveClipToTrack,
   moveLayer,
   moveVoiceover,
   neutralAdjust,
   patchClip,
+  patchAudioClip,
+  musicMovedTo,
   patchMusic,
   patchOverlay,
   patchVoiceover,
   removeClip,
+  removeAudioClip,
+  setAudioLoop,
   removeOverlay,
   removeVideoTrack,
   removeVoiceover,
@@ -83,10 +91,12 @@ import {
   type ClipDropTarget,
   type ClipFramingPatch,
   type EditAdjust,
+  type EditAudioClip,
   type EditClip,
   type EditFit,
   type EditManifest,
   type EditMusic,
+  type AudioDropTarget,
   type EditOverlay,
   type EditPlacement,
   type EditRect,
@@ -508,6 +518,8 @@ export class EditorStore {
   readonly toolbarMode = signal<ToolbarMode>('root');
   /** The Sound tool's little menu (Add sound / Sound effect / Voiceover). */
   readonly soundMenuOpen = signal(false);
+  /** The timeline plus button's Video / Audio choice, shared with the editor's Back handler. */
+  readonly timelineAddMenuOpen = signal(false);
   /** What the volume sheet is adjusting while it is open. */
   readonly volumeTarget = signal<VolumeTarget | null>(null);
   /**
@@ -537,6 +549,10 @@ export class EditorStore {
   readonly selectedVoice = computed(() => {
     const sel = this.selection.value;
     return sel?.kind === 'voice' ? findVoiceover(this.manifest.value, sel.id) : null;
+  });
+  readonly selectedAudio = computed(() => {
+    const sel = this.selection.value;
+    return sel?.kind === 'audio' ? findAudioClip(this.manifest.value, sel.id) : null;
   });
   readonly musicSelected = computed(() => this.selection.value?.kind === 'music' && !!this.manifest.value.music);
   /** The selected segment is a picture, which has no speed and no sound to set. */
@@ -851,6 +867,7 @@ export class EditorStore {
       (sel.kind === 'clip' && !!findClip(m, sel.id)) ||
       (sel.kind === 'overlay' && !!findOverlay(m, sel.id)) ||
       (sel.kind === 'voice' && !!findVoiceover(m, sel.id)) ||
+      (sel.kind === 'audio' && !!findAudioClip(m, sel.id)) ||
       (sel.kind === 'zoom' && !!findZoom(m, sel.id)) ||
       (sel.kind === 'music' && !!m.music);
     if (!stillThere) this.select(null);
@@ -873,6 +890,7 @@ export class EditorStore {
   select(selection: EditorSelection | null): void {
     this.selection.value = selection;
     this.soundMenuOpen.value = false;
+    this.timelineAddMenuOpen.value = false;
     if (selection) this.toolbarMode.value = 'root';
     // A sheet that was about the old selection makes no sense for the new one.
     const panel = this.panel.value;
@@ -888,6 +906,7 @@ export class EditorStore {
 
   openPanel(panel: EditorPanel | null): void {
     this.soundMenuOpen.value = false;
+    this.timelineAddMenuOpen.value = false;
     if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
     if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
     // A layout opening still being played is the layout sheet's, and goes with it.
@@ -1981,6 +2000,72 @@ export class EditorStore {
     this.commit(label, m => patchMusic(m, patch));
   }
 
+  /** Adds an independently placed sound and selects it. A lane is reused when it has room. */
+  addAudioClip(music: EditMusic, targetTrackId?: string): string | null {
+    const id = this.newId('audio');
+    const trackId = this.newId('at');
+    const clip: EditAudioClip = { ...music, id };
+    if (!this.commit('Add audio', m => addAudioClipOp(m, clip, trackId, targetTrackId))) return null;
+    this.select({ kind: 'audio', id });
+    this.haptic('light');
+    return id;
+  }
+
+  removeSelectedAudio(): void {
+    const selected = this.selectedAudio.value;
+    if (selected && this.commit('Remove audio', m => removeAudioClip(m, selected.id))) this.select(null);
+  }
+
+  /**
+   * Live; wrap in begin/endGesture('Move audio'). Each frame moves the sound from where the drag
+   * found it, as the music's drag does from `music0`: a sound carried to the end of the video loses
+   * its stop there ([musicMovedTo]), and a compounding move would keep it lost when the finger
+   * brought the sound back, cut or not.
+   */
+  previewMoveAudio(id: string, startMs: number): void {
+    this.previewFromStart(m => moveAudioClipOp(m, id, startMs));
+  }
+
+  moveAudioClipToTrack(id: string, target: AudioDropTarget, startMs: number): boolean {
+    const newTrackId = this.newId('at');
+    if (!this.commit('Move audio to layer', m => moveAudioClipToTrackOp(m, id, target, startMs, newTrackId))) return false;
+    this.select({ kind: 'audio', id });
+    this.haptic('light');
+    return true;
+  }
+
+  /** Live; wrap in begin/endGesture. */
+  previewAudioClip(id: string, patch: Partial<EditMusic>): void {
+    this.preview(m => patchAudioClip(m, id, patch));
+  }
+
+  commitAudioClip(id: string, patch: Partial<EditMusic>, label: string): void {
+    this.commit(label, m => patchAudioClip(m, id, patch));
+  }
+
+  /** Read at tap time, as the music's Loop is, and named the same way in the undo toast. */
+  toggleAudioLoop(id: string): void {
+    const clip = findAudioClip(this.manifest.value, id);
+    if (!clip) return;
+    const loop = !clip.loop;
+    this.commit(loop ? 'Loop on' : 'Loop off', m => setAudioLoop(m, id, loop));
+    this.haptic('light');
+  }
+
+  /**
+   * The sound moved whole to the playhead, as Start here moves the music. A lane plays one sound at
+   * a time, so another one in the way stops it, and the toast says why nothing moved.
+   */
+  startAudioHere(id: string): void {
+    const clip = findAudioClip(this.manifest.value, id);
+    if (!clip) return;
+    const moved = musicMovedTo(clip, this.playheadMs.value, this.totalMs.value);
+    if (moved.startMs === clip.startMs && moved.endMs === clip.endMs) return;
+    if (this.commit('Move audio', m => patchAudioClip(m, id, moved))) return;
+    this.showToast('There is no room for that audio here');
+    this.haptic('warning');
+  }
+
   /** Adds a recorded take where it was recorded. Returns false when there was no room for it. */
   addVoiceover(take: EditVoiceover): boolean {
     const total = this.totalMs.value;
@@ -2012,6 +2097,8 @@ export class EditorStore {
           return patchClip(m, target.id, { volume: v, muted: v === 0 ? true : false });
         case 'music':
           return patchMusic(m, { volume: v });
+        case 'audio':
+          return patchAudioClip(m, target.id, { volume: v });
         case 'voice':
           return patchVoiceover(m, target.id, { volume: v });
       }
@@ -2284,6 +2371,7 @@ export class EditorStore {
     if (sel.kind === 'clip') this.deleteSelectedClip();
     else if (sel.kind === 'overlay') this.deleteSelectedOverlay();
     else if (sel.kind === 'music') this.removeMusic();
+    else if (sel.kind === 'audio') this.removeSelectedAudio();
     // Before the voice catch-all below, or Delete with a zoom selected would silently do nothing.
     else if (sel.kind === 'zoom') this.deleteZoom(sel.id);
     else this.removeSelectedVoice();

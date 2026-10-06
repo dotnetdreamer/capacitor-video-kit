@@ -63,7 +63,8 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
   const channels = Array.from({ length: MIX_CHANNELS }, () => new Float32Array(length));
   const mix: MixedAudio = { sampleRate: MIX_SAMPLE_RATE, channels, length };
 
-  const decoder = new SourceDecoder(sourceUses(plan), plan.music ? [plan.music.uri] : []);
+  const musicPlans = [...(plan.music ? [plan.music] : []), ...plan.musicTracks];
+  const decoder = new SourceDecoder(sourceUses(plan), musicPlans.map(music => music.uri));
   let anything = false;
 
   // How long each base clip fades in for: the length of the transition bringing it in, if any.
@@ -106,18 +107,19 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
       }
     }
 
-    if (plan.music) {
-      const source = await decoder.get(plan.music.uri);
+    for (const planned of musicPlans) {
+      throwIfAborted(signal);
+      const source = await decoder.get(planned.uri);
       // Laid again against the file's own length, which the web reads for itself: a spec asks for
       // "the end of the file" when the sound is not trimmed at its end. See [soundLengthUs].
-      const music = source ? musicForSource(plan.music, soundLengthUs(source)) : null;
+      const music = source ? musicForSource(planned, soundLengthUs(source)) : null;
       if (source && music) {
         for (const item of music.items) {
           throwIfAborted(signal);
           anything = placeMusic(mix, source, item, music) || anything;
         }
       }
-      decoder.done(plan.music.uri);
+      decoder.done(planned.uri);
     }
 
     for (const take of plan.voice) {
@@ -377,6 +379,7 @@ export function sourceUses(plan: RenderPlan): Map<string, number> {
     });
   }
   if (plan.music) use(plan.music.uri);
+  for (const music of plan.musicTracks) use(music.uri);
   for (const take of plan.voice) use(take.uri);
   return uses;
 }

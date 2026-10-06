@@ -248,6 +248,8 @@ export interface RenderPlan {
   colorMatrix: ColorMatrix | null;
   overlays: OverlayPlacement[];
   music: MusicPlan | null;
+  /** Each extra music clip is mixed independently, allowing clips on different lanes to overlap. */
+  musicTracks: MusicPlan[];
   voice: VoiceItem[];
   posterAtUs: number;
   output: ComposeOutput;
@@ -297,6 +299,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     .filter(track => track.clips.length > 0);
 
   const music = planMusic(spec.audio.music, probes, totalUs);
+  const musicTracks = (spec.audio.musicTracks ?? []).flatMap(track => track.map(clip => planMusic(clip, probes, totalUs)).filter((plan): plan is MusicPlan => plan !== null));
   const voice = planVoice(spec.audio.voiceover, probes, totalUs);
 
   // The parser has already clamped the camera and dropped one that never zooms; this is the plan
@@ -331,6 +334,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
       motion: normaliseOverlayMotion(overlay.motion),
     })),
     music,
+    musicTracks,
     voice,
     posterAtUs: Math.min(Math.round(spec.posterAtMs * 1000), Math.max(0, totalUs - 1)),
     output,
@@ -339,6 +343,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
       transitions.some(transition => !transition.tail.removeAudio) ||
       tracks.some(track => track.hasAudio) ||
       music !== null ||
+      musicTracks.length > 0 ||
       voice.length > 0,
   };
 }

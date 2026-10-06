@@ -654,6 +654,19 @@ class CompositionBuilderTest {
     }
 
     @Test
+    fun `each extra music clip becomes a concurrently mixed audio sequence`() {
+        val one = Music("file:///one.m4a", 0, 0, 1_000, 1f, loop = false, fadeInMs = 0, fadeOutMs = 0)
+        val two = Music("file:///two.m4a", 500, 0, 1_000, 1f, loop = false, fadeInMs = 0, fadeOutMs = 0)
+        val audio = Audio(true, 1f, null, emptyList(), musicTracks = listOf(listOf(one), listOf(two)))
+        val plan = RenderPlan.build(spec(listOf(clip("a", outMs = 2_000))).copy(audio = audio), emptyMap())
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        assertEquals(3, sequences.size)
+        assertEquals(0L, sequences[1].editedMediaItems[0].mediaItem.clippingConfiguration.startPositionUs)
+        assertTrue(isGap(sequences[2].editedMediaItems[0]))
+        assertEquals(500_000L, plan.musicTracks[1].leadGapUs)
+    }
+
+    @Test
     fun `the progress tap publishes the frame's time and leaves the colour alone`() {
         val tap = AtomicLong(-1L)
         val matrix = ProgressTap(tap).getMatrix(1_234_567L, /* useHdr= */ false)

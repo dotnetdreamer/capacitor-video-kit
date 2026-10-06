@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest } from '../../editor';
+import { defaultClipEdit, emptyManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import type { EditorMediaHost, EditorSoundLibrary, SavedSound } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
@@ -56,7 +56,7 @@ async function mount(sounds: EditorSoundLibrary | undefined = library()): Promis
   const store = new EditorStore(host);
   const media = new EditorMedia(store, host);
   const ctx: EditorContext = { store, media };
-  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), emptyManifest());
+  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), { ...emptyManifest(), clips: [defaultClipEdit('clip-a', 5000)] });
   store.openPanel('sound');
 
   const column = document.createElement('div');
@@ -142,7 +142,7 @@ describe('ve-sound-sheet', () => {
 
     rows(sheet)[1].querySelector<HTMLButtonElement>('.snd__pick')!.click();
 
-    expect(store.manifest.value.music).toMatchObject({ uri: SAVED[1].uri, fileName: 'market' });
+    expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({ uri: SAVED[1].uri, fileName: 'market' });
     expect(store.panel.value).toBeNull();
   });
 
@@ -207,6 +207,15 @@ describe('ve-sound-sheet', () => {
 
     expect(store.manifest.value.music).toBeNull();
     expect(store.panel.value).toBe('sound');
+  });
+
+  it('closes after a file adds an audio clip', async () => {
+    const { store, sheet } = await mount();
+    actions(sheet)[1].click();
+
+    await until('the audio clip to land', () => (store.manifest.value.audioTracks?.[0]?.clips.length ?? 0) === 1);
+    await until('the sheet to close', () => store.panel.value === null);
+    expect(store.panel.value).toBeNull();
   });
 
   it('greys both doors while an extraction is running', async () => {

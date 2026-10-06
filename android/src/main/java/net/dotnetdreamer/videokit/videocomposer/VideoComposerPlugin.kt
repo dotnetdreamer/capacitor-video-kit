@@ -258,7 +258,7 @@ class VideoComposerPlugin : Plugin() {
                 }
                 probes[clip.uri] = info.toProbedInput()
             }
-            for (uri in listOfNotNull(spec.audio.music?.uri) + spec.audio.voiceover.map { it.uri }) {
+            for (uri in listOfNotNull(spec.audio.music?.uri) + spec.audio.musicTracks.flatten().map { it.uri } + spec.audio.voiceover.map { it.uri }) {
                 if (probes.containsKey(uri)) continue
                 probes[uri] = try {
                     Thumbnailer.probe(appContext, uri).toProbedInput()

@@ -659,6 +659,8 @@ export class VeEditor {
       store.closePanel();
     } else if (store.soundMenuOpen.value) {
       store.soundMenuOpen.value = false;
+    } else if (store.timelineAddMenuOpen.value) {
+      store.timelineAddMenuOpen.value = false;
     } else if (store.selection.value) {
       store.select(null);
     } else if (store.toolbarMode.value !== 'root') {

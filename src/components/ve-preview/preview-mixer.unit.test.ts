@@ -314,6 +314,7 @@ interface Rig {
   decks: readonly [FakeMedia, FakeMedia];
   music: FakeMedia;
   voice: FakeMedia;
+  lanes: FakeMedia[];
   /** The stand-ins made so far; see [PreviewMixer.elementFor]. */
   standIns: FakeMedia[];
   session: { type: string } | null;
@@ -345,6 +346,7 @@ async function rig(manifest: EditManifest, { ios = true, session = autoSession()
   const decks = [new FakeMedia(!ios), new FakeMedia(!ios)] as const;
   const music = new FakeMedia(!ios);
   const voice = new FakeMedia(!ios);
+  const lanes: FakeMedia[] = [];
   const slot = (element: FakeMedia): ClipMedia => new ClipMedia(element as unknown as HTMLVideoElement);
   const build = (): PreviewPlayer => {
     const player = new PreviewPlayer(store, {
@@ -352,6 +354,11 @@ async function rig(manifest: EditManifest, { ios = true, session = autoSession()
       partner: slot(decks[1]),
       music: music as unknown as HTMLAudioElement,
       voice: voice as unknown as HTMLAudioElement,
+      makeAudio: () => {
+        const lane = new FakeMedia(!ios);
+        lanes.push(lane);
+        return lane as unknown as HTMLAudioElement;
+      },
       extraLayers: () => [],
     });
     players.push(player);
@@ -360,7 +367,7 @@ async function rig(manifest: EditManifest, { ios = true, session = autoSession()
   };
   const player = build();
   await settle();
-  return { store, player, decks, music, voice, standIns, session, rebuild: build };
+  return { store, player, decks, music, voice, lanes, standIns, session, rebuild: build };
 }
 
 /** Puts the playhead at `ms` and plays from there, as a tap on Play does. */
@@ -394,6 +401,21 @@ afterEach(() => {
 });
 
 describe('the preview on a WebView that ignores volume', () => {
+  it('routes overlapping audio lanes beside legacy music, each at its own level', async () => {
+    const laneA = { ...MUSIC, id: 'lane-a-clip', uri: 'capacitor://localhost/a.m4a', volume: 0.6, fadeOutMs: 1000 };
+    const laneB = { ...MUSIC, id: 'lane-b-clip', uri: 'capacitor://localhost/b.m4a', volume: 0.3, fadeOutMs: 0 };
+    const r = await rig(post({ music: MUSIC, audioTracks: [{ id: 'lane-a', clips: [laneA] }, { id: 'lane-b', clips: [laneB] }] }));
+    await playFrom(r, 3500);
+
+    const [context] = FakeContext.made;
+    // Two elements a lane, both routed: the one playing and the one holding the next clip's file.
+    expect(r.lanes).toHaveLength(4);
+    expect(context.routed()).toEqual([r.music, r.voice, ...r.lanes]);
+    expect(context.gainOf(r.music)?.gain.value).toBeCloseTo(0.4, 6);
+    expect(context.gainOf(r.lanes[0])?.gain.value).toBeCloseTo(0.3, 6);
+    expect(context.gainOf(r.lanes[2])?.gain.value).toBeCloseTo(0.3, 6);
+  });
+
   it('plays the music and a take through the mixer, at the levels the render mixes them at', async () => {
     const r = await rig(post({ music: MUSIC, voiceovers: [TAKE] }));
     await playFrom(r, 3500);
@@ -825,5 +847,7 @@ describe('levelsInUse', () => {
     expect(levelsInUse(post({ music: { ...MUSIC, fadeOutMs: 0 } }))).toBe(true);
     expect(levelsInUse(post({ voiceovers: [{ ...TAKE, volume: 1 }] }))).toBe(false);
     expect(levelsInUse(post({ voiceovers: [TAKE] }))).toBe(true);
+    expect(levelsInUse(post({ audioTracks: [{ id: 'lane', clips: [{ ...MUSIC, id: 'clip', volume: 1, fadeOutMs: 0 }] }] }))).toBe(false);
+    expect(levelsInUse(post({ audioTracks: [{ id: 'lane', clips: [{ ...MUSIC, id: 'clip', volume: 0.5, fadeOutMs: 0 }] }] }))).toBe(true);
   });
 });

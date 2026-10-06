@@ -40,6 +40,7 @@ import {
   musicEndTrim,
   musicStartTrim,
   zoomDragWindow,
+  type AudioDrag,
   type ClipReorderDrag,
   type DragBase,
   type EndDrag,
@@ -272,6 +273,11 @@ interface MusicLaneView {
   selected: boolean;
 }
 
+interface AudioLaneView {
+  id: string;
+  clips: (MusicLaneView & { id: string })[];
+}
+
 /**
  * A zoom's bar. No centre in it: dragging the zoom's box on the preview rewrites the centre on every
  * frame, and a view that carried it would repaint the whole timeline for a change it does not draw.
@@ -426,6 +432,7 @@ export class VeTimeline {
    * class added by hand would be wiped by the next repaint, and a drag repaints constantly.
    */
   private readonly dragCursor = signal<DragCursor>(null);
+  private readonly audioDrop = signal<AudioDrag['drop']>(null);
 
   private readonly pad = computed(() => this.viewportWidth.value / 2);
   private readonly totalPx = computed(() => (this.ctx.store.totalMs.value / 1000) * this.ctx.store.pps.value);
@@ -805,6 +812,32 @@ export class VeTimeline {
     (a, b) => a === b || (!!a && !!b && a.x === b.x && a.w === b.w && a.label === b.label && a.selected === b.selected),
   );
 
+  private readonly audioLanes = computedWith<AudioLaneView[]>(
+    () => {
+      const store = this.ctx.store;
+      const pps = store.pps.value;
+      const pad = this.pad.value;
+      const total = store.totalMs.value;
+      const selected = store.selection.value;
+      return (store.manifest.value.audioTracks ?? []).map(track => ({
+        id: track.id,
+        clips: track.clips.map(clip => {
+          const { startMs, endMs } = musicWindow(clip, total);
+          return {
+            id: clip.id,
+            x: pad + (startMs / 1000) * pps,
+            w: Math.max(MIN_ITEM_PX, ((endMs - startMs) / 1000) * pps),
+            label: clip.fileName || 'Audio',
+            selected: selected?.kind === 'audio' && selected.id === clip.id,
+          };
+        }),
+      }));
+    },
+    (a, b) => sameList(a, b, (x, y) => x.id === y.id && sameList(x.clips, y.clips, (one, two) =>
+      one.id === two.id && one.x === two.x && one.w === two.w && one.label === two.label && one.selected === two.selected,
+    )),
+  );
+
   /** TikTok's "Add sound" bar runs the length of the video, but never shorter than its label. */
   private readonly addSoundWidth = computed(() => Math.max(160, this.totalPx.value));
 
@@ -915,6 +948,49 @@ export class VeTimeline {
         winLeft: win.left,
         winRight: win.right,
       });
+    });
+  });
+
+  private readonly audioWaveKey = computed<string | null>(() => {
+    const tracks = this.ctx.store.manifest.value.audioTracks ?? [];
+    if (!tracks.length) return null;
+    const store = this.ctx.store;
+    const win = this.renderWindow.value;
+    const parts: (string | number)[] = [store.totalMs.value, store.pps.value, Math.round(this.pad.value), Math.round(win.left), Math.round(win.right)];
+    for (const track of tracks) for (const clip of track.clips) {
+      const wave = store.waveforms.value.get(clip.uri);
+      parts.push(clip.id, clip.uri, clip.inMs, clip.outMs, clip.phaseMs ?? 0, clip.startMs, clip.endMs, clip.loop ? 1 : 0, clip.sourceDurationMs);
+      parts.push(wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '');
+    }
+    return parts.join('|');
+  });
+
+  private readonly audioWaves = computed<ReadonlyMap<string, WaveView>>(() => {
+    if (this.audioWaveKey.value === null) return EMPTY_WAVES;
+    return untracked(() => {
+      const store = this.ctx.store;
+      const tracks = store.manifest.value.audioTracks ?? [];
+      const lanes = new Map(this.audioLanes.value.flatMap(lane => lane.clips.map(clip => [clip.id, clip] as const)));
+      const win = this.renderWindow.value;
+      const totalMs = store.totalMs.value;
+      const built = new Map<string, WaveView>();
+      for (const track of tracks) for (const clip of track.clips) {
+        const lane = lanes.get(clip.id);
+        const wave = store.waveforms.value.get(clip.uri);
+        if (!lane || !wave) continue;
+        const section = musicSectionMs(clip);
+        const { startMs, endMs } = musicWindow(clip, totalMs);
+        const heardMs = Math.max(0, endMs - startMs);
+        const repeats = clip.loop && section > 0;
+        const source: WaveSource = {
+          at: outputMs => musicSourceMsAt(clip, outputMs, totalMs),
+          endsAtMs: clip.inMs + (repeats ? (musicPhaseMs(clip) + heardMs) % section || section : musicPhaseMs(clip) + heardMs),
+          repeat: repeats ? { fromMs: clip.inMs, toMs: clip.inMs + section } : null,
+        };
+        const view = waveView({ wave, source, pps: store.pps.value, itemStartMs: startMs, itemX: lane.x, itemW: lane.w, winLeft: win.left, winRight: win.right });
+        if (view) built.set(clip.id, view);
+      }
+      return built.size ? built : EMPTY_WAVES;
     });
   });
 
@@ -1389,11 +1465,51 @@ export class VeTimeline {
     return null;
   }
 
-  private readonly addClip = () => {
+  private readonly toggleAddMenu = () => {
     const { store, media } = this.ctx;
     if (media.busy.value) return;
     store.pause();
+    store.timelineAddMenuOpen.value = !store.timelineAddMenuOpen.value;
+  };
+
+  private readonly addVideo = () => {
+    this.ctx.store.timelineAddMenuOpen.value = false;
+    const { store, media } = this.ctx;
+    if (!store.canAddClip.value || media.busy.value) return;
     void media.addClip();
+  };
+
+  private readonly addAudio = () => {
+    this.ctx.store.timelineAddMenuOpen.value = false;
+    if (this.ctx.media.busy.value) return;
+    this.ctx.media.openSound();
+  };
+
+  private readonly onAddOutside = (event: PointerEvent): void => {
+    if (!this.ctx.store.timelineAddMenuOpen.value) return;
+    const path = event.composedPath();
+    if (path.some(node => node instanceof HTMLElement && (node.classList.contains('tl__add') || node.classList.contains('tl__add-menu')))) return;
+    this.ctx.store.timelineAddMenuOpen.value = false;
+  };
+
+  private readonly onAddKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Escape' || !this.ctx.store.timelineAddMenuOpen.value) return;
+    this.ctx.store.timelineAddMenuOpen.value = false;
+    this.el.shadowRoot?.querySelector<HTMLButtonElement>('.tl__add')?.focus();
+    event.stopPropagation();
+  };
+
+  /** Up and down between the choices a menu promises, as the toolbar's Sound menu does. */
+  private readonly onAddMenuKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const menu = event.currentTarget as HTMLElement;
+    const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(this.el.shadowRoot?.activeElement as HTMLButtonElement);
+    const down = event.key === 'ArrowDown';
+    const next = index < 0 ? (down ? 0 : items.length - 1) : (index + (down ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
   };
 
   /** What a layer's lane shows: a line of its text, its sticker, a thumbnail of its photo, its effect. */
@@ -1455,6 +1571,10 @@ export class VeTimeline {
       offs.push(() => target.removeEventListener(type, fn, options));
     };
     const passive = { passive: true };
+    document.addEventListener('pointerdown', this.onAddOutside, passive);
+    document.addEventListener('keydown', this.onAddKey);
+    offs.push(() => document.removeEventListener('pointerdown', this.onAddOutside));
+    offs.push(() => document.removeEventListener('keydown', this.onAddKey));
 
     on('scroll', this.onScroll, passive);
     on('scrollend', this.onScrollEnd, passive);
@@ -1926,6 +2046,10 @@ export class VeTimeline {
       this.startMusicDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), kind === 'music-start' ? 'start' : 'end');
       return;
     }
+    if (kind === 'audio-start' || kind === 'audio-end') {
+      if (id) this.startAudioDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), id, kind === 'audio-start' ? 'start' : 'end');
+      return;
+    }
     if (kind === 'end') {
       this.startEndDrag(this.dragBase(event.pointerId, event.clientX, event.clientY));
       return;
@@ -1952,7 +2076,7 @@ export class VeTimeline {
     // past and nowhere to carry it either, because the base track may not be emptied. A segment on a
     // layer always lifts - it has the base track and every other layer to go to, and the gap under
     // any of them.
-    const canLift = (kind === 'clip' && store.slots.value.length > 1) || kind === 'track-clip' || (kind === 'layer' && store.layerCount.value > 1);
+    const canLift = (kind === 'clip' && store.slots.value.length > 1) || kind === 'track-clip' || kind === 'audio' || (kind === 'layer' && store.layerCount.value > 1);
     if (canLift) press.timer = setTimeout(() => this.onLongPress(press), LONG_PRESS_MS);
     this.press = press;
   };
@@ -1986,7 +2110,7 @@ export class VeTimeline {
     // browser's scroll, which announces itself with pointercancel; only these two are ours.
     this.cancelPress();
     const vertical = Math.abs(dy) > Math.abs(dx);
-    if (!vertical && this.isSelectedBody(press)) {
+    if (this.isSelectedBody(press) && (!vertical || press.kind === 'audio')) {
       this.startBodyDrag(press);
     } else if (vertical && press.inLanes) {
       this.startLanesScroll(press, event);
@@ -2049,6 +2173,9 @@ export class VeTimeline {
         return;
       case 'music':
         this.toggleSelection({ kind: 'music' });
+        return;
+      case 'audio':
+        if (id) this.toggleSelection({ kind: 'audio', id });
         return;
       case 'voice':
         if (id) this.toggleSelection({ kind: 'voice', id });
@@ -2179,6 +2306,10 @@ export class VeTimeline {
     this.press = null;
     if (press.kind === 'clip' || press.kind === 'track-clip') this.startClipReorder(press);
     else if (press.kind === 'layer') this.startLayerReorder(press);
+    else if (press.kind === 'audio' && press.id) {
+      this.ctx.store.select({ kind: 'audio', id: press.id });
+      this.startAudioDrag(this.dragBase(press.pointerId, press.x0, press.y0), press.id, 'move');
+    }
   }
 
   private isSelectedBody(press: Press): boolean {
@@ -2193,6 +2324,8 @@ export class VeTimeline {
         return !!press.id && store.isSelected({ kind: 'clip', id: press.id });
       case 'music':
         return store.musicSelected.value;
+      case 'audio':
+        return !!press.id && store.isSelected({ kind: 'audio', id: press.id });
       case 'voice':
         return !!press.id && store.isSelected({ kind: 'voice', id: press.id });
       // Mandatory rather than a nicety: a selected bar is `touch-action: none`, so without a body
@@ -2418,6 +2551,8 @@ export class VeTimeline {
       this.startTrackDrag(base, press.id);
     } else if (press.kind === 'music') {
       this.startMusicDrag(base, 'move');
+    } else if (press.kind === 'audio' && press.id) {
+      this.startAudioDrag(base, press.id, 'move');
     } else if (press.kind === 'voice' && press.id) {
       const take = store.selectedVoice.value;
       if (!take || take.id !== press.id) return;
@@ -2611,6 +2746,7 @@ export class VeTimeline {
       case 'layer':
       case 'zoom':
       case 'music':
+      case 'audio':
       case 'voice': {
         if (!drag.moved) return false;
         const scrolling = autoScroll && this.edgeAutoScroll(drag);
@@ -2620,6 +2756,7 @@ export class VeTimeline {
         else if (drag.kind === 'layer') this.applyLayer(drag);
         else if (drag.kind === 'zoom') this.applyZoom(drag);
         else if (drag.kind === 'music') this.applyMusic(drag);
+        else if (drag.kind === 'audio') this.applyAudio(drag);
         else this.applyVoice(drag);
         return scrolling;
       }
@@ -2972,6 +3109,7 @@ export class VeTimeline {
           drag.kind === 'layer' ||
           drag.kind === 'zoom' ||
           drag.kind === 'music' ||
+          drag.kind === 'audio' ||
           drag.kind === 'voice' ||
           drag.kind === 'scrub')
       ) {
@@ -3019,6 +3157,14 @@ export class VeTimeline {
         break;
       case 'music':
         store.endGesture('Sound');
+        break;
+      case 'audio':
+        this.audioDrop.value = null;
+        if (cancelled) store.cancelGesture();
+        else if (drag.drop && drag.mode === 'move') {
+          store.cancelGesture();
+          store.moveAudioClipToTrack(drag.id, drag.drop, drag.atMs);
+        } else store.endGesture(drag.mode === 'move' ? 'Move audio' : 'Trim audio');
         break;
       case 'zoom':
         // Nothing to close: every frame was already a coalesced step (see [startZoomDrag]).
@@ -3092,6 +3238,10 @@ export class VeTimeline {
         return lanes.querySelector<HTMLElement>(`[data-lane-id="${CSS.escape(selection.id)}"]`);
       case 'music':
         return lanes.querySelector<HTMLElement>('[data-row="music"]');
+      case 'audio': {
+        const track = (this.ctx.store.manifest.value.audioTracks ?? []).find(track => track.clips.some(clip => clip.id === selection.id));
+        return track ? lanes.querySelector<HTMLElement>(`[data-arow="${CSS.escape(track.id)}"]`) : null;
+      }
       case 'voice':
         return lanes.querySelector<HTMLElement>('[data-row="voice"]');
       // On the fixed row under the filmstrip, which is always in view.
@@ -3305,7 +3455,7 @@ export class VeTimeline {
             {/* Fixed over everything, never part of the scrolling content. */}
             <div class="tl__playhead" key="playhead" aria-hidden="true"></div>
 
-            {reorder ? this.reorderRail(reorder) : store.canAddClip.value ? this.addButton() : null}
+            {reorder ? this.reorderRail(reorder) : compact ? null : [this.addButton(), store.timelineAddMenuOpen.value ? this.addMenu() : null]}
           </div>
         </Host>
       );
@@ -3553,7 +3703,8 @@ export class VeTimeline {
                 );
               })}
 
-          {compact ? null : this.musicRow(pad)}
+          {compact ? null : this.audioLanes.value.map((lane, i) => this.audioRow(lane, i))}
+          {compact || (this.audioLanes.value.length && !this.ctx.store.manifest.value.music) ? null : this.musicRow(pad)}
           {this.showVoiceLane.value ? this.voiceRow() : null}
         </div>
       </div>
@@ -3614,6 +3765,105 @@ export class VeTimeline {
         </svg>
       </span>
     );
+  }
+
+  private audioRow(lane: AudioLaneView, index: number) {
+    const drop = this.audioDrop.value;
+    const on = drop?.kind === 'track' && drop.trackId === lane.id;
+    const before = drop?.kind === 'new' && drop.index === index;
+    const waves = this.audioWaves.value;
+    return (
+      <div
+        class={{
+          'lane': true,
+          'lane--audio-drop': on,
+          'lane--audio-new-before': before,
+          'lane--audio-new-after': drop?.kind === 'new' && drop.index === this.audioLanes.value.length && index === this.audioLanes.value.length - 1,
+        }}
+        key={`audio-${lane.id}`}
+        data-arow={lane.id}
+      >
+        {lane.clips.map(clip => {
+          const handles = clip.selected ? edgeHandles(clip.x, clip.w) : null;
+          return [
+            <div
+              class={{ 'item': true, 'item--music': true, 'item--selected': clip.selected, 'item--glyph': clip.w < LANE_GLYPH_ONLY_PX }}
+              key={clip.id}
+              data-hit="audio"
+              data-id={clip.id}
+              style={{ left: `${clip.x}px`, width: `${clip.w}px` }}
+            >
+              {this.waveSvg(waves.get(clip.id) ?? null)}
+              <span class="item__label">
+                {laneGlyph('musical-note')}
+                <span class="item__text" key="text">{clip.label}</span>
+              </span>
+            </div>,
+            handles ? <span class="handle handle--in" key={`${clip.id}-in`} data-hit="audio-start" data-id={clip.id} style={{ left: `${handles.inX}px` }}></span> : null,
+            handles ? <span class="handle handle--out" key={`${clip.id}-out`} data-hit="audio-end" data-id={clip.id} style={{ left: `${handles.outX}px` }}></span> : null,
+          ];
+        })}
+      </div>
+    );
+  }
+
+  private applyAudio(drag: AudioDrag): void {
+    const store = this.ctx.store;
+    const pps = store.pps.value;
+    const total = store.totalMs.value;
+    const deltaMs = this.dragDeltaMs(drag, pps);
+    const targets = [...drag.targets, this.centreMs(pps)];
+    if (drag.mode === 'start') {
+      store.previewAudioClip(drag.id, musicStartTrim(drag.music0, this.snapEdge(drag, drag.music0.startMs + deltaMs, targets, pps), total));
+    } else if (drag.mode === 'end') {
+      store.previewAudioClip(drag.id, musicEndTrim(drag.music0, this.snapEdge(drag, drag.end0 + deltaMs, targets, pps), total));
+    } else {
+      drag.atMs = Math.max(0, this.snapEdge(drag, drag.music0.startMs + deltaMs, targets, pps));
+      store.previewMoveAudio(drag.id, drag.atMs);
+      const drop = this.audioDropTarget(drag.y, drag.fromTrackId);
+      if (!sameAudioDrop(this.audioDrop.value, drop)) {
+        this.audioDrop.value = drop;
+        store.haptic('selection');
+      }
+      drag.drop = drop;
+    }
+  }
+
+  private startAudioDrag(base: DragBase, id: string, mode: AudioDrag['mode']): void {
+    const store = this.ctx.store;
+    const track = (store.manifest.value.audioTracks ?? []).find(track => track.clips.some(clip => clip.id === id));
+    const clip = track?.clips.find(clip => clip.id === id);
+    if (!track || !clip) return;
+    store.pause();
+    store.beginGesture();
+    this.beginDrag({
+      ...base,
+      kind: 'audio',
+      mode,
+      id,
+      fromTrackId: track.id,
+      music0: clip,
+      end0: musicWindow(clip, store.totalMs.value).endMs,
+      targets: this.snapTargets(),
+      drop: null,
+      atMs: clip.startMs,
+    });
+  }
+
+  private audioDropTarget(y: number, fromTrackId: string): AudioDrag['drop'] {
+    const view = this.lanesViewEl?.getBoundingClientRect();
+    const rows = [...(this.lanesEl?.querySelectorAll<HTMLElement>('[data-arow]') ?? [])];
+    if (!view || !rows.length || y < view.top || y > view.bottom) return null;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      const rect = row.getBoundingClientRect();
+      if (y < rect.top) return { kind: 'new', index: i };
+      if (y <= rect.bottom) {
+        const trackId = row.dataset['arow'];
+        return trackId && trackId !== fromTrackId ? { kind: 'track', trackId } : null;
+      }
+    }
+    return { kind: 'new', index: rows.length };
   }
 
   private musicRow(pad: number) {
@@ -3725,9 +3975,35 @@ export class VeTimeline {
 
   private addButton() {
     return (
-      <button type="button" class="tl__add" key="add" aria-label="Add clip" onClick={this.addClip}>
+      <button
+        type="button"
+        class="tl__add"
+        key="add"
+        aria-haspopup="menu"
+        aria-expanded={String(this.ctx.store.timelineAddMenuOpen.value)}
+        onClick={this.toggleAddMenu}
+      >
         <ve-icon name="add"></ve-icon>
+        {/*
+          Named by its own words, not an `aria-label`: beside `aria-haspopup` a label is not the name
+          on Android's WebView, and "Add to timeline" is what TalkBack reads and the flows tap. See
+          `.sheet__hidden-name` in sheet-common.css.
+        */}
+        <span class="tl__hidden-name">Add to timeline</span>
       </button>
+    );
+  }
+
+  private addMenu() {
+    return (
+      <div class="tl__add-menu" key="add-menu" role="menu" aria-label="Add to timeline" onKeyDown={this.onAddMenuKey}>
+        <button type="button" role="menuitem" disabled={!this.ctx.store.canAddClip.value} onClick={this.addVideo}>
+          Video
+        </button>
+        <button type="button" role="menuitem" onClick={this.addAudio}>
+          Audio
+        </button>
+      </div>
     );
   }
 }
@@ -3744,7 +4020,7 @@ type DragCursor = 'move' | 'resize' | null;
 function dragCursor(drag: TimelineDrag): DragCursor {
   if (drag.kind === 'trim' || drag.kind === 'end') return 'resize';
   // A layer's and a sound's two edge modes trim; the third moves the whole window.
-  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'music') && drag.mode !== 'move') return 'resize';
+  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'music' || drag.kind === 'audio') && drag.mode !== 'move') return 'resize';
   return 'move';
 }
 
@@ -3767,6 +4043,12 @@ function sameDrop(a: ClipDropTarget | null, b: ClipDropTarget | null): boolean {
   if (a.kind === 'track' && b.kind === 'track') return a.trackId === b.trackId;
   if (a.kind === 'new' && b.kind === 'new') return a.index === b.index;
   return true;
+}
+
+function sameAudioDrop(a: AudioDrag['drop'], b: AudioDrag['drop']): boolean {
+  if (!a || !b) return a === b;
+  if (a.kind !== b.kind) return false;
+  return a.kind === 'track' && b.kind === 'track' ? a.trackId === b.trackId : a.kind === 'new' && b.kind === 'new' && a.index === b.index;
 }
 
 /** The tile at the head of a lane that says what kind of thing it carries (see [LAYER_GLYPHS]). */

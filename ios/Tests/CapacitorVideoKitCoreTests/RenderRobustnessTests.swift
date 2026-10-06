@@ -114,6 +114,43 @@ final class RenderRobustnessTests: RenderTestCase {
 
     // MARK: - Music
 
+    func testExtraMusicLanesMixSequentialAndOverlappingClips() async throws {
+        let video = try await TestMedia.video(file("red.mp4"), durationMs: 2000, color: .red, audio: false)
+        let sound = try RobustnessSupport.wav(file("tone.wav"), durationMs: 2000)
+        func clip(_ start: Int, _ end: Int) -> [String: Any] {
+            ["uri": sound.absoluteString, "startMs": start, "endMs": end,
+             "inMs": 0, "outMs": 2000, "volume": 0.25, "loop": false,
+             "fadeInMs": 0, "fadeOutMs": 0]
+        }
+        let options = TestSpecs.spec([TestSpecs.clip("v", video, outMs: 2000)], [
+            "audio": ["music": NSNull(), "voiceover": [Any](),
+                      "musicTracks": [[clip(0, 700), clip(1000, 1700)], [clip(500, 1500)] ]],
+        ])
+        let parsed = try TestCalls.parse(options)
+        XCTAssertEqual(parsed.audio.musicTracks.map(\.count), [2, 1])
+        XCTAssertEqual(parsed.inputURIs.filter { $0 == sound.absoluteString }.count, 3)
+
+        let built = try await RobustnessSupport.build(options)
+        let tracks = built.composition.tracks(withMediaType: .audio)
+        XCTAssertEqual(tracks.count, 3)
+        XCTAssertEqual(built.audioMix?.inputParameters.count, 3)
+        let starts = tracks.flatMap { $0.segments.filter { !$0.isEmpty }.map { $0.timeMapping.target.start.seconds } }.sorted()
+        XCTAssertEqual(starts.count, 3)
+        for (actual, expected) in zip(starts, [0.0, 0.5, 1.0]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.001)
+        }
+    }
+
+    func testInvalidExtraMusicClipNamesItsLaneAndIndex() throws {
+        let options = TestSpecs.spec([TestSpecs.clip("v", file("a.mp4"), outMs: 2000)], [
+            "audio": ["musicTracks": [[["uri": file("tone.wav").absoluteString,
+                                        "inMs": 500, "outMs": 0]]]],
+        ])
+        XCTAssertThrowsError(try TestCalls.parse(options)) { error in
+            XCTAssertEqual((error as? SpecError)?.path, "audio.musicTracks[0][0].outMs")
+        }
+    }
+
     func testMusicPhaseDefaultsToZeroAndRetainsSignedValues() throws {
         let url = file("a.mp4")
         var music: [String: Any] = ["uri": file("tone.wav").absoluteString, "inMs": 200, "outMs": 1000]

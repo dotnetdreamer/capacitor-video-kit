@@ -118,6 +118,9 @@ export async function withNativeRenderInputs<T>(
     }
     const music = prepared.audio.music;
     if (music) music.uri = await nativeUri(music.uri);
+    for (const track of prepared.audio.musicTracks ?? []) {
+      for (const clip of track) clip.uri = await nativeUri(clip.uri);
+    }
     for (const take of prepared.audio.voiceover) take.uri = await nativeUri(take.uri);
     signal?.throwIfAborted();
     return await render(prepared);

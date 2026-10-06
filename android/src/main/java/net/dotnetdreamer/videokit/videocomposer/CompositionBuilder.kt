@@ -42,7 +42,7 @@ import kotlin.math.max
  *
  * The shape is one video sequence per layer - every extra layer's clips, top layer first, then the
  * base track's - then, when the post has transitions, one more holding the outgoing tail of every
- * one of them under the base, plus at most one audio-only sequence for music and one for
+ * one of them under the base, plus an audio-only sequence for each music clip and one for
  * voiceovers. Concurrent sequences are how Media3 mixes and how it composites, so neither
  * "background music over the clips' own sound" nor "a second video over the first" needs a mixer
  * of ours. Why the base comes after the layers rather than first is written out in
@@ -171,6 +171,7 @@ object CompositionBuilder {
             sequences += tailSequence(plan.tails, plan.totalUs, output, grade, plan.camera, background)
         }
         plan.music?.let { sequences += musicSequence(it) }
+        for (clip in plan.musicTracks) sequences += musicSequence(clip)
         plan.voice?.let { sequences += voiceSequence(it) }
 
         val compositionEffects = ArrayList<Effect>()

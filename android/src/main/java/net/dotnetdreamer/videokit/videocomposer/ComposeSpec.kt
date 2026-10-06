@@ -344,6 +344,8 @@ data class Audio(
     val originalVolume: Float,
     val music: Music?,
     val voiceover: List<Voiceover>,
+    /** Additional lanes of independently mixed music clips. */
+    val musicTracks: List<List<Music>> = emptyList(),
 )
 
 data class ComposeSpec(

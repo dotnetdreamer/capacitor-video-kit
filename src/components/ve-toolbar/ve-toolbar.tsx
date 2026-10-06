@@ -8,7 +8,7 @@ import type { EditorIconName } from '../../icons/icons';
 import type { EditorPanel } from '../../state/editor.types';
 
 /** Which set of tools the bottom row is showing. */
-export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'zoom' | 'music' | 'voice';
+export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'zoom' | 'music' | 'audio' | 'voice';
 
 /** One tile in the row. Built fresh whenever what the row depends on changes. */
 export interface ToolTile {
@@ -98,6 +98,8 @@ export class VeToolbar {
   private readonly clipSelected = computed(() => !!this.ctx.store.selectedClip.value);
   private readonly layerKind = computed(() => this.ctx.store.selectedOverlay.value?.kind ?? null);
   private readonly voiceSelected = computed(() => !!this.ctx.store.selectedVoice.value);
+  private readonly audioSelected = computed(() => !!this.ctx.store.selectedAudio.value);
+  private readonly audioLoops = computed(() => !!this.ctx.store.selectedAudio.value?.loop);
   /**
    * A boolean, never the zoom itself: dragging the zoom's box on the preview rewrites the zoom on
    * every frame, and a row that read the object would be rebuilt sixty times a second for it.
@@ -125,6 +127,7 @@ export class VeToolbar {
     if (this.layerKind.value) return 'layer';
     if (this.zoomSelected.value) return 'zoom';
     if (this.ctx.store.musicSelected.value) return 'music';
+    if (this.audioSelected.value) return 'audio';
     if (this.voiceSelected.value) return 'voice';
     return this.ctx.store.toolbarMode.value === 'text' ? 'text' : 'root';
   });
@@ -384,6 +387,8 @@ export class VeToolbar {
         return this.zoomRow();
       case 'music':
         return this.musicRow();
+      case 'audio':
+        return this.audioRow();
       case 'voice':
         return this.voiceRow();
     }
@@ -789,12 +794,53 @@ export class VeToolbar {
           run: () => this.startSoundHere(),
         },
         {
-          id: 'replace',
-          label: 'Replace',
-          icon: 'swap-horizontal-outline',
+          // Another sound beside this one: a pick lands on the audio lanes, which this sound joins.
+          id: 'add-audio',
+          label: 'Add audio',
+          icon: 'add',
           run: () => this.ctx.media.openSound(),
         },
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.removeMusic() },
+      ],
+    };
+  }
+
+  private audioRow(): ToolRow {
+    const store = this.ctx.store;
+    return {
+      kind: 'audio',
+      label: 'Audio tools',
+      collapse: this.deselect('Close audio tools'),
+      tiles: [
+        {
+          id: 'volume',
+          label: 'Volume',
+          icon: 'volume-high-outline',
+          run: () => {
+            const clip = store.selectedAudio.value;
+            if (clip) store.openVolume({ kind: 'audio', id: clip.id });
+          },
+        },
+        {
+          id: 'loop',
+          label: 'Loop',
+          icon: 'repeat-outline',
+          toggled: this.audioLoops.value,
+          run: () => {
+            const clip = store.selectedAudio.value;
+            if (clip) store.toggleAudioLoop(clip.id);
+          },
+        },
+        {
+          id: 'start-here',
+          label: 'Start here',
+          icon: 'play-skip-back-outline',
+          run: () => {
+            const clip = store.selectedAudio.value;
+            if (clip) store.startAudioHere(clip.id);
+          },
+        },
+        { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.removeSelectedAudio() },
       ],
     };
   }

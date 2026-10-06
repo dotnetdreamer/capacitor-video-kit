@@ -211,6 +211,26 @@ describe('extra video layers', () => {
 });
 
 describe('music', () => {
+  it('plans sequential clips within a lane and overlaps across lanes', () => {
+    const make = (uri: string, startMs: number, endMs: number) => ({
+      uri, startMs, endMs, inMs: 0, outMs: 2000, volume: 0.5, loop: false, fadeInMs: 0, fadeOutMs: 0,
+    });
+    const plan = buildPlan(spec({
+      clips: [clip({ outMs: 4000 })],
+      audio: { originalMuted: true, originalVolume: 1, music: null, voiceover: [], musicTracks: [
+        [make('file:///a.m4a', 0, 1000), make('file:///b.m4a', 1000, 3000)],
+        [make('file:///c.m4a', 500, 2500)],
+      ] },
+    }), new Map());
+    expect(plan.music).toBeNull();
+    expect(plan.musicTracks.map(track => [track.uri, track.startUs, track.stopUs])).toEqual([
+      ['file:///a.m4a', 0, 1_000_000],
+      ['file:///b.m4a', 1_000_000, 3_000_000],
+      ['file:///c.m4a', 500_000, 2_500_000],
+    ]);
+    expect(plan.hasAudio).toBe(true);
+  });
+
   it('repeats just enough to cover the video, and cuts the last one exactly at the end', () => {
     const plan = buildPlan(
       spec({

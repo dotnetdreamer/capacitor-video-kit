@@ -407,6 +407,7 @@ struct ComposeAudio: Sendable {
     let originalVolume: Double
     let music: ComposeMusic?
     let voiceover: [ComposeVoiceover]
+    let musicTracks: [[ComposeMusic]]
 }
 
 /// One key of a camera track, as the parser leaves it: ALREADY CLAMPED, `scale` to
@@ -515,7 +516,8 @@ struct ComposeSpec: Sendable {
     /// each voiceover take's. `RetainedMedia.sweep` keeps what a render in progress reads through
     /// `JobRegistry.liveInputURIs`.
     var inputURIs: [String] {
-        everyClip.map(\.uri) + (audio.music.map { [$0.uri] } ?? []) + audio.voiceover.map(\.uri)
+        everyClip.map(\.uri) + (audio.music.map { [$0.uri] } ?? []) +
+            audio.musicTracks.flatMap { $0.map(\.uri) } + audio.voiceover.map(\.uri)
     }
 }
 

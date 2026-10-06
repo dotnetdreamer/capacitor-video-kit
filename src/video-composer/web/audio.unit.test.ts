@@ -106,6 +106,36 @@ describe('sourceUses', () => {
 });
 
 describe('mixdown', () => {
+  it('mixes legacy music with sequential clips and an overlapping lane', async () => {
+    const spec = post();
+    spec.clips = [clip('muted', 'file:///base.mp4', 0, 3000, { muted: true })];
+    spec.tracks = [];
+    spec.audio.voiceover = [];
+    spec.audio.music = { uri: 'file:///legacy.m4a', startMs: 0, inMs: 0, outMs: 3000, volume: 0.1, loop: false, fadeInMs: 0, fadeOutMs: 0 };
+    const sound = (uri: string, startMs: number, endMs: number) => ({
+      uri, startMs, endMs, inMs: 0, outMs: endMs - startMs, volume: 0.2, loop: false, fadeInMs: 0, fadeOutMs: 0,
+    });
+    spec.audio.musicTracks = [
+      [sound('file:///one.m4a', 0, 1000), sound('file:///two.m4a', 1000, 2000)],
+      [sound('file:///overlap.m4a', 500, 1800)],
+    ];
+    const mix = await mixdown(planOf(spec), new AbortController().signal);
+    const at = 1.25 * MIX_SAMPLE_RATE;
+    const sample = (uri: string, offset: number) => {
+      const seed = [...uri].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+      return Math.sin((offset + seed) / 50) * 0.25;
+    };
+    expect(mix?.channels[0]?.[at]).toBeCloseTo(
+      sample('file:///legacy.m4a', at) * 0.1 +
+      sample('file:///two.m4a', 0.25 * MIX_SAMPLE_RATE) * 0.2 +
+      sample('file:///overlap.m4a', 0.75 * MIX_SAMPLE_RATE) * 0.2,
+      5,
+    );
+    expect(decoded.get('file:///one.m4a')).toBe(1);
+    expect(decoded.get('file:///two.m4a')).toBe(1);
+    expect(decoded.get('file:///overlap.m4a')).toBe(1);
+  });
+
   /*
    * Letting a source go after its last placement must never let it go BEFORE one: a count one short
    * would decode that file a second time. A file that would not decode is not tried twice either.

@@ -799,6 +799,22 @@ class RenderPlanTest {
     }
 
     @Test
+    fun `extra music lanes plan sequential and overlapping clips independently`() {
+        fun sound(uri: String, start: Long, end: Long) =
+            Music(uri, start, 0, 2_000, 0.5f, loop = false, fadeInMs = 0, fadeOutMs = 0, endMs = end)
+        val legacy = sound("file:///legacy.m4a", 0, 4_000)
+        val audio = Audio(false, 1f, legacy, emptyList(), musicTracks = listOf(
+            listOf(sound("file:///one.m4a", 0, 1_000), sound("file:///two.m4a", 1_000, 3_000)),
+            listOf(sound("file:///overlap.m4a", 500, 2_500)),
+        ))
+        val plan = RenderPlan.build(spec(listOf(clip("a", outMs = 4_000)), audio = audio), emptyMap())
+        assertEquals(3, plan.musicTracks.size)
+        assertEquals(4, plan.extraAudioSequences) // Legacy music plus three clips, each mixed separately.
+        assertEquals(listOf(0L, 1_000_000L, 500_000L), plan.musicTracks.map { it.items.first().atUs })
+        assertEquals(listOf(1_000_000L, 3_000_000L, 2_500_000L), plan.musicTracks.map { it.items.last().atUs + it.items.last().outUs - it.items.last().inUs })
+    }
+
+    @Test
     fun `music phase beyond a cycle starts partway through then loops the whole section`() {
         val music = Music(
             "file:///m.m4a", 1_000, 2_000, 5_000, 1f,

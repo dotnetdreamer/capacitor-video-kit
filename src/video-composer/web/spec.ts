@@ -1,6 +1,7 @@
 import type {
   ComposeCamera,
   ComposeFit,
+  ComposeMusic,
   ComposeOverlay,
   ComposeOverlayMotion,
   ComposePlacement,
@@ -223,6 +224,8 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     voiceover: [],
   };
   const music = audio.music ?? null;
+  const rawMusicTracks = audio.musicTracks ?? undefined;
+  if (rawMusicTracks !== undefined && !Array.isArray(rawMusicTracks)) throw new SpecError('audio.musicTracks');
   const rawVoiceover = audio.voiceover ?? [];
   if (!Array.isArray(rawVoiceover)) throw new SpecError('audio.voiceover');
 
@@ -251,20 +254,15 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     audio: {
       originalMuted: audio.originalMuted === true,
       originalVolume: clamp(finite(audio.originalVolume, 1), 0, 1),
-      music: music
+      music: music ? normaliseMusic(music, 'audio.music') : null,
+      ...(rawMusicTracks !== undefined
         ? {
-            uri: nonEmpty(music.uri, 'audio.music.uri'),
-            startMs: Math.max(0, finite(music.startMs, 0)),
-            ...(finite(music.phaseMs, 0) !== 0 ? { phaseMs: finite(music.phaseMs, 0) } : {}),
-            inMs: Math.max(0, finite(music.inMs, 0)),
-            outMs: Math.max(0, finite(music.outMs, 0)),
-            ...(finite(music.endMs, 0) > 0 ? { endMs: finite(music.endMs, 0) } : {}),
-            volume: clamp(finite(music.volume, 1), 0, 1),
-            loop: music.loop === true,
-            fadeInMs: Math.max(0, finite(music.fadeInMs, 0)),
-            fadeOutMs: Math.max(0, finite(music.fadeOutMs, 0)),
+            musicTracks: rawMusicTracks.map((track, i) => {
+              if (!Array.isArray(track)) throw new SpecError(`audio.musicTracks[${i}]`);
+              return track.map((clip, j) => normaliseMusic(clip, `audio.musicTracks[${i}][${j}]`));
+            }),
           }
-        : null,
+        : {}),
       voiceover: rawVoiceover.map((take, i) => ({
         uri: nonEmpty(take?.uri, `audio.voiceover[${i}].uri`),
         startMs: Math.max(0, finite(take?.startMs, 0)),
@@ -273,6 +271,26 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
       })),
     },
     posterAtMs: Math.max(0, finite(spec.posterAtMs, 0)),
+  };
+}
+
+function normaliseMusic(music: ComposeMusic, path: string): ComposeMusic {
+  if (!music || typeof music !== 'object') throw new SpecError(path);
+  const uri = nonEmpty(music.uri, `${path}.uri`);
+  const inMs = Math.max(0, finite(music.inMs, 0));
+  const outMs = Math.max(0, finite(music.outMs, 0));
+  if (outMs <= inMs) throw new SpecError(`${path}.outMs`);
+  return {
+    uri,
+    startMs: Math.max(0, finite(music.startMs, 0)),
+    ...(finite(music.phaseMs, 0) !== 0 ? { phaseMs: finite(music.phaseMs, 0) } : {}),
+    inMs,
+    outMs,
+    ...(finite(music.endMs, 0) > 0 ? { endMs: finite(music.endMs, 0) } : {}),
+    volume: clamp(finite(music.volume, 1), 0, 1),
+    loop: music.loop === true,
+    fadeInMs: Math.max(0, finite(music.fadeInMs, 0)),
+    fadeOutMs: Math.max(0, finite(music.fadeOutMs, 0)),
   };
 }
 

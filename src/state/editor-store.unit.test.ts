@@ -124,6 +124,84 @@ describe('EditorStore', () => {
     expect(store.dirty.value).toBe(false);
   });
 
+  it('adds, moves and undoes independent sounds with selection kept by id', () => {
+    const first = store.addAudioClip({ ...MUSIC, sourceDurationMs: 2000, loop: false, startMs: 0 });
+    const second = store.addAudioClip({ ...MUSIC, sourceDurationMs: 2000, loop: false, startMs: 3000 });
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    expect(store.manifest.value.audioTracks?.map(track => track.clips.length)).toEqual([2]);
+    expect(store.selectedAudio.value?.id).toBe(second);
+
+    expect(store.moveAudioClipToTrack(second!, { kind: 'new', index: 1 }, 1000)).toBe(true);
+    expect(store.manifest.value.audioTracks?.map(track => track.clips.length)).toEqual([1, 1]);
+    store.undo();
+    expect(store.manifest.value.audioTracks?.map(track => track.clips.length)).toEqual([2]);
+    expect(store.selectedAudio.value?.id).toBe(second);
+    store.redo();
+    store.deleteSelection();
+    expect(store.manifest.value.audioTracks?.map(track => track.clips.length)).toEqual([1]);
+  });
+
+  it('keeps a cut sound its length when a drag takes it to the end of the post and back', () => {
+    // The first second of a two second sound. At 5.5 s its stop would be past the end of the 6 s
+    // post, which makes it "until the end" there; the frame after must not inherit that.
+    const id = store.addAudioClip({ ...MUSIC, sourceDurationMs: 2000, loop: false, startMs: 0, endMs: 1000 })!;
+    store.beginGesture();
+    store.previewMoveAudio(id, 5500);
+    expect(store.selectedAudio.value).toMatchObject({ startMs: 5500, endMs: 0 });
+    store.previewMoveAudio(id, 2000);
+    store.endGesture('Move audio');
+
+    expect(store.selectedAudio.value).toMatchObject({ startMs: 2000, endMs: 3000 });
+  });
+
+  it('names Loop on and off in the undo toast, and loops a sound up to the next one on its lane', () => {
+    const first = store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 0 })!;
+    store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 3000 });
+    expect(store.manifest.value.audioTracks).toHaveLength(1);
+
+    store.toggleAudioLoop(first);
+    expect(store.manifest.value.audioTracks![0]!.clips[0]).toMatchObject({ loop: true, endMs: 3000 });
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Loop on');
+    store.redo();
+    store.toggleAudioLoop(first);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Loop off');
+  });
+
+  it('says so when Start here would put a sound over the next one on its lane', () => {
+    const first = store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 0 })!;
+    store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 2000 });
+    store.playheadMs.value = 1500;
+    store.startAudioHere(first);
+
+    expect(store.manifest.value.audioTracks![0]!.clips[0]!.startMs).toBe(0);
+    expect(store.toast.value?.text).toBe('There is no room for that audio here');
+    store.playheadMs.value = 4000;
+    store.startAudioHere(first);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.startMs)).toEqual([2000, 4000]);
+  });
+
+  it('migrates selected legacy music in the same add step and undo restores the old edit', () => {
+    const original = load({ music: { ...MUSIC, sourceDurationMs: 2000, loop: false } });
+    store.select({ kind: 'music' });
+
+    const id = store.addAudioClip({ ...MUSIC, uri: 'file:///new.mp3', sourceDurationMs: 2000, loop: false, startMs: 2000 });
+    expect(id).toBeTruthy();
+    expect(store.manifest.value.music).toBeNull();
+    expect(store.manifest.value.audioTracks?.map(track => track.clips.map(clip => clip.uri))).toEqual([
+      ['file:///m.mp3', 'file:///new.mp3'],
+    ]);
+    expect(store.selectedAudio.value?.id).toBe(id);
+
+    store.undo();
+    expect(store.manifest.value).toBe(original);
+    expect(store.selection.value).toBeNull();
+    store.redo();
+    expect(store.manifest.value.audioTracks?.[0]?.clips[0]?.id).toBe('legacy-music');
+  });
+
   describe('commit', () => {
     it('does nothing for a change that is not possible or not a change', () => {
       expect(store.commit('Nothing', () => null)).toBe(false);

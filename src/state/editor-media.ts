@@ -1,5 +1,5 @@
 import { effect, signal, untracked } from '@preact/signals-core';
-import { MAX_LAYERS, MAX_VIDEO_TRACKS, MUSIC_FADE_MS, PICTURE_SOURCE_MS, defaultClipEdit, defaultPictureEdit, insertClip, replaceClipSource, uniqueClipKeys } from '../editor';
+import { MAX_LAYERS, MAX_VIDEO_TRACKS, MIN_LAYER_MS, MUSIC_FADE_MS, PICTURE_SOURCE_MS, audioTrackIdOfClip, defaultClipEdit, defaultPictureEdit, insertClip, musicWindow, replaceClipSource, uniqueClipKeys } from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
@@ -129,6 +129,9 @@ export class EditorMedia {
       const audio: { uri: string; key: string; durationMs: number }[] = manifest.music
         ? [{ uri: manifest.music.uri, key: manifest.music.uri, durationMs: manifest.music.sourceDurationMs }]
         : [];
+      for (const track of manifest.audioTracks ?? []) {
+        for (const clip of track.clips) audio.push({ uri: clip.uri, key: clip.uri, durationMs: clip.sourceDurationMs });
+      }
       for (const take of manifest.voiceovers) audio.push({ uri: take.uri, key: take.uri, durationMs: take.durationMs });
 
       /*
@@ -690,29 +693,37 @@ export class EditorMedia {
   /**
    * Puts a track on the post, from wherever it came from.
    *
-   * The volume and the two fades are what is carried over from a track being replaced: they are the
-   * fields the volume sheet sets by hand, and having them reset every time a different song is tried
-   * is the difference between comparing two tracks and setting the sound up twice.
+   * Each pick is another sound on the output timeline. The selected audio lane is tried first,
+   * directly after its selected clip; otherwise the playhead is used. When that lane has no room,
+   * the store finds another lane or opens one.
    */
   private useTrack(uri: string, fileName: string, sourceDurationMs: number): void {
-    const existing = this.store.manifest.value.music;
-    const fadeInMs = existing?.fadeInMs ?? 0;
-    this.store.setMusic(
-      {
-        uri,
-        fileName,
-        sourceDurationMs,
-        inMs: 0,
-        outMs: 0,
-        startMs: 0,
-        endMs: 0,
-        volume: existing?.volume ?? 0.8,
-        loop: true,
-        ...(fadeInMs > 0 ? { fadeInMs } : {}),
-        fadeOutMs: existing ? existing.fadeOutMs : MUSIC_FADE_MS,
-      },
-      existing ? 'Replace sound' : 'Add sound',
-    );
+    this.landOpenTextEdit();
+    const selected = this.store.selectedAudio.value;
+    const legacy = this.store.selection.value?.kind === 'music' ? this.store.manifest.value.music : null;
+    const anchor = selected ?? legacy;
+    const target = selected ? audioTrackIdOfClip(this.store.manifest.value, selected.id) : null;
+    const total = this.store.totalMs.value;
+    const selectedEnd = anchor ? musicWindow(anchor, total).endMs : 0;
+    const at = anchor && selectedEnd + MIN_LAYER_MS <= total
+      ? selectedEnd
+      : Math.min(this.store.playheadMs.value, Math.max(0, total - Math.max(MIN_LAYER_MS, sourceDurationMs)));
+    const sound = {
+      uri,
+      fileName,
+      sourceDurationMs,
+      inMs: 0,
+      outMs: 0,
+      startMs: at,
+      endMs: 0,
+      volume: 0.8,
+      loop: false,
+      fadeOutMs: MUSIC_FADE_MS,
+    };
+    if (target && this.store.addAudioClip(sound, target)) return;
+    if (this.store.addAudioClip(sound)) return;
+    this.store.showToast('There is no room for that audio on this timeline');
+    this.store.haptic('warning');
   }
 
   private landOpenTextEdit(): void {

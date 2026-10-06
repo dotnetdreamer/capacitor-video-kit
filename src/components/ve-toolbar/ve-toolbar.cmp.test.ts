@@ -275,7 +275,7 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'music' });
     await until('the sound row', () => label(bar) === 'Sound tools');
-    expect(ids(bar)).toEqual(['volume', 'loop', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['volume', 'loop', 'start-here', 'add-audio', 'delete']);
 
     store.select({ kind: 'voice', id: 'vo-1' });
     await until('the voiceover row', () => label(bar) === 'Voiceover tools');

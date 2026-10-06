@@ -94,18 +94,19 @@ export class VeSoundSheet {
    * Closes the sheet once a track has actually landed on the post, the way tapping a saved sound
    * does - and leaves it open otherwise.
    *
-   * The test is what the post's music IS rather than what the call answered, because every way
+   * The test is how many audio clips landed rather than what the call answered, because every way
    * these two can end without a track looks the same from here: a closed picker, a silent video, a
    * file that would not open. A customer who backed out of the picker meant to stay in this sheet,
    * and closing it under them would make Cancel read as "throw the whole thing away".
    */
   private async closeIfLanded(work: Promise<unknown>): Promise<void> {
-    const before = this.ctx.store.manifest.value.music;
+    const before = this.ctx.store.manifest.value.audioTracks?.reduce((count, track) => count + track.clips.length, 0) ?? 0;
     await work;
     // The panel may have been closed meanwhile - the back button takes it - and closing then would
     // take away whatever the customer opened next.
     if (this.ctx.store.panel.value !== 'sound') return;
-    if (this.ctx.store.manifest.value.music !== before) this.close();
+    const after = this.ctx.store.manifest.value.audioTracks?.reduce((count, track) => count + track.clips.length, 0) ?? 0;
+    if (after > before) this.close();
   }
 
   private use(sound: SavedSound): void {
@@ -260,7 +261,10 @@ export class VeSoundSheet {
       const extracting = media.extracting.value;
       const busy = media.busy.value;
       const loaded = media.soundsLoaded.value;
-      const usedUri = store.manifest.value.music?.uri ?? null;
+      const usedUris = new Set([
+        ...(store.manifest.value.music ? [store.manifest.value.music.uri] : []),
+        ...(store.manifest.value.audioTracks ?? []).flatMap(track => track.clips.map(clip => clip.uri)),
+      ]);
 
       return (
         <Host>
@@ -298,7 +302,7 @@ export class VeSoundSheet {
               */}
               {sounds.length > 0 ? (
                 <ul class="snd__list" key="list">
-                  {sounds.map(sound => this.renderRow(sound, !!usedUri && sound.uri === usedUri))}
+                  {sounds.map(sound => this.renderRow(sound, usedUris.has(sound.uri)))}
                 </ul>
               ) : loaded ? (
                 <div class="snd__empty" key="empty">

@@ -335,7 +335,7 @@ describe('EditorMedia', () => {
       open(fakeMedia(), PEAKS);
       media.useSound({ id: 's1', uri: 'blob:tune', fileName: 'tune', durationMs: 5000, savedAt: 0 });
       await settle();
-      store.removeMusic();
+      store.removeSelectedAudio();
       await settle();
 
       expect(store.waveforms.value.get('blob:tune')).toEqual(PEAKS);
@@ -401,12 +401,13 @@ describe('EditorMedia', () => {
     it('takes the track the host handed back, with its length', async () => {
       await media.pickMusic();
 
-      expect(store.manifest.value.music).toMatchObject({
+      expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({
         uri: 'blob:music',
         fileName: 'music.mp3',
         sourceDurationMs: 9000,
+        loop: false,
       });
-      expect(store.selection.value).toEqual({ kind: 'music' });
+      expect(store.selection.value).toMatchObject({ kind: 'audio' });
     });
 
     it('says so for a file that could not be read, and adds nothing', async () => {
@@ -420,15 +421,27 @@ describe('EditorMedia', () => {
       await media.pickMusic();
 
       expect(store.manifest.value.music).toBeNull();
+      expect(store.manifest.value.audioTracks).toBeUndefined();
       expect(store.toast.value?.text).toBe("That audio file can't be used. Try an MP3 or M4A.");
     });
 
-    it('keeps the volume the customer set when one track replaces another', async () => {
+    it('keeps the first sound when a second file is picked', async () => {
       await media.pickMusic();
-      store.commitMusic({ volume: 0.25 }, 'Volume');
       await media.pickMusic();
 
-      expect(store.manifest.value.music?.volume).toBe(0.25);
+      expect(store.manifest.value.audioTracks?.flatMap(track => track.clips)).toHaveLength(2);
+      expect(store.manifest.value.audioTracks).toHaveLength(2);
+      expect(store.manifest.value.music).toBeNull();
+    });
+
+    it('appends new picks after selected legacy music on the same lane', async () => {
+      open(fakeMedia({ pickAudio: vi.fn(async () => ({ uri: 'blob:short', fileName: 'short.m4a', sourceDurationMs: 2000 })) }));
+      store.setMusic({ uri: 'blob:legacy', fileName: 'legacy', sourceDurationMs: 2000, inMs: 0, outMs: 0, startMs: 0, endMs: 0, volume: 0.5, loop: false, fadeOutMs: 0 });
+      await media.pickMusic();
+      await media.pickMusic();
+
+      expect(store.manifest.value.music).toBeNull();
+      expect(store.manifest.value.audioTracks?.map(track => track.clips.map(clip => clip.startMs))).toEqual([[0, 2000, 4000]]);
     });
   });
 
@@ -492,7 +505,7 @@ describe('EditorMedia', () => {
       await media.extractSound();
 
       expect(library.extract).toHaveBeenCalledWith(expect.objectContaining({ key: 'picked' }));
-      expect(store.manifest.value.music).toMatchObject({ uri: saved.uri, fileName: 'holiday', sourceDurationMs: 12_000 });
+      expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({ uri: saved.uri, fileName: 'holiday', sourceDurationMs: 12_000 });
       expect(media.sounds.value).toEqual([saved]);
       expect(media.extracting.value).toBe(false);
       expect(media.busy.value).toBe(false);
@@ -537,8 +550,8 @@ describe('EditorMedia', () => {
       open(fakeMedia({ sounds: library }));
       media.useSound(saved);
 
-      expect(store.manifest.value.music).toMatchObject({ uri: saved.uri, fileName: 'holiday' });
-      expect(store.selection.value).toEqual({ kind: 'music' });
+      expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({ uri: saved.uri, fileName: 'holiday' });
+      expect(store.selection.value).toMatchObject({ kind: 'audio' });
       expect(host.media.pickAudio).not.toHaveBeenCalled();
     });
 
@@ -552,7 +565,7 @@ describe('EditorMedia', () => {
       expect(library.remove).toHaveBeenCalledWith('snd-1');
       expect(media.sounds.value).toEqual([]);
       // The post keeps the track: the manifest holds the URI, not the library's record.
-      expect(store.manifest.value.music?.uri).toBe(saved.uri);
+      expect(store.manifest.value.audioTracks?.[0]?.clips[0]?.uri).toBe(saved.uri);
     });
 
     it('puts the row back when the delete failed', async () => {

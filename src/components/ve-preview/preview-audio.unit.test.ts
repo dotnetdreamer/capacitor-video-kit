@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { emptyManifest, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
+import { emptyManifest, type EditAudioTrack, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore } from '../../state/editor-store';
 import type { ClipMedia } from './clip-media';
@@ -435,6 +435,7 @@ interface Rig {
   player: PreviewPlayer;
   music: FakeMedia;
   voice: FakeMedia;
+  lanes: FakeMedia[];
 }
 
 const players: PreviewPlayer[] = [];
@@ -484,6 +485,7 @@ class FakeContext {
 
 interface RigOptions {
   take?: Take;
+  audioTracks?: EditAudioTrack[];
   stallMs?: number;
   /**
    * An iPhone whose WebView gives the page an audio session and a context, and so plays a post's music
@@ -506,7 +508,7 @@ interface RigOptions {
  * iPhone's unless `mac` says otherwise: the WebKit every measurement behind these tests was made on,
  * the Mac's aside.
  */
-async function rig(engine: Engine, music: EditMusic | null, { take, stallMs, iphone = false, mac = false }: RigOptions = {}): Promise<Rig> {
+async function rig(engine: Engine, music: EditMusic | null, { take, audioTracks = [], stallMs, iphone = false, mac = false }: RigOptions = {}): Promise<Rig> {
   vi.resetModules();
   Object.defineProperty(navigator, 'vendor', { value: engine === 'webkit' ? 'Apple Computer, Inc.' : 'Google Inc.', configurable: true });
   if (engine === 'webkit' && !mac) Object.defineProperty(navigator, 'maxTouchPoints', { value: 5, configurable: true });
@@ -523,24 +525,31 @@ async function rig(engine: Engine, music: EditMusic | null, { take, stallMs, iph
   const { PreviewPlayer } = await import('./preview-player');
 
   const store = new EditorStore(resolveEditorHost({}));
-  store.load(SOURCES, new Map([['a', CLIP_MS]]), { ...emptyManifest(), clips: [clip()], music, voiceovers: take ? [take.take] : [] });
+  store.load(SOURCES, new Map([['a', CLIP_MS]]), { ...emptyManifest(), clips: [clip()], music, audioTracks, voiceovers: take ? [take.take] : [] });
   const deck = (): ClipMedia => new ClipMedia(new FakeMedia(CLIP_MS / 1000, engine) as unknown as HTMLVideoElement);
   const stall = stallMs ?? (engine === 'webkit' ? 100 : 30);
   const musicEl = new FakeMedia(TRACK_S, engine, stall);
   musicEl.playhead = () => store.playheadMs.value;
   const voiceEl = new FakeMedia(take?.fileS ?? 1, engine, stall);
   voiceEl.playhead = () => store.playheadMs.value;
+  const lanes: FakeMedia[] = [];
   const player = new PreviewPlayer(store, {
     video: deck(),
     partner: deck(),
     music: musicEl as unknown as HTMLAudioElement,
     voice: voiceEl as unknown as HTMLAudioElement,
+    makeAudio: () => {
+      const el = new FakeMedia(TRACK_S, engine, stall);
+      el.playhead = () => store.playheadMs.value;
+      lanes.push(el);
+      return el as unknown as HTMLAudioElement;
+    },
     extraLayers: () => [],
   });
   players.push(player);
   player.start();
   await run(0);
-  return { store, player, music: musicEl, voice: voiceEl };
+  return { store, player, music: musicEl, voice: voiceEl, lanes };
 }
 
 /** Turns the clock `ms` on, a display frame at a time, with everything that falls due on the way. */
@@ -601,6 +610,83 @@ afterEach(() => {
   Reflect.deleteProperty(navigator, 'audioSession');
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+describe('several audio lanes', () => {
+  const first = { ...LOOPED, id: 'first', uri: 'blob:capacitor://localhost/first', loop: false, outMs: 3000, endMs: 3000 };
+  const next = { ...LOOPED, id: 'next', uri: 'blob:capacitor://localhost/next', loop: false, inMs: 2000, outMs: 5000, startMs: 3000, endMs: 6000 };
+  const over = { ...LOOPED, id: 'over', uri: 'blob:capacitor://localhost/over', loop: false, outMs: 5000, startMs: 1000, endMs: 6000, volume: 0.5, fadeInMs: 1000, fadeOutMs: 1000 };
+  const tracks: EditAudioTrack[] = [{ id: 'lane-a', clips: [first, next] }, { id: 'lane-b', clips: [over] }];
+
+  // Two elements a lane, made in order: lane-a's pair, then lane-b's.
+  it('mixes lanes with legacy music, and hands a join to the element already holding the next file', async () => {
+    const r = await rig('chromium', LOOPED, { audioTracks: tracks });
+    expect(r.lanes).toHaveLength(4);
+    const [a, aNext, b, bSpare] = r.lanes;
+
+    await playFrom(r, 0);
+    await playTo(r, 1800);
+    expect(r.music.paused).toBe(false);
+    expect(a.src).toBe(first.uri);
+    expect(a.paused).toBe(false);
+    // Loaded and waiting, so the clip that follows straight on does not start with a cold load.
+    expect(aNext.src).toBe(next.uri);
+    expect(aNext.paused).toBe(true);
+    expect(b.src).toBe(over.uri);
+    expect(b.paused).toBe(false);
+    expect(b.volume).toBeGreaterThan(0.35);
+    expect(b.volume).toBeLessThan(0.5);
+    expect(bSpare.src).toBe('');
+    const loads = aNext.loads;
+
+    await playTo(r, 3400);
+    expect(aNext.src).toBe(next.uri);
+    expect(aNext.loads).toBe(loads);
+    expect(aNext.currentTime).toBeGreaterThan(2);
+    expect(aNext.paused).toBe(false);
+    expect(a.paused).toBe(true);
+    expect(b.src).toBe(over.uri);
+    expect(b.paused).toBe(false);
+    expect(r.music.paused).toBe(false);
+  });
+
+  it('has the next clip loaded through a gap, before it is due', async () => {
+    const later = { ...over, id: 'later', startMs: 2000, endMs: 5000 };
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [later] }] });
+    r.player.refreshAudio();
+    expect(r.lanes[0].src).toBe(later.uri);
+    expect(r.lanes[0].paused).toBe(true);
+  });
+
+  it('stops and releases a removed lane without stopping the other sounds', async () => {
+    const r = await rig('chromium', LOOPED, { audioTracks: tracks });
+    await playFrom(r, 0);
+    await playTo(r, 1800);
+    r.store.commit('Remove audio lane', manifest => ({ ...manifest, audioTracks: [tracks[0]] }));
+    r.player.refreshAudio();
+
+    for (const removed of r.lanes.slice(2)) {
+      expect(removed.paused).toBe(true);
+      expect(removed.src).toBe('');
+    }
+    expect(r.lanes[0].paused).toBe(false);
+    expect(r.music.paused).toBe(false);
+  });
+
+  it('restarts a later clip that uses the same file without reloading at the join', async () => {
+    const repeat = { ...next, uri: first.uri };
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [first, repeat] }] });
+    await playFrom(r, 0);
+    await playTo(r, 2500);
+    const [, held] = r.lanes;
+    const loads = held.loads;
+    expect(held.src).toBe(first.uri);
+
+    await playTo(r, 3400);
+    expect(held.loads).toBe(loads);
+    expect(held.currentTime).toBeGreaterThan(2);
+    expect(held.paused).toBe(false);
+  });
 });
 
 describe('the stand-in for a WebKit audio element', () => {

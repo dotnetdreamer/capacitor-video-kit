@@ -9,7 +9,9 @@ import {
   sourceMsAt,
   transitionWindowAt,
   type CompiledTransition,
+  type EditAudioClip,
   type EditClip,
+  type EditMusic,
   type TimelineSlot,
   type TransitionWindow,
 } from '../../editor';
@@ -341,6 +343,15 @@ const lastSlowSeekLeadsMs: Record<AudioPut, number> = { ...DEFAULT_SLOW_SEEK_LEA
 /** The same for a video element's start; see [DEFAULT_VIDEO_LEAD_MS]. */
 let lastVideoLeadMs = DEFAULT_VIDEO_LEAD_MS;
 
+/** One of an audio lane's two elements: the file on it, and the clip it holds that file for. */
+interface LaneSlot {
+  /** The element made for the lane. [element] is this or the mixer's stand-in for it. */
+  readonly own: HTMLAudioElement;
+  element: HTMLAudioElement;
+  uri: string | null;
+  clipId: string | null;
+}
+
 export interface PreviewMedia {
   /** The base track's first element. It starts as the clock. */
   video: ClipMedia;
@@ -348,6 +359,8 @@ export interface PreviewMedia {
   partner: ClipMedia;
   music: HTMLAudioElement;
   voice: HTMLAudioElement;
+  /** Creates a detached audio element for an audio lane, which takes two. */
+  makeAudio?: () => HTMLAudioElement;
   /**
    * Every video layer above the base one under the playhead, bottom to top. Read from the same
    * signal the component DRAWS from, so an element and the box it is placed in can never disagree
@@ -442,6 +455,13 @@ export class PreviewPlayer implements EditorPlayer {
    */
   private musicEl: HTMLAudioElement;
   private voiceEl: HTMLAudioElement;
+  /**
+   * Two elements per audio lane: one plays the clip heard now while the other holds the next clip's
+   * file open, so a clip that follows straight on starts warm. With one, every join between two
+   * files was a cold load, and the A13 lost the first 300 ms of the second sound to it.
+   */
+  private readonly audioLanes = new Map<string, readonly [LaneSlot, LaneSlot]>();
+  private readonly makeAudio: () => HTMLAudioElement;
   /** How the music and the voiceover are heard at their levels where the WebView ignores `volume`. */
   private readonly mixer: PreviewMixer;
   private readonly onSwap: (() => void) | undefined;
@@ -546,6 +566,7 @@ export class PreviewPlayer implements EditorPlayer {
     this.musicEl = media.music;
     this.voiceEl = media.voice;
     this.mixer = new PreviewMixer([media.music, media.voice]);
+    this.makeAudio = media.makeAudio ?? (() => document.createElement('audio'));
     this.onSwap = media.onSwap;
 
     for (const deck of this.decks) this.listenTo(deck);
@@ -633,6 +654,7 @@ export class PreviewPlayer implements EditorPlayer {
     const total = this.store.totalMs.value;
     if (!this.store.slots.value.length || total <= 0) return;
     // Before anything is started, and whatever is still loading: this is the tap.
+    this.ensureAudioLanes();
     this.startMixer();
     // Decided before the busy cases below. A scrub or fling that has just landed on the end is
     // usually still loading or seeking there, and playing on from where the element is going
@@ -858,6 +880,8 @@ export class PreviewPlayer implements EditorPlayer {
       applyPitch(this.video, slot.clip, clipsSilenced(this.store));
       this.applyVideoAudio(slot.clip);
     }
+    this.ensureAudioLanes();
+    if (this.isPlaying()) this.startMixer();
     this.syncAudio(this.store.playheadMs.value, this.isPlaying());
     this.syncFollower(this.isPlaying());
   }
@@ -957,11 +981,12 @@ export class PreviewPlayer implements EditorPlayer {
     for (const off of this.unlisten) off();
     this.mixer.release();
     // Both base elements are stripped, the spare too: it holds a decoder whatever it is doing.
-    for (const el of [...this.decks.map(deck => deck.video), this.musicEl, this.voiceEl]) {
+    for (const el of [...this.decks.map(deck => deck.video), this.musicEl, this.voiceEl, ...this.laneElements()]) {
       el.pause();
       el.removeAttribute('src');
       el.load();
     }
+    this.audioLanes.clear();
   }
 
   /* ========================================================================================= */
@@ -1654,7 +1679,7 @@ export class PreviewPlayer implements EditorPlayer {
    * clock's, not theirs, and learned as theirs it would put every later start in the wrong place.
    */
   private holdSound(): void {
-    for (const el of [this.musicEl, this.voiceEl]) {
+    for (const el of [this.musicEl, this.voiceEl, ...this.laneElements()]) {
       this.settling.delete(el);
       if (!el.paused) el.pause();
     }
@@ -1889,21 +1914,19 @@ export class PreviewPlayer implements EditorPlayer {
     const manifest = this.store.manifest.value;
     const total = this.store.totalMs.value;
     const live = playing && this.store.recordingFromMs.value === null;
+    this.ensureAudioLanes();
 
     const music = manifest.music;
     this.setSource('music', music?.uri ?? null);
     // Sound that is about to be due is started NOW, a stall before it is needed: the position it is
     // put at is still counted from the playhead, so what comes out starts exactly on time - and the
     // first moment of a track or a take is heard rather than swallowed by the output starting up.
-    const musicLead = music && live ? this.leadWindow(this.musicEl) : 0;
-    const heard = music ? musicWindow(music, total) : null;
-    const musicAt =
-      music && heard && live ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= musicLead ? music.inMs + musicPhaseMs(music) + ms - heard.startMs : null)) : null;
-    if (music && heard && musicAt !== null) {
-      // The render fades the track in and out; the preview follows along.
-      this.playAt(this.musicEl, musicAt, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running, musicSpan(music, heard.endMs - ms));
-    } else if (!this.musicEl.paused) {
-      this.musicEl.pause();
+    if (music) this.syncMusicClip(music, this.musicEl, ms, total, live, running);
+    else if (!this.musicEl.paused) this.musicEl.pause();
+
+    for (const track of manifest.audioTracks ?? []) {
+      const lane = this.audioLanes.get(track.id);
+      if (lane) this.syncLane(track.clips, lane, ms, total, live, running);
     }
 
     const voiceLead = live ? this.leadWindow(this.voiceEl) : 0;
@@ -1913,6 +1936,51 @@ export class PreviewPlayer implements EditorPlayer {
       this.playAt(this.voiceEl, ms - take.startMs, clamp(take.volume, 0, 1), running, takeSpan(take, ms));
     } else if (!this.voiceEl.paused) {
       this.voiceEl.pause();
+    }
+  }
+
+  /**
+   * One audio lane at `ms`. The clip heard now, or failing that the next one along, is on one of its
+   * elements - its file open through the gap before it, as the music's element always has its file -
+   * and the clip after that is loaded on the other. Each goes through [syncMusicClip], which holds a
+   * clip that is not due yet and starts one a stall before it is due; a lane's clips never overlap,
+   * so the two take turns, and neither ever has to cut the other off.
+   */
+  private syncLane(clips: readonly EditAudioClip[], lane: readonly [LaneSlot, LaneSlot], ms: number, total: number, live: boolean, running: boolean): void {
+    const audible = (clip: EditAudioClip): boolean => {
+      const window = musicWindow(clip, total);
+      return window.endMs > window.startMs;
+    };
+    // Sorted by start: the first one heard now or still to come.
+    const at = clips.findIndex(clip => musicSourceMsAt(clip, ms, total) !== null || (audible(clip) && musicWindow(clip, total).startMs > ms));
+    const due = at >= 0 ? clips[at] : undefined;
+    const after = due ? clips.slice(at + 1).find(audible) : undefined;
+    // An element keeps the clip it holds: the one readied for the next clip takes over at the join
+    // with its file already open, and the other is then free for the clip after that.
+    const playing = (due && lane.find(slot => slot.clipId === due.id)) || lane.find(slot => !after || slot.clipId !== after.id) || lane[0];
+    const spare = playing === lane[0] ? lane[1] : lane[0];
+    this.setLaneSource(playing, due);
+    this.setLaneSource(spare, after);
+    if (due) this.syncMusicClip(due, playing.element, ms, total, live, running);
+    else if (!playing.element.paused) playing.element.pause();
+    // The clip after it is started a stall early on its own element, from its beginning, as the music
+    // is: it is first heard on time instead of being put a lead's worth into itself at the join, and
+    // the clip before it plays on to its end untouched on the other element.
+    if (after) this.syncMusicClip(after, spare.element, ms, total, live, running);
+    else if (!spare.element.paused) spare.element.pause();
+  }
+
+  /** The same trim, phase, loop, level and fades for legacy music and every lane clip. */
+  private syncMusicClip(music: EditMusic, el: HTMLAudioElement, ms: number, total: number, live: boolean, running: boolean): void {
+    const heard = musicWindow(music, total);
+    const lead = live ? this.leadWindow(el) : 0;
+    const at = heard && live
+      ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= lead ? music.inMs + musicPhaseMs(music) + ms - heard.startMs : null))
+      : null;
+    if (heard && at !== null) {
+      this.playAt(el, at, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running, musicSpan(music, heard.endMs - ms));
+    } else if (!el.paused) {
+      el.pause();
     }
   }
 
@@ -2276,9 +2344,89 @@ export class PreviewPlayer implements EditorPlayer {
     el.load();
   }
 
+  /** Makes two elements per audio lane, and releases a lane once the edit no longer has it. */
+  private ensureAudioLanes(): void {
+    const wanted = new Set<string>();
+    const slot = (): LaneSlot => {
+      const own = this.makeAudio();
+      own.preload = 'auto';
+      this.mixer.add(own);
+      return { own, element: own, uri: null, clipId: null };
+    };
+    for (const track of this.store.manifest.value.audioTracks ?? []) {
+      wanted.add(track.id);
+      if (!this.audioLanes.has(track.id)) this.audioLanes.set(track.id, [slot(), slot()]);
+    }
+    for (const [id, lane] of this.audioLanes) {
+      if (wanted.has(id)) continue;
+      for (const { own, element } of lane) {
+        for (const el of new Set([own, element])) {
+          el.pause();
+          el.removeAttribute('src');
+          el.load();
+          this.forgetAudio(el);
+        }
+        this.mixer.remove(own);
+      }
+      this.audioLanes.delete(id);
+    }
+  }
+
+  /** Every audio lane's elements as they play now, stand-ins included. */
+  private laneElements(): HTMLAudioElement[] {
+    return [...this.audioLanes.values()].flatMap(lane => lane.map(slot => slot.element));
+  }
+
+  private setLaneSource(lane: LaneSlot, clip?: EditAudioClip): void {
+    const uri = clip?.uri ?? null;
+    const id = clip?.id ?? null;
+    if (lane.uri === uri && lane.clipId === id) return;
+    if (lane.uri === uri) {
+      // Two consecutive clips can use the same file. Their windows are still separate playback
+      // decisions, including when the first was already marked as finishing at its out point.
+      lane.element.pause();
+      this.settling.delete(lane.element);
+      this.audioFinishing.delete(lane.element);
+    } else {
+      lane.element = this.changeAudioSource(lane.own, lane.element, uri);
+    }
+    lane.uri = uri;
+    lane.clipId = id;
+  }
+
+  /** Chooses the routed element or its stand-in and forgets the old file's timing. */
+  private changeAudioSource(own: HTMLAudioElement, was: HTMLAudioElement, uri: string | null): HTMLAudioElement {
+    const url = uri ? this.store.host.platform.fileUrl(uri) : null;
+    const el = url ? this.mixer.elementFor(own, url) : own;
+    if (was !== el) {
+      was.pause();
+      was.removeAttribute('src');
+      was.load();
+    }
+    // What was known about the file each of them had is not true of the next one.
+    for (const changed of [was, el]) this.forgetAudio(changed);
+    el.pause();
+    if (url) {
+      el.src = url;
+    } else {
+      el.removeAttribute('src');
+    }
+    el.load();
+    return el;
+  }
+
+  private forgetAudio(el: HTMLAudioElement): void {
+    this.settling.delete(el);
+    this.audioLengths.delete(el);
+    this.audioPutAtMs.delete(el);
+    this.audioAtEnd.delete(el);
+    this.audioFinishing.delete(el);
+  }
+
   private pauseAudio(): void {
     if (!this.musicEl.paused) this.musicEl.pause();
     if (!this.voiceEl.paused) this.voiceEl.pause();
+    for (const el of this.laneElements()) if (!el.paused) el.pause();
   }
 
   /**
@@ -2291,7 +2439,7 @@ export class PreviewPlayer implements EditorPlayer {
   private startMixer(): void {
     if (volumeIsWritable() || this.store.recordingFromMs.value !== null) return;
     const manifest = this.store.manifest.value;
-    const uris = [manifest.music?.uri, ...manifest.voiceovers.map(take => take.uri)];
+    const uris = [manifest.music?.uri, ...manifest.voiceovers.map(take => take.uri), ...(manifest.audioTracks ?? []).flatMap(track => track.clips.map(clip => clip.uri))];
     const own = uris.every(uri => !uri || playableHere(this.store.host.platform.fileUrl(uri)));
     this.mixer.start(own && levelsInUse(manifest));
   }
