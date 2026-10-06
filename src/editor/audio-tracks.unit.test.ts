@@ -71,10 +71,7 @@ describe('independent audio lanes', () => {
     expect(withAudio.audioTracks?.map(track => track.clips.map(clip => clip.id))).toEqual([['legacy-music', 'b'], ['a']]);
     expect(addAudioClip(withLegacy, sound('a', 0), 'at-1')?.audioTracks?.[0]?.id).toBe('legacy-audio-track');
     expect(spec.audio.music).toBeNull();
-    expect(spec.audio.musicTracks?.map(track => track.map(clip => clip.uri))).toEqual([
-      ['file:///legacy.m4a', 'file:///b.m4a'],
-      ['file:///a.m4a'],
-    ]);
+    expect(spec.audio.musicTracks?.map(track => track.map(clip => clip.uri))).toEqual([['file:///legacy.m4a', 'file:///b.m4a'], ['file:///a.m4a']]);
     expect(spec.audio.musicTracks?.flat().filter(clip => clip.uri === 'file:///legacy.m4a')).toHaveLength(1);
     const old = await toComposeSpec(withLegacy, new Map([['video', 'file:///video.mp4']]), { jobId: 'j', batchId: 'b' }, {} as RasterContext);
     expect(old.audio).not.toHaveProperty('musicTracks');

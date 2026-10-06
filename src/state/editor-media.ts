@@ -1,5 +1,18 @@
 import { effect, signal, untracked } from '@preact/signals-core';
-import { MAX_LAYERS, MAX_VIDEO_TRACKS, MIN_LAYER_MS, MUSIC_FADE_MS, PICTURE_SOURCE_MS, audioTrackIdOfClip, defaultClipEdit, defaultPictureEdit, insertClip, musicWindow, replaceClipSource, uniqueClipKeys } from '../editor';
+import {
+  MAX_LAYERS,
+  MAX_VIDEO_TRACKS,
+  MIN_LAYER_MS,
+  MUSIC_FADE_MS,
+  PICTURE_SOURCE_MS,
+  audioTrackIdOfClip,
+  defaultClipEdit,
+  defaultPictureEdit,
+  insertClip,
+  musicWindow,
+  replaceClipSource,
+  uniqueClipKeys,
+} from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
@@ -719,9 +732,7 @@ export class EditorMedia {
     const target = selected ? audioTrackIdOfClip(this.store.manifest.value, selected.id) : null;
     const total = this.store.totalMs.value;
     const selectedEnd = anchor ? musicWindow(anchor, total).endMs : 0;
-    const at = anchor && selectedEnd + MIN_LAYER_MS <= total
-      ? selectedEnd
-      : Math.min(this.store.playheadMs.value, Math.max(0, total - Math.max(MIN_LAYER_MS, sourceDurationMs)));
+    const at = anchor && selectedEnd + MIN_LAYER_MS <= total ? selectedEnd : Math.min(this.store.playheadMs.value, Math.max(0, total - Math.max(MIN_LAYER_MS, sourceDurationMs)));
     const sound = {
       uri,
       fileName,

@@ -205,9 +205,7 @@ describe('EditorStore', () => {
     const id = store.addAudioClip({ ...MUSIC, uri: 'file:///new.mp3', sourceDurationMs: 2000, loop: false, startMs: 2000 });
     expect(id).toBeTruthy();
     expect(store.manifest.value.music).toBeNull();
-    expect(store.manifest.value.audioTracks?.map(track => track.clips.map(clip => clip.uri))).toEqual([
-      ['file:///m.mp3', 'file:///new.mp3'],
-    ]);
+    expect(store.manifest.value.audioTracks?.map(track => track.clips.map(clip => clip.uri))).toEqual([['file:///m.mp3', 'file:///new.mp3']]);
     expect(store.selectedAudio.value?.id).toBe(id);
 
     store.undo();

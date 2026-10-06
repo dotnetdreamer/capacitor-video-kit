@@ -199,12 +199,7 @@ export class VeSoundSheet {
     const confirming = this.confirmingId.value === sound.id;
     return (
       <li class="snd__row" key={sound.id}>
-        <button
-          type="button"
-          class="snd__play"
-          aria-pressed={String(playing)}
-          onClick={() => this.togglePreview(sound)}
-        >
+        <button type="button" class="snd__play" aria-pressed={String(playing)} onClick={() => this.togglePreview(sound)}>
           <ve-icon name={playing ? 'pause' : 'play'}></ve-icon>
           {/*
             The name is the button's own hidden text and NOT an `aria-label`. With `aria-pressed`
@@ -242,13 +237,7 @@ export class VeSoundSheet {
             Delete
           </button>
         ) : (
-          <button
-            type="button"
-            class="snd__bin"
-            key="bin"
-            aria-label={`Delete ${sound.fileName}`}
-            onClick={() => this.deleteSound(sound.id)}
-          >
+          <button type="button" class="snd__bin" key="bin" aria-label={`Delete ${sound.fileName}`} onClick={() => this.deleteSound(sound.id)}>
             <ve-icon name="trash-outline"></ve-icon>
           </button>
         )}
@@ -281,9 +270,7 @@ export class VeSoundSheet {
                   )}
                   <span class="snd__action-text">
                     <span class="snd__action-title">{extracting ? 'Taking the sound out…' : 'Extract from video'}</span>
-                    <span class="snd__action-hint">
-                      {extracting ? 'This can take a moment on a long video' : 'Pick a video and keep its sound'}
-                    </span>
+                    <span class="snd__action-hint">{extracting ? 'This can take a moment on a long video' : 'Pick a video and keep its sound'}</span>
                   </span>
                 </button>
 

@@ -404,7 +404,15 @@ describe('the preview on a WebView that ignores volume', () => {
   it('routes overlapping audio lanes beside legacy music, each at its own level', async () => {
     const laneA = { ...MUSIC, id: 'lane-a-clip', uri: 'capacitor://localhost/a.m4a', volume: 0.6, fadeOutMs: 1000 };
     const laneB = { ...MUSIC, id: 'lane-b-clip', uri: 'capacitor://localhost/b.m4a', volume: 0.3, fadeOutMs: 0 };
-    const r = await rig(post({ music: MUSIC, audioTracks: [{ id: 'lane-a', clips: [laneA] }, { id: 'lane-b', clips: [laneB] }] }));
+    const r = await rig(
+      post({
+        music: MUSIC,
+        audioTracks: [
+          { id: 'lane-a', clips: [laneA] },
+          { id: 'lane-b', clips: [laneB] },
+        ],
+      }),
+    );
     await playFrom(r, 3500);
 
     const [context] = FakeContext.made;

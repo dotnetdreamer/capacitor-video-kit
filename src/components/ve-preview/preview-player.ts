@@ -1974,9 +1974,10 @@ export class PreviewPlayer implements EditorPlayer {
   private syncMusicClip(music: EditMusic, el: HTMLAudioElement, ms: number, total: number, live: boolean, running: boolean): void {
     const heard = musicWindow(music, total);
     const lead = live ? this.leadWindow(el) : 0;
-    const at = heard && live
-      ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= lead ? music.inMs + musicPhaseMs(music) + ms - heard.startMs : null))
-      : null;
+    const at =
+      heard && live
+        ? (musicSourceMsAt(music, ms, total) ?? (ms < heard.startMs && heard.startMs - ms <= lead ? music.inMs + musicPhaseMs(music) + ms - heard.startMs : null))
+        : null;
     if (heard && at !== null) {
       this.playAt(el, at, clamp(music.volume, 0, 1) * musicFadeAt(music, ms, total), running, musicSpan(music, heard.endMs - ms));
     } else if (!el.paused) {

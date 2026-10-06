@@ -19,8 +19,7 @@ const sound = (name: string, startMs: number) => ({ uri: `file:///${name}.m4a`, 
 
 const add = (id: string, startMs: number, extra: Record<string, unknown> = {}): EditOp => ({ op: 'addAudio', id, sound: sound(id, startMs), ...extra });
 
-const lanesOf = (manifest: EditManifest): string[] =>
-  (manifest.audioTracks ?? []).map(track => `${track.id}: ${track.clips.map(clip => `${clip.id}@${clip.startMs}`).join(' ')}`);
+const lanesOf = (manifest: EditManifest): string[] => (manifest.audioTracks ?? []).map(track => `${track.id}: ${track.clips.map(clip => `${clip.id}@${clip.startMs}`).join(' ')}`);
 
 describe('the audio lane ops', () => {
   it('puts a following sound on the same lane and an overlapping one on a lane of its own', () => {

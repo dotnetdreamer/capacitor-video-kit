@@ -130,10 +130,7 @@ describe('ve-sound-sheet', () => {
 
   it('offers both doors, and says what each one does', async () => {
     const { sheet } = await mount();
-    expect(actions(sheet).map(button => text(button.querySelector('.snd__action-title')))).toEqual([
-      'Extract from video',
-      'From files',
-    ]);
+    expect(actions(sheet).map(button => text(button.querySelector('.snd__action-title')))).toEqual(['Extract from video', 'From files']);
   });
 
   it('puts a tapped sound on the post and closes itself', async () => {
@@ -236,9 +233,12 @@ describe('ve-sound-sheet', () => {
 
   it('greys both doors while an extraction is running', async () => {
     let finish = (_: SavedSound | null) => undefined as void;
-    const extract = vi.fn(() => new Promise<SavedSound | null>(resolve => {
-      finish = resolve;
-    }));
+    const extract = vi.fn(
+      () =>
+        new Promise<SavedSound | null>(resolve => {
+          finish = resolve;
+        }),
+    );
     const { sheet } = await mount(library({ extract }));
 
     actions(sheet)[0].click();

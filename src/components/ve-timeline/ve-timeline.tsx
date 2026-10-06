@@ -833,9 +833,14 @@ export class VeTimeline {
         }),
       }));
     },
-    (a, b) => sameList(a, b, (x, y) => x.id === y.id && sameList(x.clips, y.clips, (one, two) =>
-      one.id === two.id && one.x === two.x && one.w === two.w && one.label === two.label && one.selected === two.selected,
-    )),
+    (a, b) =>
+      sameList(
+        a,
+        b,
+        (x, y) =>
+          x.id === y.id &&
+          sameList(x.clips, y.clips, (one, two) => one.id === two.id && one.x === two.x && one.w === two.w && one.label === two.label && one.selected === two.selected),
+      ),
   );
 
   /** TikTok's "Add sound" bar runs the length of the video, but never shorter than its label. */
@@ -957,11 +962,12 @@ export class VeTimeline {
     const store = this.ctx.store;
     const win = this.renderWindow.value;
     const parts: (string | number)[] = [store.totalMs.value, store.pps.value, Math.round(this.pad.value), Math.round(win.left), Math.round(win.right)];
-    for (const track of tracks) for (const clip of track.clips) {
-      const wave = store.waveforms.value.get(clip.uri);
-      parts.push(clip.id, clip.uri, clip.inMs, clip.outMs, clip.phaseMs ?? 0, clip.startMs, clip.endMs, clip.loop ? 1 : 0, clip.sourceDurationMs);
-      parts.push(wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '');
-    }
+    for (const track of tracks)
+      for (const clip of track.clips) {
+        const wave = store.waveforms.value.get(clip.uri);
+        parts.push(clip.id, clip.uri, clip.inMs, clip.outMs, clip.phaseMs ?? 0, clip.startMs, clip.endMs, clip.loop ? 1 : 0, clip.sourceDurationMs);
+        parts.push(wave ? `${wave.peaks.length}/${wave.max}/${wave.durationMs}` : '');
+      }
     return parts.join('|');
   });
 
@@ -974,22 +980,23 @@ export class VeTimeline {
       const win = this.renderWindow.value;
       const totalMs = store.totalMs.value;
       const built = new Map<string, WaveView>();
-      for (const track of tracks) for (const clip of track.clips) {
-        const lane = lanes.get(clip.id);
-        const wave = store.waveforms.value.get(clip.uri);
-        if (!lane || !wave) continue;
-        const section = musicSectionMs(clip);
-        const { startMs, endMs } = musicWindow(clip, totalMs);
-        const heardMs = Math.max(0, endMs - startMs);
-        const repeats = clip.loop && section > 0;
-        const source: WaveSource = {
-          at: outputMs => musicSourceMsAt(clip, outputMs, totalMs),
-          endsAtMs: clip.inMs + (repeats ? (musicPhaseMs(clip) + heardMs) % section || section : musicPhaseMs(clip) + heardMs),
-          repeat: repeats ? { fromMs: clip.inMs, toMs: clip.inMs + section } : null,
-        };
-        const view = waveView({ wave, source, pps: store.pps.value, itemStartMs: startMs, itemX: lane.x, itemW: lane.w, winLeft: win.left, winRight: win.right });
-        if (view) built.set(clip.id, view);
-      }
+      for (const track of tracks)
+        for (const clip of track.clips) {
+          const lane = lanes.get(clip.id);
+          const wave = store.waveforms.value.get(clip.uri);
+          if (!lane || !wave) continue;
+          const section = musicSectionMs(clip);
+          const { startMs, endMs } = musicWindow(clip, totalMs);
+          const heardMs = Math.max(0, endMs - startMs);
+          const repeats = clip.loop && section > 0;
+          const source: WaveSource = {
+            at: outputMs => musicSourceMsAt(clip, outputMs, totalMs),
+            endsAtMs: clip.inMs + (repeats ? (musicPhaseMs(clip) + heardMs) % section || section : musicPhaseMs(clip) + heardMs),
+            repeat: repeats ? { fromMs: clip.inMs, toMs: clip.inMs + section } : null,
+          };
+          const view = waveView({ wave, source, pps: store.pps.value, itemStartMs: startMs, itemX: lane.x, itemW: lane.w, winLeft: win.left, winRight: win.right });
+          if (view) built.set(clip.id, view);
+        }
       return built.size ? built : EMPTY_WAVES;
     });
   });
@@ -3797,7 +3804,9 @@ export class VeTimeline {
               {this.waveSvg(waves.get(clip.id) ?? null)}
               <span class="item__label">
                 {laneGlyph('musical-note')}
-                <span class="item__text" key="text">{clip.label}</span>
+                <span class="item__text" key="text">
+                  {clip.label}
+                </span>
               </span>
             </div>,
             handles ? <span class="handle handle--in" key={`${clip.id}-in`} data-hit="audio-start" data-id={clip.id} style={{ left: `${handles.inX}px` }}></span> : null,
@@ -3976,14 +3985,7 @@ export class VeTimeline {
 
   private addButton() {
     return (
-      <button
-        type="button"
-        class="tl__add"
-        key="add"
-        aria-haspopup="menu"
-        aria-expanded={String(this.ctx.store.timelineAddMenuOpen.value)}
-        onClick={this.toggleAddMenu}
-      >
+      <button type="button" class="tl__add" key="add" aria-haspopup="menu" aria-expanded={String(this.ctx.store.timelineAddMenuOpen.value)} onClick={this.toggleAddMenu}>
         <ve-icon name="add"></ve-icon>
         {/*
           Named by its own words, not an `aria-label`: beside `aria-haspopup` a label is not the name

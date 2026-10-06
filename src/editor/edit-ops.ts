@@ -1511,7 +1511,14 @@ export function replaceAudioClip(manifest: EditManifest, id: string, file: Pick<
     outMs: 0,
     endMs: clip.endMs > 0 ? clip.endMs : next ? next.startMs : 0,
   };
-  if (!audioFits(replaced, lane.clips.filter(one => one.id !== id), totalDurationMs(manifest))) return null;
+  if (
+    !audioFits(
+      replaced,
+      lane.clips.filter(one => one.id !== id),
+      totalDurationMs(manifest),
+    )
+  )
+    return null;
   return {
     ...manifest,
     audioTracks: manifest.audioTracks!.map(track => (track === lane ? { ...track, clips: track.clips.map(one => (one.id === id ? replaced : one)) } : track)),

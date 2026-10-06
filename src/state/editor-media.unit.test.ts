@@ -459,7 +459,19 @@ describe('EditorMedia', () => {
 
     it("replaces an older edit's one sound in place, keeping its level and fades, as before there were lanes", async () => {
       open(fakeMedia({ pickAudio: vi.fn(async () => ({ uri: 'blob:other', fileName: 'other.m4a', sourceDurationMs: 4000 })) }));
-      store.setMusic({ uri: 'blob:legacy', fileName: 'legacy', sourceDurationMs: 2000, inMs: 0, outMs: 0, startMs: 0, endMs: 0, volume: 0.25, loop: true, fadeInMs: 300, fadeOutMs: 900 });
+      store.setMusic({
+        uri: 'blob:legacy',
+        fileName: 'legacy',
+        sourceDurationMs: 2000,
+        inMs: 0,
+        outMs: 0,
+        startMs: 0,
+        endMs: 0,
+        volume: 0.25,
+        loop: true,
+        fadeInMs: 300,
+        fadeOutMs: 900,
+      });
 
       media.openSound({ kind: 'music' });
       await vi.waitFor(() => expect(store.manifest.value.music?.uri).toBe('blob:other'));

@@ -615,8 +615,22 @@ afterEach(() => {
 describe('several audio lanes', () => {
   const first = { ...LOOPED, id: 'first', uri: 'blob:capacitor://localhost/first', loop: false, outMs: 3000, endMs: 3000 };
   const next = { ...LOOPED, id: 'next', uri: 'blob:capacitor://localhost/next', loop: false, inMs: 2000, outMs: 5000, startMs: 3000, endMs: 6000 };
-  const over = { ...LOOPED, id: 'over', uri: 'blob:capacitor://localhost/over', loop: false, outMs: 5000, startMs: 1000, endMs: 6000, volume: 0.5, fadeInMs: 1000, fadeOutMs: 1000 };
-  const tracks: EditAudioTrack[] = [{ id: 'lane-a', clips: [first, next] }, { id: 'lane-b', clips: [over] }];
+  const over = {
+    ...LOOPED,
+    id: 'over',
+    uri: 'blob:capacitor://localhost/over',
+    loop: false,
+    outMs: 5000,
+    startMs: 1000,
+    endMs: 6000,
+    volume: 0.5,
+    fadeInMs: 1000,
+    fadeOutMs: 1000,
+  };
+  const tracks: EditAudioTrack[] = [
+    { id: 'lane-a', clips: [first, next] },
+    { id: 'lane-b', clips: [over] },
+  ];
 
   // Two elements a lane, made in order: lane-a's pair, then lane-b's.
   it('mixes lanes with legacy music, and hands a join to the element already holding the next file', async () => {
