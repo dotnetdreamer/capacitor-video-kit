@@ -75,7 +75,9 @@ object Thumbnailer {
      * a repeated tile reads as a still moment; one with a missing tile reads as a bug.
      *
      * @param precise cuts the frame at each time rather than the nearest keyframe; see [frameOption]
-     *   for what that costs and why it is the caller's decision.
+     *   for what that costs and why it is the caller's decision. Cut from the clip's preview copy
+     *   when there is one big enough ([PreviewProxy.copyFor]), where it costs about what a keyframe
+     *   of the clip does.
      */
     fun thumbnails(
         ctx: Context,
@@ -99,17 +101,25 @@ object Thumbnailer {
             // because [writeJpeg] writes straight to the final name, and the lock is what keeps a
             // reader from taking a tile that is still being written.
             if (allCached(files)) return@synchronized files.map { Uri.fromFile(it).toString() }
-            val retriever = MediaMetadataRetriever()
+            // Asked for keyframes, and holding the exact frames at the same times - cut from the
+            // clip's preview copy last time the editor had it open: the same moments, each one right.
+            // The editor asks again exactly once that copy is back, and finds these same files then.
+            if (!precise) {
+                val exact = timesMs.map { File(cacheDir, cacheName(sourceKey, it, height, precise = true)) }
+                if (allCached(exact)) return@synchronized exact.map { Uri.fromFile(it).toString() }
+            }
+            var retriever: MediaMetadataRetriever? = null
             val out = ArrayList<String?>(timesMs.size)
             try {
-                retriever.open(ctx, uri)
+                val frames = openFrames(ctx, uri, if (precise) PreviewProxy.copyFor(uri, height) else null)
+                retriever = frames
                 for ((i, timeMs) in timesMs.withIndex()) {
                     val file = files[i]
                     if (cached(file)) {
                         out += Uri.fromFile(file).toString()
                         continue
                     }
-                    val frame = frameAt(retriever, timeMs, height, precise)
+                    val frame = frameAt(frames, timeMs, height, precise)
                     if (frame == null) {
                         out += null
                         continue
@@ -127,7 +137,7 @@ object Thumbnailer {
             } catch (e: Exception) {
                 Log.w(TAG, "thumbnails failed for $uri: ${e.message}")
             } finally {
-                retriever.closeQuietly()
+                retriever?.closeQuietly()
             }
             // The contract promises one URI per requested time, in order. If opening the source
             // threw part-way through, the tail is still owed - as placeholders rather than a short
@@ -135,6 +145,25 @@ object Thumbnailer {
             while (out.size < timesMs.size) out += null
             fillGaps(out, cacheDir)
         }
+    }
+
+    /**
+     * A retriever open on what a strip is cut from: the clip's preview copy when one was found to cut
+     * exact frames from, the clip itself otherwise - and when the copy will not open, which costs
+     * those frames their speed and nothing else. Throws only when the clip will not open either.
+     */
+    private fun openFrames(ctx: Context, uri: String, copy: File?): MediaMetadataRetriever {
+        if (copy != null) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(copy.absolutePath)
+                return retriever
+            } catch (e: Exception) {
+                retriever.closeQuietly()
+                Log.w(TAG, "preview copy ${copy.name} would not open; cutting from the clip: ${e.message}")
+            }
+        }
+        return openRetriever(ctx, uri)
     }
 
     private fun frameAt(

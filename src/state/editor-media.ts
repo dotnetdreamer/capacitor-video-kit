@@ -28,15 +28,25 @@ const FILMSTRIP_STEP_MS = 1000;
 const FILMSTRIP_MAX_FRAMES = 60;
 const FILMSTRIP_MAX_HEIGHT = 160;
 /**
- * The most tiles a filmstrip may be cut on exact frames rather than on keyframes.
+ * The most tiles a filmstrip may be cut on exact frames rather than on keyframes, while the clip has
+ * no preview copy to cut them from.
  *
  * The cost of an exact frame is per TILE, not per second of clip: the seek decodes every frame from
  * the keyframe before the time asked for, and on the Redmi Note 7 that measures 390-460 ms a tile
  * against 140 ms for a keyframe seek, whatever the clip's length. Six of them is the couple of
  * seconds a customer will wait for the first strip to appear, and at one tile per second they are
  * the short clips where two neighbouring tiles of the same picture are most of the strip. A longer
- * clip keeps keyframe seeks, where a repeat reads as a still moment anyway and five extra seconds
- * of decoding - per clip, with the preview wanting the same decoder - would be felt.
+ * clip starts on keyframe seeks, and five extra seconds of decoding - per clip, with the preview
+ * wanting the same decoder - would be felt.
+ *
+ * But a keyframe seek lands on the keyframe NEAREST the time, which is as often after it as before:
+ * a phone keys every one to four seconds, so a tile can show a moment seconds from its own, and in
+ * footage cut together - a film, a music video, where an encoder keys at every shot change - the
+ * nearest keyframe is the next shot, which the strip then shows a tile or two before the preview
+ * reaches it. So a clip with a preview copy ([EditorMediaHost.previewProxy]) is cut exactly however
+ * long it is: the host cuts those frames from the copy, which is small and keyed every half second,
+ * where an exact frame costs about what a keyframe of the clip does. A strip cut on keyframes before
+ * its copy was made is cut again once the copy lands (see [EditorMedia.refineFilmstrip]).
  *
  * Only the first cut of a clip pays either way, where the host caches its frames.
  */
@@ -104,6 +114,8 @@ export class EditorMedia {
   /** Filmstrips are cut one clip at a time: each batch holds a hardware decoder the preview needs. */
   private filmstripQueue: Promise<void> = Promise.resolve();
   private readonly filmstripsPending = new Map<string, Promise<void>>();
+  /** The clips whose strip in the store was cut on exact frames; see [refineFilmstrip]. */
+  private readonly exactStrips = new Set<string>();
   /** Waveforms too, and for the same reason: decoding a track is a decoder the preview wants back. */
   private waveformQueue: Promise<void> = Promise.resolve();
   private readonly waveformsPending = new Map<string, Promise<void>>();
@@ -226,7 +238,10 @@ export class EditorMedia {
         })
         .then(url => {
           if (this.destroyed) return;
-          if (url) this.store.previewUrls.value = new Map(this.store.previewUrls.peek()).set(source.key, url);
+          if (url) {
+            this.store.previewUrls.value = new Map(this.store.previewUrls.peek()).set(source.key, url);
+            this.refineFilmstrip(source);
+          }
           this.copiesAnswered.value = new Set(this.copiesAnswered.peek()).add(source.key);
         });
     }
@@ -362,6 +377,27 @@ export class EditorMedia {
     this.filmstripsPending.set(source.key, job);
     this.filmstripQueue = job;
     return job;
+  }
+
+  /**
+   * Cuts a clip's filmstrip again on exact frames now that its preview copy has landed, when the
+   * strip it has was cut on keyframes - see [PRECISE_FILMSTRIP_MAX_FRAMES] for why that strip shows
+   * shots before the preview reaches them, and why the copy is what makes exact frames affordable.
+   *
+   * Queued behind the strips being cut, like any other. Only a clip that HAS a strip is cut again:
+   * one still waiting for its first cut finds the copy there when its turn comes, and is cut exactly
+   * the first time. The strip it replaces stays up until the exact one is ready, and stays for good
+   * if the host cannot give one.
+   */
+  private refineFilmstrip(source: EditorSource): void {
+    this.filmstripQueue = this.filmstripQueue
+      .then(() => {
+        if (this.destroyed || this.exactStrips.has(source.key) || !this.store.filmstrips.peek().has(source.key)) return;
+        return this.cutFilmstrip(source);
+      })
+      .catch((error: unknown) => {
+        debugWarn('[EditorMedia] exact filmstrip failed', source.key, error);
+      });
   }
 
   /**
@@ -860,30 +896,27 @@ export class EditorMedia {
     const stepMs = durationMs > FILMSTRIP_STEP_MS * FILMSTRIP_MAX_FRAMES ? Math.ceil(durationMs / FILMSTRIP_MAX_FRAMES) : FILMSTRIP_STEP_MS;
     const count = Math.max(1, Math.min(FILMSTRIP_MAX_FRAMES, Math.ceil(durationMs / stepMs)));
     const timesMs = Array.from({ length: count }, (_, i) => i * stepMs);
+    // Exact while the strip is short, and at any length once the clip's preview copy is there to cut
+    // the frames from: see [PRECISE_FILMSTRIP_MAX_FRAMES] for both.
+    const precise = durationMs > 0 && (count <= PRECISE_FILMSTRIP_MAX_FRAMES || this.store.previewUrls.peek().has(source.key));
 
     let strip: Filmstrip | null = null;
     try {
-      const urls = await this.host.media.thumbnails({
-        source,
-        timesMs,
-        maxHeight: FILMSTRIP_MAX_HEIGHT,
-        // A keyframe seek is one decode, but a camera writes a keyframe only every second or two,
-        // so a strip at one frame per second shows several tiles of the same picture. A precise
-        // seek decodes forward from the keyframe before the time asked for, which costs roughly
-        // three keyframe seeks per tile - worth it while the strip is short enough to appear
-        // promptly, and paid once where the host caches the frames.
-        precise: durationMs > 0 && count <= PRECISE_FILMSTRIP_MAX_FRAMES,
-      });
+      const urls = await this.host.media.thumbnails({ source, timesMs, maxHeight: FILMSTRIP_MAX_HEIGHT, precise });
       if (urls.length > 0) strip = { stepMs, urls: [...urls] };
     } catch (error) {
       debugWarn('[EditorMedia] thumbnails failed', source.key, error);
     }
-    if (!strip && source.thumbnailUrl) {
+    // Only for a clip with no strip at all: a keyframe strip the exact cut could not replace is a
+    // better picture of the clip than one frame of it.
+    if (!strip && source.thumbnailUrl && !this.store.filmstrips.peek().has(source.key)) {
       // One frame standing for the whole clip: a step as long as the clip puts every tile on it.
       strip = {
         stepMs: Math.max(FILMSTRIP_STEP_MS, durationMs),
         urls: [this.host.platform.fileUrl(source.thumbnailUrl)],
       };
+    } else if (strip && precise) {
+      this.exactStrips.add(source.key);
     }
     if (!strip || this.destroyed) return;
 

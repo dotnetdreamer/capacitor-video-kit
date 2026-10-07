@@ -242,8 +242,10 @@ export interface EditorMediaHost {
    * The preview seeks at every cut, and a seek decodes from the keyframe before it; phone footage at
    * 1080p and above, keyed every few seconds, seeks for seconds on a phone that is not new. A small,
    * densely keyed copy seeks at once. Only the preview ever plays it - the source keeps its own
-   * `playbackUrl` and `sourcePath`, and every render, filmstrip and waveform still reads those - so
-   * the copy's quality is a preview's, and nothing a customer posts is made from it.
+   * `playbackUrl` and `sourcePath`, and every render and waveform still reads those - so the copy's
+   * quality is a preview's, and nothing a customer posts is made from it. A host that makes copies
+   * cuts a `precise` filmstrip from one where it has it (see [ThumbnailRequest.precise]): the editor
+   * asks for exact frames on any clip once its copy is made.
    *
    * Resolves when the copy exists, which may be seconds; the preview plays the source itself until
    * then. Never rejects on purpose: a copy that could not be made is null, and the source plays.
@@ -379,8 +381,11 @@ export interface ThumbnailRequest {
   timesMs: readonly number[];
   maxHeight: number;
   /**
-   * True asks for the exact frame rather than the keyframe before it. Costs roughly three keyframe
-   * seeks per tile, and the editor only asks for it on short clips.
+   * True asks for the exact frame rather than the keyframe nearest it. From the clip itself that
+   * costs roughly three keyframe seeks per tile, so the editor asks for it on short clips - and on
+   * any clip once [EditorMediaHost.previewProxy] has made its copy, which a host that makes copies
+   * cuts exact frames from: small and densely keyed, it decodes one for about what a keyframe of the
+   * clip costs. Frames as tall as the copy or taller still come from the clip.
    */
   precise: boolean;
 }

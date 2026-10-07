@@ -206,10 +206,24 @@ export function durationChip(ms: number): string {
   return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
 }
 
-/** The filmstrip frame nearest a source time, or null while that clip's frames are still being cut. */
+/** The filmstrip frame at or before a source time, or null while that clip's frames are still being cut. */
 export function frameUrl(strip: Filmstrip | undefined, sourceMs: number): string | null {
   if (!strip || strip.stepMs <= 0 || !strip.urls.length) return null;
   const index = clamp(Math.floor(sourceMs / strip.stepMs), 0, strip.urls.length - 1);
+  return strip.urls[index] || null;
+}
+
+/**
+ * The filmstrip frame NEAREST a source time, or null while that clip's frames are still being cut.
+ * What a tile shows (see [segmentTiles]); [frameUrl] is for a picture that must not come from past
+ * the time it is asked at, such as the last frame before a cut.
+ *
+ * Exactly halfway between two frames is the earlier one: a tile as long as the step has its middle
+ * there, and of its two frames only the earlier is inside it - the later one opens the next tile.
+ */
+export function nearestFrameUrl(strip: Filmstrip | undefined, sourceMs: number): string | null {
+  if (!strip || strip.stepMs <= 0 || !strip.urls.length) return null;
+  const index = clamp(Math.ceil(sourceMs / strip.stepMs - 0.5), 0, strip.urls.length - 1);
   return strip.urls[index] || null;
 }
 
@@ -228,6 +242,13 @@ export interface FilmTile {
  * same stretch of the clip, and a trim only slides the segment's edge over it. That is what keeps
  * the pictures still under a trim handle instead of re-sampling on every frame of the drag. It also
  * keys cleanly: scrolling adds and removes tiles at the ends without re-keying the ones in between.
+ *
+ * Each tile shows the frame nearest the MIDDLE of its stretch, held inside the part of the clip the
+ * trim leaves. It used to show the frame at or before its START, and the strip's frames are a second
+ * apart while a tile is rarely a second long (56 px at 64 px a second is 875 ms), so a tile showed a
+ * moment from up to a second before it began: every cut in the footage appeared in the strip a tile
+ * late, beside a preview already showing the next shot. Nearest the middle, a tile shows the shot
+ * that fills most of it.
  */
 export function segmentTiles(args: {
   inMs: number;
@@ -257,8 +278,8 @@ export function segmentTiles(args: {
 
   const tiles: FilmTile[] = [];
   for (let k = fromK; k <= toK; k++) {
-    const sourceMs = Math.max(inMs, k * tileSourceMs);
-    tiles.push({ key: k, x: k * tileW - inPx, url: frameUrl(strip, sourceMs) });
+    const middleMs = clamp((k + 0.5) * tileSourceMs, inMs, outMs);
+    tiles.push({ key: k, x: k * tileW - inPx, url: nearestFrameUrl(strip, middleMs) });
   }
   return tiles;
 }
@@ -311,12 +332,7 @@ export interface SnapPost {
  * The nearest snap for a set of moving edges: which target is within `thresholdPx` of which edge,
  * and how far (ms) the edges have to shift to meet it. Null when nothing is close enough.
  */
-export function nearestSnap(
-  edges: readonly number[],
-  targets: readonly number[],
-  pps: number,
-  thresholdPx = SNAP_PX,
-): { shiftMs: number; target: number } | null {
+export function nearestSnap(edges: readonly number[], targets: readonly number[], pps: number, thresholdPx = SNAP_PX): { shiftMs: number; target: number } | null {
   let best: { shiftMs: number; target: number } | null = null;
   let bestPx = Infinity;
   for (const edge of edges) {
@@ -358,11 +374,7 @@ export interface ZoomBarGeometry {
  * The bar is floored at [MIN_ITEM_PX] like every item on the timeline, and the ramps are scaled down
  * with it so the two of them never draw past each other.
  */
-export function zoomBar(
-  slot: { startMs: number; endMs: number; rampInMs: number; rampOutMs: number },
-  pps: number,
-  pad: number,
-): ZoomBarGeometry {
+export function zoomBar(slot: { startMs: number; endMs: number; rampInMs: number; rampOutMs: number }, pps: number, pad: number): ZoomBarGeometry {
   const x = pad + (slot.startMs / 1000) * pps;
   const drawn = ((slot.endMs - slot.startMs) / 1000) * pps;
   const w = Math.max(MIN_ITEM_PX, drawn);

@@ -2,7 +2,7 @@ import { MAX_LAYERS, MAX_VIDEO_TRACKS, PICTURE_CLIP_MS, PICTURE_SOURCE_MS, empty
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
-import type { EditorMediaHost, EditorSoundLibrary, EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
+import type { EditorMediaHost, EditorSoundLibrary, EditorSource, ResolvedEditorHost, SavedSound, ThumbnailRequest } from '../host/host.types';
 import type { Peaks, extractPeaks } from '../web-runtime/waveform';
 import { EditorMedia, type PictureReader } from './editor-media';
 import { EditorStore } from './editor-store';
@@ -845,6 +845,75 @@ describe('EditorMedia', () => {
 
       expect(copies.asked).toEqual(['a', 'b']);
       expect(store.previewUrls.value.size).toBe(0);
+    });
+
+    describe('filmstrips', () => {
+      /** Lets a strip queued behind a copy's arrival be cut. */
+      const settle = () => new Promise(done => setTimeout(done, 0));
+
+      /**
+       * A host whose exact frames and keyframes are told apart by name, so a test can see which strip
+       * is up. A clip of nine seconds is nine tiles, more than are cut exactly from the clip itself.
+       */
+      function longClip(exact: (request: ThumbnailRequest) => Promise<string[]> = async () => ['exact-0', 'exact-1']) {
+        const copies = copyingMedia();
+        const thumbnails = vi.fn(async (request: ThumbnailRequest) => (request.precise ? exact(request) : ['key-0', 'key-1']));
+        open({ ...copies.host, thumbnails });
+        store.durations.value = new Map(store.durations.value).set('a', 9000);
+        return { ...copies, thumbnails };
+      }
+
+      it('cuts a long clip on keyframes first, and on exact frames once its copy lands', async () => {
+        const { answer, thumbnails } = longClip();
+        await media.loadFilmstrip(sources[0]);
+        expect(thumbnails).toHaveBeenCalledTimes(1);
+        expect(thumbnails.mock.calls[0][0].precise).toBe(false);
+        expect(store.filmstrips.value.get('a')?.urls).toEqual(['key-0', 'key-1']);
+
+        await answer('a', 'file:///copy-a.mp4');
+        await vi.waitFor(() => expect(store.filmstrips.value.get('a')?.urls).toEqual(['exact-0', 'exact-1']));
+        expect(thumbnails).toHaveBeenCalledTimes(2);
+        expect(thumbnails.mock.calls[1][0]).toMatchObject({ precise: true, timesMs: [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000] });
+      });
+
+      it('cuts exact frames the first time when the copy is already there', async () => {
+        const { answer, thumbnails } = longClip();
+        await answer('a', 'file:///copy-a.mp4');
+        await media.loadFilmstrip(sources[0]);
+        await settle();
+
+        expect(thumbnails).toHaveBeenCalledTimes(1);
+        expect(thumbnails.mock.calls[0][0].precise).toBe(true);
+        expect(store.filmstrips.value.get('a')?.urls).toEqual(['exact-0', 'exact-1']);
+      });
+
+      it('does not cut again a strip that was exact already, nor one whose clip got no copy', async () => {
+        const copies = copyingMedia();
+        open(copies.host);
+        // Four seconds: a short strip, cut exactly from the clip.
+        await media.loadFilmstrip(sources[0]);
+        await media.loadFilmstrip(sources[1]);
+        await copies.answer('a', 'file:///copy-a.mp4');
+        await copies.answer('b', null);
+        await settle();
+
+        expect(host.media.thumbnails).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps the keyframe strip, rather than the poster, when the exact cut fails', async () => {
+        const { answer, thumbnails } = longClip(async () => {
+          throw new Error('no decoder');
+        });
+        const poster: EditorSource = { key: 'c', fileName: 'c.mp4', thumbnailUrl: 'file:///poster.jpg' };
+        store.durations.value = new Map(store.durations.value).set('c', 9000);
+        store.clips.value = [...store.clips.value, poster];
+        await media.loadFilmstrip(poster);
+
+        await answer('c', 'file:///copy-c.mp4');
+        await vi.waitFor(() => expect(thumbnails).toHaveBeenCalledTimes(2));
+        await settle();
+        expect(store.filmstrips.value.get('c')?.urls).toEqual(['key-0', 'key-1']);
+      });
     });
 
     describe('whenCopied', () => {

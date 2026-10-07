@@ -139,6 +139,12 @@ object PreviewProxy {
     /** Those of [pending] that [dropAllBut] dropped and nobody has asked for since. Guarded by [inFlight]. */
     private val dropped = HashSet<String>()
 
+    /**
+     * The copy each clip has had in this run of the app, by the uri [make] was given, as [make]
+     * answered it: what [copyFor] hands the filmstrip. Guarded by itself.
+     */
+    private val made = HashMap<String, Result>()
+
     /** The export being made right now, so a render can stop it; see [yieldToRender]. */
     private class Running(val main: Handler, val name: String) {
         val done = CompletableDeferred<ExportResult>()
@@ -206,7 +212,7 @@ object PreviewProxy {
         val folder = File(app.cacheDir, FOLDER).apply { mkdirs() }
         val file = File(folder, "$name.mp4")
 
-        cached(file)?.let { return it }
+        cached(file)?.let { return remember(uri, it) }
 
         val (deferred, owner) = synchronized(inFlight) {
             val running = inFlight[name]
@@ -227,7 +233,7 @@ object PreviewProxy {
                 cached(file) ?: if (isDropped(name)) throw DroppedException() else makeBetweenRenders(app, uri, file, side, fpsCap, name)
             }
             deferred.complete(result)
-            return result
+            return remember(uri, result)
         } catch (e: Throwable) {
             deferred.completeExceptionally(e)
             throw e
@@ -239,6 +245,37 @@ object PreviewProxy {
             }
         }
     }
+
+    private fun remember(uri: String, copy: Result): Result {
+        synchronized(made) { made[uri] = copy }
+        return copy
+    }
+
+    /**
+     * The copy of `uri` [make] answered in this run of the app, when it is big enough to cut a frame
+     * `maxHeight` tall from, or null.
+     *
+     * For the filmstrip's EXACT frames ([Thumbnailer.thumbnails]). The copy is the clip on the same
+     * timeline, keyed every [KEY_FRAME_INTERVAL_S], so an exact frame of it decodes from a keyframe at
+     * most half a second back, at a quarter of the pixels: about what a keyframe of the clip costs.
+     * From the clip itself, keyed every few seconds, each one decodes seconds of full-size footage,
+     * which is why a long strip was cut on keyframes - and a keyframe is the one NEAREST the time,
+     * seconds from it either way. A frame the copy is too small for - a still for a post - is still
+     * cut from the clip.
+     */
+    fun copyFor(uri: String, maxHeight: Int): File? {
+        val copy = synchronized(made) { made[uri] } ?: return null
+        if (!bigEnough(copy.width, copy.height, maxHeight)) return null
+        val file = Uri.parse(copy.uri).path?.let(::File) ?: return null
+        return if (file.isFile && file.length() > 0L) file else null
+    }
+
+    /**
+     * Whether a copy `width` x `height`, as shown, fills the box a thumbnail `maxHeight` tall is fitted
+     * into - [Thumbnailer]'s, twice as wide as it is tall - without being scaled up.
+     */
+    internal fun bigEnough(width: Int, height: Int, maxHeight: Int): Boolean =
+        width >= maxHeight * 2 || height >= maxHeight
 
     /** [transcode], started only while no render runs, and started again if one stops it. */
     private suspend fun makeBetweenRenders(ctx: Context, uri: String, target: File, shortSide: Int, maxFps: Int, name: String): Result {

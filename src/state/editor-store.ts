@@ -283,11 +283,12 @@ export class EditorStore {
    * place - the same footage on the same timeline, small and densely keyed, so a cut's seek lands at
    * once rather than decoding seconds of full-size footage. See [EditorMediaHost.previewProxy].
    *
-   * Filled in by `EditorMedia` as the host's copies land, and read by the preview alone (see
+   * Filled in by `EditorMedia` as the host's copies land, and played by the preview alone (see
    * `previewSrc`), so no render, draft or result ever carries one: the source objects are not
-   * touched. No entry is "play the source itself" - every source until its copy is ready, and every
-   * source on a host that makes none. Not reset by [load], which the template studio calls again for
-   * every template over the same clips.
+   * touched. `EditorMedia` reads it too, to cut a clip's filmstrip on exact frames once it has a copy
+   * (see [ThumbnailRequest.precise]). No entry is "play the source itself" - every source until its
+   * copy is ready, and every source on a host that makes none. Not reset by [load], which the
+   * template studio calls again for every template over the same clips.
    */
   readonly previewUrls = signal<ReadonlyMap<string, string>>(new Map());
   /**

@@ -13,6 +13,7 @@ import {
   durationChip,
   dropTargetAt,
   frameUrl,
+  nearestFrameUrl,
   nearestSnap,
   snapTargets,
   rulerLabel,
@@ -71,29 +72,53 @@ describe('segmentTiles', () => {
 
   it('keeps the first tile even when the trim cuts most of it away', () => {
     // 1900 ms in is nearly two whole tiles, but tile 1 still covers source second 1, so it is drawn
-    // at a negative x with only its last tenth showing rather than being dropped and re-keyed.
+    // at a negative x with only its last tenth showing rather than being dropped and re-keyed. Its
+    // picture comes from what the trim left - the frame nearest the in-point - not from the 900 ms
+    // before it that no longer plays.
     const tiles = tilesOf({ inMs: 1900 });
-    expect(tiles[0]).toEqual({ key: 1, x: -45, url: 'f1' });
+    expect(tiles[0]).toEqual({ key: 1, x: -45, url: 'f2' });
   });
 
   it('draws only the tiles the window asks for, plus one of slack at each end', () => {
     // The window is 100..140, which strictly needs tile 2 alone. The slack is what stops a tile
     // popping in at the edge of the screen on every frame of a scroll.
-    expect(tilesOf({ winLeft: 100, winRight: 140 }).map((t) => t.key)).toEqual([1, 2, 3]);
+    expect(tilesOf({ winLeft: 100, winRight: 140 }).map(t => t.key)).toEqual([1, 2, 3]);
   });
 
   it('measures the window against the segment, not the content', () => {
     // The same window over a segment that starts 100 px further right picks the tiles 100 px
     // earlier in the clip.
-    expect(tilesOf({ segX: 100, winLeft: 200, winRight: 240 }).map((t) => t.key)).toEqual([1, 2, 3]);
+    expect(tilesOf({ segX: 100, winLeft: 200, winRight: 240 }).map(t => t.key)).toEqual([1, 2, 3]);
   });
 
   it('covers more source per tile as the clip is sped up', () => {
-    // Four seconds of source at 2x is two seconds of output: two tiles, sampled two seconds apart.
+    // Four seconds of source at 2x is two seconds of output: two tiles, each two seconds of source,
+    // each showing the frame from the middle of its two.
     expect(tilesOf({ speed: 2 })).toEqual([
-      { key: 0, x: 0, url: 'f0' },
-      { key: 1, x: 50, url: 'f2' },
+      { key: 0, x: 0, url: 'f1' },
+      { key: 1, x: 50, url: 'f3' },
     ]);
+  });
+
+  it('shows each tile the frame nearest its middle when tiles and frames do not line up', () => {
+    // The editor's own zoom: 56 px tiles at 64 px a second are 875 ms each, over a strip cut a second
+    // apart - an 8 s clip as it was on the A13. Taking the frame at or before each tile's start gave
+    // f0 f0 f1 f2 f3 f4 f5 f6 f7 f7: every tile a moment from up to a second before it began, so a
+    // shot change at 3.5 s first showed in the tile starting at 4.375 s, while the preview had been
+    // on the new shot for most of a second.
+    const strip: Filmstrip = { stepMs: 1000, urls: ['f0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8'] };
+    const tiles = tilesOf({ outMs: 8021, pps: 64, tileW: 56, strip, winLeft: -1000, winRight: 2000 });
+    expect(tiles.map(t => t.url)).toEqual(['f0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f7', 'f8']);
+    // 2.625-3.5 s shows the old shot and 3.5-4.375 s the new one: the cut lands on the tile edge
+    // nearest it.
+    expect(tiles[3]).toEqual({ key: 3, x: 168, url: 'f3' });
+    expect(tiles[4]).toEqual({ key: 4, x: 224, url: 'f4' });
+  });
+
+  it('shows the closing tile a frame from what the trim leaves of it', () => {
+    // At 2x a tile is two seconds of source. The clip stops 0.4 s into its second tile, whose middle
+    // (source 3 s) no longer plays, so that tile takes the frame nearest the out-point, not f3.
+    expect(tilesOf({ speed: 2, outMs: 2400 }).map(t => t.url)).toEqual(['f1', 'f2']);
   });
 
   it('treats a speed of zero as 1x', () => {
@@ -113,7 +138,7 @@ describe('segmentTiles', () => {
 
   it('holds the last frame it has rather than dropping the tail of the strip', () => {
     const short: Filmstrip = { stepMs: 1000, urls: ['f0', 'f1'] };
-    expect(tilesOf({ strip: short }).map((t) => t.url)).toEqual(['f0', 'f1', 'f1', 'f1']);
+    expect(tilesOf({ strip: short }).map(t => t.url)).toEqual(['f0', 'f1', 'f1', 'f1']);
   });
 
   it('draws nothing for a segment with no length, no zoom or no tile', () => {
@@ -280,6 +305,32 @@ describe('frameUrl', () => {
     expect(frameUrl({ stepMs: 0, urls: ['f0'] }, 0)).toBeNull();
     expect(frameUrl({ stepMs: 1000, urls: [] }, 0)).toBeNull();
     expect(frameUrl({ stepMs: 1000, urls: [''] }, 0)).toBeNull();
+  });
+});
+
+describe('nearestFrameUrl', () => {
+  it('takes the frame nearest the source time, on either side of it', () => {
+    expect(nearestFrameUrl(STRIP, 400)).toBe('f0');
+    expect(nearestFrameUrl(STRIP, 600)).toBe('f1');
+    expect(nearestFrameUrl(STRIP, 2900)).toBe('f3');
+  });
+
+  it('takes the earlier frame from exactly halfway', () => {
+    // The middle of a one-step tile: the earlier frame is the one inside it.
+    expect(nearestFrameUrl(STRIP, 500)).toBe('f0');
+    expect(nearestFrameUrl(STRIP, 2500)).toBe('f2');
+  });
+
+  it('holds the ends rather than reading off the strip', () => {
+    expect(nearestFrameUrl(STRIP, -1000)).toBe('f0');
+    expect(nearestFrameUrl(STRIP, 99_000)).toBe('f4');
+  });
+
+  it('has nothing to show while a clip is still being cut', () => {
+    expect(nearestFrameUrl(undefined, 0)).toBeNull();
+    expect(nearestFrameUrl({ stepMs: 0, urls: ['f0'] }, 0)).toBeNull();
+    expect(nearestFrameUrl({ stepMs: 1000, urls: [] }, 0)).toBeNull();
+    expect(nearestFrameUrl({ stepMs: 1000, urls: [''] }, 0)).toBeNull();
   });
 });
 

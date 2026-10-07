@@ -847,8 +847,10 @@ class VideoComposerPlugin : Plugin() {
             times += timesArray.optLong(i, 0L).coerceAtLeast(0L)
         }
         val maxHeight = call.getInt("maxHeight") ?: 160
-        // Off unless asked for: a precise seek decodes forward from the previous keyframe, which is
-        // worth paying for a short filmstrip and not for anything else (see [Thumbnailer.frameOption]).
+        // Off unless asked for: a precise seek decodes forward from the previous keyframe, which in
+        // the clip itself is worth paying for a short filmstrip and not for anything else (see
+        // [Thumbnailer.frameOption]) - and in its preview copy costs about a keyframe, which is why the
+        // editor asks for it on any clip once the copy is made ([PreviewProxy.copyFor]).
         val precise = call.getBoolean("precise", false) ?: false
 
         pluginScope.launch {
