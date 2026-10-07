@@ -86,8 +86,32 @@ describe('the audio lane ops', () => {
     expect(() => applyEditOps(manifest, [{ op: 'duplicateAudio', id: 'a', newId: 'b' }])).toThrow(/sound id "b" is already on this post/);
   });
 
+  it('carries a sound to another place in its lane’s order, as holding it on the timeline does', () => {
+    const manifest = applyEditOps(post(), [add('a', 1000), add('b', 7000), add('c', 12_000)]);
+    expect(lanesOf(manifest)).toEqual(['lane-a: a@1000 b@7000 c@12000']);
+    expect(lanesOf(applyEditOps(manifest, [{ op: 'reorderAudio', id: 'b', toIndex: 0 }]))).toEqual(['lane-a: b@1000 a@7000 c@12000']);
+    expect(lanesOf(applyEditOps(manifest, [{ op: 'reorderAudio', id: 'a', toIndex: 2 }]))).toEqual(['lane-a: b@1000 c@7000 a@12000']);
+    // Past either end is the end; its own place is no change.
+    expect(lanesOf(applyEditOps(manifest, [{ op: 'reorderAudio', id: 'a', toIndex: 9 }]))).toEqual(['lane-a: b@1000 c@7000 a@12000']);
+    expect(applyEditOps(manifest, [{ op: 'reorderAudio', id: 'b', toIndex: 1 }])).toEqual(manifest);
+    expect(() => applyEditOps(manifest, [{ op: 'reorderAudio', id: 'zz', toIndex: 0 }])).toThrow(/no sound "zz" on the audio lanes/);
+    expect(() => applyEditOps(manifest, [{ op: 'reorderAudio', id: 'a', toIndex: 'last' }])).toThrow(/"toIndex" must be a finite number/);
+  });
+
+  it('keeps what is heard of a sound the post cuts short, and refuses to pass one the post never reaches', () => {
+    const long = applyEditOps(post(), [add('a', 1000), add('b', 7000), add('c', 12_000)]);
+    // Cut to ten seconds: b is heard to 10 s, and c starts after the post has ended.
+    const manifest = { ...long, clips: [defaultClipEdit('v', 10_000)] };
+    const reordered = applyEditOps(manifest, [{ op: 'reorderAudio', id: 'b', toIndex: 0 }]);
+    expect(lanesOf(reordered)).toEqual(['lane-a: b@1000 a@5000 c@12000']);
+    expect(reordered.audioTracks?.[0]?.clips[0]?.endMs).toBe(4000);
+    expect(() => applyEditOps(manifest, [{ op: 'reorderAudio', id: 'c', toIndex: 0 }])).toThrow(
+      /"c" cannot move to place 0 on its lane - it and every sound it passes need to be heard on the post for at least 100ms/,
+    );
+  });
+
   it('has a line in the op reference for each op', () => {
-    for (const op of ['addAudio', 'patchAudio', 'moveAudioToTrack', 'splitAudio', 'duplicateAudio', 'removeAudio']) expect(OP_REFERENCE[op]).toBeTruthy();
+    for (const op of ['addAudio', 'patchAudio', 'moveAudioToTrack', 'reorderAudio', 'splitAudio', 'duplicateAudio', 'removeAudio']) expect(OP_REFERENCE[op]).toBeTruthy();
   });
 });
 

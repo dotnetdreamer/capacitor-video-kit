@@ -259,6 +259,11 @@ describe('no op makes a zoom on a post that has none', () => {
       { op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } },
       { op: 'moveAudioToTrack', id: 'au', target: { kind: 'new', index: 0 }, atMs: 3000 },
     ],
+    reorderAudio: [
+      { op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } },
+      { op: 'addAudio', id: 'au2', sound: { uri: 'file:///au2.m4a', sourceDurationMs: 2000, startMs: 3000 } },
+      { op: 'reorderAudio', id: 'au2', toIndex: 0 },
+    ],
     splitAudio: [
       { op: 'addAudio', id: 'au', sound: { uri: 'file:///au.m4a', sourceDurationMs: 2000, startMs: 1000 } },
       { op: 'splitAudio', id: 'au', atMs: 2000, newId: 'au2' },

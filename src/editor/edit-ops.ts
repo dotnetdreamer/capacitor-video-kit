@@ -1633,6 +1633,61 @@ export function moveAudioClip(manifest: EditManifest, id: string, atMs: number):
 }
 
 /**
+ * Carries a sound to another position in its lane's sequence, like a video segment's reorder.
+ *
+ * Sounds have places of their own rather than the video's gapless sequence, so only the block the
+ * sound crosses is rebuilt. Its first start and the gaps between its positions stay put, and each
+ * sound brings its length, source section, phase and fades with it. A sound clipped by the post's
+ * end brings its played length, with an explicit stop at its new end: otherwise its hidden tail
+ * would cover its next neighbour, and a longer file than the post could not be swapped at all.
+ * Fractional-speed lengths reserve their last millisecond: all starts are whole milliseconds, and
+ * rounding one down would overlap its neighbour.
+ */
+export function reorderAudioClip(manifest: EditManifest, id: string, toIndex: number): EditManifest {
+  if (!Number.isFinite(toIndex)) return manifest;
+  const lane = manifest.audioTracks?.find(track => track.clips.some(clip => clip.id === id));
+  if (!lane) return manifest;
+  const from = lane.clips.findIndex(clip => clip.id === id);
+  const to = clamp(Math.round(toIndex), 0, lane.clips.length - 1);
+  if (from === to) return manifest;
+
+  const total = totalDurationMs(manifest);
+  const first = Math.min(from, to);
+  const last = Math.max(from, to);
+  const block = lane.clips.slice(first, last + 1);
+  const wholeWindows = block.map(clip => wholeAudioWindow(clip));
+  const bounded = wholeWindows.map(window => !Number.isFinite(window.endMs) || window.endMs > total);
+  const windows = block.map((clip, index) => (bounded[index] ? audioClipWindow(clip, total) : wholeWindows[index]!));
+  const lengths = windows.map(window => Math.ceil(window.endMs - window.startMs));
+  const gaps = windows.slice(0, -1).map((window, index) => block[index + 1]!.startMs - Math.ceil(window.endMs));
+  if (
+    windows.some(window => !Number.isFinite(window.startMs) || !Number.isFinite(window.endMs) || window.endMs - window.startMs < MIN_LAYER_MS) ||
+    gaps.some(gap => !Number.isFinite(gap) || gap < 0)
+  ) return manifest;
+
+  const order = block.map((_, index) => index);
+  const [moving] = order.splice(from - first, 1);
+  order.splice(to - first, 0, moving!);
+  let startMs = block[0]!.startMs;
+  const reordered = order.map((index, position) => {
+    const original = block[index]!;
+    const delta = startMs - original.startMs;
+    // Keep a stop even at the post's end. musicMovedTo clears it there, which would make a
+    // previously bounded loop overlap its next neighbour when the post is extended again.
+    const endMs = bounded[index] ? startMs + lengths[index]! : original.endMs > 0 ? original.endMs + delta : 0;
+    const placed = startMs === original.startMs && endMs === original.endMs ? original : { ...original, startMs, endMs };
+    startMs += lengths[index]! + (gaps[position] ?? 0);
+    return placed;
+  });
+  const clips = [...lane.clips.slice(0, first), ...reordered, ...lane.clips.slice(last + 1)];
+  if (!reordered.every(clip => audioFits(clip, clips.filter(other => other !== clip), total))) return manifest;
+  return {
+    ...manifest,
+    audioTracks: manifest.audioTracks!.map(track => (track === lane ? { ...track, clips } : track)),
+  };
+}
+
+/**
  * Cuts a sound in two at `atMs` on the post, both halves on its lane: the left keeps the sound's id and
  * the right is `newId`. Played one after the other they are the sound as it was, so each half is what
  * its own handle would have made of it ([musicEndTrim], [musicStartTrim] in the timeline). A sound

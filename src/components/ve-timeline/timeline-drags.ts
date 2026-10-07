@@ -226,6 +226,7 @@ export interface VoiceDrag extends DragBase {
  */
 export interface ClipReorderDrag extends DragBase {
   kind: 'clip-reorder';
+  media: 'video' | 'audio';
   id: string;
   /** The layer the segment was lifted from: null for the base track. */
   fromTrackId: string | null;
@@ -261,7 +262,7 @@ export interface LayerReorderDrag extends DragBase {
   row: HTMLElement | null;
 }
 
-/** A picked audio clip can move in time or be dropped onto another audio lane. */
+/** A selected audio clip moves in time or drops onto another lane; holds use ClipReorderDrag. */
 export interface AudioDrag extends DragBase {
   kind: 'audio';
   mode: 'start' | 'end' | 'move';

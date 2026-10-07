@@ -59,6 +59,7 @@ import {
   patchVoiceover,
   removeClip,
   removeAudioClip,
+  reorderAudioClip,
   replaceAudioClip as replaceAudioClipOp,
   setAudioLoop,
   setAudioSpeed as setAudioSpeedOp,
@@ -2098,6 +2099,11 @@ export class EditorStore {
    */
   previewMoveAudio(id: string, startMs: number): void {
     this.previewFromStart(m => moveAudioClipOp(m, id, startMs));
+  }
+
+  /** Commits the position chosen by the lifted audio rail as one undo step. */
+  reorderAudio(id: string, toIndex: number): void {
+    if (this.commit('Reorder audio', m => reorderAudioClip(m, id, toIndex))) this.haptic('light');
   }
 
   moveAudioClipToTrack(id: string, target: AudioDropTarget, startMs: number): boolean {

@@ -1306,6 +1306,281 @@ describe('the timeline add button under a compact sheet', () => {
 });
 
 describe('audio lanes', () => {
+  function packedSounds(store: EditorStore, secondDurationMs = 2000) {
+    store.pps.value = 24;
+    const sound = (fileName: string, startMs: number): EditMusic => ({
+      uri: `blob:${fileName}`, fileName, sourceDurationMs: 2000,
+      inMs: 0, outMs: 0, startMs, endMs: 0, volume: 0.8, loop: false, fadeOutMs: 0,
+    });
+    const first = store.addAudioClip(sound('first', 0))!;
+    const second = store.addAudioClip({ ...sound('second', 2000), sourceDurationMs: secondDurationMs })!;
+    return { first, second };
+  }
+
+  async function holdAudio(tl: HTMLElement, store: EditorStore, id: string) {
+    store.select(null);
+    await frames(2);
+    const item = root(tl).querySelector<HTMLElement>(`[data-hit="audio"][data-id="${id}"]`)!;
+    const from = centre(item);
+    pointer(item, 'pointerdown', from.x, from.y);
+    await until('the audio lift', () => root(tl).querySelector('.tl__reorder') !== null);
+    return from;
+  }
+
+  function audioRowEl(tl: HTMLElement, id: string): HTMLElement {
+    const found = root(tl).querySelector<HTMLElement>(`[data-arow="${id}"]`);
+    if (!found) throw new Error(`no ${id} audio row`);
+    return found;
+  }
+
+  function heldIndex(tl: HTMLElement): number | undefined {
+    return instanceOf<{ clipReorder: { value: { to: number } | null } }>(tl).clipReorder.value?.to;
+  }
+
+  it('lifts a sound into the video rail and swaps in either direction only on release', async () => {
+    const { store, tl } = await mount();
+    const { first, second } = packedSounds(store);
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, first);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    const lane = audioRowEl(tl, before.audioTracks![0]!.id);
+    const tile = root(tl).querySelector<HTMLElement>('.rtile--lifted')!;
+    const neighbour = root(tl).querySelector<HTMLElement>('.tl__reorder-rail .rtile')!;
+    expect(tile.offsetWidth).toBe(32);
+    expect(tile.offsetHeight).toBe(32);
+    expect(getComputedStyle(tile).boxShadow).not.toBe('none');
+    expect(neighbour.style.transform).toBe('translateX(40px)');
+    expect(getComputedStyle(lane).visibility).toBe('hidden');
+    expect(getComputedStyle(row(tl, 'base')).visibility).toBe('visible');
+    expect(store.selection.value).toBeNull();
+    pointer(scroller, 'pointermove', from.x + 40, from.y);
+    await until('the second rail slot', () => heldIndex(tl) === 1);
+    await frames(2);
+    expect(neighbour.style.transform).toBe('translateX(0px)');
+    expect(store.manifest.value).toBe(before);
+    expect(scroller.scrollLeft).toBe(0);
+    pointer(scroller, 'pointerup', from.x + 40, from.y);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[second, 0], [first, 2000]]);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+    expect(store.toast.value?.text).toBe('Undo: Reorder audio');
+    store.redo();
+    const swapped = store.manifest.value;
+    const back = await holdAudio(tl, store, first);
+    pointer(scroller, 'pointermove', back.x - 40, back.y);
+    await until('the first rail slot', () => heldIndex(tl) === 0);
+    expect(store.manifest.value).toBe(swapped);
+    pointer(scroller, 'pointerup', back.x - 40, back.y);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[first, 0], [second, 2000]]);
+    store.undo();
+    expect(store.manifest.value).toBe(swapped);
+    expect(store.toast.value?.text).toBe('Undo: Reorder audio');
+  });
+
+  it('keeps a lone sound lifted and carries it into a lane below the stack', async () => {
+    const { store, tl } = await mount();
+    const { first } = packedSounds(store);
+    store.removeSelectedAudio();
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, first);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x + 48, from.y);
+    await frames(2);
+    expect(root(tl).querySelector('.rtile--lifted')).not.toBeNull();
+    expect(root(tl).querySelectorAll('.tl__reorder-rail .rtile')).toHaveLength(0);
+    expect(heldIndex(tl)).toBe(0);
+    expect(store.manifest.value).toBe(before);
+    const lane = audioRowEl(tl, before.audioTracks![0]!.id);
+    const below = lane.getBoundingClientRect().bottom + 80;
+    pointer(scroller, 'pointermove', from.x + 48, below);
+    await until('the lane below the stack', () => lane.classList.contains('tl__vrow--drop-under'));
+    expect(getComputedStyle(root(tl).querySelector<HTMLElement>('.tl__reorder-rail')!).display).toBe('none');
+    expect(store.manifest.value).toBe(before);
+    pointer(scroller, 'pointerup', from.x + 48, below);
+    expect(store.manifest.value.audioTracks![0]!.clips).toHaveLength(1);
+    expect(store.manifest.value.audioTracks![0]!.clips[0]!.startMs).toBe(2000);
+    expect(store.selectedAudio.value?.id).toBe(first);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+    expect(store.toast.value?.text).toBe('Undo: Move audio to layer');
+  });
+
+  it('carries an eight second sound past its shorter neighbour by one compact tile', async () => {
+    const { store, tl } = await mount();
+    const { first, second } = packedSounds(store, 8000);
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, second);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x - 40, from.y);
+    await until('long sound over the first rail slot', () => heldIndex(tl) === 0);
+    expect(store.manifest.value).toBe(before);
+    expect(scroller.scrollLeft).toBe(0);
+    pointer(scroller, 'pointerup', from.x - 40, from.y);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[second, 0], [first, 8000]]);
+  });
+
+  it('commits the last rail position when released before the next animation frame', async () => {
+    const { store, tl } = await mount();
+    const { first, second } = packedSounds(store);
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, first);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x + 40, from.y);
+    pointer(scroller, 'pointerup', from.x + 40, from.y);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => clip.id)).toEqual([second, first]);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+  });
+
+  it('returns home and cancels above the stack or on pointercancel without changing audio', async () => {
+    const { store, tl } = await mount();
+    const { first } = packedSounds(store);
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, first);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x + 40, from.y);
+    await until('the other rail slot', () => heldIndex(tl) === 1);
+    pointer(scroller, 'pointermove', from.x, from.y);
+    await until('the original rail slot', () => heldIndex(tl) === 0);
+    pointer(scroller, 'pointerup', from.x, from.y);
+    expect(store.manifest.value).toBe(before);
+    const again = await holdAudio(tl, store, first);
+    pointer(scroller, 'pointermove', again.x + 40, again.y);
+    await until('the next held rail slot', () => heldIndex(tl) === 1);
+    pointer(scroller, 'pointercancel', again.x + 40, again.y);
+    expect(store.manifest.value).toBe(before);
+    const above = await holdAudio(tl, store, first);
+    const lane = audioRowEl(tl, before.audioTracks![0]!.id);
+    pointer(scroller, 'pointermove', above.x, lane.getBoundingClientRect().top - 80);
+    await until('the cancelled lift', () => root(tl).querySelector('.tl__reorder') === null);
+    expect(store.manifest.value).toBe(before);
+    expect(getComputedStyle(lane).visibility).toBe('visible');
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Add audio');
+  });
+
+  it('switches from the reorder rail to another lane and back before committing a transfer', async () => {
+    const { store, tl } = await mount();
+    const { first, second } = packedSounds(store);
+    const other = store.addAudioClip({ ...store.selectedAudio.value!, fileName: 'other', uri: 'blob:other', startMs: 0 })!;
+    const before = store.manifest.value;
+    const target = store.manifest.value.audioTracks![1]!.id;
+    const from = await holdAudio(tl, store, first);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x + 40, from.y);
+    await until('the reordered rail', () => heldIndex(tl) === 1);
+    const to = centre(audioRowEl(tl, target));
+    pointer(scroller, 'pointermove', from.x + 40, to.y);
+    await until('the destination lane', () => audioRowEl(tl, target).classList.contains('tl__vrow--drop'));
+    const lane = audioRowEl(tl, before.audioTracks![0]!.id);
+    const rail = root(tl).querySelector<HTMLElement>('.tl__reorder-rail')!;
+    expect(getComputedStyle(rail).display).toBe('none');
+    expect(getComputedStyle(lane).visibility).toBe('visible');
+    expect(Number(getComputedStyle(lane.querySelector<HTMLElement>(`[data-id="${first}"]`)!).opacity)).toBeLessThan(1);
+    expect(store.manifest.value).toBe(before);
+    pointer(scroller, 'pointermove', from.x + 40, from.y);
+    await until('back on the source rail', () => !root(tl).querySelector('.tl--dropping'));
+    expect(getComputedStyle(rail).display).not.toBe('none');
+    expect(getComputedStyle(lane).visibility).toBe('hidden');
+    expect(heldIndex(tl)).toBe(1);
+    // Release on the destination without waiting for its next animation frame.
+    pointer(scroller, 'pointermove', from.x + 48, to.y);
+    pointer(scroller, 'pointerup', from.x + 48, to.y);
+    expect(store.manifest.value.audioTracks!.map(track => track.clips.map(clip => clip.id))).toEqual([[second], [other, first]]);
+    expect(store.manifest.value.audioTracks![0]!.clips[0]!.startMs).toBe(2000);
+    expect(store.selectedAudio.value?.id).toBe(first);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+    expect(store.toast.value?.text).toBe('Undo: Move audio to layer');
+  });
+
+  it('opens a lane in the gap between audio rows and below the last row', async () => {
+    const { store, tl } = await mount();
+    const { first, second } = packedSounds(store);
+    const other = store.addAudioClip({ ...store.selectedAudio.value!, fileName: 'other', uri: 'blob:other', startMs: 0 })!;
+    const before = store.manifest.value;
+    const sourceId = before.audioTracks![0]!.id;
+    const targetId = before.audioTracks![1]!.id;
+    const from = await holdAudio(tl, store, first);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    const gap = (audioRowEl(tl, sourceId).getBoundingClientRect().bottom + audioRowEl(tl, targetId).getBoundingClientRect().top) / 2;
+    pointer(scroller, 'pointermove', from.x, gap);
+    await until('the gap between audio rows', () => audioRowEl(tl, sourceId).classList.contains('tl__vrow--drop-under'));
+    expect(store.manifest.value).toBe(before);
+    pointer(scroller, 'pointerup', from.x, gap);
+    expect(store.manifest.value.audioTracks!.map(track => track.clips.map(clip => clip.id))).toEqual([[second], [first], [other]]);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+    const again = await holdAudio(tl, store, first);
+    const last = audioRowEl(tl, targetId);
+    const below = last.getBoundingClientRect().bottom + 80;
+    pointer(scroller, 'pointermove', again.x, below);
+    await until('the gap below all audio rows', () => last.classList.contains('tl__vrow--drop-under'));
+    expect(store.manifest.value).toBe(before);
+    pointer(scroller, 'pointerup', again.x, below);
+    expect(store.manifest.value.audioTracks!.map(track => track.clips.map(clip => clip.id))).toEqual([[second], [other], [first]]);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+  });
+
+  it('slides the compact rail at the edge without scrolling the timeline or moving audio', async () => {
+    const { store, tl } = await mount();
+    store.pps.value = 24;
+    let first: string | null = null;
+    for (let i = 0; i < 12; i += 1) {
+      const id = store.addAudioClip({
+        uri: `blob:sound-${i}`, fileName: `sound-${i}`, sourceDurationMs: 500,
+        inMs: 0, outMs: 0, startMs: i * 500, endMs: 0, volume: 0.8, loop: false, fadeOutMs: 0,
+      })!;
+      first ??= id;
+    }
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, first!);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    const overlay = root(tl).querySelector<HTMLElement>('.tl__reorder')!;
+    const origin = Number.parseFloat(overlay.style.getPropertyValue('--ox'));
+    const edge = scroller.getBoundingClientRect().right - 3;
+    pointer(scroller, 'pointermove', edge, from.y);
+    await until('the rail to slide left', () => Number.parseFloat(overlay.style.getPropertyValue('--ox')) < origin - 20);
+    expect(scroller.scrollLeft).toBe(0);
+    expect(store.manifest.value).toBe(before);
+    pointer(scroller, 'pointercancel', edge, from.y);
+    expect(store.manifest.value).toBe(before);
+  });
+
+  it('keeps video rows independent when audio shares their clip and track IDs', async () => {
+    const { store, tl } = await mount([layer('vt-1', 1, [{ id: 'seg-x', key: 'clip-x' }])]);
+    const { first } = packedSounds(store);
+    const other = store.addAudioClip({ ...store.selectedAudio.value!, fileName: 'other', uri: 'blob:other', startMs: 0 })!;
+    store.commit('Colliding domain IDs', m => ({
+      ...m,
+      audioTracks: m.audioTracks!.map((track, i) => i === 0 ? {
+        ...track, id: 'vt-1', clips: track.clips.map(clip => clip.id === first ? { ...clip, id: 'seg-a' } : clip),
+      } : track),
+    }));
+    const before = store.manifest.value;
+    const from = await holdAudio(tl, store, 'seg-a');
+    expect(getComputedStyle(audioRowEl(tl, 'vt-1')).visibility).toBe('hidden');
+    expect(getComputedStyle(row(tl, 'vt-1')).visibility).toBe('visible');
+    expect(getComputedStyle(row(tl, 'base')).visibility).toBe('visible');
+    const destination = audioRowEl(tl, before.audioTracks![1]!.id);
+    const to = centre(destination);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x, to.y);
+    await until('the audio destination without a video cue', () => destination.classList.contains('tl__vrow--drop'));
+    expect(root(tl).querySelector('[data-vrow].tl__vrow--drop')).toBeNull();
+    expect(root(tl).querySelector('[data-vrow].tl__vrow--drop-under')).toBeNull();
+    expect(getComputedStyle(segmentEl(tl, 'seg-a')).opacity).toBe('1');
+    expect(store.manifest.value).toBe(before);
+    pointer(scroller, 'pointerup', from.x, to.y);
+    await frames(2);
+    expect(store.manifest.value.clips).toBe(before.clips);
+    expect(store.manifest.value.videoTracks).toBe(before.videoTracks);
+    expect(store.manifest.value.audioTracks![1]!.clips.map(clip => clip.id)).toEqual([other, 'seg-a']);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+  });
+
   it('shows sequential clips together, overlaps on another lane, and drops a clip between lanes', async () => {
     const { store, tl } = await mount();
     store.pps.value = 24;

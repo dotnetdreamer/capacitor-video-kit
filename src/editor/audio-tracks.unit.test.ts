@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RasterContext } from './raster-context';
 import { toComposeSpec } from './compose';
-import { addAudioClip, audioClipWindow, moveAudioClip, moveAudioClipToTrack, patchAudioClip, removeAudioClip, replaceAudioClip, setAudioLoop } from './edit-ops';
+import { addAudioClip, audioClipWindow, moveAudioClip, moveAudioClipToTrack, patchAudioClip, removeAudioClip, reorderAudioClip, replaceAudioClip, setAudioLoop } from './edit-ops';
 import { defaultClipEdit, emptyManifest, isUntouched, normaliseManifest, type EditAudioClip, type EditManifest } from './edit-manifest';
 
 const post = (): EditManifest => ({
@@ -140,5 +140,140 @@ describe('independent audio lanes', () => {
     expect(isUntouched(before, durations, 9 / 16)).toBe(true);
     const withAudio = addAudioClip(before, sound('a', 0), 'at-1')!;
     expect(isUntouched(withAudio, durations, 9 / 16)).toBe(false);
+  });
+});
+
+describe('reordering sounds on a lane', () => {
+  const onLane = (...clips: EditAudioClip[]): EditManifest => ({ ...post(), audioTracks: [{ id: 'at-1', clips }] });
+  const places = (manifest: EditManifest) => manifest.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs]);
+
+  it('swaps packed clips in either direction even when there is no free gap', () => {
+    const original = onLane(sound('a', 0, { sourceDurationMs: 10_000 }), sound('b', 10_000, { sourceDurationMs: 10_000 }));
+    const firstToLast = reorderAudioClip(original, 'a', 1);
+    const lastToFirst = reorderAudioClip(original, 'b', 0);
+    expect(places(firstToLast)).toEqual([['b', 0], ['a', 10_000]]);
+    expect(lastToFirst).toEqual(firstToLast);
+    expect(reorderAudioClip(firstToLast, 'a', 0)).toEqual(original);
+    expect(places(original)).toEqual([['a', 0], ['b', 10_000]]);
+  });
+
+  it('keeps unequal lengths, boundary gaps and the lane span when crossing several clips', () => {
+    const original = onLane(
+      sound('a', 1000, { sourceDurationMs: 2000 }),
+      sound('b', 5000, { sourceDurationMs: 4000 }),
+      sound('c', 11_000, { sourceDurationMs: 1000 }),
+    );
+    const reordered = reorderAudioClip(original, 'a', 2);
+    expect(places(reordered)).toEqual([['b', 1000], ['c', 7000], ['a', 10_000]]);
+    expect(reordered.audioTracks![0]!.clips.map(clip => audioClipWindow(clip, 20_000).endMs - clip.startMs)).toEqual([4000, 1000, 2000]);
+    expect(audioClipWindow(reordered.audioTracks![0]!.clips[2]!, 20_000).endMs).toBe(12_000);
+    expect(reorderAudioClip(original, 'c', 0).audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([['c', 1000], ['a', 4000], ['b', 8000]]);
+  });
+
+  it('changes only the crossed block and keeps other clips and lanes by reference', () => {
+    const a = sound('a', 1000, { sourceDurationMs: 2000 });
+    const b = sound('b', 5000, { sourceDurationMs: 4000 });
+    const before = sound('before', 0, { sourceDurationMs: 500 });
+    const after = sound('after', 11_000, { sourceDurationMs: 1000 });
+    const otherLane = { id: 'at-2', clips: [sound('other', 0)] };
+    const original = { ...onLane(before, a, b, after), audioTracks: [{ id: 'at-1', clips: [before, a, b, after] }, otherLane] };
+    const reordered = reorderAudioClip(original, 'a', 2);
+    expect(places(reordered)).toEqual([['before', 0], ['b', 1000], ['a', 7000], ['after', 11_000]]);
+    expect(reordered.audioTracks![0]!.clips[0]).toBe(before);
+    expect(reordered.audioTracks![0]!.clips[3]).toBe(after);
+    expect(reordered.audioTracks![1]).toBe(otherLane);
+    expect(reordered.clips).toBe(original.clips);
+  });
+
+  it('carries source trims, phase, speed, level and fades while shifting an explicit stop', () => {
+    const a = sound('a', 1000, { sourceDurationMs: 14_000, inMs: 1000, outMs: 9000, phaseMs: 1000, speed: 2, endMs: 4000, volume: 0.4, fadeInMs: 300, fadeOutMs: 700 });
+    const original = onLane(a, sound('b', 5000, { sourceDurationMs: 2000 }));
+    const reordered = reorderAudioClip(original, 'a', 1);
+    expect(places(reordered)).toEqual([['b', 1000], ['a', 4000]]);
+    expect(reordered.audioTracks![0]!.clips[1]).toEqual({ ...a, startMs: 4000, endMs: 7000 });
+    expect(normaliseManifest(reordered).audioTracks).toEqual(reordered.audioTracks);
+  });
+
+  it('keeps a bounded loop bounded when its stop reaches the post end', () => {
+    const original = onLane(sound('a', 0, { loop: true, endMs: 8000, phaseMs: 300, fadeOutMs: 700 }), sound('b', 8000, { sourceDurationMs: 12_000 }));
+    const reordered = reorderAudioClip(original, 'a', 1);
+    expect(reordered.audioTracks![0]!.clips).toEqual([
+      sound('b', 0, { sourceDurationMs: 12_000 }),
+      sound('a', 12_000, { loop: true, endMs: 20_000, phaseMs: 300, fadeOutMs: 700 }),
+    ]);
+    const extended = { ...reordered, durationMs: 30_000 };
+    expect(audioClipWindow(extended.audioTracks![0]!.clips[1]!, 30_000).endMs).toBe(20_000);
+    expect(normaliseManifest(extended).audioTracks).toEqual(reordered.audioTracks);
+  });
+
+  it.each([{ loop: true }, { sourceDurationMs: 0 }])('bounds a to-end sound moved before its neighbour (%j)', options => {
+    const original = onLane(sound('a', 1000, { sourceDurationMs: 2000 }), sound('b', 5000, { ...options, phaseMs: 300, fadeInMs: 400, fadeOutMs: 600 }));
+    const reordered = reorderAudioClip(original, 'b', 0);
+    expect(places(reordered)).toEqual([['b', 1000], ['a', 18_000]]);
+    expect(reordered.audioTracks![0]!.clips[0]).toEqual({ ...original.audioTracks![0]!.clips[1], startMs: 1000, endMs: 16_000 });
+    expect(audioClipWindow(reordered.audioTracks![0]!.clips[0]!, 20_000)).toEqual({ startMs: 1000, endMs: 16_000 });
+    const extended = normaliseManifest({ ...reordered, durationMs: 30_000 });
+    expect(extended.audioTracks).toHaveLength(1);
+    expect(extended.audioTracks).toEqual(reordered.audioTracks);
+  });
+
+  it('reserves fractional-speed lengths without overlapping or moving the block after them', () => {
+    const after = sound('after', 4500, { sourceDurationMs: 1000 });
+    const original = onLane(
+      sound('a', 0, { sourceDurationMs: 5000, speed: 3 }),
+      sound('b', 1667, { sourceDurationMs: 4000, speed: 3 }),
+      sound('c', 3001, { sourceDurationMs: 1000 }),
+      after,
+    );
+    const reordered = reorderAudioClip(original, 'a', 2);
+    expect(places(reordered)).toEqual([['b', 0], ['c', 1334], ['a', 2334], ['after', 4500]]);
+    const clips = reordered.audioTracks![0]!.clips;
+    expect(audioClipWindow(clips[0]!, 20_000).endMs).toBeLessThanOrEqual(clips[1]!.startMs);
+    expect(audioClipWindow(clips[1]!, 20_000).endMs).toBeLessThanOrEqual(clips[2]!.startMs);
+    expect(Math.ceil(audioClipWindow(clips[2]!, 20_000).endMs)).toBe(4001);
+    expect(clips[3]).toBe(after);
+    expect(normaliseManifest(reordered).audioTracks).toEqual(reordered.audioTracks);
+  });
+
+  it('swaps a longer-than-post file using its played length and stops its hidden tail safely', () => {
+    const a = sound('a', 0, { sourceDurationMs: 2000 });
+    const b = sound('b', 2000, { sourceDurationMs: 12_000, inMs: 1000, outMs: 10_000, phaseMs: 1000, volume: 0.4, fadeInMs: 200, fadeOutMs: 300 });
+    const original = { ...onLane(a, b), clips: [defaultClipEdit('video', 6000, 'seg-1')] };
+    const reordered = reorderAudioClip(original, 'b', 0);
+    expect(places(reordered)).toEqual([['b', 0], ['a', 4000]]);
+    expect(reordered.audioTracks![0]!.clips).toEqual([{ ...b, startMs: 0, endMs: 4000 }, { ...a, startMs: 4000 }]);
+    expect(reorderAudioClip(original, 'a', 1)).toEqual(reordered);
+    expect(reordered.audioTracks![0]!.clips.map(clip => audioClipWindow(clip, 6000).endMs - clip.startMs)).toEqual([4000, 2000]);
+    expect(normaliseManifest(reordered).audioTracks).toEqual(reordered.audioTracks);
+    const extended = normaliseManifest({ ...reordered, durationMs: 30_000 });
+    expect(extended.audioTracks).toHaveLength(1);
+    expect(audioClipWindow(extended.audioTracks![0]!.clips[0]!, 30_000).endMs).toBe(4000);
+    expect(extended.audioTracks).toEqual(reordered.audioTracks);
+  });
+
+  it('leaves an untouched sound outside a shortened post where it was', () => {
+    const outside = sound('outside', 10_000, { sourceDurationMs: 1000 });
+    const original = {
+      ...onLane(sound('a', 0, { sourceDurationMs: 500 }), sound('b', 500, { sourceDurationMs: 12_000, speed: 3 }), outside),
+      clips: [defaultClipEdit('video', 3000, 'seg-1')],
+    };
+    const reordered = reorderAudioClip(original, 'b', 0);
+    expect(places(reordered)).toEqual([['b', 0], ['a', 2500], ['outside', 10_000]]);
+    expect(reordered.audioTracks![0]!.clips[0]!.endMs).toBe(2500);
+    expect(reordered.audioTracks![0]!.clips[2]).toBe(outside);
+    expect(normaliseManifest(reordered).audioTracks).toEqual(reordered.audioTracks);
+    expect(reorderAudioClip(original, 'outside', 0)).toBe(original);
+  });
+
+  it('returns the original manifest for missing clips, unchanged order and invalid lengths', () => {
+    const original = onLane(sound('a', 0), sound('b', 5000));
+    expect(reorderAudioClip(original, 'a', 0)).toBe(original);
+    expect(reorderAudioClip(original, 'missing', 1)).toBe(original);
+    expect(reorderAudioClip(original, 'a', Number.NaN)).toBe(original);
+    expect(reorderAudioClip(original, 'a', Number.POSITIVE_INFINITY)).toBe(original);
+    const noLength = { ...emptyManifest(), audioTracks: [{ id: 'at-1', clips: [sound('a', 0), sound('b', 5000, { loop: true })] }] };
+    expect(reorderAudioClip(noLength, 'b', 0)).toBe(noLength);
+    const overlapping = onLane(sound('a', 0), sound('b', 1000));
+    expect(reorderAudioClip(overlapping, 'a', 1)).toBe(overlapping);
   });
 });

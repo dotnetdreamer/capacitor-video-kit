@@ -109,6 +109,7 @@ import {
   removeOverlay,
   removeVideoTrack,
   removeVoiceover,
+  reorderAudioClip,
   replaceClipSource,
   resetClipFraming,
   setClipCrop,
@@ -1033,6 +1034,21 @@ const OPS: Record<string, Apply> = {
     const newTrackId = optionalStr(op, 'newTrackId') ?? `lane-${id}`;
     const next = moveAudioClipToTrack(manifest, id, target, num(op, 'atMs'), newTrackId);
     if (!next) throw new Error(`"${id}" cannot be moved there - the lane has no gap that holds it whole, or a new lane needs an id ("${newTrackId}") no lane has`);
+    return next;
+  },
+
+  /* The timeline's hold on a sound, along its own lane: the order the editor commits on release. */
+  reorderAudio: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudio(manifest, id);
+    const toIndex = num(op, 'toIndex');
+    const next = reorderAudioClip(manifest, id, toIndex);
+    const lane = manifest.audioTracks!.find(track => track.clips.some(clip => clip.id === id))!;
+    const from = lane.clips.findIndex(clip => clip.id === id);
+    const to = Math.min(Math.max(Math.round(toIndex), 0), lane.clips.length - 1);
+    if (next === manifest && to !== from) {
+      throw new Error(`"${id}" cannot move to place ${to} on its lane - it and every sound it passes need to be heard on the post for at least ${MIN_LAYER_MS}ms`);
+    }
     return next;
   },
 
