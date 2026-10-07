@@ -213,15 +213,29 @@ describe('extra video layers', () => {
 describe('music', () => {
   it('plans sequential clips within a lane and overlaps across lanes', () => {
     const make = (uri: string, startMs: number, endMs: number) => ({
-      uri, startMs, endMs, inMs: 0, outMs: 2000, volume: 0.5, loop: false, fadeInMs: 0, fadeOutMs: 0,
+      uri,
+      startMs,
+      endMs,
+      inMs: 0,
+      outMs: 2000,
+      volume: 0.5,
+      loop: false,
+      fadeInMs: 0,
+      fadeOutMs: 0,
     });
-    const plan = buildPlan(spec({
-      clips: [clip({ outMs: 4000 })],
-      audio: { originalMuted: true, originalVolume: 1, music: null, voiceover: [], musicTracks: [
-        [make('file:///a.m4a', 0, 1000), make('file:///b.m4a', 1000, 3000)],
-        [make('file:///c.m4a', 500, 2500)],
-      ] },
-    }), new Map());
+    const plan = buildPlan(
+      spec({
+        clips: [clip({ outMs: 4000 })],
+        audio: {
+          originalMuted: true,
+          originalVolume: 1,
+          music: null,
+          voiceover: [],
+          musicTracks: [[make('file:///a.m4a', 0, 1000), make('file:///b.m4a', 1000, 3000)], [make('file:///c.m4a', 500, 2500)]],
+        },
+      }),
+      new Map(),
+    );
     expect(plan.music).toBeNull();
     expect(plan.musicTracks.map(track => [track.uri, track.startUs, track.stopUs])).toEqual([
       ['file:///a.m4a', 0, 1_000_000],
@@ -319,8 +333,8 @@ describe('music', () => {
   it('cuts a section that plays once at its stop, and ignores a stop past the end of the video', () => {
     const music = { uri: 'file:///m.mp3', startMs: 0, inMs: 0, outMs: 4000, volume: 1, loop: false, fadeInMs: 0, fadeOutMs: 0 };
     const at = (endMs: number) =>
-      buildPlan(spec({ clips: [clip({ outMs: 3000 })], audio: { originalMuted: false, originalVolume: 1, voiceover: [], music: { ...music, endMs } } }), new Map())
-        .music?.items ?? [];
+      buildPlan(spec({ clips: [clip({ outMs: 3000 })], audio: { originalMuted: false, originalVolume: 1, voiceover: [], music: { ...music, endMs } } }), new Map()).music?.items ??
+      [];
     const early = at(1200);
     expect(early).toHaveLength(1);
     expect((early[0]?.outUs ?? 0) - (early[0]?.inUs ?? 0)).toBe(1_200_000);
@@ -397,8 +411,8 @@ describe('music laid against its decoded file', () => {
     const asked = planned({});
     expect(asked.items).toHaveLength(1);
     const laid = musicForSource(asked, 12_000_000);
-    expect(laid?.items.map((item) => item.atUs)).toEqual([0, 12_000_000, 24_000_000]);
-    expect(laid?.items.map((item) => item.outUs - item.inUs)).toEqual([12_000_000, 12_000_000, 6_000_000]);
+    expect(laid?.items.map(item => item.atUs)).toEqual([0, 12_000_000, 24_000_000]);
+    expect(laid?.items.map(item => item.outUs - item.inUs)).toEqual([12_000_000, 12_000_000, 6_000_000]);
     expect(laid?.stopUs).toBe(30_000_000);
   });
 
@@ -551,7 +565,10 @@ describe('reading the timeline', () => {
  * a layer's cut, the music, a voiceover, the poster.
  */
 describe('buildPlan with a tail past the base track', () => {
-  const probes = new Map([['file:///a.mp4', probed()], ['file:///b.mp4', probed()]]);
+  const probes = new Map([
+    ['file:///a.mp4', probed()],
+    ['file:///b.mp4', probed()],
+  ]);
 
   it('runs the output on past the clips', () => {
     const plan = buildPlan(spec({ durationMs: 4000 }), probes);

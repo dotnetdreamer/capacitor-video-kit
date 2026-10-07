@@ -1918,10 +1918,12 @@ export function normaliseManifest(input: unknown): EditManifest {
     for (const [rowIndex, row] of raw['audioTracks'].entries()) {
       const clips: EditAudioClip[] = (Array.isArray(row?.clips) ? row.clips : [])
         .filter((clip: any) => clip && typeof clip.uri === 'string' && clip.uri.length > 0)
-        .map((clip: any, index: number): EditAudioClip => ({
-          ...readMusic(clip),
-          id: uniqueAudioId(clip.id, `audio-${rowIndex}-${index}`, audioIds),
-        }))
+        .map(
+          (clip: any, index: number): EditAudioClip => ({
+            ...readMusic(clip),
+            id: uniqueAudioId(clip.id, `audio-${rowIndex}-${index}`, audioIds),
+          }),
+        )
         .sort((a: EditAudioClip, b: EditAudioClip) => a.startMs - b.startMs);
       if (clips.length === 0) continue;
       const id = uniqueAudioId(row?.id, `at-${rowIndex}`, audioTrackIds);

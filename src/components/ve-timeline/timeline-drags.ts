@@ -333,10 +333,7 @@ export function musicStartTrim(music0: EditMusic, newStartMs: number, totalMs: n
   const out = music0.outMs > 0 ? music0.outMs : music0.sourceDurationMs;
   const inMs = music0.inMs + musicPhaseMs(music0);
   const minDelta = Math.max(-music0.startMs, -inMs / speed);
-  const maxDelta = Math.min(
-    musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs,
-    out > 0 ? (out - shortestSectionMs(speed) - inMs) / speed : Number.POSITIVE_INFINITY,
-  );
+  const maxDelta = Math.min(musicStopMs(music0, totalMs) - MIN_LAYER_MS - music0.startMs, out > 0 ? (out - shortestSectionMs(speed) - inMs) / speed : Number.POSITIVE_INFINITY);
   const delta = Math.round(clamp(newStartMs - music0.startMs, minDelta, Math.max(minDelta, maxDelta)));
   return { startMs: music0.startMs + delta, inMs: Math.max(0, inMs + Math.round(delta * speed)), ...(music0.phaseMs ? { phaseMs: 0 } : {}) };
 }
@@ -388,15 +385,7 @@ export function musicEndTrim(music0: EditMusic, newEndMs: number, totalMs: numbe
  * is whole milliseconds. The store clamps again; this is what keeps the bar under the finger against
  * a neighbour instead of sliding off it.
  */
-export function zoomDragWindow(
-  mode: ZoomDrag['mode'],
-  start0: number,
-  end0: number,
-  edgeMs: number,
-  lo: number,
-  hi: number,
-  minMs: number,
-): { startMs: number; endMs: number } {
+export function zoomDragWindow(mode: ZoomDrag['mode'], start0: number, end0: number, edgeMs: number, lo: number, hi: number, minMs: number): { startMs: number; endMs: number } {
   const room = Math.max(0, hi - lo);
   const min = Math.min(minMs, room);
   if (mode === 'start') {

@@ -576,17 +576,17 @@ object CompositionBuilder {
                 )
             }
 
-        // Exactly one effect does the geometry, and which one is decided here rather than per
-        // frame. A clip that asks for neither a crop nor a rect gets the Presentation it always
-        // got, unchanged, which is the whole of the promise that every manifest written before
-        // those fields renders as it did. A clip that asks for either gets a single transform that
-        // folds crop, fit and rect together - see RenderPlan.sourceWindow for why it cannot be a
-        // Crop followed by a Presentation. The frame both of them work against is the clip's own:
-        // the output frame on the base track, and the layer's rectangle on any other.
-        val geometry: Effect = if (planned.reframed) {
-            Reframe(clip, planned.frame, planned.rotationGlDeg)
+        // Which effects do the geometry is decided here rather than per frame. A clip that asks for
+        // neither a crop nor a rect gets the Presentation it always got, unchanged, which is the
+        // whole of the promise that every manifest written before those fields renders as it did.
+        // A clip that asks for either gets [Reframe]'s pair: its source cut to the part its rectangle
+        // shows, then put on that rectangle - see RenderPlan.fitBoxes for why it takes two. The frame
+        // both of them work against is the clip's own: the output frame on the base track, and the
+        // layer's rectangle on any other.
+        val geometry: List<Effect> = if (planned.reframed) {
+            Reframe(clip, planned.frame, planned.rotationGlDeg).let { listOf(it.cut, it.placement) }
         } else {
-            geometries.presentation(planned.frame.width, planned.frame.height, layoutFor(clip.fit))
+            listOf(geometries.presentation(planned.frame.width, planned.frame.height, layoutFor(clip.fit)))
         }
 
         // The colour goes on the picture BEFORE the geometry letterboxes it. Applied to the finished
@@ -625,7 +625,7 @@ object CompositionBuilder {
         val videoEffects: List<Effect> = listOfNotNull(
             grade,
             if (planned.slowed) SlowMotionEffect(startUs, startUs + planned.outDurUs, output.fps) else null,
-            geometry,
+        ) + geometry + listOfNotNull(
             camera?.takeIf { planned.zoomed }?.let { CameraTransformation(it) },
             transition,
         )
@@ -816,81 +816,117 @@ object CompositionBuilder {
     }
 
     /**
-     * Crop, fit and rect as one vertex-shader matrix, for the clips that ask for any of them.
+     * Crop, fit and rect as a pair of vertex-shader matrices, for the clips that ask for any of them.
      *
-     * Media3 hands a `MatrixTransformation` the source frame's real size in [configure] and then
+     * Media3 hands a `MatrixTransformation` the source frame's real size in `configure` and then
      * asks for a 3x3 matrix over normalised device coordinates, which it applies to the corners of
-     * the quad the frame is drawn on - not to the texture. Everything the matrix pushes past the
-     * edge of the frame is clipped by GL, and everything the quad does not reach is left at the
-     * cleared background, which encodes as black. That is the whole mechanism: pick the window of
-     * the source the frame stands for, and map it onto the frame's own -1..1 square. The frame is
-     * the output's for a clip on the base track and the layer's rectangle for any other, which is
-     * the only difference between the two.
+     * the quad the frame is drawn on - not to the texture. Everything the matrices push past the
+     * edge of the frame is clipped, and everything the quad does not reach is left at the cleared
+     * background, which encodes as black. The frame is the output's for a clip on the base track
+     * and the layer's rectangle for any other, which is the only difference between the two.
      *
-     * [RenderPlan.sourceWindow] picks the window, and the maths for why it is ONE window and not a
-     * crop pass followed by a presentation pass is written out there. Here there is only the change
-     * of coordinates: the window is 0..1 with y DOWN, NDC is -1..1 with y UP, the same flip the
-     * overlay anchors get.
+     * TWO matrices, because one cannot keep a picture inside a rectangle smaller than the frame.
+     * [cut] opens the part of the source the rectangle shows out onto the whole -1..1 square, and
+     * [placement] puts that square on the rectangle; [RenderPlan.fitBoxes] picks both boxes. Media3
+     * merges the pair into one shader pass, so the source is still sampled once, at its own
+     * resolution, but it clips the quad to the -1..1 square between them, and that clip is what cuts
+     * a COVER fit's overflow away. One matrix - the whole-frame window [RenderPlan.sourceWindow]
+     * describes - left that overflow on the frame round the rectangle. Both boxes are 0..1 with y
+     * DOWN, NDC is -1..1 with y UP, the same flip the overlay anchors get.
      *
-     * The TURN comes after all of that and is the only part that is not a window: the window and
-     * the fit are measured in the upright rectangle, and what turns is the finished result. It is
-     * applied here, on the base track, because a base clip's rectangle is a part of the output
-     * frame and the frame is what crops its corners. A clip on an extra layer is turned by the
-     * compositor instead - see [LayerCompositor] - because its rectangle IS its frame, and a
+     * The TURN comes after all of that, in the placement, and is the only part that is not a box:
+     * the boxes and the fit are measured in the upright rectangle, and what turns is the finished
+     * result. It is applied here, on the base track, because a base clip's rectangle is a part of
+     * the output frame and the frame is what crops its corners. A clip on an extra layer is turned by
+     * the compositor instead - see [LayerCompositor] - because its rectangle IS its frame, and a
      * rectangle turned inside itself would cut its own corners off.
      *
-     * The matrix is rebuilt in [configure] because the window depends on the source's pixel size,
-     * and [configure] is where Media3 finally knows it. It is rebuilt rather than recomputed per
-     * frame because nothing in it moves: [getMatrix] hands back the same instance every frame, as
-     * Media3's own `Crop` does, and Media3 copies it into a float array before drawing.
+     * The matrices are built in the cut's `configure`, because the boxes depend on the source's pixel
+     * size and that is where Media3 finally knows it. A rectangle that holds still is placed there
+     * once, and the same two instances are handed back every frame, as Media3's own `Crop` does;
+     * Media3 copies them into float arrays before drawing.
      */
     private class Reframe(
         private val clip: Clip,
         private val frame: Output,
         /** Counter-clockwise, as GL counts, and 0 for a clip that stands as it was drawn. */
         private val rotationGlDeg: Float,
-    ) : MatrixTransformation {
+    ) {
 
-        private val matrix = Matrix()
+        private val cutMatrix = Matrix()
+        private val placeMatrix = Matrix()
 
-        /** The clip's moving rectangle, or null for one placed once, in [configure], for good. */
+        /** The clip's moving rectangle, or null for one placed once, in the cut's `configure`, for good. */
         private val motion = clip.rectMotion
         private var inputWidth = 0
         private var inputHeight = 0
 
-        override fun configure(inputWidth: Int, inputHeight: Int): Size {
-            this.inputWidth = inputWidth
-            this.inputHeight = inputHeight
-            // A rectangle that holds still is placed here, once, as it always was; one that moves is
-            // placed in [getMatrix], at every frame's own time.
-            if (motion == null) place(clip.rect?.bounds ?: FULL_FRAME)
-            // The window has the frame's aspect ratio by construction, so declaring the frame's
-            // size here scales the picture without stretching it.
-            return Size(frame.width, frame.height)
+        /** The frame both matrices were last built for: Media3 asks each of them, in turn, for every frame. */
+        private var placedAtUs = C.TIME_UNSET
+
+        /** The source cut down to the part the rectangle shows, which Media3 then clips the quad to. */
+        val cut: MatrixTransformation = object : MatrixTransformation {
+            override fun configure(inputWidth: Int, inputHeight: Int): Size {
+                this@Reframe.inputWidth = inputWidth
+                this@Reframe.inputHeight = inputHeight
+                // A rectangle that holds still is placed here, once, as it always was; one that moves
+                // is placed at every frame's own time.
+                if (motion == null) place(clip.rect?.bounds ?: FULL_FRAME)
+                // The source's own size, so the placement is configured against the same picture.
+                return Size(inputWidth, inputHeight)
+            }
+
+            override fun getMatrix(presentationTimeUs: Long): Matrix {
+                placeAt(presentationTimeUs)
+                return cutMatrix
+            }
+        }
+
+        /** That cut put on the rectangle, and turned in it. */
+        val placement: MatrixTransformation = object : MatrixTransformation {
+            // The boxes have the frame's proportions by construction, so declaring the frame's size
+            // here scales the picture without stretching it.
+            override fun configure(inputWidth: Int, inputHeight: Int): Size = Size(frame.width, frame.height)
+
+            override fun getMatrix(presentationTimeUs: Long): Matrix {
+                placeAt(presentationTimeUs)
+                return placeMatrix
+            }
+        }
+
+        /**
+         * A moving rectangle's two matrices, rebuilt once for each frame from the keys read at the
+         * frame's own presentation time - the output timeline's, as [CameraTransformation] explains -
+         * which is the arithmetic of `configure` once per frame and no allocation.
+         */
+        private fun placeAt(presentationTimeUs: Long) {
+            if (motion == null || presentationTimeUs == placedAtUs) return
+            placedAtUs = presentationTimeUs
+            place(motion.atUs(presentationTimeUs))
         }
 
         /**
          * The picture fitted into [rect] and turned in it. A rectangle too thin to show draws nothing
-         * at all: the matrix folds the quad to a point, Media3 finds no polygon left to draw, and
+         * at all: the placement folds the quad to a point, Media3 finds no polygon left to draw, and
          * the frame stays the transparent black every shader program clears its target to.
          */
         private fun place(rect: Rect) {
-            matrix.reset()
+            cutMatrix.reset()
+            placeMatrix.reset()
             if (RectMotion.drawsNothing(rect, frame.width, frame.height)) {
-                matrix.setScale(0f, 0f)
+                placeMatrix.setScale(0f, 0f)
                 return
             }
-            val window = RenderPlan.sourceWindow(clip, frame, inputWidth, inputHeight, rect)
-            val centreX = RenderPlan.centreNdcX(window)
-            val centreY = RenderPlan.centreNdcY(window)
-            // Put the window's centre on the origin, then open it out until its sides are the
-            // frame's: an NDC side of 2 spans a window side of w, so the scale is 1 / w.
-            matrix.postTranslate(-centreX, -centreY)
-            matrix.postScale(1f / window.w, 1f / window.h)
-            // A SECOND step rather than something folded into the two lines above, so that a clip
-            // which is not turned - every clip of every spec written before the angle existed -
-            // leaves with exactly the transform it has always had. The angle can only have come off
-            // a rectangle, so there is always one to turn about when there is an angle at all.
+            val (source, target) = RenderPlan.fitBoxes(clip, frame, inputWidth, inputHeight, rect)
+            val cut = RenderPlan.cutOnto(source)
+            cutMatrix.setScale(cut.scaleX, cut.scaleY)
+            cutMatrix.postTranslate(cut.offsetX, cut.offsetY)
+            val placed = RenderPlan.placeInto(target)
+            placeMatrix.setScale(placed.scaleX, placed.scaleY)
+            placeMatrix.postTranslate(placed.offsetX, placed.offsetY)
+            // Its own step after the placement, so a clip that is not turned goes through the two
+            // boxes and nothing else. The angle can only have come off a rectangle, so there is
+            // always one to turn about when there is an angle at all.
             if (rotationGlDeg != 0f) turn(rect)
         }
 
@@ -911,24 +947,13 @@ object CompositionBuilder {
             val pivotX = RenderPlan.centreNdcX(rect)
             val pivotY = RenderPlan.centreNdcY(rect)
             val aspect = frame.width.toFloat() / frame.height.toFloat()
-            matrix.postTranslate(-pivotX, -pivotY)
-            matrix.postScale(aspect, 1f)
+            placeMatrix.postTranslate(-pivotX, -pivotY)
+            placeMatrix.postScale(aspect, 1f)
             // Android's `Matrix` turns counter-clockwise in a y-UP frame, which is the frame these
             // vertices are in, so the plan's already-negated degrees go in as they are.
-            matrix.postRotate(rotationGlDeg)
-            matrix.postScale(1f / aspect, 1f)
-            matrix.postTranslate(pivotX, pivotY)
-        }
-
-        /**
-         * The same instance every frame, as Media3's own `Crop` hands back, and Media3 copies it into
-         * a float array before drawing. For a moving rectangle it is rebuilt first, from the keys read
-         * at the frame's own presentation time - the output timeline's, as [CameraTransformation]
-         * explains - which is the arithmetic of [configure] once per frame and no allocation.
-         */
-        override fun getMatrix(presentationTimeUs: Long): Matrix {
-            if (motion != null) place(motion.atUs(presentationTimeUs))
-            return matrix
+            placeMatrix.postRotate(rotationGlDeg)
+            placeMatrix.postScale(1f / aspect, 1f)
+            placeMatrix.postTranslate(pivotX, pivotY)
         }
 
         private companion object {

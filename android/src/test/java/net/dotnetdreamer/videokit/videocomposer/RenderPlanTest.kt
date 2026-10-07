@@ -392,6 +392,40 @@ class RenderPlanTest {
     }
 
     @Test
+    fun `a cover picture is cut to its rectangle before it is placed, so none of it spills past the edges`() {
+        // The square source covering the top half of the frame, as above: the half shows the
+        // source's middle 8/9.
+        val clip = clip("a", fit = Fit.COVER, rect = place(0f, 0f, 1f, 0.5f))
+        val (source, target) = RenderPlan.fitBoxes(clip, output, 1_000, 1_000, Rect(0f, 0f, 1f, 0.5f))
+        assertRect(0f, 0.0555556f, 1f, 0.8888889f, source)
+        assertRect(0f, 0f, 1f, 0.5f, target)
+
+        // The window, the same map as ONE matrix, puts the source's bottom edge 1/32 of the frame
+        // below the half - drawn over whatever is under it, because only the frame's own edges clip
+        // a single matrix. That is what this pair is for.
+        val window = window(fit = Fit.COVER, rect = place(0f, 0f, 1f, 0.5f))
+        assertEquals(0.53125f, (1f - window.y) / window.h, 1e-5f)
+
+        // Through the cut the source box opens out onto exactly the -1..1 square (y up), and the rest
+        // of the source - its top and bottom 1/18 - lands outside it, where Media3 clips it away...
+        val cut = RenderPlan.cutOnto(source)
+        assertEquals(1f, cut.y(1f - 2f * source.y), 1e-5f)
+        assertEquals(-1f, cut.y(1f - 2f * (source.y + source.h)), 1e-5f)
+        assertEquals(-1f, cut.x(-1f), 1e-5f)
+        assertEquals(1f, cut.x(1f), 1e-5f)
+        assertTrue(cut.y(1f) > 1f)
+        assertTrue(cut.y(-1f) < -1f)
+
+        // ...and the placement puts that square on the half and nowhere else: from the frame's top
+        // edge (NDC 1) down to its middle (NDC 0), across the whole width.
+        val placed = RenderPlan.placeInto(target)
+        assertEquals(1f, placed.y(1f), 1e-5f)
+        assertEquals(0f, placed.y(-1f), 1e-5f)
+        assertEquals(-1f, placed.x(-1f), 1e-5f)
+        assertEquals(1f, placed.x(1f), 1e-5f)
+    }
+
+    @Test
     fun `a rect in the bottom right corner puts the source in the bottom right corner`() {
         // A 9:16 source into a 9:16 quarter-frame: no bars anywhere, so the window is purely the
         // output frame seen from the source - twice its size, with the source at the far corner.

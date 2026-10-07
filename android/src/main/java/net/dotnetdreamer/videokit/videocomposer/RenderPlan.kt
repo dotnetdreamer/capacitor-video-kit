@@ -930,15 +930,15 @@ class RenderPlan private constructor(
          * Which part of the ORIENTED source frame the OUTPUT frame shows, in fractions of the
          * source with a top-left origin and y down - crop, fit and rect folded into ONE rectangle.
          *
-         * It is one rectangle because it has to be. Media3 merges every consecutive
-         * `GlMatrixTransformation` into a single shader program and draws ONE quad through the
-         * product of their matrices, so the sizes the intermediate steps report are used to work
-         * the next matrix out and nothing else: there is no intermediate framebuffer and therefore
-         * no intermediate clip. A `Crop` followed by a `Presentation` that letterboxes would put
-         * the picture in the middle of the output and then paint the very pixels the crop threw
-         * away into the bars around it, because the only clip in the chain is the output's own
-         * edges. Folding the lot into one rectangle sidesteps that: everything outside it lands
-         * outside the output frame, where GL discards it, whether Media3 merges the passes or not.
+         * Media3 merges every consecutive `GlMatrixTransformation` into a single shader program and
+         * draws ONE quad through the product of their matrices, so the sizes the intermediate steps
+         * report are used to work the next matrix out and nothing else: there is no intermediate
+         * framebuffer. There IS an intermediate clip, though: `DefaultShaderProgram` carries the
+         * quad through the matrices one at a time and clips it to the -1..1 square after each
+         * (`updateCompositeTransformationMatrixAndVisiblePolygon`, read in the 1.11.1 bytecode).
+         * This window is the whole map as ONE matrix, which only the output's own edges clip, so
+         * the engine draws through its two halves instead - see [fitBoxes] for what the window
+         * alone let through.
          *
          * The result is deliberately allowed OUTSIDE 0..1. A letterbox bar is a piece of the output
          * that corresponds to no piece of the source, so a clip that is letterboxed top and bottom
@@ -970,6 +970,38 @@ class RenderPlan private constructor(
          * squeeze, exactly as the preview and the other engines re-frame it.
          */
         fun sourceWindow(clip: Clip, output: Output, inputWidth: Int, inputHeight: Int, rect: Rect): Rect {
+            val (src, dst) = fitBoxes(clip, output, inputWidth, inputHeight, rect)
+            // src sits on dst, so source fractions per output fraction is the ratio of their sides;
+            // running that back out to the whole output frame says where its corners sit on the
+            // source. The window's aspect is the OUTPUT's by construction, which is what lets the
+            // caller declare the output size and get no distortion out of it.
+            val kx = src.w / dst.w
+            val ky = src.h / dst.h
+            return Rect(
+                x = src.x - dst.x * kx,
+                y = src.y - dst.y * ky,
+                w = kx,
+                h = ky,
+            )
+        }
+
+        /**
+         * The two boxes [sourceWindow] is worked out from: the part of the ORIENTED source the clip
+         * shows, and the part of the output it shows it in, both in fractions with a top-left origin
+         * and y down, mapping onto each other exactly with no part of the picture left over.
+         *
+         * They are what the engine draws through, rather than the window, because the window is
+         * clipped by nothing but the output's own edges. Everything of the source outside the first
+         * box - what a COVER fit cuts off its picture's long sides - maps outside the second box, and
+         * for a clip in the whole frame that is outside the frame, where GL discards it. For a clip in
+         * a smaller rectangle it is not: a 9:16 picture covering half of a 9:16 frame spills a quarter
+         * of the frame past both of the rectangle's long edges, over whatever is drawn there
+         * (measured on a phone, where it showed the two halves of a sliding split already a quarter
+         * open on their first frame and meeting a quarter off the middle). So `Reframe` draws through
+         * [cutOnto] the first box and then [placeInto] the second, and Media3 clips the quad to the
+         * -1..1 square in between.
+         */
+        fun fitBoxes(clip: Clip, output: Output, inputWidth: Int, inputHeight: Int, rect: Rect): Pair<Rect, Rect> {
             val crop = clip.crop ?: FULL_FRAME
 
             // One pixel floors everywhere, so a hand-built spec cannot divide by zero below and
@@ -999,20 +1031,30 @@ class RenderPlan private constructor(
                 src = crop
                 dst = Rect(rect.x + (rect.w - drawW) / 2f, rect.y + (rect.h - drawH) / 2f, drawW, drawH)
             }
-
-            // src sits on dst, so source fractions per output fraction is the ratio of their sides;
-            // running that back out to the whole output frame says where its corners sit on the
-            // source. The window's aspect is the OUTPUT's by construction, which is what lets the
-            // caller declare the output size and get no distortion out of it.
-            val kx = src.w / dst.w
-            val ky = src.h / dst.h
-            return Rect(
-                x = src.x - dst.x * kx,
-                y = src.y - dst.y * ky,
-                w = kx,
-                h = ky,
-            )
+            return src to dst
         }
+
+        /**
+         * A map of normalised device coordinates onto themselves that only scales and shifts:
+         * `x * scaleX + offsetX`, and the same for y. What `Reframe` hands Media3 as a matrix, kept
+         * as four numbers here so that the JVM can check where it sends a picture.
+         */
+        data class NdcMap(val scaleX: Float, val scaleY: Float, val offsetX: Float, val offsetY: Float) {
+            fun x(ndcX: Float): Float = ndcX * scaleX + offsetX
+            fun y(ndcY: Float): Float = ndcY * scaleY + offsetY
+        }
+
+        /**
+         * The cut: [source], a box on the source in fractions with y down, opened out onto the whole
+         * -1..1 square. A box of side w spans 2w in NDC, so its centre goes to the origin and it is
+         * scaled by 1 / w. Everything of the source outside the box lands outside the square, which
+         * is what Media3 clips the quad to before the next matrix (see [fitBoxes]).
+         */
+        fun cutOnto(source: Rect): NdcMap =
+            NdcMap(1f / source.w, 1f / source.h, -centreNdcX(source) / source.w, -centreNdcY(source) / source.h)
+
+        /** The placement: the -1..1 square, which is the cut source box, onto [target] on the output. */
+        fun placeInto(target: Rect): NdcMap = NdcMap(target.w, target.h, centreNdcX(target), centreNdcY(target))
 
         /**
          * The centre of a rectangle in normalised device coordinates: origin centre, y UP, edges at

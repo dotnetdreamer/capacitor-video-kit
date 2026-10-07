@@ -1663,7 +1663,8 @@ export function reorderAudioClip(manifest: EditManifest, id: string, toIndex: nu
   if (
     windows.some(window => !Number.isFinite(window.startMs) || !Number.isFinite(window.endMs) || window.endMs - window.startMs < MIN_LAYER_MS) ||
     gaps.some(gap => !Number.isFinite(gap) || gap < 0)
-  ) return manifest;
+  )
+    return manifest;
 
   const order = block.map((_, index) => index);
   const [moving] = order.splice(from - first, 1);
@@ -1680,7 +1681,16 @@ export function reorderAudioClip(manifest: EditManifest, id: string, toIndex: nu
     return placed;
   });
   const clips = [...lane.clips.slice(0, first), ...reordered, ...lane.clips.slice(last + 1)];
-  if (!reordered.every(clip => audioFits(clip, clips.filter(other => other !== clip), total))) return manifest;
+  if (
+    !reordered.every(clip =>
+      audioFits(
+        clip,
+        clips.filter(other => other !== clip),
+        total,
+      ),
+    )
+  )
+    return manifest;
   return {
     ...manifest,
     audioTracks: manifest.audioTracks!.map(track => (track === lane ? { ...track, clips } : track)),

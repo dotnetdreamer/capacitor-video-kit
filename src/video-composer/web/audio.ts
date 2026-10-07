@@ -64,7 +64,10 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
   const mix: MixedAudio = { sampleRate: MIX_SAMPLE_RATE, channels, length };
 
   const musicPlans = [...(plan.music ? [plan.music] : []), ...plan.musicTracks];
-  const decoder = new SourceDecoder(sourceUses(plan), musicPlans.map(music => music.uri));
+  const decoder = new SourceDecoder(
+    sourceUses(plan),
+    musicPlans.map(music => music.uri),
+  );
   let anything = false;
 
   // How long each base clip fades in for: the length of the transition bringing it in, if any.
@@ -444,7 +447,10 @@ class SourceDecoder {
   private context: BaseAudioContext | null = null;
   private readonly measured: ReadonlySet<string>;
 
-  constructor(private readonly uses: Map<string, number>, measured: Iterable<string> = []) {
+  constructor(
+    private readonly uses: Map<string, number>,
+    measured: Iterable<string> = [],
+  ) {
     this.measured = new Set(measured);
   }
 
