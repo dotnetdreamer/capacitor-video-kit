@@ -413,15 +413,18 @@ extension TestMedia {
     /// `sessionStart` is where the file's timeline starts, the first frame's time when nil; one earlier
     /// than the first frame writes the file a phone or ffmpeg writes when its video starts after its
     /// sound - an EMPTY edit from `sessionStart` to the first frame, then the media (measured).
+    /// `compression` is merged over the encoder's properties, as `video(_:)`'s is: where the keyframes
+    /// fall, say.
     static func frames(_ url: URL, width: Int, height: Int, times: [CMTime], reorder: Bool = false,
                        bitrate: Int = 8_000_000, transform: CGAffineTransform = .identity,
-                       sessionStart: CMTime? = nil,
+                       sessionStart: CMTime? = nil, compression: [String: Any] = [:],
                        picture: (Int) -> [UInt8]) async throws -> URL {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         var properties: [String: Any] = [AVVideoAllowFrameReorderingKey: reorder,
                                          AVVideoAverageBitRateKey: bitrate]
         if reorder { properties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
+        for (k, v) in compression { properties[k] = v }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,

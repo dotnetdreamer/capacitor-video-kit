@@ -385,7 +385,8 @@ export interface ThumbnailRequest {
    * costs roughly three keyframe seeks per tile, so the editor asks for it on short clips - and on
    * any clip once [EditorMediaHost.previewProxy] has made its copy, which a host that makes copies
    * cuts exact frames from: small and densely keyed, it decodes one for about what a keyframe of the
-   * clip costs. Frames as tall as the copy or taller still come from the clip.
+   * clip costs. Frames as tall as the copy or taller still come from the clip. A host that can cut
+   * exact frames cheaply without a copy (iOS) cuts them whatever this says.
    */
   precise: boolean;
 }

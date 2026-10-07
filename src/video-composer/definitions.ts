@@ -1242,7 +1242,8 @@ export interface ThumbnailsOptions {
    * because it costs what it is worth: a keyframe seek is a jump, while a precise one decodes every
    * frame from the keyframe before the time asked for. Cameras write a keyframe every one or two
    * seconds, so without this a filmstrip at one frame per second shows each frame once or twice
-   * over, and with it a whole strip costs roughly one decode of the clip.
+   * over, and with it a whole strip costs roughly one decode of the clip. iOS cuts the exact frame
+   * whatever this says.
    */
   precise?: boolean;
 }

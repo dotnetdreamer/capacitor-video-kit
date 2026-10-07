@@ -105,8 +105,11 @@ enum Thumbnailer {
     /// returned array against its own time array to position tiles, so a dropped entry does not
     /// shorten the strip, it shifts every tile after it against the timeline.
     ///
-    /// Cached on disk by (source signature, time, maxHeight, precise). Reopening a clip in the
-    /// editor is the common case and it should not decode a single frame.
+    /// Every tile is the exact frame at its time, whatever `precise` says (see the tolerances
+    /// below). The parameter stays because it is the plugin's contract, which Android chooses by.
+    ///
+    /// Cached on disk by (source signature, time, maxHeight). Reopening a clip in the editor is
+    /// the common case and it should not decode a single frame.
     static func thumbnails(_ url: URL, timesMs: [Int64], maxHeight rawMaxHeight: Int,
                            precise: Bool) async throws -> [URL] {
         if timesMs.isEmpty { return [] }                            // never open a decoder for nothing
@@ -122,7 +125,7 @@ enum Thumbnailer {
         var wanted: [(index: Int, timeMs: Int64)] = []
         for (i, raw) in timesMs.enumerated() {
             let clamped = max(0, raw)
-            let file = dir.appendingPathComponent(cacheName(sourceKey, clamped, maxHeight, precise))
+            let file = dir.appendingPathComponent(cacheName(sourceKey, clamped, maxHeight))
             if fileBytes(file) > 0 {
                 results[i] = file
             } else {
@@ -146,12 +149,16 @@ enum Thumbnailer {
             // Android's getScaledFrameAtTime box. A full box rather than an unconstrained width,
             // so an ultra-wide source produces the same tile on both platforms.
             generator.maximumSize = CGSize(width: maxHeight * 2, height: maxHeight)
-            // `precise` maps to tolerances and to nothing else. false is Android's
-            // OPTION_CLOSEST_SYNC (jump to the keyframe, one decode), true is OPTION_CLOSEST
-            // (decode forward from the keyframe before the time). A fixed half-second tolerance
-            // would be neither, and the two platforms would disagree about which frame a tile shows.
-            generator.requestedTimeToleranceBefore = precise ? .zero : .positiveInfinity
-            generator.requestedTimeToleranceAfter = precise ? .zero : .positiveInfinity
+            // The exact frame at every time, whatever `precise` says. Infinite tolerance answers with
+            // the keyframe NEAREST the time, as often after it as before and seconds from it, so a
+            // strip cut on keyframes showed each shot of a film or a music video - keyed at every
+            // cut - a tile or two before the preview reached it. Android cuts exact frames from its
+            // preview copy (PreviewProxy); iOS makes no copy and needs none, because the generator
+            // decodes ascending times forward in one pass rather than from a keyframe per tile, so a
+            // whole strip costs at most one decode of the clip. So both platforms show the same frame
+            // on each tile.
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
 
             // Key by the REQUESTED time rather than trusting the sequence order: the batch mode is
             // documented as time ordered, not request ordered, and we asked in ascending order.
@@ -161,7 +168,7 @@ enum Thumbnailer {
                     continue                                        // fillGaps deals with it below
                 }
                 let key = msOf(time)
-                let file = dir.appendingPathComponent(cacheName(sourceKey, key, maxHeight, precise))
+                let file = dir.appendingPathComponent(cacheName(sourceKey, key, maxHeight))
                 if let written = try? writeJPEG(downsample(image, maxHeight: maxHeight), to: file, quality: 0.8) {
                     byTime[key] = written
                 }
@@ -172,11 +179,11 @@ enum Thumbnailer {
         return fillGaps(results, in: dir)
     }
 
-    /// `"<sourceKey>-<timeMs>-<maxHeight>[-p].jpg"`. The height and the precise suffix both belong
-    /// in the name: a precise tile is a different picture of the same moment, and a strip asked for
-    /// precisely must never be served the keyframes an earlier sloppy request left behind.
-    private static func cacheName(_ sourceKey: String, _ timeMs: Int64, _ maxHeight: Int, _ precise: Bool) -> String {
-        "\(sourceKey)-\(timeMs)-\(maxHeight)\(precise ? "-p" : "").jpg"
+    /// `"<sourceKey>-<timeMs>-<maxHeight>-p.jpg"`, the name a precise tile has always had, for every
+    /// tile now that every tile is exact. The plain name is where older builds left the keyframes
+    /// they cut for `precise: false`, and a strip read under it would be served those again.
+    private static func cacheName(_ sourceKey: String, _ timeMs: Int64, _ maxHeight: Int) -> String {
+        "\(sourceKey)-\(timeMs)-\(maxHeight)-p.jpg"
     }
 
     /// The signature covers path, length and modification time, exactly as Android's does, so a
