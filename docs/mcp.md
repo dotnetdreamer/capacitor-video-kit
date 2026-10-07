@@ -60,6 +60,8 @@ on a lane of its own, and one the agent puts on a named lane where it does not f
 post's single `music` joins the lanes as their first sound on the first `addAudio`, as it does in the
 editor. `splitAudio` cuts a sound in two on its lane and `duplicateAudio` puts a copy straight after
 it, as the audio row's Cut and Duplicate do; a cut that leaves a half under 100 ms is refused.
+`reorderAudio` carries a sound to another place in its lane's order, as holding it on the timeline
+does: the sounds it passes close up behind it, each keeping its length and settings.
 
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different

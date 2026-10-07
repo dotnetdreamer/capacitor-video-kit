@@ -305,13 +305,14 @@ interface VoiceLaneView {
 
 interface ClipReorderView {
   id: string;
+  media: 'video' | 'audio';
   /** The layer the segment was lifted from: null for the base track. */
   fromTrackId: string | null;
   to: number;
   size: number;
   pitch: number;
-  thumbs: { id: string; url: string | null }[];
-  liftedUrl: string | null;
+  /** Every tile on the row, the lifted one among them: a frame for video, a name and its wave for sound. */
+  thumbs: { id: string; url: string | null; label?: string; wave?: WaveView | null }[];
   /** The rail's and the lifted tile's positions when the lift began; the drag moves them directly. */
   ox0: number;
   lx0: number;
@@ -341,6 +342,9 @@ interface PinchState {
  * DOWN it leaves that row: the row under the finger lights up, the gap under each row opens a video
  * layer that is not there yet, and letting go puts the segment there. That is the whole of how a
  * post gets more than one picture on the frame from the timeline.
+ *
+ * Sounds use the same lift, compact rail and drop cues on their audio lanes. A selected sound
+ * dragged without holding moves in time; a held sound commits its reorder or lane transfer on release.
  *
  * Every cut of the base track carries LightCut's white dot, and a tap on one opens the transition
  * sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
@@ -1240,13 +1244,13 @@ export class VeTimeline {
   private readonly clipReorder = signal<ClipReorderView | null>(null);
 
   /** The other segments' thumbnails, each in the slot it would take if the lifted one landed now. */
-  private readonly reorderSlots = computedWith<{ id: string; url: string | null; x: number }[]>(
+  private readonly reorderSlots = computedWith<(ClipReorderView['thumbs'][number] & { x: number })[]>(
     () => {
       const r = this.clipReorder.value;
       if (!r) return [];
       return r.thumbs.filter(thumb => thumb.id !== r.id).map((thumb, i) => ({ ...thumb, x: (i < r.to ? i : i + 1) * r.pitch }));
     },
-    (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.url === y.url && x.x === y.x),
+    (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.url === y.url && x.label === y.label && x.wave === y.wave && x.x === y.x),
   );
 
   private readonly layerReorder = signal<{ id: string; from: number; to: number } | null>(null);
@@ -2315,12 +2319,8 @@ export class VeTimeline {
     if (this.press !== press || this.drag || this.pinch) return;
     press.timer = null;
     this.press = null;
-    if (press.kind === 'clip' || press.kind === 'track-clip') this.startClipReorder(press);
+    if (press.kind === 'clip' || press.kind === 'track-clip' || press.kind === 'audio') this.startClipReorder(press);
     else if (press.kind === 'layer') this.startLayerReorder(press);
-    else if (press.kind === 'audio' && press.id) {
-      this.ctx.store.select({ kind: 'audio', id: press.id });
-      this.startAudioDrag(this.dragBase(press.pointerId, press.x0, press.y0), press.id, 'move');
-    }
   }
 
   private isSelectedBody(press: Press): boolean {
@@ -2635,42 +2635,50 @@ export class VeTimeline {
     const id = press.id;
     if (!id) return;
     const manifest = store.manifest.value;
-    const trackId = trackIdOfClip(manifest, id);
+    const audio = press.kind === 'audio';
+    const audioTrack = audio ? manifest.audioTracks?.find(track => track.clips.some(clip => clip.id === id)) : null;
+    const trackId = audio ? audioTrack?.id : trackIdOfClip(manifest, id);
     if (trackId === undefined) return;
-    const track = trackId === null ? null : findVideoTrack(manifest, trackId);
-    if (trackId !== null && !track) return;
+    const track = !audio && trackId !== null ? findVideoTrack(manifest, trackId) : null;
+    if (!audio && trackId !== null && !track) return;
 
-    const rows = this.videoRows();
+    const rows = audio ? this.audioRows() : this.videoRows();
     const row = rows.find(r => r.trackId === trackId);
     if (!row) return;
 
     const slots = timelineSlots({ clips: track ? track.clips : manifest.clips });
-    const from = slots.findIndex(slot => slot.clip.id === id);
+    const from = audio ? audioTrack!.clips.findIndex(clip => clip.id === id) : slots.findIndex(slot => slot.clip.id === id);
     if (from < 0) return;
 
     const base = { ...this.dragBase(press.pointerId, press.x, press.y) };
     const tlTop = this.tlEl?.getBoundingClientRect().top ?? 0;
     // The tiles are square and as tall as the row they came off, which is the whole point of the
     // rail: it reads as the same strip, laid out so a finger can carry one tile past another.
-    const size = (trackId === null ? this.tileW.value : TRACK2_H) - 8;
+    const size = (audio ? row.bottom - row.top : trackId === null ? this.tileW.value : TRACK2_H) - 8;
     const pitch = size + 8;
     const rel = press.x - base.viewLeft;
     const originX = rel - (from * pitch + size / 2);
     const railTop = row.top - tlTop + (row.bottom - row.top - size) / 2;
     const strips = store.filmstrips.value;
-    const thumbs = slots.map(slot => ({
+    const thumbs: ClipReorderView['thumbs'] = audio ? audioTrack!.clips.map(clip => ({
+      id: clip.id,
+      url: null,
+      label: clip.fileName || 'Audio',
+      wave: this.audioWaves.value.get(clip.id) ?? null,
+    })) : slots.map(slot => ({
       id: slot.clip.id,
       url: frameUrl(strips.get(slot.clip.clipKey), slot.clip.inMs),
     }));
-    const atMs0 = (track?.startMs ?? 0) + slots[from].startMs;
+    const atMs0 = audio ? audioTrack!.clips[from].startMs : (track?.startMs ?? 0) + slots[from].startMs;
     const drag: ClipReorderDrag = {
       ...base,
       kind: 'clip-reorder',
+      media: audio ? 'audio' : 'video',
       id,
       fromTrackId: trackId,
       from,
       to: from,
-      count: slots.length,
+      count: thumbs.length,
       originX,
       size,
       pitch,
@@ -2684,12 +2692,12 @@ export class VeTimeline {
     this.beginDrag(drag);
     this.clipReorder.value = {
       id,
+      media: drag.media,
       fromTrackId: trackId,
       to: from,
       size,
       pitch,
       thumbs,
-      liftedUrl: thumbs[from].url,
       ox0: originX,
       lx0: rel - size / 2,
       ly0: press.y - tlTop - size / 2,
@@ -2710,6 +2718,13 @@ export class VeTimeline {
     return Array.from(nodes, node => {
       const rect = node.getBoundingClientRect();
       return { trackId: node.dataset['vrow'] === 'base' ? null : (node.dataset['vrow'] ?? null), top: rect.top, bottom: rect.bottom };
+    });
+  }
+
+  private audioRows(): DropRow[] {
+    return [...(this.lanesEl?.querySelectorAll<HTMLElement>('[data-arow]') ?? [])].map(node => {
+      const rect = node.getBoundingClientRect();
+      return { trackId: node.dataset['arow']!, top: rect.top, bottom: rect.bottom };
     });
   }
 
@@ -3122,9 +3137,11 @@ export class VeTimeline {
           drag.kind === 'music' ||
           drag.kind === 'audio' ||
           drag.kind === 'voice' ||
+          drag.kind === 'clip-reorder' ||
           drag.kind === 'scrub')
       ) {
         this.applyDrag(drag, false);
+        if (this.drag !== drag) return;
       }
     }
     this.drag = null;
@@ -3188,7 +3205,11 @@ export class VeTimeline {
         if (cancelled) break;
         // Another layer, or a layer of its own under the row it was dropped on; otherwise another
         // place in the row it never left.
-        if (drag.drop) store.moveClipToTrack(drag.id, drag.drop, drag.atMs);
+        if (drag.media === 'audio') {
+          if (drag.drop?.kind === 'track') store.moveAudioClipToTrack(drag.id, drag.drop, drag.atMs);
+          else if (drag.drop?.kind === 'new') store.moveAudioClipToTrack(drag.id, { kind: 'new', index: drag.drop.index + 1 }, drag.atMs);
+          else if (!drag.drop && drag.to !== drag.from) store.reorderAudio(drag.id, drag.to);
+        } else if (drag.drop) store.moveClipToTrack(drag.id, drag.drop, drag.atMs);
         else if (drag.to !== drag.from) store.moveClipTo(drag.id, drag.to);
         break;
       case 'layer-reorder': {
@@ -3345,7 +3366,7 @@ export class VeTimeline {
       const reorder = this.clipReorder.value;
       const trim = this.trimHandles.value;
       const rows = this.trackRows.value;
-      const marks = dropMarks(reorder?.drop ?? null, rows);
+      const marks = dropMarks(reorder?.media === 'video' ? reorder.drop : null, rows);
       const tail = this.tail.value;
 
       return (
@@ -3371,7 +3392,7 @@ export class VeTimeline {
                   class={{
                     'tl__track': true,
                     'tl__vrow': true,
-                    'tl__vrow--source': reorder !== null && reorder.fromTrackId === null,
+                    'tl__vrow--source': reorder?.media === 'video' && reorder.fromTrackId === null,
                     'tl__vrow--drop': marks.on === 0,
                     'tl__vrow--drop-under': marks.under === 0,
                   }}
@@ -3395,7 +3416,7 @@ export class VeTimeline {
 
                   {this.segments.value.map(seg => (
                     <div
-                      class={{ 'seg': true, 'seg--selected': seg.selected, 'seg--ghost': reorder?.drop != null && reorder.id === seg.id }}
+                      class={{ 'seg': true, 'seg--selected': seg.selected, 'seg--ghost': reorder?.media === 'video' && reorder.drop != null && reorder.id === seg.id }}
                       key={seg.id}
                       data-hit="clip"
                       data-id={seg.id}
@@ -3648,7 +3669,7 @@ export class VeTimeline {
               class={{
                 'tl__track2': true,
                 'tl__vrow': true,
-                'tl__vrow--source': reorder?.fromTrackId === row.id,
+                'tl__vrow--source': reorder?.media === 'video' && reorder.fromTrackId === row.id,
                 'tl__vrow--drop': marks.on === i + 1,
                 'tl__vrow--drop-under': marks.under === i + 1,
               }}
@@ -3661,7 +3682,7 @@ export class VeTimeline {
                     'seg': true,
                     'seg--extra': true,
                     'seg--selected': seg.selected,
-                    'seg--ghost': reorder?.drop != null && reorder.id === seg.id,
+                    'seg--ghost': reorder?.media === 'video' && reorder.drop != null && reorder.id === seg.id,
                   }}
                   key={seg.id}
                   data-hit="track-clip"
@@ -3780,7 +3801,9 @@ export class VeTimeline {
   }
 
   private audioRow(lane: AudioLaneView, index: number) {
-    const drop = this.audioDrop.value;
+    const lift = this.clipReorder.value;
+    const audioLift = lift?.media === 'audio' ? lift : null;
+    const drop = audioLift?.drop ? audioLift.drop.kind === 'new' ? { ...audioLift.drop, index: audioLift.drop.index + 1 } : audioLift.drop : this.audioDrop.value;
     const on = drop?.kind === 'track' && drop.trackId === lane.id;
     const before = drop?.kind === 'new' && drop.index === index;
     const waves = this.audioWaves.value;
@@ -3788,9 +3811,12 @@ export class VeTimeline {
       <div
         class={{
           'lane': true,
-          'lane--audio-drop': on,
-          'lane--audio-new-before': before,
-          'lane--audio-new-after': drop?.kind === 'new' && drop.index === this.audioLanes.value.length && index === this.audioLanes.value.length - 1,
+          'lane--audio-source': audioLift?.fromTrackId === lane.id,
+          'tl__vrow--drop': audioLift !== null && on,
+          'tl__vrow--drop-under': audioLift?.drop?.kind === 'new' && audioLift.drop.index === index,
+          'lane--audio-drop': audioLift === null && on,
+          'lane--audio-new-before': audioLift === null && before,
+          'lane--audio-new-after': audioLift === null && drop?.kind === 'new' && drop.index === this.audioLanes.value.length && index === this.audioLanes.value.length - 1,
         }}
         key={`audio-${lane.id}`}
         data-arow={lane.id}
@@ -3799,7 +3825,7 @@ export class VeTimeline {
           const handles = clip.selected ? edgeHandles(clip.x, clip.w) : null;
           return [
             <div
-              class={{ 'item': true, 'item--music': true, 'item--selected': clip.selected, 'item--glyph': clip.w < LANE_GLYPH_ONLY_PX }}
+              class={{ 'item': true, 'item--music': true, 'item--selected': clip.selected, 'item--glyph': clip.w < LANE_GLYPH_ONLY_PX, 'item--ghost': audioLift?.drop != null && audioLift.id === clip.id }}
               key={clip.id}
               data-hit="audio"
               data-id={clip.id}
@@ -3833,8 +3859,8 @@ export class VeTimeline {
       store.previewAudioClip(drag.id, musicEndTrim(drag.music0, this.snapEdge(drag, drag.end0 + deltaMs, targets, pps), total));
     } else {
       drag.atMs = Math.max(0, this.snapEdge(drag, drag.music0.startMs + deltaMs, targets, pps));
-      store.previewMoveAudio(drag.id, drag.atMs);
       const drop = this.audioDropTarget(drag.y, drag.fromTrackId);
+      store.previewMoveAudio(drag.id, drag.atMs);
       if (!sameAudioDrop(this.audioDrop.value, drop)) {
         this.audioDrop.value = drop;
         store.haptic('selection');
@@ -3975,16 +4001,27 @@ export class VeTimeline {
       >
         <div class="tl__reorder-rail" key="rail">
           {this.reorderSlots.value.map(thumb => (
-            <div class="rtile" key={thumb.id} style={{ transform: `translateX(${thumb.x}px)` }}>
-              {thumb.url ? <img src={thumb.url} alt="" draggable={false} decoding="async" /> : null}
+            <div class={{ 'rtile': true, 'rtile--audio': reorder.media === 'audio' }} key={thumb.id} style={{ transform: `translateX(${thumb.x}px)` }}>
+              {this.reorderTile(thumb)}
             </div>
           ))}
         </div>
-        <div class="rtile rtile--lifted" key="lifted">
-          {reorder.liftedUrl ? <img src={reorder.liftedUrl} alt="" draggable={false} decoding="async" /> : null}
+        <div class={{ 'rtile': true, 'rtile--lifted': true, 'rtile--audio': reorder.media === 'audio' }} key="lifted">
+          {this.reorderTile(reorder.thumbs.find(thumb => thumb.id === reorder.id))}
         </div>
       </div>
     );
+  }
+
+  private reorderTile(thumb: ClipReorderView['thumbs'][number] | undefined) {
+    if (!thumb) return null;
+    if (thumb.url) return <img src={thumb.url} alt="" draggable={false} decoding="async" />;
+    if (!thumb.label) return null;
+    return [
+      thumb.wave ? <svg class="rtile__wave" viewBox={`0 0 ${thumb.wave.w} ${WAVE_VIEW_H}`} preserveAspectRatio="none"><path d={thumb.wave.d}></path></svg> : null,
+      <ve-icon name="musical-note"></ve-icon>,
+      <span class="rtile__label">{thumb.label}</span>,
+    ];
   }
 
   private addButton() {
@@ -4027,7 +4064,7 @@ type DragCursor = 'move' | 'resize' | null;
 function dragCursor(drag: TimelineDrag): DragCursor {
   if (drag.kind === 'trim' || drag.kind === 'end') return 'resize';
   // A layer's and a sound's two edge modes trim; the third moves the whole window.
-  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'music' || drag.kind === 'audio') && drag.mode !== 'move') return 'resize';
+  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'music' || drag.kind === 'audio') && (drag.mode === 'start' || drag.mode === 'end')) return 'resize';
   return 'move';
 }
 

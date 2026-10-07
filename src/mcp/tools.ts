@@ -453,6 +453,11 @@ export const OP_REFERENCE: Record<string, string> = {
   moveAudioToTrack:
     'id, target ({kind:"track",trackId} | {kind:"new",index}), atMs, newTrackId? - onto a lane, or a new one at index; it lands in ' +
     'the gap nearest atMs that holds it whole, and a lane left empty goes.',
+  reorderAudio:
+    'id, toIndex - another place in its lane’s order (0 is first), as holding the sound on the timeline does. The sounds it ' +
+    'passes close up behind it; each keeps its length, trim, speed, loop and fades, and the gaps between places stay where they ' +
+    'were. A sound cut short by the end of the post keeps what is heard of it. Refused when it or a sound it passes is heard ' +
+    `for less than ${MIN_LAYER_MS}ms on the post.`,
   splitAudio:
     'id, atMs, newId - the sound in two at atMs on the post, both on its lane: the first keeps its id and the fade in, the second ' +
     `(newId) the fade out, and the two play as the sound did. Each half is heard for at least ${MIN_LAYER_MS}ms, or the op is refused.`,

@@ -155,6 +155,36 @@ describe('EditorStore', () => {
     expect(store.selectedAudio.value).toMatchObject({ startMs: 2000, endMs: 3000 });
   });
 
+  it('commits the lifted sound order with selection preserved and one undo', () => {
+    const first = store.addAudioClip({ ...MUSIC, sourceDurationMs: 2000, loop: false, startMs: 0 })!;
+    const second = store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 2000 })!;
+    store.select({ kind: 'audio', id: first });
+    const before = store.manifest.value;
+    store.reorderAudio(first, 1);
+    store.reorderAudio(first, 1);
+    const after = store.manifest.value;
+    expect(after.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[second, 0], [first, 1000]]);
+    expect(store.selectedAudio.value?.id).toBe(first);
+    store.undo();
+    expect(store.manifest.value).toBe(before);
+    expect(store.toast.value?.text).toBe('Undo: Reorder audio');
+    store.redo();
+    expect(store.manifest.value).toBe(after);
+    expect(store.selectedAudio.value?.id).toBe(first);
+  });
+
+  it('adds no history step when a lifted sound keeps its position or the reorder is invalid', () => {
+    const first = store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 0 })!;
+    store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 1000 });
+    const before = store.manifest.value;
+    store.reorderAudio(first, 0);
+    store.reorderAudio('missing', 1);
+    store.reorderAudio(first, NaN);
+    expect(store.manifest.value).toBe(before);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Add audio');
+  });
+
   it('names Loop on and off in the undo toast, and loops a sound up to the next one on its lane', () => {
     const first = store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 0 })!;
     store.addAudioClip({ ...MUSIC, sourceDurationMs: 1000, loop: false, startMs: 3000 });

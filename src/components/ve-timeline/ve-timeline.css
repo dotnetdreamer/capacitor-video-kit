@@ -150,11 +150,13 @@
  * back, because the rows are what the customer is now aiming at, and the segment under the finger
  * is greyed in its old place so it is clear which one is in the air.
  */
-.tl--reordering:not(.tl--dropping) .tl__vrow--source {
+.tl--reordering:not(.tl--dropping) .tl__vrow--source,
+.tl--reordering:not(.tl--dropping) .lane--audio-source {
   visibility: hidden;
 }
 
-.seg--ghost {
+.seg--ghost,
+.item--ghost {
   opacity: 0.3;
 }
 
@@ -1099,6 +1101,42 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.rtile--audio {
+  display: grid;
+  place-items: center;
+  background: var(--ve-lane-music, #0b8e87);
+  color: #fff;
+}
+
+.rtile--audio ve-icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  margin-bottom: 6px;
+}
+
+.rtile__wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+  opacity: 0.3;
+}
+
+.rtile__label {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 1px;
+  overflow: hidden;
+  font-size: 7px;
+  line-height: 9px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: center;
 }
 
 .rtile--lifted {
