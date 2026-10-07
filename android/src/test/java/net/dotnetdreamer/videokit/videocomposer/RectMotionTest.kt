@@ -216,4 +216,23 @@ class RectMotionTest {
         // Read off the keys half way through the slide.
         assertRect(0f, 0.75f, 1f, 0.5f, slidingIn.at(1_300.0))
     }
+
+    @Test
+    fun `a half sliding in from the top shows nothing below its own edge`() {
+        // What a phone export showed: a 9:16 clip covering the top half of a 9:16 frame, half way in
+        // (its rectangle at y -0.25). Its picture is twice the half's height, so drawn through the
+        // one-matrix window it reached a quarter of the frame past the rectangle - the half looked a
+        // quarter open on its first frame, and the two halves met a quarter off the middle.
+        val clip = Clip("b", "file:///b.mp4", 0, 2_000, 1f, 1f, false, Fit.COVER, rect = Placement(0f, 0f, 1f, 0.5f, null))
+        val halfWay = Rect(0f, -0.25f, 1f, 0.5f)
+        val window = RenderPlan.sourceWindow(clip, output, 1080, 1920, halfWay)
+        assertEquals(0.5f, (1f - window.y) / window.h, 1e-5f)
+
+        // Cut to the half's own share of the picture and then placed, its bottom edge is the
+        // rectangle's: a quarter of the frame down (NDC 0.5), and nothing of it below.
+        val (source, target) = RenderPlan.fitBoxes(clip, output, 1080, 1920, halfWay)
+        assertRect(0f, 0.25f, 1f, 0.5f, source)
+        val bottomNdc = RenderPlan.placeInto(target).y(RenderPlan.cutOnto(source).y(1f - 2f * (source.y + source.h)))
+        assertEquals(0.5f, bottomNdc, 1e-5f)
+    }
 }

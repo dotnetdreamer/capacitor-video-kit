@@ -2660,15 +2660,17 @@ export class VeTimeline {
     const originX = rel - (from * pitch + size / 2);
     const railTop = row.top - tlTop + (row.bottom - row.top - size) / 2;
     const strips = store.filmstrips.value;
-    const thumbs: ClipReorderView['thumbs'] = audio ? audioTrack!.clips.map(clip => ({
-      id: clip.id,
-      url: null,
-      label: clip.fileName || 'Audio',
-      wave: this.audioWaves.value.get(clip.id) ?? null,
-    })) : slots.map(slot => ({
-      id: slot.clip.id,
-      url: frameUrl(strips.get(slot.clip.clipKey), slot.clip.inMs),
-    }));
+    const thumbs: ClipReorderView['thumbs'] = audio
+      ? audioTrack!.clips.map(clip => ({
+          id: clip.id,
+          url: null,
+          label: clip.fileName || 'Audio',
+          wave: this.audioWaves.value.get(clip.id) ?? null,
+        }))
+      : slots.map(slot => ({
+          id: slot.clip.id,
+          url: frameUrl(strips.get(slot.clip.clipKey), slot.clip.inMs),
+        }));
     const atMs0 = audio ? audioTrack!.clips[from].startMs : (track?.startMs ?? 0) + slots[from].startMs;
     const drag: ClipReorderDrag = {
       ...base,
@@ -3803,7 +3805,7 @@ export class VeTimeline {
   private audioRow(lane: AudioLaneView, index: number) {
     const lift = this.clipReorder.value;
     const audioLift = lift?.media === 'audio' ? lift : null;
-    const drop = audioLift?.drop ? audioLift.drop.kind === 'new' ? { ...audioLift.drop, index: audioLift.drop.index + 1 } : audioLift.drop : this.audioDrop.value;
+    const drop = audioLift?.drop ? (audioLift.drop.kind === 'new' ? { ...audioLift.drop, index: audioLift.drop.index + 1 } : audioLift.drop) : this.audioDrop.value;
     const on = drop?.kind === 'track' && drop.trackId === lane.id;
     const before = drop?.kind === 'new' && drop.index === index;
     const waves = this.audioWaves.value;
@@ -3825,7 +3827,13 @@ export class VeTimeline {
           const handles = clip.selected ? edgeHandles(clip.x, clip.w) : null;
           return [
             <div
-              class={{ 'item': true, 'item--music': true, 'item--selected': clip.selected, 'item--glyph': clip.w < LANE_GLYPH_ONLY_PX, 'item--ghost': audioLift?.drop != null && audioLift.id === clip.id }}
+              class={{
+                'item': true,
+                'item--music': true,
+                'item--selected': clip.selected,
+                'item--glyph': clip.w < LANE_GLYPH_ONLY_PX,
+                'item--ghost': audioLift?.drop != null && audioLift.id === clip.id,
+              }}
               key={clip.id}
               data-hit="audio"
               data-id={clip.id}
@@ -4018,7 +4026,11 @@ export class VeTimeline {
     if (thumb.url) return <img src={thumb.url} alt="" draggable={false} decoding="async" />;
     if (!thumb.label) return null;
     return [
-      thumb.wave ? <svg class="rtile__wave" viewBox={`0 0 ${thumb.wave.w} ${WAVE_VIEW_H}`} preserveAspectRatio="none"><path d={thumb.wave.d}></path></svg> : null,
+      thumb.wave ? (
+        <svg class="rtile__wave" viewBox={`0 0 ${thumb.wave.w} ${WAVE_VIEW_H}`} preserveAspectRatio="none">
+          <path d={thumb.wave.d}></path>
+        </svg>
+      ) : null,
       <ve-icon name="musical-note"></ve-icon>,
       <span class="rtile__label">{thumb.label}</span>,
     ];
