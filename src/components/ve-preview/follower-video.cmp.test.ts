@@ -189,3 +189,53 @@ describe('a layer with no element of its own for its sound', () => {
     expect(r.video.muted).toBe(false);
   }, 30_000);
 });
+
+/*
+ * A layer that opens mid-play - each half of a split sliding in - is readied before its window opens:
+ * its clip loaded and the element sitting paused on the frame the layer opens on. Left until the
+ * window opened, the clip was put on the element on that frame and the stage held still while it
+ * loaded, so the slide's first half was never seen.
+ */
+describe('a layer readied before its window opens', () => {
+  /** The rig's layer starting at 2 s, from 1 s into its file. */
+  const later = (m: EditManifest): EditManifest => ({
+    ...m,
+    videoTracks: m.videoTracks.map(track => ({ ...track, startMs: 2000, clips: track.clips.map(clip => ({ ...clip, inMs: 1000 })) })),
+  });
+
+  it('waits paused on its opening frame, then starts there with no load and no seek', async (ctx: TestContext) => {
+    if (!canPlayVp8()) ctx.skip('this browser cannot play VP8');
+    const r = await rig(false, later);
+    r.store.playheadMs.value = 1000;
+    r.follower.sync(null, true);
+    const [next] = r.store.upcomingLayers(1500);
+    expect(next).toMatchObject({ trackId: 'track-1', sourceMs: 1000 });
+
+    r.follower.preload(next);
+    await until('the opening frame', () => r.video.readyState >= 2 && !r.video.seeking && Math.abs(r.video.currentTime - 1) < 0.01);
+    expect(r.video.paused).toBe(true);
+
+    let loads = 0;
+    let seeks = 0;
+    r.video.addEventListener('loadstart', () => (loads += 1));
+    r.video.addEventListener('seeking', () => (seeks += 1));
+    // The window opens a frame late, as it does on a phone: the playhead is past the frame waited on.
+    r.store.playheadMs.value = 2016;
+    r.follower.sync(r.layer(), true);
+    await until('the layer to play', () => !r.video.paused);
+    expect([loads, seeks]).toEqual([0, 0]);
+  }, 30_000);
+
+  it('is left alone while a layer is on screen', async (ctx: TestContext) => {
+    if (!canPlayVp8()) ctx.skip('this browser cannot play VP8');
+    const r = await rig(false);
+    r.follower.sync(r.layer(), false);
+    await until('the layer to load', () => r.video.readyState >= 2);
+    const src = r.video.currentSrc;
+    const at = r.video.currentTime;
+
+    r.follower.preload({ ...r.layer(), clipId: 'clip-a', clipKey: 'clip-a', sourceMs: 3000 });
+    expect(r.video.currentSrc).toBe(src);
+    expect(r.video.currentTime).toBe(at);
+  }, 30_000);
+});

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ClipMedia, StillPicture } from './clip-media';
+import { PreviewPictures } from './preview-pictures';
 
 /*
  * A picture has to play like a clip for the preview's player to hold it at all - be the clock
@@ -108,6 +109,53 @@ describe('StillPicture', () => {
     await next(still, 'seeked');
     expect(still.seeking).toBe(false);
     expect(still.currentTime).toBe(5);
+  });
+
+  /*
+   * Two slots on one photo - the base track and a split's half opening on what it just showed - draw
+   * the one picture the preview decoded, so the half is on screen from the first frame of its slide
+   * rather than after a decode and an upload of its own.
+   */
+  it('shows a picture another slot has decoded at once, and still says so a turn later', async () => {
+    const pictures = new PreviewPictures();
+    const url = await pictureUrl(64, 48);
+    const first = new StillPicture(pictures);
+    first.src = url;
+    const loaded = next(first, 'loadedmetadata');
+    first.load();
+    await loaded;
+
+    const second = new StillPicture(pictures);
+    second.src = url;
+    let heard = false;
+    second.addEventListener('loadedmetadata', () => (heard = true));
+    second.load();
+    expect(second.bitmap).toBe(first.bitmap);
+    expect([second.readyState, second.videoWidth, second.videoHeight]).toEqual([4, 64, 48]);
+    expect(heard).toBe(false);
+    await wait(0);
+    expect(heard).toBe(true);
+    pictures.destroy();
+  });
+
+  it('gives its picture back rather than closing it under another slot', async () => {
+    const pictures = new PreviewPictures(undefined, { keptBytes: 0 });
+    const url = await pictureUrl(64, 48);
+    const [first, second] = [new StillPicture(pictures), new StillPicture(pictures)];
+    for (const still of [first, second]) {
+      still.src = url;
+      const loaded = next(still, 'loadedmetadata');
+      still.load();
+      await loaded;
+    }
+    const shared = first.bitmap!;
+
+    first.clear();
+    expect(shared.width).toBe(64);
+    expect(second.bitmap).toBe(shared);
+    second.clear();
+    // Nobody holds it and nothing is kept: let go, so the painter drops its texture too.
+    expect(shared.width).toBe(0);
   });
 });
 

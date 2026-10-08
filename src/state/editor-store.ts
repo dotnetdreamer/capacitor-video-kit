@@ -471,6 +471,30 @@ export class EditorStore {
   });
 
   /**
+   * For each extra track, the layer it shows NEXT, when that starts within `withinMs` of the
+   * playhead: the track's first clip while the track has not started, or the clip after the one on
+   * screen. Each is read at the instant it starts, so `sourceMs` is the frame its element should be
+   * waiting on - which is what lets a layer's element load and find that frame before its window
+   * opens rather than on the frame it does; see `FollowerVideo.preload`. A track whose next clip
+   * would start past its own end, or past the post's, has nothing next.
+   */
+  upcomingLayers(withinMs: number): PreviewVideoLayer[] {
+    const m = this.manifest.value;
+    const at = this.playheadMs.value;
+    const total = this.totalMs.value;
+    const layers: PreviewVideoLayer[] = [];
+    for (const track of m.videoTracks) {
+      const cut = Math.min(totalDurationMs({ clips: track.clips }), total - track.startMs);
+      if (cut <= 0) continue;
+      const into = at - track.startMs;
+      const next = timelineSlots({ clips: track.clips }).find(slot => slot.startMs > into && slot.startMs < cut);
+      if (!next || next.startMs - into > withinMs) continue;
+      layers.push(this.previewLayer(track.id, next, next.startMs, track.opacity, track.z));
+    }
+    return layers;
+  }
+
+  /**
    * The transition at the playhead, or null wherever one clip fills the frame. Beside
    * [previewLayers] rather than inside it, because that list holds ONE base entry and a great deal
    * of the preview - the crop tool, the hit-testing, the source element per track - relies on it.

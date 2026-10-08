@@ -17,16 +17,63 @@
  * `<video>` every frame because a video moves, and a picture drawn from at full size would cost that
  * upload for a still - so the long side is capped by the caller, at what the place drawing it can
  * actually show.
+ *
+ * KEPT WHERE WEBGL READS IT FASTEST. A picture is decoded to be drawn, and drawing it starts with
+ * handing it to WebGL, once. On WebKit that one upload is most of what a picture costs: from an
+ * `ImageBitmap`, or from a canvas the GPU draws, `texImage2D` reads the pixels back out of the GPU
+ * process first, and took 50-62 ms for a 1080x1920 photo and 71-77 ms for one cut to 2048 from a
+ * phone's 12-16 megapixels; from a canvas kept in memory (`willReadFrequently`) it took 9-12 ms and
+ * 18-20 ms (iOS 26.5 simulator, 2026-10-07). That was a frame and a half dropped every time a
+ * photo came on screen in the preview, and three at once when a split opened on three of them. So
+ * on WebKit the picture stays on that canvas; elsewhere it becomes a bitmap as it always has. Either
+ * way it is drawn on once and never again, which [isStillPicture] lets the painter rely on.
  */
 
 /** A photo that has neither loaded nor failed after this long is treated as one that failed. */
 const DECODE_TIMEOUT_MS = 15_000;
 
 export interface DecodedPicture {
-  /** Upright, and no larger than was asked for. An `ImageBitmap` wherever the engine can make one. */
+  /**
+   * Upright, and no larger than was asked for. An `ImageBitmap` wherever the engine can make one and
+   * hands it to WebGL quickly; otherwise the canvas it was drawn on, which [isStillPicture] knows.
+   */
   bitmap: ImageBitmap | HTMLCanvasElement;
   width: number;
   height: number;
+}
+
+/** The canvases [decodePicture] has drawn a picture on and handed out: never drawn on again. */
+const stills = new WeakSet<HTMLCanvasElement>();
+
+/**
+ * Whether `source` is a canvas holding a decoded picture, which - like a bitmap - cannot change, so
+ * the painter uploads it once rather than on every frame as it does a canvas in general.
+ */
+export function isStillPicture(source: unknown): source is HTMLCanvasElement {
+  return typeof HTMLCanvasElement !== 'undefined' && source instanceof HTMLCanvasElement && stills.has(source);
+}
+
+/**
+ * Lets a decoded picture's pixels go at once rather than whenever it is collected: a bitmap is
+ * closed, a canvas emptied. Either then reports a size of nothing, which is how the painter finds
+ * the texture it was uploaded into and lets that go too.
+ */
+export function releasePicture(picture: DecodedPicture): void {
+  const bitmap = picture.bitmap;
+  if ('close' in bitmap) {
+    bitmap.close();
+    return;
+  }
+  bitmap.width = 0;
+  bitmap.height = 0;
+}
+
+let appleWebKit: boolean | null = null;
+
+/** WebKit, where a picture is quicker to hand WebGL from memory than from a bitmap; see above. Asked once. */
+function keepsPicturesInMemory(): boolean {
+  if (appleWebKit === null) appleWebKit = typeof navigator !== 'undefined' && /^Apple/.test(navigator.vendor ?? '');
+  return appleWebKit;
 }
 
 /** Whether a host source is a picture rather than a video. Absent `kind` is a video. */
@@ -51,10 +98,15 @@ export async function decodePicture(url: string, maxEdge: number): Promise<Decod
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    const context = canvas.getContext('2d');
+    const inMemory = keepsPicturesInMemory();
+    const context = canvas.getContext('2d', inMemory ? { willReadFrequently: true } : undefined);
     if (!context) throw new Error('no 2D canvas to draw the picture on');
     context.drawImage(image, 0, 0, width, height);
 
+    if (inMemory) {
+      stills.add(canvas);
+      return { bitmap: canvas, width, height };
+    }
     if (typeof createImageBitmap === 'function') {
       try {
         const bitmap = await createImageBitmap(canvas);
@@ -67,6 +119,7 @@ export async function decodePicture(url: string, maxEdge: number): Promise<Decod
         // An engine that will not make one from a canvas still draws the canvas itself.
       }
     }
+    stills.add(canvas);
     return { bitmap: canvas, width, height };
   } finally {
     image.removeAttribute('src');

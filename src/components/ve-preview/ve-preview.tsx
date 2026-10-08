@@ -13,6 +13,7 @@ import { ClipMedia } from './clip-media';
 import { LayerMotion } from './layer-motion';
 import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
+import { PreviewPictures } from './preview-pictures';
 import { PreviewPlayer } from './preview-player';
 import { zoomArea, zoomLevelLabel } from './zoom-area';
 
@@ -222,6 +223,11 @@ export class VePreview implements EditorPlayer {
   private baseMedia: ClipMedia | null = null;
   private partnerMedia: ClipMedia | null = null;
   private readonly extraMedia = new Map<string, ClipMedia>();
+  /**
+   * The decoded pictures every element here shares, so a photo on screen in two places - the base
+   * track and a layer opening on it - is decoded and uploaded once. See [PreviewPictures].
+   */
+  private pictures: PreviewPictures | null = null;
   private readonly extraRefs = new Map<string, (el?: HTMLElement) => void>();
   private musicEl?: HTMLAudioElement;
   private voiceEl?: HTMLAudioElement;
@@ -723,6 +729,9 @@ export class VePreview implements EditorPlayer {
     this.partnerMedia?.dispose();
     this.baseMedia = null;
     this.partnerMedia = null;
+    // Last: every slot above has given its picture back, and what is kept goes with the preview.
+    this.pictures?.destroy();
+    this.pictures = null;
   }
 
   /** The player, the gestures, the stage measurement and the four effects, once. */
@@ -736,8 +745,10 @@ export class VePreview implements EditorPlayer {
     const voice = this.voiceEl;
     if (!stage || !canvas || !video || !partner || !music || !voice) return;
 
-    const baseMedia = new ClipMedia(video);
-    const partnerMedia = new ClipMedia(partner);
+    const pictures = new PreviewPictures();
+    this.pictures = pictures;
+    const baseMedia = new ClipMedia(video, pictures);
+    const partnerMedia = new ClipMedia(partner, pictures);
     this.baseMedia = baseMedia;
     this.partnerMedia = partnerMedia;
 
@@ -762,6 +773,7 @@ export class VePreview implements EditorPlayer {
       // moved: where the layer has got to in its file is the one thing the element needs.
       extraLayers: () => store.previewLayers.value.filter(layer => layer.trackId !== null),
       onSwap: this.readBaseAspect,
+      pictures,
     });
     // The base track is drawn from the player's own reading of its two elements, one reading a
     // frame, so a swap between them can never pair one clip's framing with the other's picture.
@@ -913,7 +925,7 @@ export class VePreview implements EditorPlayer {
       if (this.attachedExtras.get(trackId) === video) continue;
       this.releaseExtra(trackId);
       this.attachedExtras.set(trackId, video);
-      const media = new ClipMedia(video);
+      const media = new ClipMedia(video, this.pictures ?? undefined);
       this.extraMedia.set(trackId, media);
       media.addEventListener('loadedmetadata', this.readExtraAspect);
       media.addEventListener('resize', this.readExtraAspect);

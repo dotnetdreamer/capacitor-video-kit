@@ -1,5 +1,5 @@
 import { loadableUrl, resolve } from '../../web-runtime/files';
-import { decodePicture, measurePicture, type DecodedPicture } from '../../web-runtime/picture';
+import { decodePicture, measurePicture, releasePicture, type DecodedPicture } from '../../web-runtime/picture';
 import type { FrameTween, LayerSource } from './painter';
 import type { ProbedInput } from './plan';
 import { framePairAt, frameSeekTarget, frameTimes, type SourceWindow } from './slow-motion';
@@ -174,8 +174,7 @@ export class StillReader implements SourceReader {
   }
 
   close(): void {
-    const bitmap = this.picture.bitmap;
-    if ('close' in bitmap) bitmap.close();
+    releasePicture(this.picture);
   }
 }
 

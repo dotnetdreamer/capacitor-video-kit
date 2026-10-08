@@ -66,6 +66,19 @@ object CompositionBuilder {
     /** Pitch is preserved across speed changes; flipping this also means flipping the other engines. */
     const val MAINTAIN_PITCH = true
 
+    /**
+     * How long an export may go without writing a sample before Media3 calls it stuck and fails it,
+     * as `muxer`. This is the only stall watch Android has, the counterpart of iOS's `StallWatch`.
+     *
+     * Media3's own default is 10 s on a device and 25 s on an emulator, and a heavy post spends
+     * longer than that before its first frame is written: every input of the compositor is set up on
+     * the one GL thread first. Dhum Dhum on four videos is nine inputs, and the Android 17 emulator
+     * took ~21 s to its first frame (2026-10-08), so four of its five exports there failed that would
+     * have finished; a slow phone is the same story against 10 s. Killing a render that would have
+     * finished is the worse of the two mistakes, and a minute still ends one that has truly hung.
+     */
+    const val MAX_DELAY_BETWEEN_SAMPLES_MS = 60_000L
+
     fun toComposition(
         plan: RenderPlan,
         overlays: List<TextureOverlay>,
@@ -215,6 +228,7 @@ object CompositionBuilder {
                 LayerCompositor(
                     output,
                     layers,
+                    plan.totalUs,
                     plan.tails,
                     plan.camera,
                     // The base's trailing gap is Media3's OPAQUE black, which would sit over the canvas
@@ -271,6 +285,7 @@ object CompositionBuilder {
             .setVideoMimeType(MimeTypes.VIDEO_H264)
             .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .setEncoderFactory(encoderFactory)
+            .setMaxDelayBetweenMuxerSamplesMs(MAX_DELAY_BETWEEN_SAMPLES_MS)
             // Transformer must be built, started, polled and cancelled on one Looper thread.
             .setLooper(Looper.getMainLooper())
         // The H.264 profile is deliberately NOT requested: DefaultEncoderFactory ignores a
@@ -1018,6 +1033,8 @@ object CompositionBuilder {
     private class LayerCompositor(
         output: Output,
         tracks: List<RenderPlan.PlannedTrack>,
+        /** The post's length, which a layer that ends before it is padded to with a gap. */
+        totalUs: Long,
         /** The plan's tails, in timeline order; empty when the post has no transition. */
         private val tails: List<RenderPlan.PlannedTail>,
         /**
@@ -1035,7 +1052,7 @@ object CompositionBuilder {
     ) : VideoCompositorSettings {
 
         private val size = Size(output.width, output.height)
-        private val layers: List<Layer> = tracks.map { Layer(it, camera) }
+        private val layers: List<Layer> = tracks.map { Layer(it, camera, lastFrameFromUs(it, totalUs, output.fps)) }
 
         /**
          * The tails' input: registered straight after the base, which is registered straight after
@@ -1075,6 +1092,8 @@ object CompositionBuilder {
         private class Layer(
             private val track: RenderPlan.PlannedTrack,
             private val camera: CameraTrack?,
+            /** From here on the layer's last frame is hidden; see [lastFrameFromUs]. */
+            private val lastFrameFromUs: Long,
         ) {
 
             private val hidden: OverlaySettings =
@@ -1122,7 +1141,7 @@ object CompositionBuilder {
              */
             fun settingsAt(timeUs: Long): OverlaySettings {
                 val i = track.visibleIndexAt(timeUs)
-                if (i == RenderPlan.PlannedTrack.HIDDEN) return hidden
+                if (i == RenderPlan.PlannedTrack.HIDDEN || timeUs >= lastFrameFromUs) return hidden
                 val placement = track.placements[i]
                 if (camera == null || !placement.zoomed) return placed[i]
                 val view = camera.atUs(timeUs) ?: return placed[i]
@@ -1148,6 +1167,29 @@ object CompositionBuilder {
         }
 
         private companion object {
+            /**
+             * Where the LAST frame of a layer that ends before the post does begins: half a frame
+             * before that frame is due, so the frame is caught wherever its timestamp rounded to.
+             * [Layer.settingsAt] hides it.
+             *
+             * That frame does not reach the compositor as the picture it is. The layer's sequence
+             * switches to its trailing gap right after it, and the frame still waiting in the
+             * compositor came out of the switch as opaque black: one wholly black output frame at
+             * the end of every such layer, over the base and every layer under it - each half of
+             * both of a template's splits, photos and videos alike (Android 17 emulator, Media3
+             * 1.11.1, 2026-10-08), where the iOS and web engines draw the clip's last frame. Hidden,
+             * the frame the base shows instead is the one that would have shown around the layer
+             * anyway, and a layer that ends on a cut goes one frame early; one that slides out
+             * leaves a sliver too thin to see on that frame, so nothing at all is lost there.
+             *
+             * A layer that runs to the post's end has no gap after it and keeps its last frame.
+             */
+            fun lastFrameFromUs(track: RenderPlan.PlannedTrack, totalUs: Long, fps: Int): Long {
+                if (track.endUs >= totalUs) return Long.MAX_VALUE
+                val frameUs = 1_000_000L / fps.coerceAtLeast(1)
+                return track.endUs - frameUs - frameUs / 2
+            }
+
             /** The base track, composited as it arrives: centred, unscaled and opaque. */
             val BASE: OverlaySettings = StaticOverlaySettings.Builder().build()
 

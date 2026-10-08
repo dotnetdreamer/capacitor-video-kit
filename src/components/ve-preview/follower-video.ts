@@ -31,6 +31,9 @@ const SOUND_DRIFT_MS = 200;
  */
 const SOUND_START_LEAD_MS = 180;
 
+/** `readyState >= HAVE_CURRENT_DATA`: the element has a frame of where it is. */
+const HAVE_CURRENT_DATA = 2;
+
 export interface FollowerMedia {
   video: ClipMedia;
   /**
@@ -77,6 +80,11 @@ export class FollowerVideo {
   private posterIsBlank = true;
   /** The last thing [sync] was told, so a load that lands later can pick up where it left off. */
   private layer: PreviewVideoLayer | null = null;
+  /**
+   * The layer the track shows next, while it shows nothing, which the element is loaded and waiting
+   * on; see [preload]. Null once a layer is on screen.
+   */
+  private ahead: PreviewVideoLayer | null = null;
   private playing = false;
   private destroyed = false;
 
@@ -106,12 +114,41 @@ export class FollowerVideo {
       this.pause();
       return;
     }
+    this.ahead = null;
     this.targetMs = layer.sourceMs;
     const source = this.store.clipByKey(layer.clipKey);
     if (!source) {
       this.pause();
       return;
     }
+    if (this.loadedKey !== source.key) {
+      this.load(source);
+      return;
+    }
+    this.apply();
+  }
+
+  /**
+   * Gets the element ready for the layer its track shows next, while it shows nothing: the source
+   * loaded and the element paused on the frame the layer opens on, so the layer is on screen from
+   * the first frame of its window.
+   *
+   * Left until the window opened, the source was put on the element on that very frame, and the
+   * stage held every other layer still while it came - a picture decoding, a video loading, seeking
+   * and finding its first frame - and then jumped to where the post had got to in the meantime. A
+   * split whose halves slide in over 600 ms lost the first 220-380 ms of the slide that way on the
+   * iOS 26.5 simulator (2026-10-07): the halves appeared a third of the way in. The base track has
+   * always done this for its next clip, on its spare element (see `preloadDue`); a layer's element
+   * has nothing else to do while its track is off screen, so it waits on its next clip itself.
+   *
+   * Nothing is done while a layer is on screen - the element is busy showing it - or for null.
+   */
+  preload(next: PreviewVideoLayer | null): void {
+    if (this.destroyed || this.layer || !next) return;
+    const source = this.store.clipByKey(next.clipKey);
+    if (!source) return;
+    this.ahead = next;
+    this.targetMs = next.sourceMs;
     if (this.loadedKey !== source.key) {
       this.load(source);
       return;
@@ -196,7 +233,10 @@ export class FollowerVideo {
    * metadata has just arrived, which is always seeked; see below.
    */
   private apply(fresh = false): void {
-    const layer = this.layer;
+    // On screen, or waiting for its window to open (see [preload]): the same element either way, and
+    // only one that is on screen is ever started or heard.
+    const live = this.layer !== null;
+    const layer = this.layer ?? this.ahead;
     const clip = layer ? findClip(this.store.manifest.value, layer.clipId) : null;
     if (!clip) return;
     const video = this.video;
@@ -212,8 +252,12 @@ export class FollowerVideo {
     // Running, the element carries itself between playhead writes and only a drift worth a stall is
     // corrected; stopped, nothing else moves it, so it goes exactly where it is wanted. The source
     // runs at the clip's speed, so the output milliseconds the drift is measured in are that many
-    // more of the file when the clip is sped up.
-    const tolerance = this.playing && !video.paused ? (DRIFT_MS * speed) / 1000 : SEEK_EPSILON_S;
+    // more of the file when the clip is sped up. A paused element with a frame that a play has just
+    // reached - the one [preload] left on the opening frame of its window - is started from there,
+    // as a running one would carry on: the playhead is a frame or two past that frame by the time
+    // the window opens, and a seek to close those milliseconds would throw the waiting frame away.
+    const running = this.playing && (!video.paused || (live && video.readyState >= HAVE_CURRENT_DATA));
+    const tolerance = running ? (DRIFT_MS * speed) / 1000 : SEEK_EPSILON_S;
     const targetSec = this.targetMs / 1000;
     // A source that has just loaded is seeked whatever those two numbers say, which is the same rule
     // the base element's loader has for the same reason: an element that has never been seeked keeps
@@ -223,12 +267,12 @@ export class FollowerVideo {
     // then sat on its blank poster, showing nothing, until some other edit happened to move it.
     if (fresh || Math.abs(video.currentTime - targetSec) > tolerance) video.currentTime = targetSec;
 
-    if (this.playing) {
+    if (live && this.playing) {
       if (video.paused) startPlayback(video);
     } else {
       this.pause();
     }
-    this.applySound(clip, silenced);
+    if (live) this.applySound(clip, silenced);
   }
 
   /**

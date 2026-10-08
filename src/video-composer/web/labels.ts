@@ -1,7 +1,7 @@
 import type * as TasksVision from '@mediapipe/tasks-vision';
 
 import { extensionOf, FILE_SCHEME, loadableUrl, readFile } from '../../web-runtime/files';
-import { decodePicture, type DecodedPicture } from '../../web-runtime/picture';
+import { decodePicture, releasePicture, type DecodedPicture } from '../../web-runtime/picture';
 import type { LabeledFrame, LabelMediaOptions, LabelMediaResult, MediaLabel } from '../definitions';
 
 import { FrameReader } from './media';
@@ -244,7 +244,7 @@ async function lookAt(options: LabelMediaOptions, engine: Engine, deadline: numb
       try {
         return { engine: 'mediapipe', kind: 'image', frames: [{ timeMs: 0, labels: look(engine, picture.bitmap, minConfidence) }] };
       } finally {
-        if ('close' in picture.bitmap) picture.bitmap.close();
+        releasePicture(picture);
       }
     }
   }

@@ -53,8 +53,10 @@ import {
   type SoundSpan,
 } from './preview-media';
 import { PreviewMixer, levelsInUse, playableHere } from './preview-mixer';
+import type { PreviewPictures } from './preview-pictures';
 import {
   MAX_START_LEAD_MS,
+  PRELOAD_AHEAD_MS,
   TAIL_SEEK_MS,
   boundaryAfterSplits,
   boundaryKind,
@@ -374,6 +376,12 @@ export interface PreviewMedia {
   extraLayers: () => readonly PreviewVideoLayer[];
   /** The two base elements have just traded places: the base clip on screen is on the other one now. */
   onSwap?: () => void;
+  /**
+   * The preview's decoded pictures, shared by every element. A layer's NEXT clip, when it is a
+   * picture and the layer's element is busy showing the one before it, is decoded into these ahead
+   * of its cut; see [PreviewPlayer.syncFollower].
+   */
+  pictures?: PreviewPictures;
 }
 
 /**
@@ -470,6 +478,7 @@ export class PreviewPlayer implements EditorPlayer {
   /** How the music and the voiceover are heard at their levels where the WebView ignores `volume`. */
   private readonly mixer: PreviewMixer;
   private readonly onSwap: (() => void) | undefined;
+  private readonly pictures: PreviewPictures | null;
 
   /** The segment the clock is showing, by segment id - indices move when the manifest changes. */
   private segmentId: string | null = null;
@@ -575,6 +584,7 @@ export class PreviewPlayer implements EditorPlayer {
     this.mixer = new PreviewMixer([media.music, media.voice]);
     this.makeAudio = media.makeAudio ?? (() => document.createElement('audio'));
     this.onSwap = media.onSwap;
+    this.pictures = media.pictures ?? null;
 
     for (const deck of this.decks) this.listenTo(deck);
     // A picker, a phone call or the home button takes the page away, and the paused elements'
@@ -2529,12 +2539,29 @@ export class PreviewPlayer implements EditorPlayer {
    * A follower whose track has no clip under the playhead is synced with null rather than skipped,
    * which is what tells it to hide itself: skipping would leave the last frame of a layer that has
    * ended sitting on the frame.
+   *
+   * And each is readied for what its track shows next, [PRELOAD_AHEAD_MS] ahead - the lead the base
+   * track's spare is given for its next clip. One with nothing on screen loads it and waits on its
+   * opening frame (see [FollowerVideo.preload]); one busy showing a clip cannot, so the next clip's
+   * picture, if it is one, is decoded into the shared ones for the element to find ready at the cut.
    */
   private syncFollower(playing: boolean): void {
     const byTrack = new Map(this.extraLayers().map(layer => [layer.trackId, layer] as const));
+    const coming = this.followers.size > 0 ? new Map(this.store.upcomingLayers(PRELOAD_AHEAD_MS).map(layer => [layer.trackId, layer] as const)) : null;
     for (const [trackId, follower] of this.followers) {
-      follower.sync(byTrack.get(trackId) ?? null, playing);
+      const layer = byTrack.get(trackId) ?? null;
+      follower.sync(layer, playing);
+      const next = coming?.get(trackId) ?? null;
+      if (!layer) follower.preload(next);
+      else if (next) this.warmPicture(next);
     }
+  }
+
+  /** Decodes the picture `layer` shows into the shared ones ahead of its cut, when it is a picture. */
+  private warmPicture(layer: PreviewVideoLayer): void {
+    const source = this.pictures ? this.store.clipByKey(layer.clipKey) : undefined;
+    if (!source || !this.store.isPictureKey(source.key)) return;
+    this.pictures?.warm(previewSrc(this.store, source));
   }
 
   /* ========================================================================================= */

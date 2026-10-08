@@ -1,7 +1,8 @@
 import { PICTURE_SOURCE_MS } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { LayerSource } from '../../video-composer/web/painter';
-import { decodePicture } from '../../web-runtime/picture';
+import type { DecodedPicture } from '../../web-runtime/picture';
+import { PreviewPictures, type PictureHold } from './preview-pictures';
 
 /**
  * What one layer of the preview plays a clip on: its `<video>` element for a video, or a picture held
@@ -56,14 +57,6 @@ const FORWARDED = [
 const HAVE_NOTHING = 0;
 const HAVE_ENOUGH_DATA = 4;
 
-/**
- * The long side a picture is decoded at for the preview. The compositor draws into a canvas at most
- * twice the size of the box on screen, so a phone's preview never needs more than this - and the
- * crop tool, which shows the whole of a source on a stage the size of the preview, needs no more
- * either.
- */
-const PREVIEW_MAX_EDGE = 2048;
-
 /** How often a running picture says `timeupdate`, which is what a `<video>` does about as often. */
 const TIMEUPDATE_MS = 250;
 
@@ -78,6 +71,8 @@ const TIMEUPDATE_MS = 250;
 export class StillPicture extends EventTarget {
   /** The picture, once decoded: upright, and no bigger than the preview can show. */
   bitmap: ImageBitmap | HTMLCanvasElement | null = null;
+  /** This picture's claim on [pictures], from its load until the next load or [clear]. */
+  private held: PictureHold | null = null;
   videoWidth = 0;
   videoHeight = 0;
   readyState = HAVE_NOTHING;
@@ -98,6 +93,15 @@ export class StillPicture extends EventTarget {
   private loadToken = 0;
   private seekToken = 0;
   private ticker: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Where the picture comes from: the preview's [PreviewPictures], shared with every other slot, so a
+   * photo on screen in two places is decoded and uploaded once. One of its own, which keeps nothing
+   * it is not holding, for a picture made on its own - the unit tests'.
+   */
+  constructor(private readonly pictures: PreviewPictures = new PreviewPictures(undefined, { keptBytes: 0 })) {
+    super();
+  }
 
   get src(): string {
     return this.url;
@@ -150,7 +154,14 @@ export class StillPicture extends EventTarget {
     return this.currentTime >= this.duration;
   }
 
-  /** Decodes [src]; `loadedmetadata` and the rest follow once it has, or `error` if it cannot be. */
+  /**
+   * Decodes [src]; `loadedmetadata` and the rest follow once it has, or `error` if it cannot be.
+   *
+   * A picture another slot has already decoded, or one kept from a moment ago, is taken at once: it
+   * is drawable from the next frame, which is the whole point of sharing it - a layer opening on it
+   * is on screen from the first frame of its window. The events still come a turn later, as they
+   * would for a decode, so whoever asked has finished asking before the answer lands.
+   */
   load(): void {
     const token = ++this.loadToken;
     this.releaseBitmap();
@@ -160,22 +171,21 @@ export class StillPicture extends EventTarget {
     this.error = null;
     const url = this.url;
     if (!url) return;
-    decodePicture(url, PREVIEW_MAX_EDGE).then(
-      (picture) => {
-        if (token !== this.loadToken) {
-          if ('close' in picture.bitmap) picture.bitmap.close();
-          return;
-        }
-        this.bitmap = picture.bitmap;
-        this.videoWidth = picture.width;
-        this.videoHeight = picture.height;
-        this.readyState = HAVE_ENOUGH_DATA;
-        this.fire('loadedmetadata');
-        this.fire('resize');
-        this.fire('loadeddata');
-        this.fire('canplay');
-        this.fire('canplaythrough');
-        if (!this.paused) this.fire('playing');
+    const held = this.pictures.hold(url);
+    this.held = held;
+    const decoded = held.picture;
+    if (decoded) {
+      this.take(decoded);
+      queueMicrotask(() => {
+        if (token === this.loadToken) this.announce();
+      });
+      return;
+    }
+    held.ready.then(
+      picture => {
+        if (token !== this.loadToken) return;
+        this.take(picture);
+        this.announce();
       },
       (error: unknown) => {
         if (token !== this.loadToken) return;
@@ -246,10 +256,29 @@ export class StillPicture extends EventTarget {
     this.ticker = null;
   }
 
+  /** The decoded picture, drawable from now on. */
+  private take(picture: DecodedPicture): void {
+    this.bitmap = picture.bitmap;
+    this.videoWidth = picture.width;
+    this.videoHeight = picture.height;
+    this.readyState = HAVE_ENOUGH_DATA;
+  }
+
+  /** What a `<video>` says as its first frame arrives, in the order it says it. */
+  private announce(): void {
+    this.fire('loadedmetadata');
+    this.fire('resize');
+    this.fire('loadeddata');
+    this.fire('canplay');
+    this.fire('canplaythrough');
+    if (!this.paused) this.fire('playing');
+  }
+
+  /** Gives the picture back to [pictures], which keeps it for the next slot or lets it go. */
   private releaseBitmap(): void {
-    const bitmap = this.bitmap;
     this.bitmap = null;
-    if (bitmap && 'close' in bitmap) bitmap.close();
+    this.held?.release();
+    this.held = null;
   }
 
   private fire(type: string): void {
@@ -259,13 +288,18 @@ export class StillPicture extends EventTarget {
 
 /** One layer's media: its `<video>` element, and the picture that takes its place for a picture. */
 export class ClipMedia extends EventTarget {
-  readonly still = new StillPicture();
+  readonly still: StillPicture;
   /** Which of the two is live: the picture, or the element. */
   private picture = false;
   private readonly unlisten: Array<() => void> = [];
 
-  constructor(readonly element: HTMLVideoElement) {
+  /** `pictures` is the preview's, shared by every slot; see [StillPicture]. */
+  constructor(
+    readonly element: HTMLVideoElement,
+    pictures?: PreviewPictures,
+  ) {
     super();
+    this.still = new StillPicture(pictures);
     for (const type of FORWARDED) {
       this.forward(element, type, () => !this.picture);
       this.forward(this.still, type, () => this.picture);

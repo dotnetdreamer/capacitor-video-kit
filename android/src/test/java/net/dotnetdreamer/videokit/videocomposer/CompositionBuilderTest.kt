@@ -157,6 +157,35 @@ class CompositionBuilderTest {
         assertEquals(RenderPlan.PlannedTrack.HIDDEN, layer.visibleIndexAt(itemOutUs))
     }
 
+    /*
+     * A layer's last frame came through the switch to its trailing gap as opaque black - one black
+     * frame over the whole post at the end of every split, photos and videos alike (Android 17
+     * emulator, 2026-10-08) - so the compositor hides that frame, and only that one, for a layer that
+     * ends before the post does.
+     */
+    @Test
+    fun `a layer that ends before the post hides its last frame, and only that one`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 2_000)), tracks = listOf(Track("pip", listOf(clip("b", outMs = 1_000)), 0, 1, 1f))),
+            probes("a", "b"),
+        )
+        val settings = CompositionBuilder.toComposition(plan, emptyList(), null).videoCompositorSettings
+        // At 30 fps the layer's frames fall at 0, 33_333 ... 966_667 and its gap opens at 1_000_000.
+        assertEquals(1f, settings.getOverlaySettings(0, 933_333L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(0, 966_667L).alphaScale, 0f)
+        assertEquals(0f, settings.getOverlaySettings(0, 1_000_000L).alphaScale, 0f)
+    }
+
+    @Test
+    fun `a layer that runs to the post's end keeps its last frame`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 1_000)), tracks = listOf(Track("pip", listOf(clip("b", outMs = 1_000)), 0, 1, 1f))),
+            probes("a", "b"),
+        )
+        val settings = CompositionBuilder.toComposition(plan, emptyList(), null).videoCompositorSettings
+        assertEquals(1f, settings.getOverlaySettings(0, 966_667L).alphaScale, 0f)
+    }
+
     /** A layer of its own, whose clip is the only one that long, so the sequences can be told apart. */
     private fun layer(id: String, key: String, outMs: Long, z: Int, rect: Placement? = null) =
         Track(id, listOf(clip(key, outMs = outMs, rect = rect)), 0, z, 1f)

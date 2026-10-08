@@ -997,6 +997,32 @@ describe('EditorStore', () => {
       });
     });
 
+    /*
+     * What a layer's element is readied for before its window opens - a split's halves loaded and
+     * sitting on their opening frames a second and a half before they slide in - so each is read at
+     * the instant it starts, from its in point.
+     */
+    describe('upcomingLayers', () => {
+      it("names a track's first clip, at its in point, once the track starts within the window", () => {
+        load({ videoTracks: [track([clip('c', 500, 3000, { rect: { x: 0, y: 0, w: 1, h: 0.5 } })], { startMs: 2000, opacity: 0.5 })] });
+        store.seek(400);
+        expect(store.upcomingLayers(1500)).toEqual([]);
+
+        store.seek(1000);
+        expect(store.upcomingLayers(1500)).toEqual([
+          { trackId: 'vt', clipId: 'c', clipKey: 'c', sourceMs: 500, rect: { x: 0, y: 0, w: 1, h: 0.5 }, crop: null, fit: 'cover', opacity: 0.5, z: 1 },
+        ]);
+      });
+
+      it('names the clip after the one on screen, and nothing once the last one is', () => {
+        load({ videoTracks: [track([clip('c', 0, 1000), clip('d', 200, 2200)])] });
+        store.seek(0);
+        expect(store.upcomingLayers(1500).map(layer => [layer.clipId, layer.sourceMs])).toEqual([['d', 200]]);
+        store.seek(1000);
+        expect(store.upcomingLayers(1500)).toEqual([]);
+      });
+    });
+
     describe('the actions', () => {
       it('adds a layer and selects its clip', () => {
         const id = store.addVideoTrack(clip('c', 0, 3000));

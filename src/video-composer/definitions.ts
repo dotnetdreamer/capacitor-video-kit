@@ -823,7 +823,10 @@ export type ComposeFailureCode =
   | 'unreadable_input'
   /** The encoder refused the request, or failed partway through it. */
   | 'encoder'
-  /** The finished streams could not be written into a file. */
+  /**
+   * The finished streams could not be written into a file. On Android this includes a render that
+   * has written nothing for 60 seconds, which Media3 stops as stuck (`nativeCode` 7002).
+   */
   | 'muxer'
   /**
    * Stopped from outside, by the platform, with nothing wrong with the post: the same spec
@@ -871,7 +874,7 @@ export type ComposeFailureCode =
    * Everything else, with the platform's own words as `message`. On iOS this includes a render
    * whose progress has not moved for 90 seconds, which is stopped with the message `timeout`
    * because something under it has stopped answering; a render that keeps moving, however slowly,
-   * is never stopped for time, and Android has no such watch at all.
+   * is never stopped for time. Android's watch is Media3's, and it reports as `muxer`.
    */
   | 'unknown';
 

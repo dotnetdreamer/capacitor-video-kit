@@ -1,6 +1,7 @@
 import { isIdentityView, type CameraView } from '../../editor/camera';
 import { isNeutralMotion, type OverlayMotionSample } from '../../editor/motion';
 import type { TransitionLook } from '../../editor/transitions';
+import { isStillPicture } from '../../web-runtime/picture';
 import type { ComposeRect, ComposeTransition } from '../definitions';
 
 import { cameraAffine } from './camera-draw';
@@ -913,9 +914,10 @@ export class Painter {
       return texture !== undefined;
     }
     // A bitmap cannot change once it is made - a picture on the timeline, decoded once, or one frame
-    // of a slowed clip held for the frames made from it - so it is uploaded the first time it is
-    // drawn and never again. Anything else is re-uploaded below.
-    const still = typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap;
+    // of a slowed clip held for the frames made from it - and nor can the canvas a picture was decoded
+    // onto (see `isStillPicture`), so either is uploaded the first time it is drawn and never again.
+    // Anything else is re-uploaded below.
+    const still = isStill(source);
     const uploaded = still && this.textures.has(source);
     const texture = this.textureFor(gl, source);
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -1137,7 +1139,7 @@ export class Painter {
   private textureFor(gl: WebGL2RenderingContext, source: LayerSource): WebGLTexture {
     const existing = this.textures.get(source);
     if (existing) return existing;
-    if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) this.sweepClosedBitmaps(gl);
+    if (isStill(source)) this.sweepClosedBitmaps(gl);
     const texture = this.newTexture(gl);
     this.textures.set(source, texture);
     return texture;
@@ -1158,25 +1160,25 @@ export class Painter {
   }
 
   /**
-   * Lets go of the texture of every picture that has since been closed.
+   * Lets go of the texture of every picture that has since been let go of.
    *
-   * A picture on the timeline is a bitmap, and a new one is a new texture; the old one's owner
-   * closes it when it moves on, and nothing else would ever tell the painter. A closed bitmap
-   * reports a size of 0, which is how it is found. Run only when a new bitmap arrives, so it costs a
-   * walk of a few entries per picture change and nothing per frame.
+   * A picture on the timeline is a bitmap, or the canvas it was decoded onto, and a new one is a new
+   * texture; the old one's owner closes or empties it when it moves on (`releasePicture`), and
+   * nothing else would ever tell the painter. Either then reports a size of 0, which is how it is
+   * found. Run only when a new picture arrives, so it costs a walk of a few entries per picture
+   * change and nothing per frame.
    */
   private sweepClosedBitmaps(gl: WebGL2RenderingContext): void {
     for (const [source, texture] of this.textures) {
-      if (source instanceof ImageBitmap && source.width === 0 && source.height === 0) {
+      if (isReleased(source)) {
         gl.deleteTexture(texture);
         this.textures.delete(source);
       }
     }
     // And the flow of any pair with a closed frame in it, which can never be drawn again.
-    const closed = (source: LayerSource) => source instanceof ImageBitmap && source.width === 0 && source.height === 0;
     for (let i = this.flows.length - 1; i >= 0; i--) {
       const kept = this.flows[i]!;
-      if (!closed(kept.a) && !closed(kept.b)) continue;
+      if (!isReleased(kept.a) && !isReleased(kept.b)) continue;
       this.flows.splice(i, 1);
       this.flowEstimator?.release(kept.result);
     }
@@ -1230,12 +1232,23 @@ function hasPicture(layer: LayerDraw | null): layer is LayerDraw {
 }
 
 /**
- * Whether a source is a picture that cannot change - a bitmap, not yet closed, or a [GpuFrame] - and
- * so one whose flow can be worked out once and kept. A closed bitmap reports a size of nothing.
+ * Whether a source is a picture that cannot change - a bitmap or a decoded picture's canvas, not yet
+ * let go of, or a [GpuFrame] - and so one whose flow can be worked out once and kept. One let go of
+ * reports a size of nothing.
  */
-function isHeldPicture(source: LayerSource): source is ImageBitmap | GpuFrame {
+function isHeldPicture(source: LayerSource): source is ImageBitmap | HTMLCanvasElement | GpuFrame {
   if (source instanceof GpuFrame) return true;
-  return typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap && source.width > 0 && source.height > 0;
+  return isStill(source) && source.width > 0 && source.height > 0;
+}
+
+/** A picture that cannot change once made: a bitmap, or the canvas a picture was decoded onto. */
+function isStill(source: LayerSource): source is ImageBitmap | HTMLCanvasElement {
+  return (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) || isStillPicture(source);
+}
+
+/** A still its owner has let go of - closed, or emptied - which reports a size of nothing. */
+function isReleased(source: LayerSource): boolean {
+  return isStill(source) && source.width === 0 && source.height === 0;
 }
 
 /** What the 2D path can draw `source` as: itself, or nothing for a [GpuFrame], which is a texture. */

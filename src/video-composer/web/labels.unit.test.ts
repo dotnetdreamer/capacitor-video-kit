@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 const media = vi.hoisted(() => ({ open: vi.fn(), decodePicture: vi.fn() }));
 vi.mock('./media', () => ({ FrameReader: { open: media.open } }));
-vi.mock('../../web-runtime/picture', () => ({ decodePicture: media.decodePicture }));
+vi.mock('../../web-runtime/picture', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../web-runtime/picture')>()),
+  decodePicture: media.decodePicture,
+}));
 
 /*
  * The kit's stored files, as the test says they were stored: IndexedDB is not what is under test. A
