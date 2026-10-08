@@ -59,14 +59,33 @@
 /*
  * `pan-x`: horizontal swipes are the browser's own scroll (with its fling); vertical ones, and
  * two-finger gestures, are refused by the browser and come to the component as pointer events.
+ *
+ * It is also the window the rows pan up and down in. `overflow: clip` rather than `hidden`: it does
+ * not make a scroll container, so the browser has no way to scroll it on its own - to a focused lane
+ * under the fold, say - and the labels' sticky positioning still refers to the horizontal scroller.
+ * `hidden` is the fallback for old WebViews.
  */
 .tl__content {
   position: relative;
-  display: flex;
-  flex-direction: column;
   min-width: 100%;
   height: 100%;
+  overflow: hidden;
+  overflow: clip;
   touch-action: pan-x;
+}
+
+/*
+ * Every row of the timeline - the ruler, the filmstrip, the zoom row and the lanes - in one column
+ * that pans up and down as one, under a transform the component writes.
+ *
+ * `position: relative` so it is every row's `offsetParent`: the reveal measures a row's `offsetTop`
+ * against this element, and against any other it would be measuring against the offset it is trying
+ * to work out.
+ */
+.tl__rows {
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ----------------------------------------------------------------------------------- ruler */
@@ -576,7 +595,7 @@
 /* ------------------------------------------------------------------------------------ zooms */
 
 /*
- * The zoom row, fixed under the filmstrip with the base track rather than among the lanes: the
+ * The zoom row, straight under the filmstrip with the base track rather than among the lanes: the
  * camera moves the video, so its row sits with the video, and the lanes are hidden in compact mode -
  * exactly while the zoom's own sheet is open. Shorter than a lane, because a zoom only ever has a
  * window and a level to show, and the compact timeline has 96px for everything.
@@ -650,28 +669,15 @@
 /* ----------------------------------------------------------------------------------- lanes */
 
 /*
- * `overflow: clip` rather than `hidden`: it does not make a scroll container, so the labels' sticky
- * positioning still refers to the horizontal scroller. `hidden` is the fallback for old WebViews.
- */
-.tl__lanes-view {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  margin-top: var(--lane-gap);
-  overflow: hidden;
-  overflow: clip;
-}
-
-/*
- * `position: relative` so it is every row's `offsetParent`: the reveal measures a row's `offsetTop`
- * against this element, and against a static one it would be measured against the scrolling view
- * instead - which is to say against the offset it is trying to work out.
+ * Not positioned, so that every row in it is measured from `.tl__rows` like the rows above it: the
+ * pan and the reveal work in that one column's pixels.
  */
 .tl__lanes {
-  position: relative;
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: var(--lane-gap);
+  margin-top: var(--lane-gap);
   padding-bottom: var(--lane-gap);
   touch-action: pan-x;
 }
@@ -966,10 +972,28 @@
 }
 
 /*
- * `--tl-add-x` is written by the component: the button follows the end of the video, and only falls
- * back to the right edge once that end has been scrolled off past it. Until the first measurement
- * the property is unset, which makes `left` invalid and leaves `right` in charge - so the button is
- * never unplaced, and a timeline rendered without script still has it where it always was.
+ * The add button and its choices, on a layer of their own over the whole timeline, above the
+ * playhead (5) as the button always was. Outside the scroller, so a sideways scroll does not carry
+ * them off with it, and panned up and down with the rows by the component, because the button is
+ * level with the base track and goes wherever that goes. Only what is on the layer takes a touch.
+ */
+.tl__add-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.tl__add-layer > * {
+  pointer-events: auto;
+}
+
+/*
+ * `--tl-add-x` is written on the layer by the component: the button follows the end of the video,
+ * a handle's reach past it, and only falls back to the right edge once that end has been scrolled
+ * off past it. Until the first measurement the property is unset, which makes `left` invalid and
+ * leaves `right` in charge - so the button is never unplaced, and a timeline rendered without script
+ * still has it where it always was.
  */
 .tl__add {
   position: absolute;
@@ -989,6 +1013,17 @@
   color: #000;
   font-size: 28px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  transition: opacity 120ms ease;
+}
+
+/*
+ * Out of the way while an edge is being pulled. It follows the end of the video, so it would travel
+ * along beside the very handle that is making the last clip longer, then stop at the right edge just
+ * as that handle got there and have the handle pulled in underneath it.
+ */
+.tl--drag-resize .tl__add {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .tl__add:active {

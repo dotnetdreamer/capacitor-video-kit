@@ -185,6 +185,32 @@ function drop(tl: HTMLElement, at: { x: number; y: number }): void {
   pointer(root(tl).querySelector('.tl__scroller')!, 'pointerup', at.x, at.y);
 }
 
+/** Five video layers over the base track: more rows than the timeline has room for. */
+function fiveLayers(): EditVideoTrack[] {
+  return [1, 2, 3, 4, 5].map(n => layer(`vt-${n}`, n, [{ id: `seg-${n}`, key: n % 2 ? 'clip-x' : 'clip-y' }]));
+}
+
+/** How far up the rows are panned, read off the transform the component writes on their column. */
+function pannedBy(column: HTMLElement): number {
+  return -Number(/translate3d\([^,]+,\s*(-?[\d.]+)px/.exec(column.style.transform)?.[1] ?? 0);
+}
+
+/**
+ * A finger put down on `on` and swiped `by` px straight up, held still long enough at the end to leave
+ * no fling behind it, and let go.
+ */
+async function swipeUp(tl: HTMLElement, on: Element, from: { x: number; y: number }, by: number): Promise<void> {
+  const scroller = root(tl).querySelector('.tl__scroller')!;
+  pointer(on, 'pointerdown', from.x, from.y);
+  pointer(scroller, 'pointermove', from.x, from.y - 20);
+  await frames(1);
+  pointer(scroller, 'pointermove', from.x, from.y - by);
+  await frames(2);
+  await new Promise(resolve => setTimeout(resolve, 120));
+  pointer(scroller, 'pointerup', from.x, from.y - by);
+  await frames(2);
+}
+
 afterEach(() => {
   for (const { store, column } of mounted.splice(0)) {
     store.dispose();
@@ -212,11 +238,11 @@ describe('the rows', () => {
    * of black under the last of them, until something else repainted.
    */
   it('keeps the rows panned inside themselves when the timeline gets taller', async () => {
-    const { tl } = await mount([1, 2, 3, 4, 5].map(n => layer(`vt-${n}`, n, [{ id: `seg-${n}`, key: n % 2 ? 'clip-x' : 'clip-y' }])));
-    const view = root(tl).querySelector<HTMLElement>('.tl__lanes-view')!;
-    const lanes = root(tl).querySelector<HTMLElement>('.tl__lanes')!;
-    const room = () => lanes.offsetHeight - view.clientHeight;
-    const panned = () => -Number(/translate3d\([^,]+,\s*(-?[\d.]+)px/.exec(lanes.style.transform)?.[1] ?? 0);
+    const { tl } = await mount(fiveLayers());
+    const view = root(tl).querySelector<HTMLElement>('.tl__content')!;
+    const column = root(tl).querySelector<HTMLElement>('.tl__rows')!;
+    const room = () => column.offsetHeight - view.clientHeight;
+    const panned = () => pannedBy(column);
     expect(room()).toBeGreaterThan(0);
 
     // Up past the end, held still long enough to leave no fling behind it, and let go.
@@ -249,8 +275,8 @@ describe('the rows', () => {
    */
   it('does not measure the rows on a render while they are not panned', async () => {
     const { store, tl } = await mount([layer('vt-1', 1, [{ id: 'seg-x', key: 'clip-x' }])]);
-    const lanes = root(tl).querySelector<HTMLElement>('.tl__lanes')!;
-    expect(lanes.style.transform).toBe('');
+    const column = root(tl).querySelector<HTMLElement>('.tl__rows')!;
+    expect(column.style.transform).toBe('');
     const renders = countRenders(tl);
     await settle(renders);
 
@@ -261,11 +287,49 @@ describe('the rows', () => {
       await until('a render', () => renders() > before);
       await frames(1);
 
-      expect(measured.mock.contexts.filter(el => el === lanes)).toHaveLength(0);
-      expect(lanes.style.transform).toBe('');
+      expect(measured.mock.contexts.filter(el => el === column)).toHaveLength(0);
+      expect(column.style.transform).toBe('');
     } finally {
       measured.mockRestore();
     }
+  });
+
+  /*
+   * The ruler and the filmstrip used to stand still while everything under them panned, so with
+   * more rows than fit only the lanes moved. The whole timeline is one column now, and a swipe that
+   * starts on the filmstrip - which used to do nothing - pans it like a swipe anywhere else.
+   */
+  it('pans the ruler and the filmstrip with the lanes, and the add button with the filmstrip', async () => {
+    const { tl } = await mount(fiveLayers());
+    const ruler = root(tl).querySelector<HTMLElement>('.tl__ruler')!;
+    const add = root(tl).querySelector<HTMLElement>('.tl__add')!;
+    const tops = () => [ruler, row(tl, 'base'), row(tl, 'vt-5'), add].map(el => el.getBoundingClientRect().top);
+    const before = tops();
+
+    const from = centre(segmentEl(tl, 'seg-a'));
+    await swipeUp(tl, segmentEl(tl, 'seg-a'), from, 60);
+
+    const moved = tops().map((top, i) => before[i] - top);
+    expect(moved[0]).toBeGreaterThan(40);
+    for (const by of moved) expect(by).toBeCloseTo(moved[0], 0);
+  });
+
+  /*
+   * A segment on the base track is selected from outside the timeline too - by touching the video on
+   * the preview, by Edit, by Crop - and with the filmstrip panned out of sight the selection would be
+   * on a row nobody can see.
+   */
+  it('brings the filmstrip back into view, with the ruler over it, when a segment on it is selected', async () => {
+    const { store, tl } = await mount(fiveLayers());
+    const column = root(tl).querySelector<HTMLElement>('.tl__rows')!;
+    const view = root(tl).querySelector<HTMLElement>('.tl__content')!;
+    await swipeUp(tl, view, centre(row(tl, 'vt-3')), 600);
+    const top = view.getBoundingClientRect().top;
+    await until('the filmstrip to be panned out of sight', () => row(tl, 'base').getBoundingClientRect().bottom <= top);
+
+    store.select({ kind: 'clip', id: 'seg-b' });
+    await until('the rows back at the top', () => pannedBy(column) === 0);
+    expect(root(tl).querySelector('.tl__ruler')!.getBoundingClientRect().top).toBeCloseTo(top, 0);
   });
 });
 
@@ -1278,6 +1342,47 @@ describe('the timeline add button', () => {
     await until('the video choice', () => !!root(tl).querySelector('.tl__add-menu button'));
     root(tl).querySelector<HTMLButtonElement>('.tl__add-menu button')!.click();
     expect(addVideo).toHaveBeenCalledTimes(1);
+  });
+
+  /** The last segment selected, the end of the video under the centre line, and that segment's end handle. */
+  async function lastSegmentOnTheLine(tl: HTMLElement, store: EditorStore): Promise<HTMLElement> {
+    store.select({ kind: 'clip', id: 'seg-c' });
+    store.seek(12_000);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    await until('the end of the video under the line', () => Math.abs(scroller.scrollLeft - 12 * store.pps.value) < 1);
+    await until('the end handle', () => !!row(tl, 'base').querySelector('.handle--out'));
+    return row(tl, 'base').querySelector<HTMLElement>('.handle--out')!;
+  }
+
+  /*
+   * The button follows the end of the video, and it stood 12 px past it - inside the finger target of
+   * the last segment's end handle, which reaches 30 px out past the edge. It was the one that got the
+   * press, so the last clip could hardly be pulled any longer.
+   */
+  it('stands clear of the end handle of the last segment, so the clip can be pulled longer', async () => {
+    const { store, tl } = await mount();
+    const handle = await lastSegmentOnTheLine(tl, store);
+    const target = handle.getBoundingClientRect();
+    const add = root(tl).querySelector<HTMLElement>('.tl__add')!.getBoundingClientRect();
+
+    expect(add.left).toBeGreaterThanOrEqual(target.right);
+    // The handle's outermost pixel is its own, which is where a thumb reaching for the edge lands.
+    expect(root(tl).elementFromPoint(target.right - 2, target.top + target.height / 2)).toBe(handle);
+  });
+
+  it('gets out of the way while an edge is pulled, and comes back after', async () => {
+    const { store, tl } = await mount();
+    const handle = await lastSegmentOnTheLine(tl, store);
+    const add = root(tl).querySelector<HTMLElement>('.tl__add')!;
+    const at = centre(handle);
+
+    pointer(handle, 'pointerdown', at.x, at.y);
+    await until('the trim to take the row', () => root(tl).querySelector('.tl--drag-resize') !== null);
+    expect(getComputedStyle(add).pointerEvents).toBe('none');
+    await until('the button to fade', () => getComputedStyle(add).opacity === '0');
+
+    pointer(handle, 'pointerup', at.x, at.y);
+    await until('the button to come back', () => getComputedStyle(add).pointerEvents === 'auto' && getComputedStyle(add).opacity === '1');
   });
 });
 

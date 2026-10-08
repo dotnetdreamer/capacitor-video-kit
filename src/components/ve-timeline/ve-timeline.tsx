@@ -123,10 +123,17 @@ const FOLLOW_LEAD_MS = 50;
 /** How far the rail of lifted thumbnails slides per frame while the finger holds at an edge. */
 const REORDER_RAIL_PX = 6;
 
-/** The add button's own size and the air it keeps, both from the edge of the screen and from the
- *  end of the video it follows. Its width is the usual 44px finger target. */
+/** The add button's own size and the air it keeps from the edge of the screen. Its width is the usual
+ *  44px finger target. */
 const ADD_SIZE_PX = 44;
 const ADD_GAP_PX = 12;
+/**
+ * How far past the end of the video the add button stands while it follows that end. The end handle of
+ * a selected last segment is a 44px finger target that reaches 30px out past the edge it holds (see
+ * [edgeHandles]), and the button starts 6px beyond that. At 12px it covered the outer 18px of the
+ * handle and took the press, which made the last clip nearly impossible to pull longer.
+ */
+const ADD_AFTER_END_PX = 36;
 
 /**
  * What kind of thing a layer's lane is, as the glyph at its head. The lanes are told apart by this
@@ -350,7 +357,7 @@ interface PinchState {
  * sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
  * that happens to start on one is still the timeline's scroll.
  *
- * Under the filmstrip, in the same fixed column, is the ZOOM row when the post has zooms: one bar per
+ * Under the filmstrip, above the lanes, is the ZOOM row when the post has zooms: one bar per
  * zoom (the camera closing in on an area of the picture - nothing to do with this timeline's own
  * pinch zoom), its ramps drawn as a fade at each end from the same slots the camera compiler plays.
  * A tap opens the zoom's sheet; the selected bar is dragged to move it and its handles retime it,
@@ -370,9 +377,9 @@ interface PinchState {
  * swipe anywhere is a native, compositor-driven scroll with momentum, while a vertical one is
  * refused by the browser and handed to us as pointer events (Chrome decides the axis from the first
  * movement past the touch slop and zeroes the other axis for the whole gesture) - which is how
- * everything under the base track scrolls vertically, the video layers included, under a fixed ruler
- * and filmstrip without the two directions ever mixing. Handles and selected items are
- * `touch-action: none`, so dragging them never scrolls anything.
+ * the whole timeline pans vertically, ruler and filmstrip included, without the two directions
+ * ever mixing. Handles and selected items are `touch-action: none`, so dragging them never scrolls
+ * anything.
  */
 @Component({
   tag: 've-timeline',
@@ -1225,10 +1232,10 @@ export class VeTimeline {
   });
 
   /**
-   * The zoom row sits in the FIXED column with the base track, under the filmstrip - not among the
-   * lanes, which scroll and which compact mode hides - so it is still on screen while the zoom's own
-   * sheet is open. In compact mode it is shown only for that sheet: the slim timeline over any other
-   * sheet has no height to spare for it.
+   * The zoom row sits with the base track, straight under the filmstrip - not among the lanes, which
+   * compact mode hides - so it is still on screen while the zoom's own sheet is open. In compact mode
+   * it is shown only for that sheet: the slim timeline over any other sheet has no height to spare
+   * for it.
    */
   private readonly showZoomRow = computed(() => this.zoomBars.value.length > 0 && (!this.compactSig.value || this.ctx.store.panel.value === 'zoom'));
 
@@ -1311,16 +1318,17 @@ export class VeTimeline {
 
   /*
    * One stable function per element rather than a fresh arrow per render: a new value is a changed
-   * value to Stencil, and every ref would run again on every repaint. Three of the five elements
-   * are behind a condition, and Stencil calls a ref with null on the way out, so each one clears
-   * what it held.
+   * value to Stencil, and every ref would run again on every repaint. Three of the elements are
+   * behind a condition, and Stencil calls a ref with null on the way out, so each one clears what it
+   * held.
    */
   private tlEl?: HTMLDivElement;
   private scrollerEl?: HTMLDivElement;
   private contentEl?: HTMLDivElement;
-  private lanesViewEl?: HTMLDivElement;
+  private rowsEl?: HTMLDivElement;
   private lanesEl?: HTMLDivElement;
   private reorderEl?: HTMLDivElement;
+  private addLayerEl?: HTMLDivElement;
 
   private readonly keepTl = (el?: HTMLDivElement | null) => {
     this.tlEl = el ?? undefined;
@@ -1331,14 +1339,23 @@ export class VeTimeline {
   private readonly keepContent = (el?: HTMLDivElement | null) => {
     this.contentEl = el ?? undefined;
   };
-  private readonly keepLanesView = (el?: HTMLDivElement | null) => {
-    this.lanesViewEl = el ?? undefined;
+  private readonly keepRows = (el?: HTMLDivElement | null) => {
+    this.rowsEl = el ?? undefined;
   };
   private readonly keepLanes = (el?: HTMLDivElement | null) => {
     this.lanesEl = el ?? undefined;
   };
   private readonly keepReorder = (el?: HTMLDivElement | null) => {
     this.reorderEl = el ?? undefined;
+  };
+  /*
+   * The add button's layer goes while a segment is lifted, and the one made when the lift ends has to
+   * start out where the base track is - which is wherever the rows have been panned to. Its place
+   * along the timeline is written by `componentDidRender`, straight after the patch that made it.
+   */
+  private readonly keepAddLayer = (el?: HTMLDivElement | null) => {
+    this.addLayerEl = el ?? undefined;
+    if (el) el.style.transform = panTransform(this.laneY);
   };
 
   /*
@@ -1622,9 +1639,9 @@ export class VeTimeline {
       const width = el.clientWidth;
       if (width !== this.viewportWidth.value) this.viewportWidth.value = width;
       this.updateChunk(el.scrollLeft);
-      // A change of HEIGHT alone renders nothing, and the lanes' pan is only clamped on a render. A
+      // A change of HEIGHT alone renders nothing, and the rows' pan is only clamped on a render. A
       // timeline that got taller - a split screen's divider dragged, a window made taller - left
-      // lanes panned to their end past the new one, a band of black under the last row, until
+      // rows panned to their end past the new one, a band of black under the last row, until
       // something else repainted. Shorter is harmless: it only gives the pan more room.
       if (this.laneY > 0) this.setLaneY(this.laneY);
     });
@@ -1906,8 +1923,8 @@ export class VeTimeline {
   }
 
   /**
-   * Puts the add button just after the end of the video, or against the right edge once the end has
-   * been scrolled off past it.
+   * Puts the add button a handle's reach after the end of the video (see [ADD_AFTER_END_PX]), or
+   * against the right edge once the end has been scrolled off past it.
    *
    * On a phone the two are almost always the same place - the filmstrip fills the width - which is
    * why the button could simply live at the right edge. On a monitor they are not: the timeline is
@@ -1917,17 +1934,19 @@ export class VeTimeline {
    *
    * Written as a property rather than through the render because it answers to `scrollLeft`, which
    * changes on every frame of a scroll and is not state the vdom has any business repainting for.
-   * The CSS reads it with no fallback on purpose: until this has run, `left` is invalid and the
-   * button keeps the `right: 12px` the stylesheet gives it.
+   * On the button's own layer rather than on `.tl`: a custom property is inherited, and one written
+   * on `.tl` reached every element of the timeline on every frame of a scroll. The CSS reads it with
+   * no fallback on purpose: until this has run, `left` is invalid and the button keeps the
+   * `right: 12px` the stylesheet gives it.
    */
   private placeAdd(scrollX: number): void {
-    const tl = this.tlEl;
-    if (!tl) return;
+    const layer = this.addLayerEl;
+    if (!layer) return;
     const width = this.viewportWidth.value;
     if (width <= 0) return;
-    const afterVideo = this.pad.value + this.totalPx.value - scrollX + ADD_GAP_PX;
+    const afterVideo = this.pad.value + this.totalPx.value - scrollX + ADD_AFTER_END_PX;
     const atEdge = width - ADD_SIZE_PX - ADD_GAP_PX;
-    tl.style.setProperty('--tl-add-x', `${Math.round(Math.max(0, Math.min(afterVideo, atEdge)))}px`);
+    layer.style.setProperty('--tl-add-x', `${Math.round(Math.max(0, Math.min(afterVideo, atEdge)))}px`);
   }
 
   /**
@@ -2079,7 +2098,6 @@ export class VeTimeline {
       y0: event.clientY,
       x: event.clientX,
       y: event.clientY,
-      inLanes: !!target?.closest('.tl__lanes-view'),
       // The fling is still running a hair before this finger landed, and landing is what stopped it.
       // Never true of a mouse: a compositor fling is something a FINGER stops by touching the
       // screen, and a click a moment after a wheel is a click rather than a brake.
@@ -2127,7 +2145,8 @@ export class VeTimeline {
     const vertical = Math.abs(dy) > Math.abs(dx);
     if (this.isSelectedBody(press) && (!vertical || press.kind === 'audio')) {
       this.startBodyDrag(press);
-    } else if (vertical && press.inLanes) {
+    } else if (vertical) {
+      // Anywhere on the timeline, the ruler and the filmstrip included: they pan with the rest.
       this.startLanesScroll(press, event);
     } else if (!vertical && press.pointerType === 'mouse') {
       // Sideways, from a mouse, on something that is not a selected item: the timeline itself is
@@ -2735,7 +2754,9 @@ export class VeTimeline {
     const lanes = this.layerLanes.value;
     const from = lanes.findIndex(lane => lane.id === press.id);
     if (!press.id || from < 0 || lanes.length < 2) return;
-    const rect = this.lanesViewEl?.getBoundingClientRect();
+    // The window the rows pan in, which is the whole timeline: a lane held at its top edge brings the
+    // rows above it back down, the filmstrip among them.
+    const rect = this.contentEl?.getBoundingClientRect();
     const row = this.lanesEl?.querySelector<HTMLElement>(`[data-lane-id="${CSS.escape(press.id)}"]`) ?? null;
     const drag: LayerReorderDrag = {
       ...this.dragBase(press.pointerId, press.x, press.y),
@@ -3232,22 +3253,26 @@ export class VeTimeline {
   }
 
   /* ========================================================================================= */
-  /* Lanes, vertically                                                                         */
+  /* Rows, vertically                                                                          */
   /* ========================================================================================= */
 
+  /*
+   * Every row pans up and down as one column - the ruler, the filmstrip and the zoom row as well as
+   * the lanes - so a post with more rows than fit is read top to bottom like any other list. The
+   * names below still say "lane" from the days when the lanes panned under a fixed ruler and base
+   * track; `laneY` is how far the whole column is panned.
+   */
+
   /**
-   * The lanes' vertical offset is ours, not the browser's, so it is clamped again whenever the
-   * lanes change - and a lane selected from elsewhere (a new text, a sheet) is scrolled into view.
+   * The rows' vertical offset is ours, not the browser's, so it is clamped again whenever the rows
+   * change - and a row selected from elsewhere (a new text, a sheet, a tap on the preview) is
+   * scrolled into view.
    *
    * Every signal this reads is one the render has just read, which is what makes it a render hook
-   * rather than an effect. The dedupe on the key is what keeps it from scrolling the lanes back to
+   * rather than an effect. The dedupe on the key is what keeps it from scrolling the rows back to
    * the selection on each of the sixty renders a drag elsewhere in the editor costs.
    */
   private clampLanes(): void {
-    if (!this.showLanes.value) {
-      this.laneY = 0;
-      return;
-    }
     // Rows that are not panned have nothing to clamp: 0 is already the floor, and finding the
     // ceiling reads `offsetHeight` straight after the patch, which forces a layout on every render -
     // every frame of a pinch zoom among them. The resize observer skips it the same way.
@@ -3256,50 +3281,56 @@ export class VeTimeline {
     const row = this.selectionRow(selection);
     // The ROW a selection is on and not merely which selection it is. A layer sent to the back, a
     // segment carried onto another video layer, or an undo of either is the same selection on a new
-    // row - and with more rows than fit on the screen, that row can be out of sight.
-    const key = `${selectionKey(selection)}@${row?.offsetTop ?? -1}`;
+    // row - and with more rows than fit on the screen, that row can be out of sight. The two rows at
+    // the head of the column never trade places with anything, so they go by name: measuring them
+    // would force a layout straight after the patch, and a base segment stays selected through every
+    // frame of its own trim.
+    const place = row ? (headRow(row) ?? row.offsetTop) : -1;
+    const key = `${selectionKey(selection)}@${place}`;
     if (key === this.revealedKey) return;
     this.revealedKey = key;
     this.revealRow(row);
   }
 
-  /** The row the selection is drawn on, or null when it has none among the lanes. */
+  /** The row the selection is drawn on, or null when it has none on the timeline. */
   private selectionRow(selection: EditorSelection | null): HTMLElement | null {
-    const lanes = this.lanesEl;
-    if (!lanes || !selection) return null;
+    const rows = this.rowsEl;
+    if (!rows || !selection) return null;
     switch (selection.kind) {
       case 'overlay':
-        return lanes.querySelector<HTMLElement>(`[data-lane-id="${CSS.escape(selection.id)}"]`);
+        return rows.querySelector<HTMLElement>(`[data-lane-id="${CSS.escape(selection.id)}"]`);
       case 'music':
-        return lanes.querySelector<HTMLElement>('[data-row="music"]');
+        return rows.querySelector<HTMLElement>('[data-row="music"]');
       case 'audio': {
         const track = (this.ctx.store.manifest.value.audioTracks ?? []).find(track => track.clips.some(clip => clip.id === selection.id));
-        return track ? lanes.querySelector<HTMLElement>(`[data-arow="${CSS.escape(track.id)}"]`) : null;
+        return track ? rows.querySelector<HTMLElement>(`[data-arow="${CSS.escape(track.id)}"]`) : null;
       }
       case 'voice':
-        return lanes.querySelector<HTMLElement>('[data-row="voice"]');
-      // On the fixed row under the filmstrip, which is always in view.
+        return rows.querySelector<HTMLElement>('[data-row="voice"]');
       case 'zoom':
-        return null;
+        return rows.querySelector<HTMLElement>('[data-row="zoom"]');
       case 'clip': {
-        // A segment on the base track is on the fixed row above the lanes, which is always in view.
+        // The base track pans away with everything else, and a segment on it is selected from
+        // outside the timeline too: by touching the video on the preview, or by Edit and Crop.
         const trackId = this.ctx.store.selectedClipTrackId.value;
-        return trackId ? lanes.querySelector<HTMLElement>(`[data-vrow="${CSS.escape(trackId)}"]`) : null;
+        return rows.querySelector<HTMLElement>(trackId ? `[data-vrow="${CSS.escape(trackId)}"]` : '[data-vrow="base"]');
       }
     }
   }
 
   private laneMaxY(): number {
-    const view = this.lanesViewEl;
-    const lanes = this.lanesEl;
-    return view && lanes ? Math.max(0, lanes.offsetHeight - view.clientHeight) : 0;
+    const view = this.contentEl;
+    const rows = this.rowsEl;
+    return view && rows ? Math.max(0, rows.offsetHeight - view.clientHeight) : 0;
   }
 
   private setLaneY(y: number, max = this.laneMaxY()): void {
     const next = clamp(y, 0, max);
     this.laneY = next;
-    const lanes = this.lanesEl;
-    if (lanes) lanes.style.transform = next > 0 ? `translate3d(0, ${-next}px, 0)` : '';
+    const transform = panTransform(next);
+    if (this.rowsEl) this.rowsEl.style.transform = transform;
+    // The add button sits outside the scroller, level with the base track, so it is moved with it.
+    if (this.addLayerEl) this.addLayerEl.style.transform = transform;
   }
 
   private startLaneInertia(velocity: number, max: number): void {
@@ -3333,11 +3364,12 @@ export class VeTimeline {
    * selection under the fold as soon as one of them had been scrolled past.
    */
   private revealRow(row: HTMLElement | null): void {
-    const view = this.lanesViewEl;
+    const view = this.contentEl;
     if (!view || !row) return;
     const gap = this.compactSig.value ? 4 : 8;
-    const top = row.offsetTop;
-    const bottom = top + row.offsetHeight;
+    const bottom = row.offsetTop + row.offsetHeight;
+    // The base track comes back with the ruler over it, the times it is read against.
+    const top = headRow(row) === 'base' ? 0 : row.offsetTop;
     const height = view.clientHeight;
     if (top < this.laneY) this.setLaneY(top);
     else if (bottom > this.laneY + height) this.setLaneY(bottom - height + gap);
@@ -3351,13 +3383,14 @@ export class VeTimeline {
    * Every conditional block here carries a key, so does every row of every list, and so does every
    * element this file holds on to by hand.
    *
-   * The lanes, the two video rows and the four blocks inside the scroller are all `div`s, and
-   * Stencil matches unkeyed siblings of the same tag BY POSITION: hiding the ruler in compact mode
-   * would patch the ruler's element into the video track's place, taking the filmstrip's images
-   * with it. The scroller, the content and the lanes are keyed for the other half of the same
-   * reason: each is an element a listener, a measurement or an imperative style is bound to, and a
-   * vdom that rebuilt one of them would leave this component driving a node that is no longer on
-   * screen. Neither failure throws and both look right for one frame.
+   * The lanes, the two video rows and the four blocks of the column inside the scroller are all
+   * `div`s, and Stencil matches unkeyed siblings of the same tag BY POSITION: hiding the ruler in
+   * compact mode would patch the ruler's element into the video track's place, taking the
+   * filmstrip's images with it. The scroller, the content, the column, the lanes and the add
+   * button's layer are keyed for the other half of the same reason: each is an element a listener,
+   * a measurement or an imperative style is bound to, and a vdom that rebuilt one of them would
+   * leave this component driving a node that is no longer on screen. Neither failure throws and
+   * both look right for one frame.
    */
   render() {
     return this.watcher.run(() => {
@@ -3388,101 +3421,103 @@ export class VeTimeline {
             {/* One native horizontal scroller for every row, so they can never drift apart. */}
             <div class="tl__scroller" key="scroller" ref={this.keepScroller}>
               <div class="tl__content" key="content" ref={this.keepContent} style={{ width: `${this.contentWidth.value}px` }}>
-                {compact ? null : this.rulerRow(pad)}
+                <div class="tl__rows" key="rows" ref={this.keepRows}>
+                  {compact ? null : this.rulerRow(pad)}
 
-                <div
-                  class={{
-                    'tl__track': true,
-                    'tl__vrow': true,
-                    'tl__vrow--source': reorder?.media === 'video' && reorder.fromTrackId === null,
-                    'tl__vrow--drop': marks.on === 0,
-                    'tl__vrow--drop-under': marks.under === 0,
-                  }}
-                  key="track"
-                  data-vrow="base"
-                >
-                  {/*
-                    Keyed now that the row holds other buttons: the dots are buttons too, and an
-                    unkeyed sibling of the same tag is matched by position.
-                  */}
-                  <button
-                    type="button"
-                    class="tl__mute"
-                    key="mute"
-                    data-hit="mute"
-                    style={{ left: `${pad - 74}px` }}
-                    aria-label={this.originalMuted.value ? 'Turn original sound on' : 'Turn original sound off'}
+                  <div
+                    class={{
+                      'tl__track': true,
+                      'tl__vrow': true,
+                      'tl__vrow--source': reorder?.media === 'video' && reorder.fromTrackId === null,
+                      'tl__vrow--drop': marks.on === 0,
+                      'tl__vrow--drop-under': marks.under === 0,
+                    }}
+                    key="track"
+                    data-vrow="base"
                   >
-                    <ve-icon name={this.originalMuted.value ? 'volume-mute' : 'volume-high'}></ve-icon>
-                  </button>
-
-                  {this.segments.value.map(seg => (
-                    <div
-                      class={{ 'seg': true, 'seg--selected': seg.selected, 'seg--ghost': reorder?.media === 'video' && reorder.drop != null && reorder.id === seg.id }}
-                      key={seg.id}
-                      data-hit="clip"
-                      data-id={seg.id}
-                      style={{ left: `${seg.x}px`, width: `${seg.w}px`, transform: seg.shift ? `translateX(${seg.shift}px)` : undefined }}
-                    >
-                      {this.segmentInner(seg)}
-                    </div>
-                  ))}
-
-                  {/*
-                    The stretch past the base track's last frame, where the picture is black. Drawn
-                    so the room a customer has just made reads as room rather than as a timeline
-                    that has run out of filmstrip.
-                  */}
-                  {tail ? <span class="tl__tail" key="tail" aria-hidden="true" style={{ left: `${tail.x}px`, width: `${tail.w}px` }}></span> : null}
-
-                  {/*
-                    The dots on the cuts, in the row itself so they scroll and zoom with the
-                    filmstrip, and after the segments so they paint over the gap they mark.
-
-                    No `touch-action` of their own: a tap comes through the pointer path by
-                    `data-hit`, and a swipe that starts on a dot inherits the row's `pan-x` and
-                    scrolls the timeline like a swipe anywhere else on it. The click listener is for
-                    the clicks no pointer came before, a screen reader's. Keys are prefixed because
-                    the segments beside them are keyed by the very same clip ids.
-
-                    The target is narrowed beside a short segment (see [dotHitWidth]), always about
-                    the cut: the width and the margin that centres it are written together.
-                  */}
-                  {this.transitionDots.value.map(dot => (
+                    {/*
+                      Keyed now that the row holds other buttons: the dots are buttons too, and an
+                      unkeyed sibling of the same tag is matched by position.
+                    */}
                     <button
                       type="button"
-                      class={{ 'tl__trans': true, 'tl__trans--set': dot.kind !== null, 'tl__trans--open': dot.open }}
-                      key={`trans-${dot.id}`}
-                      data-hit="transition"
-                      data-id={dot.id}
-                      // No `aria-pressed`, although the open dot is lit. Chrome hands a button that has
-                      // both an aria-label and aria-pressed to Android as a ToggleButton, and the
-                      // WebViews still in use (Chrome 99 on the Samsung A13) send that ToggleButton
-                      // with NO text - so TalkBack reads nothing and Maestro finds nothing. The label
-                      // already says what the boundary carries, which is the state worth hearing.
-                      aria-label={dot.label}
-                      style={{ left: `${dot.x}px`, width: `${dot.hit}px`, marginLeft: `${-dot.hit / 2}px` }}
-                      onKeyDown={this.onDotKey}
-                      onClick={this.onDotClick}
+                      class="tl__mute"
+                      key="mute"
+                      data-hit="mute"
+                      style={{ left: `${pad - 74}px` }}
+                      aria-label={this.originalMuted.value ? 'Turn original sound on' : 'Turn original sound off'}
                     >
-                      <span class="tl__trans-dot" aria-hidden="true">
-                        {dot.kind !== null ? <ve-icon name="transition" key="glyph"></ve-icon> : null}
-                      </span>
+                      <ve-icon name={this.originalMuted.value ? 'volume-mute' : 'volume-high'}></ve-icon>
                     </button>
-                  ))}
 
-                  {/* Outside the segments, so one set of arithmetic places every handle on the timeline. */}
-                  {trim && trim.trackId === null
-                    ? [
-                        <span class="handle handle--in" key="trim-in" data-hit="clip-in" data-id={trim.id} style={{ left: `${trim.inX}px` }}></span>,
-                        <span class="handle handle--out" key="trim-out" data-hit="clip-out" data-id={trim.id} style={{ left: `${trim.outX}px` }}></span>,
-                      ]
-                    : null}
+                    {this.segments.value.map(seg => (
+                      <div
+                        class={{ 'seg': true, 'seg--selected': seg.selected, 'seg--ghost': reorder?.media === 'video' && reorder.drop != null && reorder.id === seg.id }}
+                        key={seg.id}
+                        data-hit="clip"
+                        data-id={seg.id}
+                        style={{ left: `${seg.x}px`, width: `${seg.w}px`, transform: seg.shift ? `translateX(${seg.shift}px)` : undefined }}
+                      >
+                        {this.segmentInner(seg)}
+                      </div>
+                    ))}
+
+                    {/*
+                      The stretch past the base track's last frame, where the picture is black. Drawn
+                      so the room a customer has just made reads as room rather than as a timeline
+                      that has run out of filmstrip.
+                    */}
+                    {tail ? <span class="tl__tail" key="tail" aria-hidden="true" style={{ left: `${tail.x}px`, width: `${tail.w}px` }}></span> : null}
+
+                    {/*
+                      The dots on the cuts, in the row itself so they scroll and zoom with the
+                      filmstrip, and after the segments so they paint over the gap they mark.
+
+                      No `touch-action` of their own: a tap comes through the pointer path by
+                      `data-hit`, and a swipe that starts on a dot inherits the row's `pan-x` and
+                      scrolls the timeline like a swipe anywhere else on it. The click listener is for
+                      the clicks no pointer came before, a screen reader's. Keys are prefixed because
+                      the segments beside them are keyed by the very same clip ids.
+
+                      The target is narrowed beside a short segment (see [dotHitWidth]), always about
+                      the cut: the width and the margin that centres it are written together.
+                    */}
+                    {this.transitionDots.value.map(dot => (
+                      <button
+                        type="button"
+                        class={{ 'tl__trans': true, 'tl__trans--set': dot.kind !== null, 'tl__trans--open': dot.open }}
+                        key={`trans-${dot.id}`}
+                        data-hit="transition"
+                        data-id={dot.id}
+                        // No `aria-pressed`, although the open dot is lit. Chrome hands a button that has
+                        // both an aria-label and aria-pressed to Android as a ToggleButton, and the
+                        // WebViews still in use (Chrome 99 on the Samsung A13) send that ToggleButton
+                        // with NO text - so TalkBack reads nothing and Maestro finds nothing. The label
+                        // already says what the boundary carries, which is the state worth hearing.
+                        aria-label={dot.label}
+                        style={{ left: `${dot.x}px`, width: `${dot.hit}px`, marginLeft: `${-dot.hit / 2}px` }}
+                        onKeyDown={this.onDotKey}
+                        onClick={this.onDotClick}
+                      >
+                        <span class="tl__trans-dot" aria-hidden="true">
+                          {dot.kind !== null ? <ve-icon name="transition" key="glyph"></ve-icon> : null}
+                        </span>
+                      </button>
+                    ))}
+
+                    {/* Outside the segments, so one set of arithmetic places every handle on the timeline. */}
+                    {trim && trim.trackId === null
+                      ? [
+                          <span class="handle handle--in" key="trim-in" data-hit="clip-in" data-id={trim.id} style={{ left: `${trim.inX}px` }}></span>,
+                          <span class="handle handle--out" key="trim-out" data-hit="clip-out" data-id={trim.id} style={{ left: `${trim.outX}px` }}></span>,
+                        ]
+                      : null}
+                  </div>
+
+                  {this.showZoomRow.value ? this.zoomRow() : null}
+
+                  {this.showLanes.value ? this.lanes(compact, pad, rows, marks, reorder) : null}
                 </div>
-
-                {this.showZoomRow.value ? this.zoomRow() : null}
-
-                {this.showLanes.value ? this.lanes(compact, pad, rows, marks, reorder) : null}
               </div>
             </div>
 
@@ -3490,7 +3525,14 @@ export class VeTimeline {
             <div class="tl__playhead" key="playhead" aria-hidden="true"></div>
 
             {/* In compact mode as well: the slim timeline under a sheet is where clips are added too. */}
-            {reorder ? this.reorderRail(reorder) : [this.addButton(), store.timelineAddMenuOpen.value ? this.addMenu() : null]}
+            {reorder ? (
+              this.reorderRail(reorder)
+            ) : (
+              <div class="tl__add-layer" key="add-layer" ref={this.keepAddLayer}>
+                {this.addButton()}
+                {store.timelineAddMenuOpen.value ? this.addMenu() : null}
+              </div>
+            )}
           </div>
         </Host>
       );
@@ -3652,96 +3694,91 @@ export class VeTimeline {
   }
 
   /**
-   * Everything under the base track, on one vertical scroller: the extra video layers first, then a
-   * lane for each overlay, the sound and the voiceover.
-   *
-   * The video layers belong in here rather than in the fixed column above, because there is no cap
-   * on how many of them a post may have - fifteen rows of 48 px is three times the whole timeline.
-   * Only the ruler and the base track are fixed, which is right: the base track IS the post, and
-   * everything else is something laid over it.
+   * Everything under the base track (and the zoom row): the extra video layers first, then a lane
+   * for each overlay, the sound and the voiceover. All of it pans up and down with the ruler and the
+   * filmstrip above it, as one column - see `laneY`. There is no cap on how many video layers a post
+   * may have, and fifteen rows of 48 px is three times the whole timeline.
    */
   private lanes(compact: boolean, pad: number, rows: TrackRowView[], marks: { on: number; under: number }, reorder: ClipReorderView | null) {
     const layerHandles = this.layerHandles.value;
     const trim = this.trimHandles.value;
     return (
-      <div class="tl__lanes-view" key="lanes-view" ref={this.keepLanesView}>
-        <div class={{ 'tl__lanes': true, 'tl__lanes--reordering': this.layerReorder.value !== null }} key="lanes" ref={this.keepLanes}>
-          {rows.map((row, i) => (
-            <div
-              class={{
-                'tl__track2': true,
-                'tl__vrow': true,
-                'tl__vrow--source': reorder?.media === 'video' && reorder.fromTrackId === row.id,
-                'tl__vrow--drop': marks.on === i + 1,
-                'tl__vrow--drop-under': marks.under === i + 1,
-              }}
-              key={row.id}
-              data-vrow={row.id}
-            >
-              {row.segments.map(seg => (
+      <div class={{ 'tl__lanes': true, 'tl__lanes--reordering': this.layerReorder.value !== null }} key="lanes" ref={this.keepLanes}>
+        {rows.map((row, i) => (
+          <div
+            class={{
+              'tl__track2': true,
+              'tl__vrow': true,
+              'tl__vrow--source': reorder?.media === 'video' && reorder.fromTrackId === row.id,
+              'tl__vrow--drop': marks.on === i + 1,
+              'tl__vrow--drop-under': marks.under === i + 1,
+            }}
+            key={row.id}
+            data-vrow={row.id}
+          >
+            {row.segments.map(seg => (
+              <div
+                class={{
+                  'seg': true,
+                  'seg--extra': true,
+                  'seg--selected': seg.selected,
+                  'seg--ghost': reorder?.media === 'video' && reorder.drop != null && reorder.id === seg.id,
+                }}
+                key={seg.id}
+                data-hit="track-clip"
+                data-id={seg.id}
+                style={{ left: `${seg.x}px`, width: `${seg.w}px` }}
+              >
+                {this.segmentInner(seg)}
+              </div>
+            ))}
+
+            {/* Every layer is trimmed on its own, by the same two handles the base track has. */}
+            {trim?.trackId === row.id
+              ? [
+                  <span class="handle handle--in" key="trim-in" data-hit="clip-in" data-id={trim.id} style={{ left: `${trim.inX}px` }}></span>,
+                  <span class="handle handle--out" key="trim-out" data-hit="clip-out" data-id={trim.id} style={{ left: `${trim.outX}px` }}></span>,
+                ]
+              : null}
+          </div>
+        ))}
+
+        {compact
+          ? null
+          : this.layerLanes.value.map((lane, i) => {
+              const shift = this.laneShift(i);
+              return (
                 <div
-                  class={{
-                    'seg': true,
-                    'seg--extra': true,
-                    'seg--selected': seg.selected,
-                    'seg--ghost': reorder?.media === 'video' && reorder.drop != null && reorder.id === seg.id,
-                  }}
-                  key={seg.id}
-                  data-hit="track-clip"
-                  data-id={seg.id}
-                  style={{ left: `${seg.x}px`, width: `${seg.w}px` }}
+                  class={{ 'lane': true, 'lane--lifted': this.layerReorder.value?.id === lane.id }}
+                  key={lane.id}
+                  data-lane-id={lane.id}
+                  style={shift ? { transform: shift } : undefined}
                 >
-                  {this.segmentInner(seg)}
-                </div>
-              ))}
-
-              {/* Every layer is trimmed on its own, by the same two handles the base track has. */}
-              {trim?.trackId === row.id
-                ? [
-                    <span class="handle handle--in" key="trim-in" data-hit="clip-in" data-id={trim.id} style={{ left: `${trim.inX}px` }}></span>,
-                    <span class="handle handle--out" key="trim-out" data-hit="clip-out" data-id={trim.id} style={{ left: `${trim.outX}px` }}></span>,
-                  ]
-                : null}
-            </div>
-          ))}
-
-          {compact
-            ? null
-            : this.layerLanes.value.map((lane, i) => {
-                const shift = this.laneShift(i);
-                return (
                   <div
-                    class={{ 'lane': true, 'lane--lifted': this.layerReorder.value?.id === lane.id }}
-                    key={lane.id}
-                    data-lane-id={lane.id}
-                    style={shift ? { transform: shift } : undefined}
+                    class={{ 'item': true, 'item--selected': lane.selected, 'item--glyph': lane.w < LANE_GLYPH_ONLY_PX }}
+                    data-hit="layer"
+                    data-id={lane.id}
+                    data-kind={lane.kind}
+                    style={{ 'left': `${lane.x}px`, 'width': `${lane.w}px`, '--ramp-in': `${lane.rampInPx}px`, '--ramp-out': `${lane.rampOutPx}px` }}
                   >
-                    <div
-                      class={{ 'item': true, 'item--selected': lane.selected, 'item--glyph': lane.w < LANE_GLYPH_ONLY_PX }}
-                      data-hit="layer"
-                      data-id={lane.id}
-                      data-kind={lane.kind}
-                      style={{ 'left': `${lane.x}px`, 'width': `${lane.w}px`, '--ramp-in': `${lane.rampInPx}px`, '--ramp-out': `${lane.rampOutPx}px` }}
-                    >
-                      {/* The layer arriving and leaving, as the zoom bar draws its camera's: a fade at each end. */}
-                      <span class="item__ramp item__ramp--in" aria-hidden="true"></span>
-                      <span class="item__ramp item__ramp--out" aria-hidden="true"></span>
-                      <span class="item__label">{this.laneLabel(lane)}</span>
-                    </div>
-                    {lane.selected && layerHandles
-                      ? [
-                          <span class="handle handle--in" key="layer-in" data-hit="layer-start" data-id={layerHandles.id} style={{ left: `${layerHandles.inX}px` }}></span>,
-                          <span class="handle handle--out" key="layer-out" data-hit="layer-end" data-id={layerHandles.id} style={{ left: `${layerHandles.outX}px` }}></span>,
-                        ]
-                      : null}
+                    {/* The layer arriving and leaving, as the zoom bar draws its camera's: a fade at each end. */}
+                    <span class="item__ramp item__ramp--in" aria-hidden="true"></span>
+                    <span class="item__ramp item__ramp--out" aria-hidden="true"></span>
+                    <span class="item__label">{this.laneLabel(lane)}</span>
                   </div>
-                );
-              })}
+                  {lane.selected && layerHandles
+                    ? [
+                        <span class="handle handle--in" key="layer-in" data-hit="layer-start" data-id={layerHandles.id} style={{ left: `${layerHandles.inX}px` }}></span>,
+                        <span class="handle handle--out" key="layer-out" data-hit="layer-end" data-id={layerHandles.id} style={{ left: `${layerHandles.outX}px` }}></span>,
+                      ]
+                    : null}
+                </div>
+              );
+            })}
 
-          {compact ? null : this.audioLanes.value.map((lane, i) => this.audioRow(lane, i))}
-          {compact || (this.audioLanes.value.length && !this.ctx.store.manifest.value.music) ? null : this.musicRow(pad)}
-          {this.showVoiceLane.value ? this.voiceRow() : null}
-        </div>
+        {compact ? null : this.audioLanes.value.map((lane, i) => this.audioRow(lane, i))}
+        {compact || (this.audioLanes.value.length && !this.ctx.store.manifest.value.music) ? null : this.musicRow(pad)}
+        {this.showVoiceLane.value ? this.voiceRow() : null}
       </div>
     );
   }
@@ -3899,9 +3936,12 @@ export class VeTimeline {
   }
 
   private audioDropTarget(y: number, fromTrackId: string): AudioDrag['drop'] {
-    const view = this.lanesViewEl?.getBoundingClientRect();
+    const view = this.contentEl?.getBoundingClientRect();
+    const lanes = this.lanesEl?.getBoundingClientRect();
     const rows = [...(this.lanesEl?.querySelectorAll<HTMLElement>('[data-arow]') ?? [])];
-    if (!view || !rows.length || y < view.top || y > view.bottom) return null;
+    // On the lanes as they are on screen: under the filmstrip wherever the pan has put it, and
+    // inside the timeline.
+    if (!view || !lanes || !rows.length || y < Math.max(view.top, lanes.top) || y > view.bottom) return null;
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i];
       const rect = row.getBoundingClientRect();
@@ -4121,6 +4161,21 @@ function edgeHandles(x: number, w: number): EdgeHandlesView {
   // The white bar stands 16 px into the start handle's 44 px box and 14 px into the end one's, so
   // these are the box positions that put each bar exactly against its edge of the item.
   return { inX: x - 30, outX: x + w - 14 };
+}
+
+/**
+ * How far the timeline's rows are panned, as the transform that draws it. Nothing at all at the top
+ * rather than a translate of 0: any transform makes the column a stacking context, and the transition
+ * dot being dressed would sink under the playhead inside it (see `.tl__trans--open`).
+ */
+function panTransform(y: number): string {
+  return y > 0 ? `translate3d(0, ${-y}px, 0)` : '';
+}
+
+/** Which of the two rows at the head of the column this is - the base track or the zoom row - if either. */
+function headRow(row: HTMLElement): 'base' | 'zoom' | null {
+  if (row.dataset['vrow'] === 'base') return 'base';
+  return row.dataset['row'] === 'zoom' ? 'zoom' : null;
 }
 
 function selectionKey(selection: EditorSelection | null): string {

@@ -65,8 +65,6 @@ export interface Press {
   /** Where the finger is now. */
   x: number;
   y: number;
-  /** Whether it landed on the lanes, where a vertical swipe scrolls the lanes. */
-  inLanes: boolean;
   /**
    * Set when the finger went down on a coasting fling. Landing on the timeline is how a fling is
    * stopped, and stopping one is all that press means: it must not also select, mute or open a
@@ -286,11 +284,12 @@ export interface ScrubDrag extends DragBase {
   kind: 'scrub';
 }
 
+/** A vertical swipe panning the timeline's rows - all of them, ruler and filmstrip included. */
 export interface LanesScrollDrag extends DragBase {
   kind: 'lanes';
   laneY0: number;
   maxY: number;
-  /** Lanes px per ms, positive when the lanes move up. Smoothed, for the fling on release. */
+  /** Px per ms, positive when the rows move up. Smoothed, for the fling on release. */
   velocity: number;
   lastY: number;
   lastT: number;

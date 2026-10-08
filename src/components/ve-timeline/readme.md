@@ -25,7 +25,7 @@ Every cut of the base track carries LightCut's white dot, and a tap on one opens
 sheet on that cut. The dot is a plain press like any other here - no lift, no drag - so a swipe
 that happens to start on one is still the timeline's scroll.
 
-Under the filmstrip, in the same fixed column, is the ZOOM row when the post has zooms: one bar per
+Under the filmstrip, above the lanes, is the ZOOM row when the post has zooms: one bar per
 zoom (the camera closing in on an area of the picture - nothing to do with this timeline's own
 pinch zoom), its ramps drawn as a fade at each end from the same slots the camera compiler plays.
 A tap opens the zoom's sheet; the selected bar is dragged to move it and its handles retime it,
@@ -45,9 +45,9 @@ The browser keeps doing what it does best: the content is `touch-action: pan-x`,
 swipe anywhere is a native, compositor-driven scroll with momentum, while a vertical one is
 refused by the browser and handed to us as pointer events (Chrome decides the axis from the first
 movement past the touch slop and zeroes the other axis for the whole gesture) - which is how
-everything under the base track scrolls vertically, the video layers included, under a fixed ruler
-and filmstrip without the two directions ever mixing. Handles and selected items are
-`touch-action: none`, so dragging them never scrolls anything.
+the whole timeline pans vertically, ruler and filmstrip included, without the two directions
+ever mixing. Handles and selected items are `touch-action: none`, so dragging them never scrolls
+anything.
 
 ## Properties
 
