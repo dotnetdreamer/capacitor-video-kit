@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 /*
  * `@capacitor/core` is not installed under that name here (`tsconfig.json` says why), and all the
@@ -116,6 +116,66 @@ describe('the native-only calls, in a browser', () => {
   it('stages no render inputs, because its engine reads a blob as it is', async () => {
     await expect(plugin.stageRenderInput({ data: 'c291bmQ=' })).rejects.toMatchObject({ code: 'UNIMPLEMENTED' });
     await expect(plugin.releaseRenderInputs({ uris: [] })).rejects.toMatchObject({ code: 'UNIMPLEMENTED' });
+  });
+});
+
+/* A page's Downloads are the browser's: the file is handed to its download under the name asked for. */
+describe('saveToDownloads, in a browser', () => {
+  const plugin: VideoComposerPlugin = new VideoComposerWeb();
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** The name of every download the page started, in order. */
+  function watchDownloads(): string[] {
+    const names: string[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:https://example.test/copy');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      names.push(this.download);
+    });
+    return names;
+  }
+
+  it('refuses a call without a file, as a phone does', async () => {
+    await expect(plugin.saveToDownloads({ uri: '' })).rejects.toMatchObject({ code: 'invalid_spec', message: 'uri is required' });
+    await expect(plugin.saveToDownloads({} as never)).rejects.toMatchObject({ code: 'invalid_spec' });
+  });
+
+  it('downloads the file under the name it was given, and says it was saved', async () => {
+    const sound = new Blob(['RIFF'], { type: 'audio/wav' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => sound })));
+    const downloads = watchDownloads();
+
+    await expect(plugin.saveToDownloads({ uri: 'blob:https://example.test/a', fileName: 'holiday.wav' })).resolves.toEqual({
+      saved: true,
+      uri: 'blob:https://example.test/a',
+    });
+    expect(downloads).toEqual(['holiday.wav']);
+  });
+
+  it("names a file it was given no name for after the URL's last segment", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(['RIFF']) })));
+    const downloads = watchDownloads();
+
+    await plugin.saveToDownloads({ uri: 'https://example.test/sounds/beach%20day.m4a' });
+
+    expect(downloads).toEqual(['beach day.m4a']);
+  });
+
+  it('reports a file it could not read as unreadable_input, and downloads nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    const downloads = watchDownloads();
+
+    await expect(plugin.saveToDownloads({ uri: 'blob:https://example.test/gone' })).rejects.toMatchObject({ code: 'unreadable_input' });
+    expect(downloads).toEqual([]);
   });
 });
 

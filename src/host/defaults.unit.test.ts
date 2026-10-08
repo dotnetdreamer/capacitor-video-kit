@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { editorDebug, setEditorDebug } from './debug';
-import { browserMediaHost, envSafeAreaInsets, pickMediaFiles, resolveEditorHost } from './defaults';
-import type { EditorInsets, EditorMediaHost, EditorSource } from './host.types';
+import { browserMediaHost, browserSoundLibrary, envSafeAreaInsets, pickMediaFiles, resolveEditorHost } from './defaults';
+import type { EditorInsets, EditorMediaHost, EditorSource, SavedSound } from './host.types';
 
 const stubMedia: EditorMediaHost = {
   pickVideo: async () => null,
@@ -180,6 +180,76 @@ describe('the browser media host', () => {
       precise: false,
     });
     expect(urls).toEqual([]);
+  });
+});
+
+/* A page's Downloads are the browser's, and every sound the page's library keeps is a WAV. */
+describe('the browser sound library handing a sound to the person', () => {
+  const SOUND: SavedSound = { id: 's1', uri: 'blob:https://example.test/s1', fileName: 'holiday', durationMs: 9000, savedAt: 0 };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** The name of every download the page started, in order. */
+  function watchDownloads(): string[] {
+    const names: string[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:https://example.test/copy');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      names.push(this.download);
+    });
+    return names;
+  }
+
+  it("downloads the sound as the WAV it is, under the sound's own name", async () => {
+    const wav = new Blob(['RIFF'], { type: 'audio/wav' });
+    const read = vi.fn(async () => ({ ok: true, status: 200, blob: async () => wav }));
+    vi.stubGlobal('fetch', read);
+    const downloads = watchDownloads();
+
+    await expect(browserSoundLibrary().download?.(SOUND)).resolves.toBe(true);
+
+    expect(read).toHaveBeenCalledWith(SOUND.uri);
+    expect(downloads).toEqual(['holiday.wav']);
+  });
+
+  it('names a sound with no name of its own Sound', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(['RIFF']) })));
+    const downloads = watchDownloads();
+
+    await browserSoundLibrary().download?.({ ...SOUND, fileName: '' });
+
+    expect(downloads).toEqual(['Sound.wav']);
+  });
+
+  it('rejects for a sound whose bytes cannot be read, and downloads nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    );
+    const downloads = watchDownloads();
+
+    await expect(browserSoundLibrary().download?.(SOUND)).rejects.toThrow(SOUND.uri);
+    expect(downloads).toEqual([]);
+  });
+
+  /* A WebView drops a download link without an error, so a row there would report a save that never happened. */
+  it('offers no download inside a Capacitor app on a phone, and the browser’s own in a page', () => {
+    const page = globalThis as { Capacitor?: unknown };
+    try {
+      for (const platform of ['android', 'ios']) {
+        page.Capacitor = { getPlatform: () => platform };
+        expect(browserSoundLibrary().download).toBeUndefined();
+      }
+      page.Capacitor = { getPlatform: () => 'web' };
+      expect(browserSoundLibrary().download).toBeInstanceOf(Function);
+    } finally {
+      delete page.Capacitor;
+    }
   });
 });
 

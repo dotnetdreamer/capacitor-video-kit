@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { EditorMediaHost, EditorSource, EditorVoiceHost, ThumbnailRequest } from '../host/host.types';
+import type { EditorMediaHost, EditorSource, EditorVoiceHost, SavedSound, ThumbnailRequest } from '../host/host.types';
 
 import type {
   DeleteSoundOptions,
@@ -13,6 +13,11 @@ import type {
   PreviewProxyResult,
   ProbeOptions,
   ProbeResult,
+  ReleaseRenderInputsOptions,
+  SaveToDownloadsOptions,
+  SaveToDownloadsResult,
+  StageRenderInputOptions,
+  StageRenderInputResult,
   ThumbnailsOptions,
   ThumbnailsResult,
   VoiceRecordingResult,
@@ -34,7 +39,12 @@ const kit = vi.hoisted(() => {
     pickAudio: vi.fn(async () => null),
     probeDuration: vi.fn(async (_source: EditorSource): Promise<number> => 0),
     thumbnails: vi.fn(async (_request: ThumbnailRequest): Promise<string[]> => ['data:image/jpeg;base64,browser']),
-    sounds: { list: vi.fn(async () => []), extract: vi.fn(async () => null), remove: vi.fn(async () => undefined) },
+    sounds: {
+      list: vi.fn(async () => []),
+      extract: vi.fn(async () => null),
+      remove: vi.fn(async () => undefined),
+      download: vi.fn(async (_sound: SavedSound) => true),
+    },
     release: vi.fn(),
   });
   return {
@@ -50,6 +60,9 @@ const kit = vi.hoisted(() => {
       listSounds: vi.fn<() => Promise<ListSoundsResult>>(),
       extractAudio: vi.fn<(options: ExtractAudioOptions) => Promise<ExtractAudioResult>>(),
       deleteSound: vi.fn<(options: DeleteSoundOptions) => Promise<void>>(),
+      saveToDownloads: vi.fn<(options: SaveToDownloadsOptions) => Promise<SaveToDownloadsResult>>(),
+      stageRenderInput: vi.fn<(options: StageRenderInputOptions) => Promise<StageRenderInputResult>>(),
+      releaseRenderInputs: vi.fn<(options: ReleaseRenderInputsOptions) => Promise<void>>(),
       startVoiceRecording: vi.fn<() => Promise<void>>(),
       stopVoiceRecording: vi.fn<() => Promise<VoiceRecordingResult>>(),
     },
@@ -641,10 +654,15 @@ describe("a recorder of the host's own", () => {
 });
 
 describe('the sound library', () => {
-  it("is the browser's by default, on a phone too", () => {
+  /* Its list, extract and remove are the page's own; a download link in a WebView goes nowhere. */
+  it("is the browser's by default on a phone too, with the composer's download in place of the page's", () => {
     kit.native = true;
     const { host, browser } = build();
-    expect(host.sounds).toBe(browser.sounds);
+    expect(host.sounds?.list).toBe(browser.sounds.list);
+    expect(host.sounds?.extract).toBe(browser.sounds.extract);
+    expect(host.sounds?.remove).toBe(browser.sounds.remove);
+    expect(host.sounds?.download).toBeInstanceOf(Function);
+    expect(host.sounds?.download).not.toBe(browser.sounds.download);
   });
 
   it("is the host's own when it brings one, on either platform", () => {
@@ -748,6 +766,69 @@ describe("the composer's sound library on a phone", () => {
     kit.composer.deleteSound.mockResolvedValue(undefined);
     await library().remove('s1');
     expect(kit.composer.deleteSound).toHaveBeenCalledWith({ id: 's1' });
+  });
+});
+
+describe('handing a kept sound to the person on a phone', () => {
+  /** A sound from the page's library: a `blob:` URL over the WAV it decoded. */
+  const PAGE_SOUND: SavedSound = { id: 's1', uri: 'blob:capacitor://localhost/s1', fileName: 'holiday', durationMs: 9000, savedAt: 10 };
+  const STAGED = 'file:///app/tmp/videokit-render-inputs/1.wav';
+
+  beforeEach(() => {
+    kit.native = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(['RIFF'], { type: 'audio/wav' }) })),
+    );
+    kit.composer.stageRenderInput.mockResolvedValue({ uri: STAGED });
+    kit.composer.releaseRenderInputs.mockResolvedValue(undefined);
+    kit.composer.saveToDownloads.mockResolvedValue({ saved: true, uri: 'content://media/external_primary/downloads/7' });
+  });
+
+  it("writes a page's sound out as a file, saves it under the sound's name, and deletes the file after", async () => {
+    const { host, browser } = build();
+
+    await expect(host.sounds?.download?.(PAGE_SOUND)).resolves.toBe(true);
+
+    expect(kit.composer.stageRenderInput).toHaveBeenCalledWith({ data: 'UklGRg==', extension: 'wav' });
+    expect(kit.composer.saveToDownloads).toHaveBeenCalledWith({ uri: STAGED, fileName: 'holiday.wav' });
+    expect(kit.composer.releaseRenderInputs).toHaveBeenCalledWith({ uris: [STAGED] });
+    expect(browser.sounds.download).not.toHaveBeenCalled();
+  });
+
+  it('answers false when the person backed out of the save sheet, and still deletes the file', async () => {
+    kit.composer.saveToDownloads.mockResolvedValue({ saved: false });
+
+    await expect(build().host.sounds?.download?.(PAGE_SOUND)).resolves.toBe(false);
+    expect(kit.composer.releaseRenderInputs).toHaveBeenCalledWith({ uris: [STAGED] });
+  });
+
+  it('rejects with the failure when the save does, having deleted the file', async () => {
+    kit.composer.saveToDownloads.mockRejectedValue(coded('no_space'));
+
+    await expect(build().host.sounds?.download?.(PAGE_SOUND)).rejects.toMatchObject({ code: 'no_space' });
+    expect(kit.composer.releaseRenderInputs).toHaveBeenCalledWith({ uris: [STAGED] });
+  });
+
+  it("saves the composer's own sound from its file, as the .m4a it is, staging nothing", async () => {
+    const sounds = build({ sounds: 'native' }).host.sounds;
+
+    await expect(sounds?.download?.({ ...PAGE_SOUND, uri: 'file:///app/files/sounds/snd-1.m4a' })).resolves.toBe(true);
+
+    expect(kit.composer.saveToDownloads).toHaveBeenCalledWith({ uri: 'file:///app/files/sounds/snd-1.m4a', fileName: 'holiday.m4a' });
+    expect(kit.composer.stageRenderInput).not.toHaveBeenCalled();
+  });
+
+  it('names a sound with no name of its own Sound', async () => {
+    await build().host.sounds?.download?.({ ...PAGE_SOUND, fileName: '' });
+
+    expect(kit.composer.saveToDownloads).toHaveBeenCalledWith({ uri: STAGED, fileName: 'Sound.wav' });
+  });
+
+  it("keeps the page's own download in a page", () => {
+    kit.native = false;
+    const { host, browser } = build();
+    expect(host.sounds?.download).toBe(browser.sounds.download);
   });
 });
 

@@ -7,6 +7,7 @@ import { readVoiceTake } from '../host/read-file';
 import { webViewUrl } from '../host/web-view-url';
 
 import { VideoComposer } from './index';
+import { withNativeFile } from './render-inputs';
 
 /*
  * The editor's media host over the package's own composer, which every Capacitor host was writing
@@ -64,15 +65,18 @@ export interface ComposerMediaHostOptions {
    * - `'browser'`: the library the page keeps in IndexedDB (`browserSoundLibrary`). A sound is a
    *   `blob:` URL, so a host whose drafts keep bytes keeps it with the draft, and a render on a phone
    *   writes it out as a file first (`withNativeRenderInputs`). The cost is the page's: the audio is
-   *   decoded to WAV, about ten megabytes a minute.
+   *   decoded to WAV, about ten megabytes a minute. On a phone its `download` is the composer's
+   *   `saveToDownloads`, with the sound written out as a file the same way, because a download link
+   *   in a WebView goes nowhere.
    * - `'native'`: the composer's own library, `listSounds`, `extractAudio` and `deleteSound`: a file
    *   per sound in the app's storage with a record beside it, the compressed track remuxed where the
    *   platform can manage it rather than decoded. A sound is a `file://` URI, which the preview
    *   plays through `platform.fileUrl` and the engine reads where it is; a draft that keeps paths
-   *   keeps it for as long as the sound is in the library. On the web this is the browser library,
-   *   because the web composer keeps its sounds in that same IndexedDB store: it is one library
-   *   either way, and asking the page's copy spares loading the web composer to reach it.
-   * - An [EditorSoundLibrary] of the host's own, on every platform.
+   *   keeps it for as long as the sound is in the library. Its `download` is `saveToDownloads`. On
+   *   the web this is the browser library, because the web composer keeps its sounds in that same
+   *   IndexedDB store: it is one library either way, and asking the page's copy spares loading the
+   *   web composer to reach it.
+   * - An [EditorSoundLibrary] of the host's own, on every platform, `download` and all.
    */
   sounds?: 'browser' | 'native' | EditorSoundLibrary;
 
@@ -100,7 +104,8 @@ export interface ComposerMediaHostOptions {
  * - `thumbnails` has the composer cut the frames from `sourcePath` and answers them as URLs the
  *   WebView may load ([webViewUrl]), and is the browser's canvas for a source with no path;
  * - `voice` is the composer's recorder unless [ComposerMediaHostOptions.voice] says otherwise;
- * - `sounds` is the composer's library when [ComposerMediaHostOptions.sounds] asks for it.
+ * - `sounds` is the composer's library when [ComposerMediaHostOptions.sounds] asks for it, and the
+ *   browser's or the composer's hands a sound to the person through `saveToDownloads`.
  *
  * In a page it is the browser host, with whatever the host brought. The pickers and `release` are
  * the host's on every platform, and the browser host's where it brought none.
@@ -269,7 +274,26 @@ async function nativeDropPreviewProxies(keep: readonly EditorSource[]): Promise<
 /** [ComposerMediaHostOptions.sounds], as the library the editor is handed. */
 function soundLibrary(choice: ComposerMediaHostOptions['sounds'], browser: EditorMediaHost, native: boolean): EditorSoundLibrary | undefined {
   if (typeof choice === 'object') return choice;
-  return choice === 'native' && native ? nativeSoundLibrary() : browser.sounds;
+  if (!native) return browser.sounds;
+  if (choice === 'native') return nativeSoundLibrary();
+  // The page's library, keeping its own list, extract and remove: only its download is no good on a
+  // phone, where a download link in the WebView goes nowhere.
+  return browser.sounds ? { ...browser.sounds, download: downloadSound } : undefined;
+}
+
+/**
+ * One kept sound, handed to the person through the composer's `saveToDownloads`: Downloads on
+ * Android, the system's save sheet on iOS. Named after the sound as the library lists it, with the
+ * extension of the file it is: a page's sound is a `blob:` URL over a WAV, which no native call can
+ * open, so it is written out as a file first and deleted after ([withNativeFile]); the composer's own
+ * is the `.m4a` in its library, handed over as it is.
+ */
+async function downloadSound(sound: SavedSound): Promise<boolean> {
+  return withNativeFile(sound.uri, async (file, extension) => {
+    const name = sound.fileName || 'Sound';
+    const { saved } = await VideoComposer.saveToDownloads({ uri: file, fileName: extension ? `${name}.${extension}` : name });
+    return saved;
+  });
 }
 
 /** [ComposerMediaHostOptions.release], after the browser host's own. */
@@ -328,6 +352,8 @@ function nativeSoundLibrary(): EditorSoundLibrary {
     async remove(id: string): Promise<void> {
       await VideoComposer.deleteSound({ id });
     },
+
+    download: downloadSound,
   };
 }
 

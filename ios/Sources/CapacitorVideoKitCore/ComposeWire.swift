@@ -152,8 +152,10 @@ enum Reject {
     static let fileMissing = "file_missing"
     static let invalidRequest = "invalid_request"
     static let notFound = "not_found"
-    /// iOS only, and not in Android's list: `pickAudioFile` asked for while its picker is still up.
-    /// Android refuses the whole call as `unimplemented` and so has no second one to refuse.
+    /// iOS only, and not in Android's list: `pickAudioFile` asked for while its picker is still up,
+    /// and `saveToDownloads` while its save sheet is, which is the same document picker. Android
+    /// refuses the first call as `unimplemented` and saves to Downloads without a sheet, so it has
+    /// no second call to refuse.
     static let alreadyPicking = "already_picking"
 }
 

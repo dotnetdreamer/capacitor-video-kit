@@ -248,4 +248,59 @@ describe('ve-sound-sheet', () => {
     finish(SAVED[0]);
     await until('the buttons to come back', () => actions(sheet).every(button => !button.disabled), 3000);
   });
+
+  it('offers no download for a library that cannot hand a sound over', async () => {
+    const { sheet } = await mount();
+    await until('the list', () => rows(sheet).length === 2);
+
+    expect(sheet.shadowRoot?.querySelector('.snd__save')).toBeNull();
+  });
+
+  it('downloads a row’s sound through the library, and stays open on the post as it was', async () => {
+    const download = vi.fn(async () => true);
+    const { store, sheet } = await mount(library({ download }));
+    await until('the list', () => rows(sheet).length === 2);
+    const save = rows(sheet).map(row => row.querySelector<HTMLButtonElement>('.snd__save')!);
+    expect(save.map(button => button.getAttribute('aria-label'))).toEqual(['Download holiday', 'Download market']);
+
+    save[1].click();
+
+    await until('the download', () => download.mock.calls.length === 1);
+    expect(download).toHaveBeenCalledWith(SAVED[1]);
+    await until('the toast', () => store.toast.value?.text === 'Sound downloaded');
+    expect(store.panel.value).toBe('sound');
+    expect(store.manifest.value.audioTracks ?? []).toEqual([]);
+  });
+
+  it('spins on the row being downloaded and greys every other download until it is done', async () => {
+    let finish = (_: boolean) => undefined as void;
+    const download = vi.fn(
+      () =>
+        new Promise<boolean>(resolve => {
+          finish = resolve;
+        }),
+    );
+    const { sheet } = await mount(library({ download }));
+    await until('the list', () => rows(sheet).length === 2);
+
+    rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__save')!.click();
+    await until('the spinner', () => !!rows(sheet)[0].querySelector('.snd__save ve-spinner'));
+    const saves = () => rows(sheet).map(row => row.querySelector<HTMLButtonElement>('.snd__save')!);
+    expect(saves().map(button => button.disabled)).toEqual([true, true]);
+
+    finish(false);
+    await until('the downloads to come back', () => saves().every(button => !button.disabled));
+    expect(rows(sheet)[0].querySelector('.snd__save ve-spinner')).toBeNull();
+  });
+
+  it('leaves the delete as the only question on a row that is asking it', async () => {
+    const { sheet } = await mount(library({ download: vi.fn(async () => true) }));
+    await until('the list', () => rows(sheet).length === 2);
+
+    rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__bin')!.click();
+    await until('the confirm', () => !!rows(sheet)[0].querySelector('.snd__confirm'));
+
+    expect(rows(sheet)[0].querySelector('.snd__save')).toBeNull();
+    expect(rows(sheet)[1].querySelector('.snd__save')).not.toBeNull();
+  });
 });

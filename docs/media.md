@@ -3,6 +3,7 @@
 [Documentation](README.md) / [Project overview](../README.md)
 
 - [Saving the finished video to the gallery](#saving-the-finished-video-to-the-gallery)
+- [Saving any other file to Downloads](#saving-any-other-file-to-downloads)
 - [Reading the gallery, for a host that draws its own picker](#reading-the-gallery-for-a-host-that-draws-its-own-picker)
 - [Reading what footage shows](#reading-what-footage-shows)
 - [Keeping picked media](#keeping-picked-media)
@@ -63,6 +64,45 @@ The failures are `invalid_spec` for an option that cannot be honoured, `permissi
 `unsupported` from a browser that cannot download, and `unknown` for whatever else the platform
 says. One of those is not yet true everywhere: Android looks for a full disk by the words of the
 error rather than by its cause, misses a real `ENOSPC`, and reports it as `unreadable_input`.
+
+## Saving any other file to Downloads
+
+A gallery is for videos. A sound out of the library, or any other file a person wants to keep
+outside the app, goes to their Downloads with `VideoComposer.saveToDownloads`:
+
+```ts
+const { saved, uri } = await VideoComposer.saveToDownloads({
+  uri: sound.uri,           // a `file://` the kit handed back; on the web any URL a page can read
+  fileName: 'holiday.m4a',  // extension included; defaults to the source's own name
+});
+```
+
+Android inserts into the Downloads collection of MediaStore, which needs no permission from API 29,
+inserted pending so no other app sees half a file, and answers with the `content://` row; a name
+already in Downloads is MediaStore's to number, `holiday (1).m4a`. Below API 29 the file is written
+into the public Download directory under a name nothing there has yet, after the same capped storage
+permission `saveToGallery` asks for, and handed to the media scanner.
+
+iOS has no Downloads folder an app can write into: the one in the Files app is a folder like any
+other, in iCloud Drive or On My iPhone. So iOS puts up the system's own save sheet
+(`UIDocumentPickerViewController` exporting a copy), where the person picks the place, Downloads
+among them, and taps Save. Backing out resolves `{ saved: false }` rather than rejecting. The sheet
+names the file after the one it is handed, so the kit puts a link to it under `fileName` in
+`tmp/videokit-downloads/` first, and deletes that once the sheet has answered. A second call while a
+sheet is up is refused with `already_picking`, as a second `pickAudioFile` is, and one with no
+screen to present on with Capacitor's `UNAVAILABLE`. Nothing goes in `Info.plist`.
+
+The web hands the file to the browser's own download, as `saveToGallery` does there.
+
+A phone opens files and nothing else, so a page's `blob:` URL has to be written out first. That is
+what `composerMediaHost` does for the editor's sound library on a phone, through the same staging a
+render's page inputs go through, and why its Sound sheet can offer a download on every saved sound
+(see [Sound library](editor-customization.md)).
+
+The failures are `invalid_spec` for no `uri`, `permission_denied` for storage refused below API 29,
+`unreadable_input` for a file that is not there, `no_space` for a full disk, `already_picking` on
+iOS, `unsupported` from a browser that cannot download, and `unknown` for whatever else the
+platform says.
 
 ## Reading the gallery, for a host that draws its own picker
 

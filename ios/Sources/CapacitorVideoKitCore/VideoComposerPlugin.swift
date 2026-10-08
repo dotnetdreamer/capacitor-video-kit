@@ -17,7 +17,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "VideoComposerPlugin"
     public let jsName = "VideoComposer"
 
-    /// Twenty-nine entries. A method missing from this list is rejected by the bridge before this class
+    /// Thirty entries. A method missing from this list is rejected by the bridge before this class
     /// is consulted, which is exactly what used to happen to `systemInsets`: the `@objc func` alone
     /// changes nothing. `addListener` / `removeListener` / `removeAllListeners` are special-cased
     /// by `CapacitorBridge.handleJSCall` before the list is read and stay off it.
@@ -32,6 +32,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "saveToGallery", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "saveToDownloads", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "requestGalleryAccess", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "listGalleryVideos", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "galleryThumbnail", returnType: CAPPluginReturnPromise),
@@ -68,6 +69,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         // page of an earlier one never collected.
         JobRegistry.shared.attach(emitter: self)
         JobFolders.sweepOnLaunch()
+        DownloadsExport.clearOnLoad()
     }
 
     deinit {
@@ -338,6 +340,106 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject(rejection.message, rejection.code)
             }
         }
+    }
+
+    // MARK: - saveToDownloads
+
+    /// The save sheet `saveToDownloads` has put up, until it answers. Touched on main only.
+    private var downloadsExport: DownloadsExport?
+
+    /// Whether a `saveToDownloads` is still making its named copy, before there is a sheet to ask
+    /// `isOpen` of. Touched on main only.
+    private var stagingDownload = false
+
+    /// Offers a file to the person through the system's save sheet, where Downloads is one of the
+    /// places to pick: see `DownloadsExport` for why iOS has a sheet where Android has none.
+    /// `{ saved: false }` when they back out, never a rejection.
+    ///
+    /// Rejects `already_picking` while a sheet an earlier call asked for is open, or still having its
+    /// copy made, as `pickAudioFile` does for its picker; Capacitor's `UNAVAILABLE` with no screen to
+    /// present on; `unreadable_input` for a file that is not there; and `no_space` or `unknown` for a
+    /// copy that would not write.
+    @objc func saveToDownloads(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), !uri.isEmpty else {
+            call.reject("uri is required", Reject.invalidSpec)
+            return
+        }
+        guard let url = JobFolders.fileURL(from: uri) else {
+            call.reject("unreadable uri \(uri)", Reject.unreadableInput)
+            return
+        }
+        let name = DownloadsExport.name(call.getString("fileName"), source: url)
+        Task { @MainActor in
+            self.stageDownload(call, source: url, name: name)
+        }
+    }
+
+    /// Makes the named copy off main - a hard link, or a whole file where there can be none - and
+    /// then puts the sheet up for it.
+    @MainActor
+    private func stageDownload(_ call: CAPPluginCall, source: URL, name: String) {
+        if stagingDownload {
+            call.reject("the save sheet is already open", Reject.alreadyPicking)
+            return
+        }
+        if let open = downloadsExport {
+            guard !open.isOpen() else {
+                call.reject("the save sheet is already open", Reject.alreadyPicking)
+                return
+            }
+            open.settle(.cancelled)
+        }
+        guard bridge?.viewController != nil else {
+            call.unavailable("there is no screen to show the save sheet on")
+            return
+        }
+        stagingDownload = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let staged: URL
+            do {
+                staged = try DownloadsExport.stage(source, as: name)
+            } catch {
+                Task { @MainActor in self.stagingDownload = false }
+                if case let DownloadsExport.StageError.unreadable(message) = error {
+                    call.reject(message, Reject.unreadableInput)
+                } else {
+                    Self.rejectWrite(call, error)
+                }
+                return
+            }
+            Task { @MainActor in
+                self.stagingDownload = false
+                self.presentDownloadsExport(call, staged: staged)
+            }
+        }
+    }
+
+    @MainActor
+    private func presentDownloadsExport(_ call: CAPPluginCall, staged: URL) {
+        guard let presenter = bridge?.viewController else {
+            DownloadsExport.release(staged)
+            call.unavailable("there is no screen to show the save sheet on")
+            return
+        }
+        let export = DownloadsExport(exporting: staged) { [weak self] outcome in
+            self?.downloadsExport = nil
+            // The sheet made its own copy where the person chose; the named one is spent either way.
+            DownloadsExport.release(staged)
+            switch outcome {
+            case let .saved(url):
+                var json: [String: Any] = ["saved": true]
+                if let url { json["uri"] = url.absoluteString }
+                call.resolve(json)
+            case .cancelled:
+                call.resolve(["saved": false])
+            }
+        }
+        guard export.present(from: presenter) else {
+            DownloadsExport.release(staged)
+            call.unavailable("the save sheet could not be shown")
+            return
+        }
+        downloadsExport = export
     }
 
     // MARK: - Gallery library

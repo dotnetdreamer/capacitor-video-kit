@@ -1126,6 +1126,62 @@ export type SaveToGalleryFailureCode =
   /** Whatever else the platform refused the save for, in its own words as the message. */
   | 'unknown';
 
+/** A file on its way out of the app and into the person's own files: see [VideoComposerPlugin.saveToDownloads]. */
+export interface SaveToDownloadsOptions {
+  /**
+   * The file to save: `file://` or an absolute path on a phone, as `extractAudio` and
+   * `stageRenderInput` hand one back, and on the web anything a page can read, a `blob:` URL
+   * included. A phone opens files and nothing else, so a page's own bytes are written out first
+   * (`stageRenderInput`).
+   */
+  uri: string;
+
+  /**
+   * What the file is called once it is there, EXTENSION INCLUDED: a files app prints it, and Android
+   * reads the file's type off it. Defaults to the source file's own name.
+   *
+   * A name and never a path: on Android and iOS a `/` or `\` in it becomes `_`, and a name that is
+   * `.` or `..` is `download`, rather than a folder somewhere else on the phone.
+   */
+  fileName?: string;
+}
+
+export interface SaveToDownloadsResult {
+  /**
+   * False when the person backed out of the save sheet iOS shows, which is an answer rather than a
+   * failure. Always true on Android and the web, which ask nothing.
+   */
+  saved: boolean;
+  /**
+   * Where the file went, when it was saved: a `content://` row of the Downloads collection on
+   * Android (a `file://` below API 29, which has no such collection), the `file://` URL of the place
+   * the person chose on iOS, and the URI the page was handed on the web, which learns nothing about
+   * where a download went. For a log rather than for reading back: none of them is the app's to
+   * open later.
+   */
+  uri?: string;
+}
+
+/** Why a save to Downloads did not happen; the codes [SaveToGalleryFailureCode] has, read the same way. */
+export type SaveToDownloadsFailureCode =
+  /** No `uri`. */
+  | 'invalid_spec'
+  /** The person said no to storage, which only Android below API 29 asks for. */
+  | 'permission_denied'
+  /** No file at `uri`, or nothing that can be read as one. */
+  | 'unreadable_input'
+  /** The disk would not take the copy. */
+  | 'no_space'
+  /** A browser with no way to hand a file to the person. Web only. */
+  | 'unsupported'
+  /**
+   * iOS only: the save sheet an earlier call put up is still open. It is a document picker, and this
+   * is the code `pickAudioFile` gives for the same thing.
+   */
+  | 'already_picking'
+  /** Whatever else the platform refused the save for, in its own words as the message. */
+  | 'unknown';
+
 /**
  * How much of the device's video library a host may read.
  *

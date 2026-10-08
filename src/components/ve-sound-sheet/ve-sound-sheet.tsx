@@ -21,10 +21,12 @@ const CONFIRM_DELETE_MS = 4000;
  * Sound menu used to open directly, unchanged.
  *
  * Tapping a saved sound uses it and closes the sheet, which is the same gesture the sticker sheet
- * has: the sound lands on the timeline and the customer's eyes are already going there.
+ * has: the sound lands on the timeline and the customer's eyes are already going there. A host whose
+ * library can hand a sound to the person ([EditorSoundLibrary.download]) gets a download button on
+ * every row as well, which leaves the post and the sheet as they were.
  *
  * The library itself belongs to the host - see [EditorSoundLibrary] - and this sheet only ever asks
- * it three things. A host with no library never opens this sheet at all: `media.openSound()` sends
+ * it four things. A host with no library never opens this sheet at all: `media.openSound()` sends
  * it straight to the file picker instead, because a sheet whose only content is one button is worse
  * than the button.
  *
@@ -118,6 +120,16 @@ export class VeSoundSheet {
   }
 
   /**
+   * Hands a copy of the sound to the person, through the host's library. The sheet stays open: the
+   * post is not what changed, and the next thing may be another download.
+   */
+  private download(sound: SavedSound): void {
+    this.clearConfirm();
+    this.stopPreview();
+    void this.ctx.media.downloadSound(sound);
+  }
+
+  /**
    * The bin, tapped twice. A sound is the one thing in this editor that outlives the edit, so a
    * delete here cannot be undone by the undo stack the way every other delete can - and the sheet
    * has nowhere to put a system alert from inside its own shadow root. So the row asks for itself:
@@ -194,7 +206,7 @@ export class VeSoundSheet {
   /* Render                                                                                    */
   /* ========================================================================================= */
 
-  private renderRow(sound: SavedSound, inUse: boolean) {
+  private renderRow(sound: SavedSound, inUse: boolean, download: boolean, downloading: string | null) {
     const playing = this.previewId.value === sound.id;
     const confirming = this.confirmingId.value === sound.id;
     return (
@@ -230,8 +242,26 @@ export class VeSoundSheet {
 
         {/*
           One button that changes what it is, keyed so the vdom swaps the element rather than
-          patching a bin into a word and leaving the icon's `aria-label` on it.
+          patching a bin into a word and leaving the icon's `aria-label` on it. The download goes
+          while the row asks about a delete, which is then the only question on it.
         */}
+        {download && !confirming ? (
+          <button
+            type="button"
+            class="snd__save"
+            key="save"
+            aria-label={`Download ${sound.fileName}`}
+            disabled={downloading !== null}
+            onClick={() => this.download(sound)}
+          >
+            {downloading === sound.id ? (
+              <ve-spinner key="spinner" label={`Downloading ${sound.fileName}`}></ve-spinner>
+            ) : (
+              <ve-icon name="download-outline" key="icon"></ve-icon>
+            )}
+          </button>
+        ) : null}
+
         {confirming ? (
           <button type="button" class="snd__confirm" key="confirm" onClick={() => this.deleteSound(sound.id)}>
             Delete
@@ -252,6 +282,8 @@ export class VeSoundSheet {
       const extracting = media.extracting.value;
       const busy = media.busy.value;
       const loaded = media.soundsLoaded.value;
+      const download = media.canDownloadSounds;
+      const downloading = media.downloadingSound.value;
       const usedUris = new Set([
         ...(store.manifest.value.music ? [store.manifest.value.music.uri] : []),
         ...(store.manifest.value.audioTracks ?? []).flatMap(track => track.clips.map(clip => clip.uri)),
@@ -291,7 +323,7 @@ export class VeSoundSheet {
               */}
               {sounds.length > 0 ? (
                 <ul class="snd__list" key="list">
-                  {sounds.map(sound => this.renderRow(sound, usedUris.has(sound.uri)))}
+                  {sounds.map(sound => this.renderRow(sound, usedUris.has(sound.uri), download, downloading))}
                 </ul>
               ) : loaded ? (
                 <div class="snd__empty" key="empty">

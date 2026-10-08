@@ -1,5 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 
+import { extensionOf } from '../web-runtime/files';
+
 import type { ComposeClip, ComposeFailureCode, ComposeSpec } from './definitions';
 import { VideoComposer } from './index';
 
@@ -65,41 +67,7 @@ export async function withNativeRenderInputs<T>(
     if (known) return known;
 
     const blob = await readInput(uri, clipKey, signal);
-    const extension = extensionFor(blob.type);
-
-    /*
-     * One chunk encoded ahead. The page would otherwise sit idle through every bridge call while the
-     * phone decodes and appends, and only then start encoding the next mebibyte; encoding chunk i+1
-     * while chunk i is being written overlaps the two. The calls themselves still go out one at a
-     * time and in order - the first still answers the file's name before any append names it - so
-     * the staged file is the same bytes. At most two chunks of base64, about 2.8 MB, are alive at
-     * once. An encode started ahead and never awaited, because the signal stopped the staging or a
-     * write failed, is caught here so its rejection is not reported as unhandled.
-     */
-    const encode = (at: number): Promise<string> => {
-      const encoding = base64(blob.slice(at, at + CHUNK_BYTES));
-      encoding.catch(() => undefined);
-      return encoding;
-    };
-    let file = '';
-    let pending = encode(0);
-    for (let offset = 0; offset < blob.size; offset += CHUNK_BYTES) {
-      signal?.throwIfAborted();
-      const data = await pending;
-      signal?.throwIfAborted();
-      if (offset + CHUNK_BYTES < blob.size) pending = encode(offset + CHUNK_BYTES);
-      try {
-        if (!file) {
-          file = (await VideoComposer.stageRenderInput({ data, ...(extension ? { extension } : {}) })).uri;
-          // Remembered before the next chunk, so a file whose append fails is still released.
-          staged.push(file);
-        } else {
-          await VideoComposer.stageRenderInput({ data, uri: file });
-        }
-      } catch (error) {
-        throw writeFailure(error);
-      }
-    }
+    const file = await stageBlob(blob, extensionFor(blob.type), staged, signal);
     stagedByBlob.set(uri, file);
     return file;
   };
@@ -129,6 +97,78 @@ export async function withNativeRenderInputs<T>(
       await VideoComposer.releaseRenderInputs({ uris: staged }).catch(() => undefined);
     }
   }
+}
+
+/**
+ * `use` with `uri` as a file a native call can open, for a call that is not a render - handing a
+ * sound from the browser's library to `saveToDownloads`, say. A `blob:` URL is written out the way
+ * [withNativeRenderInputs] writes a render's inputs, and the file is deleted once `use` has settled,
+ * whatever it settled with; anything else is handed over as it is. `use` is told the extension the
+ * file is named with, without its dot - from the blob's type ([extensionFor]) or from the name - or
+ * `''` when neither says.
+ *
+ * A blob that cannot be staged rejects with a [RenderInputError], as a render's does:
+ * `unreadable_input` for one that will not read, `no_space` or `unknown` for a write the phone
+ * refused. `use` is never called then.
+ *
+ * Off a phone `use` is handed `uri` itself, a `blob:` URL included: a page reads one as it is.
+ */
+export async function withNativeFile<T>(uri: string, use: (file: string, extension: string) => Promise<T>): Promise<T> {
+  if (!Capacitor.isNativePlatform() || !uri.startsWith('blob:')) return use(uri, extensionOf(uri, ''));
+
+  const staged: string[] = [];
+  try {
+    const blob = await readInput(uri, undefined, undefined);
+    const extension = extensionFor(blob.type);
+    return await use(await stageBlob(blob, extension, staged), extension);
+  } finally {
+    if (staged.length > 0) {
+      await VideoComposer.releaseRenderInputs({ uris: staged }).catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Writes `blob` into a new staged file through `stageRenderInput`, a mebibyte a call, and answers the
+ * file's `file://` name, named with `extension` when there is one. The name goes into `staged` as soon
+ * as the first chunk has made the file, so the caller's release covers a file whose append then
+ * failed. A write the phone refused rejects with a [RenderInputError] ([writeFailure]).
+ */
+async function stageBlob(blob: Blob, extension: string, staged: string[], signal?: AbortSignal): Promise<string> {
+  /*
+   * One chunk encoded ahead. The page would otherwise sit idle through every bridge call while the
+   * phone decodes and appends, and only then start encoding the next mebibyte; encoding chunk i+1
+   * while chunk i is being written overlaps the two. The calls themselves still go out one at a
+   * time and in order - the first still answers the file's name before any append names it - so
+   * the staged file is the same bytes. At most two chunks of base64, about 2.8 MB, are alive at
+   * once. An encode started ahead and never awaited, because the signal stopped the staging or a
+   * write failed, is caught here so its rejection is not reported as unhandled.
+   */
+  const encode = (at: number): Promise<string> => {
+    const encoding = base64(blob.slice(at, at + CHUNK_BYTES));
+    encoding.catch(() => undefined);
+    return encoding;
+  };
+  let file = '';
+  let pending = encode(0);
+  for (let offset = 0; offset < blob.size; offset += CHUNK_BYTES) {
+    signal?.throwIfAborted();
+    const data = await pending;
+    signal?.throwIfAborted();
+    if (offset + CHUNK_BYTES < blob.size) pending = encode(offset + CHUNK_BYTES);
+    try {
+      if (!file) {
+        file = (await VideoComposer.stageRenderInput({ data, ...(extension ? { extension } : {}) })).uri;
+        // Remembered before the next chunk, so a file whose append fails is still released.
+        staged.push(file);
+      } else {
+        await VideoComposer.stageRenderInput({ data, uri: file });
+      }
+    } catch (error) {
+      throw writeFailure(error);
+    }
+  }
+  return file;
 }
 
 /**

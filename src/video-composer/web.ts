@@ -40,6 +40,8 @@ import type {
   RetainMediaResult,
   SaveToGalleryOptions,
   SaveToGalleryResult,
+  SaveToDownloadsOptions,
+  SaveToDownloadsResult,
   StageRenderInputResult,
   StartVoiceRecordingOptions,
   SweepMediaOptions,
@@ -238,6 +240,27 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
        the person's now, in a folder this code will never learn the name of - so minting one would
        be the web answering a question the other platforms answer truthfully. */
     return { uri };
+  }
+
+  /** The browser's own download, which is where a page's Downloads are: [saveToGallery]'s, under any name. */
+  async saveToDownloads(options: SaveToDownloadsOptions): Promise<SaveToDownloadsResult> {
+    const uri = required(options?.uri, 'uri');
+
+    let blob: Blob;
+    try {
+      blob = await resolve(uri);
+    } catch (error) {
+      throw coded(describe(error), 'unreadable_input');
+    }
+
+    try {
+      downloadBlob(blob, options?.fileName || nameOf(uri) || 'download');
+    } catch (error) {
+      throw coded(describe(error), 'unsupported');
+    }
+
+    // Saved as far as a page can know: the file has been handed over, and where it went is the browser's.
+    return { saved: true, uri };
   }
 
   /*

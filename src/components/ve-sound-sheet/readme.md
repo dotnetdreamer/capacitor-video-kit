@@ -15,10 +15,12 @@ kept, the same sound is one tap away in every edit after this one. "From files" 
 Sound menu used to open directly, unchanged.
 
 Tapping a saved sound uses it and closes the sheet, which is the same gesture the sticker sheet
-has: the sound lands on the timeline and the customer's eyes are already going there.
+has: the sound lands on the timeline and the customer's eyes are already going there. A host whose
+library can hand a sound to the person ([EditorSoundLibrary.download]) gets a download button on
+every row as well, which leaves the post and the sheet as they were.
 
 The library itself belongs to the host - see [EditorSoundLibrary] - and this sheet only ever asks
-it three things. A host with no library never opens this sheet at all: `media.openSound()` sends
+it four things. A host with no library never opens this sheet at all: `media.openSound()` sends
 it straight to the file picker instead, because a sheet whose only content is one button is worse
 than the button.
 
@@ -42,15 +44,15 @@ into it - and the video is paused while it plays, so the two are never heard at 
 ### Depends on
 
 - [ve-icon](../ve-icon)
-- [ve-sheet](../ve-sheet)
 - [ve-spinner](../ve-spinner)
+- [ve-sheet](../ve-sheet)
 
 ### Graph
 ```mermaid
 graph TD;
   ve-sound-sheet --> ve-icon
-  ve-sound-sheet --> ve-sheet
   ve-sound-sheet --> ve-spinner
+  ve-sound-sheet --> ve-sheet
   ve-sheet --> ve-icon
   ve-editor --> ve-sound-sheet
   style ve-sound-sheet fill:#f9f,stroke:#333,stroke-width:4px

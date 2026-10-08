@@ -123,6 +123,7 @@
 }
 
 .snd__play,
+.snd__save,
 .snd__bin {
   flex: 0 0 auto;
   display: grid;
@@ -140,6 +141,26 @@
 
 .snd__play[aria-pressed='true'] {
   color: var(--ve-accent, #a6ff2e);
+}
+
+/*
+ * Dimmed like the bin, and lit while held, as the play button is. A save already under way puts a
+ * spinner in the same box, so the row does not move when it starts or ends.
+ */
+.snd__save {
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  --ve-spinner-size: 18px;
+  --ve-spinner-thickness: 2px;
+}
+
+.snd__save:active {
+  color: var(--ve-accent, #a6ff2e);
+}
+
+/* Every save button at once while one is running: one save at a time, and on iOS the first is a sheet. */
+.snd__save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .snd__bin {
@@ -254,11 +275,16 @@
   .snd__bin:hover {
     color: var(--ve-danger, #ff4d6a);
   }
+
+  .snd__save:not(:disabled):hover {
+    color: var(--ve-text, #fff);
+  }
 }
 
 .snd__action:focus-visible,
 .snd__pick:focus-visible,
 .snd__play:focus-visible,
+.snd__save:focus-visible,
 .snd__bin:focus-visible,
 .snd__confirm:focus-visible {
   outline: 2px solid var(--ve-text, #fff);

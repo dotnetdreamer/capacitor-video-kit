@@ -64,7 +64,7 @@ import kotlin.math.min
     name = "VideoComposer",
     permissions = [
         Permission(alias = VideoComposerPlugin.MICROPHONE, strings = [Manifest.permission.RECORD_AUDIO]),
-        // Only ever asked for below API 29; from there the gallery insert is scoped and free.
+        // Only ever asked for below API 29; from there the gallery and Downloads inserts are scoped and free.
         Permission(alias = VideoComposerPlugin.STORAGE, strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE]),
         // Reading the gallery, for a host that draws its own - and going on reading a picked file
         // through the MediaStore URI [RetainedMedia] kept for it, which is the same grant put to a
@@ -1103,6 +1103,64 @@ class VideoComposerPlugin : Plugin() {
                 val message = ErrorMapping.describe(e)
                 val code = if (message.contains("no_space")) FailureCodes.NO_SPACE else FailureCodes.UNREADABLE_INPUT
                 call.reject(message, code)
+            }
+        }
+    }
+
+    /* ======================================================================================== */
+    /* saveToDownloads                                                                           */
+    /* ======================================================================================== */
+
+    /**
+     * Copies a file into the phone's Downloads. See [Downloads]: a scoped MediaStore insert from API
+     * 29, which needs no permission, and the public directory below it, which does.
+     */
+    @PluginMethod
+    fun saveToDownloads(call: PluginCall) {
+        // Before the permission, so a call the page got wrong never puts a prompt on the screen.
+        if (call.getString("uri").isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        // Asked for only where it is real, as saveToGallery asks: below 29 the file is written into
+        // shared storage directly, and the manifest caps the declaration at 28.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && getPermissionState(STORAGE) != PermissionState.GRANTED) {
+            requestPermissionForAlias(STORAGE, call, "downloadsPermissionCallback")
+            return
+        }
+        copyToDownloads(call)
+    }
+
+    @PermissionCallback
+    private fun downloadsPermissionCallback(call: PluginCall) {
+        if (getPermissionState(STORAGE) != PermissionState.GRANTED) {
+            call.reject("Storage permission is needed to save a file to Downloads", PERMISSION_DENIED)
+            return
+        }
+        copyToDownloads(call)
+    }
+
+    private fun copyToDownloads(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        val fileName = call.getString("fileName")
+
+        // Off the shared plugin thread, for the reason copyToGallery gives: this copies a whole file.
+        pluginScope.launch {
+            try {
+                val saved = Downloads.save(context.applicationContext, uri, fileName)
+                call.resolve(JSObject().put("saved", true).put("uri", saved.toString()))
+            } catch (e: Downloads.UnreadableSource) {
+                call.reject(ErrorMapping.describe(e), FailureCodes.UNREADABLE_INPUT)
+            } catch (e: SecurityException) {
+                call.reject(ErrorMapping.describe(e), PERMISSION_DENIED)
+            } catch (e: Exception) {
+                // Downloads' side of the copy, with the source already open: never the input's fault.
+                val code = if (ErrorMapping.hasNoSpaceCause(e)) FailureCodes.NO_SPACE else FailureCodes.UNKNOWN
+                call.reject(ErrorMapping.describe(e), code)
             }
         }
     }

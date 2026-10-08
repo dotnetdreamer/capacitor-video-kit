@@ -179,8 +179,8 @@ graph TD;
   ve-opacity-sheet --> ve-slider
   ve-voiceover-sheet --> ve-sheet
   ve-sound-sheet --> ve-icon
-  ve-sound-sheet --> ve-sheet
   ve-sound-sheet --> ve-spinner
+  ve-sound-sheet --> ve-sheet
   ve-transition-sheet --> ve-sheet
   ve-transition-sheet --> ve-slider
   ve-zoom-sheet --> ve-sheet

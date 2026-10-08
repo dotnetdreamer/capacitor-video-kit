@@ -54,6 +54,8 @@ import type {
   ProbeResult,
   SaveToGalleryOptions,
   SaveToGalleryResult,
+  SaveToDownloadsOptions,
+  SaveToDownloadsResult,
   StageRenderInputOptions,
   StageRenderInputResult,
   StartVoiceRecordingOptions,
@@ -183,6 +185,30 @@ export interface VideoComposerPlugin {
    * insert is scoped and needs no permission at all. Rejects with a [SaveToGalleryFailureCode].
    */
   saveToGallery(options: SaveToGalleryOptions): Promise<SaveToGalleryResult>;
+
+  /**
+   * Copies a file out of the app and into the person's own Downloads, where a files app finds it
+   * and nothing about the app's storage can take it away again: what a sound in the library, or any
+   * file that is not a video, needs where a video has [saveToGallery].
+   *
+   * - Android: a MediaStore insert into the Downloads collection, which from API 29 is scoped to
+   *   that one directory and needs no permission, inserted pending and made visible only once every
+   *   byte is there, as [saveToGallery]'s is. A name already taken there is MediaStore's to change,
+   *   `holiday (1).wav`. Below 29 the file is written into the public Download directory under a
+   *   name nothing there has yet, with the storage permission asked for first, and handed to the
+   *   media scanner.
+   * - iOS: there is no Downloads folder an app can write into, and the one in the Files app is a
+   *   folder like any other in iCloud Drive or On My iPhone. So the file is offered through the
+   *   system's own save sheet (`UIDocumentPickerViewController` exporting a copy), where the person
+   *   picks the place - Downloads among them - and taps Save. Backing out resolves `saved: false`.
+   *   The copy is made under `fileName` first (`tmp/videokit-downloads/`), because the sheet names
+   *   the file after the one it is given, and deleted once the sheet has answered.
+   * - Web: the browser's own download, as [saveToGallery] is there.
+   *
+   * Rejects with a [SaveToDownloadsFailureCode], and on iOS with Capacitor's `UNAVAILABLE` when
+   * there is no screen to put the sheet on.
+   */
+  saveToDownloads(options: SaveToDownloadsOptions): Promise<SaveToDownloadsResult>;
 
   /**
    * Asks to read the device's videos when the person has not been asked yet, and answers with what

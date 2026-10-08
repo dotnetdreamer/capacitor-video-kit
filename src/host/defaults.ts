@@ -10,6 +10,8 @@ import {
 } from '../editor';
 
 import type { PickAudioFileResult } from '../video-composer/definitions';
+import { resolve } from '../web-runtime/files';
+import { downloadBlob } from '../web-runtime/gallery';
 import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
 
 import { setEditorDebug } from './debug';
@@ -41,13 +43,14 @@ import { webViewUrl } from './web-view-url';
  * built on these defaults opens a real file, plays it, cuts a real filmstrip and hands back a real
  * manifest, which is what makes the package droppable into a plain page with no host at all.
  *
- * Two members reach past the page, both through the `window.Capacitor` a Capacitor app already has
- * and neither through an import of `@capacitor/core`. `platform.fileUrl` turns a device path into
+ * Three members reach past the page, all through the `window.Capacitor` a Capacitor app already has
+ * and none through an import of `@capacitor/core`. `platform.fileUrl` turns a device path into
  * Capacitor's local server URL for it, so a Capacitor host has no line of its own to write for it
- * ([webViewUrl]). And where the page cannot be trusted - on iOS in a Capacitor app built with the
+ * ([webViewUrl]). Where the page cannot be trusted - on iOS in a Capacitor app built with the
  * kit's native side - the audio picker is the kit's own document picker (see
  * [pickAudioThroughKit]); a host that spreads these defaults into its own media host gets that with
- * the rest.
+ * the rest. And inside a Capacitor app on a phone the sound library offers no download, which a
+ * WebView drops ([browserSoundLibrary]).
  *
  * The one thing with no web answer is the render, so it stays null. The editor greys nothing for
  * it: the edit is still an edit, and the manifest still comes back at the end.
@@ -395,7 +398,7 @@ export async function pickMediaFiles({ limit, pictures }: { limit: number; pictu
  * ```
  */
 export function browserSoundLibrary(): EditorSoundLibrary {
-  return {
+  const library: EditorSoundLibrary = {
     async list(): Promise<readonly SavedSound[]> {
       return await listSounds();
     },
@@ -416,6 +419,22 @@ export function browserSoundLibrary(): EditorSoundLibrary {
       await deleteSound(id);
     },
   };
+
+  /*
+   * The browser's own download, which is where a page's Downloads are. Every sound this library
+   * keeps is the WAV `extractAudio` writes (`web-runtime/sounds`), so that is the extension.
+   *
+   * None inside a Capacitor app on a phone: neither WebView hands a download link to anything, and
+   * the click is dropped without an error, so the row would say "Sound downloaded" over a file that
+   * was never written. `composerMediaHost` gives the library the composer's `saveToDownloads` there.
+   */
+  if (!insideNativeApp()) {
+    library.download = async (sound: SavedSound): Promise<boolean> => {
+      downloadBlob(await resolve(sound.uri), `${sound.fileName || 'Sound'}.wav`);
+      return true;
+    };
+  }
+  return library;
 }
 
 /**
@@ -444,6 +463,16 @@ interface NativeBridge {
   convertFileSrc(filePath: string): string;
   nativePromise<R>(pluginName: string, methodName: string, options?: object): Promise<R>;
   PluginHeaders?: readonly { readonly name: string; readonly methods: readonly { readonly name: string }[] }[];
+}
+
+/**
+ * Whether this page is a Capacitor app's WebView on a phone, read off the global its native side
+ * puts in the page, as [bridgeWithAudioPicker] reads it: `web` in a browser, and absent altogether
+ * in a page with no Capacitor at all.
+ */
+function insideNativeApp(): boolean {
+  const bridge = (globalThis as { Capacitor?: Partial<NativeBridge> }).Capacitor;
+  return typeof bridge?.getPlatform === 'function' && bridge.getPlatform() !== 'web';
 }
 
 /**

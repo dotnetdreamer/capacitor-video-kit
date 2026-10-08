@@ -124,6 +124,9 @@ size it stopped at. The code is the answer and the numbers are for the log.
 `saveToGallery`: `invalid_spec`, `permission_denied`, `unreadable_input`, `no_space`, `unsupported`
 (web only), `unknown`.
 
+`saveToDownloads`: the same, and `already_picking` on iOS while its save sheet is up. Backing out
+of that sheet is `{ saved: false }`, not a failure.
+
 `labelMedia`: `invalid_spec`, `unreadable_input`, `unsupported` (web and the iOS simulator),
 `unknown`.
 

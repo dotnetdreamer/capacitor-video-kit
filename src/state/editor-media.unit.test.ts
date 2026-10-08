@@ -630,6 +630,77 @@ describe('EditorMedia', () => {
       expect(media.sounds.value).toEqual([saved]);
       expect(store.toast.value?.text).toBe('That sound could not be deleted');
     });
+
+    it('offers a save only when the library can hand a sound to the person', () => {
+      open(fakeMedia({ sounds: fakeLibrary() }));
+      expect(media.canDownloadSounds).toBe(false);
+
+      open(fakeMedia({ sounds: fakeLibrary({ download: vi.fn(async () => true) }) }));
+      expect(media.canDownloadSounds).toBe(true);
+
+      open(fakeMedia());
+      expect(media.canDownloadSounds).toBe(false);
+    });
+
+    it('hands a sound to the library to download, says so once it is done, and leaves the post alone', async () => {
+      const download = vi.fn(async () => true);
+      open(fakeMedia({ sounds: fakeLibrary({ download }) }));
+      const saving = media.downloadSound(saved);
+
+      expect(media.downloadingSound.value).toBe('snd-1');
+      await saving;
+
+      expect(download).toHaveBeenCalledWith(saved);
+      expect(media.downloadingSound.value).toBeNull();
+      expect(store.toast.value?.text).toBe('Sound downloaded');
+      expect(store.manifest.value.music).toBeNull();
+      expect(store.manifest.value.audioTracks ?? []).toEqual([]);
+    });
+
+    it('says nothing when the person backed out of the save sheet', async () => {
+      open(fakeMedia({ sounds: fakeLibrary({ download: vi.fn(async () => false) }) }));
+      await media.downloadSound(saved);
+
+      expect(store.toast.value).toBeNull();
+      expect(media.downloadingSound.value).toBeNull();
+    });
+
+    it('says so when the save failed', async () => {
+      open(
+        fakeMedia({
+          sounds: fakeLibrary({
+            download: vi.fn(async () => {
+              throw new Error('no space');
+            }),
+          }),
+        }),
+      );
+      await media.downloadSound(saved);
+
+      expect(store.toast.value?.text).toBe('That sound could not be downloaded. Try again.');
+      expect(media.downloadingSound.value).toBeNull();
+    });
+
+    it('saves one sound at a time, ignoring a second tap while the first is under way', async () => {
+      let finish: (saved: boolean) => void = () => undefined;
+      const download = vi.fn(() => new Promise<boolean>((resolve) => (finish = resolve)));
+      open(fakeMedia({ sounds: fakeLibrary({ download }) }));
+
+      const first = media.downloadSound(saved);
+      await media.downloadSound({ ...saved, id: 'snd-2' });
+      finish(true);
+      await first;
+
+      expect(download).toHaveBeenCalledTimes(1);
+    });
+
+    it('does nothing for a library that cannot save', async () => {
+      open(fakeMedia({ sounds: fakeLibrary() }));
+      await media.downloadSound(saved);
+
+      expect(media.downloadingSound.value).toBeNull();
+      expect(store.toast.value).toBeNull();
+    });
   });
 
   describe('pictures on the timeline', () => {

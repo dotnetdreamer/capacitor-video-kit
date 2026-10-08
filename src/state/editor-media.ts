@@ -111,6 +111,13 @@ export class EditorMedia {
    */
   readonly extracting = signal(false);
 
+  /**
+   * The id of the sound being handed to the person right now ([downloadSound]), or null. Its row
+   * puts a spinner where its save button was. One at a time: on iOS the save is a sheet the person
+   * is still looking at.
+   */
+  readonly downloadingSound = signal<string | null>(null);
+
   /** Filmstrips are cut one clip at a time: each batch holds a hardware decoder the preview needs. */
   private filmstripQueue: Promise<void> = Promise.resolve();
   private readonly filmstripsPending = new Map<string, Promise<void>>();
@@ -694,6 +701,40 @@ export class EditorMedia {
       this.sounds.value = before;
       this.store.showToast('That sound could not be deleted');
       this.store.haptic('warning');
+    }
+  }
+
+  /** Whether the host's library can hand a sound to the person, which puts a download button on every row. */
+  get canDownloadSounds(): boolean {
+    return typeof this.host.media.sounds?.download === 'function';
+  }
+
+  /**
+   * Hands a copy of one kept sound to the person, outside the app: the host's library decides where
+   * ([EditorSoundLibrary.download]) - a browser's download, a phone's Downloads, or the save sheet
+   * iOS shows. Nothing about the post changes, and the sheet stays open.
+   *
+   * A person who backed out of a save sheet is told nothing: they saw the sheet and chose. A
+   * second tap while one is under way is ignored rather than queued, because on iOS the first is a
+   * sheet that is still up.
+   */
+  async downloadSound(sound: SavedSound): Promise<void> {
+    const library = this.host.media.sounds;
+    if (!library?.download || this.downloadingSound.value !== null) return;
+    this.store.pause();
+    this.downloadingSound.value = sound.id;
+    try {
+      const saved = await library.download(sound);
+      if (this.destroyed || !saved) return;
+      this.store.showToast('Sound downloaded');
+      this.store.haptic('light');
+    } catch (error) {
+      debugWarn('[EditorMedia] sound download failed', sound.id, error);
+      if (this.destroyed) return;
+      this.store.showToast('That sound could not be downloaded. Try again.', 2400);
+      this.store.haptic('warning');
+    } finally {
+      if (!this.destroyed) this.downloadingSound.value = null;
     }
   }
 

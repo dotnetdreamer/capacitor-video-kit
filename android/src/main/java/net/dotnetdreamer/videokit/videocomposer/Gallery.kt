@@ -155,21 +155,22 @@ object Gallery {
 
     /**
      * The name the video is saved under: [fileName], or else the source's own name, or else
-     * `video.mp4`, trimmed, and made a NAME rather than a path.
+     * [fallback] - `video.mp4` for a video - trimmed, and made a NAME rather than a path.
      *
      * Below API 29 the video is written with `File(directory, name)`, so a name with a separator in
      * it - `a/../../x.mp4` - would put it outside `Movies` or `DCIM`, anywhere on shared storage.
      * From 29 on, MediaStore makes a valid file name of `DISPLAY_NAME` itself, a separator becoming
      * `_`, and files the row by `RELATIVE_PATH` alone. So a separator becomes `_` here, on every
      * release, and a name that is `.` or `..`, which names a folder rather than a file, is
-     * `video.mp4` as a missing one is. Flattened rather than refused, unlike [albumOf]: a name is
+     * [fallback] as a missing one is. Flattened rather than refused, unlike [albumOf]: a name is
      * what the gallery prints under the video, and a slash in a title is no reason to lose a save.
+     * [Downloads] names its files by the same rules, with a fallback of its own.
      */
-    internal fun nameOf(fileName: String?, sourceName: String?): String {
-        val name = (fileName?.takeIf { it.isNotBlank() } ?: sourceName ?: DEFAULT_NAME).trim()
+    internal fun nameOf(fileName: String?, sourceName: String?, fallback: String = DEFAULT_NAME): String {
+        val name = (fileName?.takeIf { it.isNotBlank() } ?: sourceName ?: fallback).trim()
             .replace('/', '_')
             .replace('\\', '_')
-        return if (name.isEmpty() || name == "." || name == "..") DEFAULT_NAME else name
+        return if (name.isEmpty() || name == "." || name == "..") fallback else name
     }
 
     /**

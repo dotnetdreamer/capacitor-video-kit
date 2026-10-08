@@ -351,7 +351,8 @@ export interface SavedSound {
  * The editor owns none of this for the same reason it owns no file: a library is bytes on a disk
  * that outlive the edit, and what "a disk" is differs between a Capacitor app, a plain page and a
  * test. So the editor asks for the list, asks for one more to be made, and asks for one to go; the
- * host decides where any of it lives and hands back records.
+ * host decides where any of it lives and hands back records. A library that can also hand a copy of
+ * a sound to the person, [download], gets a save button on every row of the Sound sheet.
  *
  * `extract` is the whole of the feature on this side. The editor picks the video - with the picker
  * it already has, so the library never grows one of its own - and hands it over; the host pulls the
@@ -373,6 +374,19 @@ export interface EditorSoundLibrary {
 
   /** Deletes one sound and its file. Silent about an id that is already gone. */
   remove(id: string): Promise<void>;
+
+  /**
+   * Hands a copy of one kept sound to the person, somewhere outside the app they can open it from:
+   * a browser's download, a phone's Downloads. Resolves true once the copy is there - or, in a
+   * browser, handed to its download - and false when the person backed out of a sheet the platform
+   * asked them in, which iOS's save sheet does. Rejects when the copy failed.
+   *
+   * Optional; absent, the Sound sheet offers no save. `browserSoundLibrary` has one in a browser, the
+   * browser's download, and none inside a Capacitor app on a phone, where a WebView drops a download
+   * link without a word; `composerMediaHost` gives a library one there, through
+   * `VideoComposer.saveToDownloads`.
+   */
+  download?(sound: SavedSound): Promise<boolean>;
 }
 
 export interface ThumbnailRequest {

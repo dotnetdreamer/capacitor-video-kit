@@ -18,7 +18,7 @@ vi.mock('@capacitor/core', () => ({
   WebPlugin: class {},
 }));
 
-import { RenderInputError, extensionFor, withNativeRenderInputs } from './render-inputs';
+import { RenderInputError, extensionFor, withNativeFile, withNativeRenderInputs } from './render-inputs';
 
 const MIB = 1024 * 1024;
 
@@ -343,6 +343,78 @@ describe('withNativeRenderInputs', () => {
     expect(fetchInput).not.toHaveBeenCalled();
     expect(bridge.stageRenderInput).not.toHaveBeenCalled();
     expect(bridge.releaseRenderInputs).not.toHaveBeenCalled();
+  });
+});
+
+describe('withNativeFile', () => {
+  /** What `use` was handed, and whether anything had been released by the time it ran. */
+  let used: { file: string; extension: string; releasedYet: boolean }[];
+  const use = async (file: string, extension: string): Promise<string> => {
+    used.push({ file, extension, releasedYet: bridge.releaseRenderInputs.mock.calls.length > 0 });
+    return 'saved';
+  };
+
+  beforeEach(() => {
+    bridge.native = true;
+    used = [];
+    blobs = new Map([['blob:app/sound', new Blob(['RIFF'], { type: 'audio/wav' })]]);
+    fetchInput = vi.fn(async (uri: string) => {
+      const blob = blobs.get(uri);
+      return blob ? { ok: true, status: 200, blob: async () => blob } : { ok: false, status: 404, blob: async () => new Blob() };
+    });
+    vi.stubGlobal('fetch', fetchInput);
+    bridge.stageRenderInput.mockReset().mockImplementation(async ({ uri, extension }) => ({
+      uri: uri ?? `file:///tmp/videokit-render-inputs/1${extension ? `.${extension}` : ''}`,
+    }));
+    bridge.releaseRenderInputs.mockReset().mockResolvedValue();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('writes a blob out as a file named for its type, hands that over, and releases it once used', async () => {
+    await expect(withNativeFile('blob:app/sound', use)).resolves.toBe('saved');
+
+    expect(used).toEqual([{ file: 'file:///tmp/videokit-render-inputs/1.wav', extension: 'wav', releasedYet: false }]);
+    expect(bridge.stageRenderInput).toHaveBeenCalledWith({ data: 'UklGRg==', extension: 'wav' });
+    expect(bridge.releaseRenderInputs).toHaveBeenCalledWith({ uris: ['file:///tmp/videokit-render-inputs/1.wav'] });
+  });
+
+  it('hands a file over as it is, with the extension its name has, and stages nothing', async () => {
+    await withNativeFile('file:///app/files/sounds/snd-1.m4a', use);
+
+    expect(used).toEqual([{ file: 'file:///app/files/sounds/snd-1.m4a', extension: 'm4a', releasedYet: false }]);
+    expect(fetchInput).not.toHaveBeenCalled();
+    expect(bridge.stageRenderInput).not.toHaveBeenCalled();
+    expect(bridge.releaseRenderInputs).not.toHaveBeenCalled();
+  });
+
+  it('releases the file when the call it was for fails, and rejects with that failure', async () => {
+    await expect(
+      withNativeFile('blob:app/sound', async () => {
+        throw new Error('the save sheet could not be shown');
+      }),
+    ).rejects.toThrow('the save sheet could not be shown');
+
+    expect(bridge.releaseRenderInputs).toHaveBeenCalledWith({ uris: ['file:///tmp/videokit-render-inputs/1.wav'] });
+  });
+
+  it('reports a blob that will not read as unreadable_input, and never makes the call', async () => {
+    await expect(withNativeFile('blob:app/revoked', use)).rejects.toMatchObject({ code: 'unreadable_input' });
+
+    expect(used).toEqual([]);
+    expect(bridge.stageRenderInput).not.toHaveBeenCalled();
+  });
+
+  it('hands a page the blob itself, because a page reads one', async () => {
+    bridge.native = false;
+
+    await withNativeFile('blob:app/sound', use);
+
+    expect(used).toEqual([{ file: 'blob:app/sound', extension: '', releasedYet: false }]);
+    expect(bridge.stageRenderInput).not.toHaveBeenCalled();
   });
 });
 

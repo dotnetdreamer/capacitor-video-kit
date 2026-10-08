@@ -130,6 +130,14 @@ so the library never grows a picker of its own - keeps it, and answers with the 
 deletes one. `extract` resolves with null for a video that carries no audio track, which is a fact
 about the file rather than a failure, and the editor says so plainly instead of showing an error.
 
+A fourth, `download(sound)`, is optional: it hands a copy of one sound to the person, outside the
+app, and resolves false when they backed out of a sheet the platform asked them in. A library that
+has it gets a download button on every row of the Sound sheet. `browserSoundLibrary()` has one in a
+browser, the browser's own download, and none inside a Capacitor app on a phone, where a WebView
+drops a download link without an error. `composerMediaHost` gives the browser's library and the
+composer's one through `VideoComposer.saveToDownloads` on a phone instead: Downloads on Android, the
+system's save sheet on iOS ([Saving any other file to Downloads](media.md#saving-any-other-file-to-downloads)).
+
 On a Capacitor host whose sounds should live with the composer, which owns the files and the records,
 that is `composerMediaHost({ sounds: 'native' })` ([Native media host](editor.md#native-media-host)), and nothing to write.
 
