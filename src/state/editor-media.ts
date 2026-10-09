@@ -558,11 +558,13 @@ export class EditorMedia {
     const played = layers.flatMap(layer => wireAudioEffects([layer], totalMs).map(window => ({ id: layer.id, window })));
     for (const group of copyGroups(played.map(({ id, window }) => ({ ...window, id })))) {
       const windows = group.map(({ id: _id, ...window }) => window);
-      wanted.set(group.map(one => one.id).join(','), {
+      // Named by WHICH layers it is of, not their order: one restacked is the same copy made again,
+      // played on until the new one lands, as for a slider - the order is in its effect key.
+      wanted.set(group.map(one => one.id).sort().join(','), {
         plan,
         windows,
         soundKey: copySoundKey(plan, windows),
-        effectKey: JSON.stringify(windows.map(window => [window.speed ?? 1, window.effect ?? null])),
+        effectKey: JSON.stringify(windows.map(window => [window.startMs, window.endMs, window.speed ?? 1, window.effect ?? null])),
       });
     }
     return wanted;

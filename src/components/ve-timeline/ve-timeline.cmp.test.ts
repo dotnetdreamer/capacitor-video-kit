@@ -1964,8 +1964,9 @@ describe('the zoom row', () => {
 });
 
 /*
- * The audio effects' row: one bar per layer, over the sounds it changes, named with its effect and
- * its state, selected by a tap and retimed by the same handles a zoom has. At 64 px a second.
+ * The audio effects' lanes: a lane per layer, the top of the stack first, over the sounds they change,
+ * each bar named with its effect and its state, selected by a tap, retimed by the same handles a zoom
+ * has and carried up or down the stack by holding it. At 64 px a second.
  */
 describe('the audio effects row', () => {
   /** A megaphone from 1 s to 4 s, added and let go of. */
@@ -2044,6 +2045,73 @@ describe('the audio effects row', () => {
     store.select({ kind: 'audioEffect', id });
     store.openPanel('audioEffects');
     await until('the effects row', () => !!root(tl).querySelector('[data-row="afx"] .item--afx'));
+  });
+
+  /** Two layers over the same time from 1 s, the megaphone at the bottom, slow + reverb on it. */
+  async function stacked(): Promise<{ store: EditorStore; tl: HTMLElement; bottom: string; top: string }> {
+    const { store, tl } = await mount();
+    store.seek(1000);
+    const bottom = store.addAudioEffectAtPlayhead('megaphone')!;
+    const top = store.addAudioEffectAtPlayhead('slowReverb')!;
+    store.select(null);
+    await until('two lanes', () => root(tl).querySelectorAll('[data-afx-lane]').length === 2);
+    return { store, tl, bottom, top };
+  }
+
+  const laneIds = (tl: HTMLElement) => [...root(tl).querySelectorAll<HTMLElement>('[data-afx-lane]')].map(lane => lane.dataset['afxLane']);
+
+  it('draws a lane per layer, the top of the stack first, over the same time', async () => {
+    const { tl, bottom, top } = await stacked();
+    expect(laneIds(tl)).toEqual([top, bottom]);
+    const bars = [...root(tl).querySelectorAll<HTMLElement>('[data-afx-lane] .item--afx')];
+    expect(bars.map(one => one.getAttribute('aria-label'))).toEqual(['Slow + reverb effect', 'Megaphone effect']);
+    expect(bars[0]!.getBoundingClientRect().left).toBeCloseTo(bars[1]!.getBoundingClientRect().left, 0);
+    expect(bars[0]!.getBoundingClientRect().top).toBeLessThan(bars[1]!.getBoundingClientRect().top);
+  });
+
+  it('carries a held lane down the stack, as one undo step', async () => {
+    const { store, tl, bottom, top } = await stacked();
+    const item = root(tl).querySelector<HTMLElement>(`[data-afx-lane="${top}"] .item--afx`)!;
+    const from = centre(item);
+    pointer(item, 'pointerdown', from.x, from.y);
+    await until('the lift', () => root(tl).querySelector('[data-afx-lane].lane--lifted') !== null);
+    const scroller = root(tl).querySelector<HTMLElement>('.tl__scroller')!;
+    pointer(scroller, 'pointermove', from.x, from.y + 48);
+    await frames(3);
+    pointer(scroller, 'pointerup', from.x, from.y + 48);
+    await frames(2);
+    expect(store.audioEffects.value.map(layer => layer.id)).toEqual([top, bottom]);
+    expect(laneIds(tl)).toEqual([bottom, top]);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Effect order');
+    expect(store.audioEffects.value.map(layer => layer.id)).toEqual([bottom, top]);
+  });
+
+  it('drags a layer over another, nothing but the post stopping it', async () => {
+    const { store, tl, bottom } = await stacked();
+    store.setAudioEffectWindow(bottom, 6000, 8000);
+    store.select({ kind: 'audioEffect', id: bottom });
+    await until('the handles', () => !!root(tl).querySelector(`[data-afx-lane="${bottom}"] .handle--in`));
+    const handle = root(tl).querySelector<HTMLElement>(`[data-afx-lane="${bottom}"] .handle--in`)!;
+    const rect = handle.getBoundingClientRect();
+    const from = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const scroller = root(tl).querySelector('.tl__scroller')!;
+    // Three seconds back, into the time the layer above covers.
+    pointer(handle, 'pointerdown', from.x, from.y);
+    pointer(scroller, 'pointermove', from.x - 192, from.y);
+    await frames(3);
+    pointer(scroller, 'pointerup', from.x - 192, from.y);
+    await frames(2);
+    expect(store.audioEffects.value.find(layer => layer.id === bottom)!.startMs).toBeCloseTo(3000, -2);
+  });
+
+  it('keeps only the selected layer’s lane in the slim timeline', async () => {
+    const { store, tl, bottom } = await stacked();
+    (tl as HTMLElement & { compact: boolean }).compact = true;
+    store.select({ kind: 'audioEffect', id: bottom });
+    store.openPanel('audioEffects');
+    await until('one lane', () => laneIds(tl).length === 1);
+    expect(laneIds(tl)).toEqual([bottom]);
   });
 });
 

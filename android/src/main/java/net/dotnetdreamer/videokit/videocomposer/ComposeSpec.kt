@@ -371,9 +371,10 @@ data class Audio(
     val musicTracks: List<List<Music>> = emptyList(),
     /**
      * The audio effect layers over the FINISHED mix - see [AudioEffectWindow] - in the order they came,
-     * which the parser holds to sorted and never overlapping. Empty, which is every spec written before
-     * the key, is the mix as it always was, and [RenderPlan] decides that once. Last and defaulted, so
-     * every audio block built without one is built exactly as it was.
+     * which is the order they stack in: windows may cover the same time, each running on what the ones
+     * before it left. Empty, which is every spec written before the key, is the mix as it always was,
+     * and [RenderPlan] decides that once. Last and defaulted, so every audio block built without one is
+     * built exactly as it was.
      */
     val effects: List<AudioEffectWindow> = emptyList(),
 )

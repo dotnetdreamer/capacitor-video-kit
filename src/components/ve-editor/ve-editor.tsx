@@ -701,6 +701,8 @@ export class VeEditor {
       store.closePanel();
     } else if (store.soundMenuOpen.value) {
       store.soundMenuOpen.value = false;
+    } else if (store.effectsMenuOpen.value) {
+      store.effectsMenuOpen.value = false;
     } else if (store.timelineAddMenuOpen.value) {
       store.timelineAddMenuOpen.value = false;
     } else if (store.selection.value) {

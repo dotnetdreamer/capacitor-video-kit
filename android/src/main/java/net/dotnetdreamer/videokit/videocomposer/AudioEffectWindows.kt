@@ -59,8 +59,9 @@ data class AudioEffectWindow(
  * same golden numbers; everything between is doubles, as there, and the steps are [SoundEffectChain].
  *
  * The stream comes in order, in pieces of any size, and leaves exactly as it would in one; the first
- * frame of the first piece is output frame [firstFrame]. Each window runs on what the one before it
- * left, and keeps what it has not yet read of that - for a slowed window, what it has fallen behind.
+ * frame of the first piece is output frame [firstFrame]. Each window runs on what the ones before it in
+ * the list left - where they cover the same frames, that is the stack - and keeps what it has not yet
+ * read of that: for a slowed window, what it has fallen behind.
  */
 class AudioEffectRunner(
     windows: List<AudioEffectWindow>,

@@ -134,13 +134,18 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
       sound.push(`  "${take.id}" ${time(take.startMs)}..${time(take.startMs + take.durationMs)}, ${percent(take.volume)}`);
     }
   }
-  // Last, because a layer is not a sound: it is a window that everything above goes through.
-  const effects = [...(manifest.audioEffects ?? [])].sort((a, b) => a.startMs - b.startMs);
+  // Last, because a layer is not a sound: it is a window that everything above goes through. In the
+  // order they stack, as the picture layers are listed, because the order is part of the sound, and
+  // numbered from the bottom, which is the place moveAudioEffectTo takes.
+  const effects = manifest.audioEffects ?? [];
   if (effects.length === 0) {
     sound.push('Audio effects: none');
   } else {
-    sound.push(`Audio effects: ${count(effects.length, 'layer')} (everything heard inside one goes through its effect - clips, lanes and voiceover alike; one at a time)`);
-    for (const layer of effects) sound.push(`  ${describeAudioEffect(layer, totalMs)}`);
+    sound.push(
+      `Audio effects: ${count(effects.length, 'layer')}, bottom to top (everything heard inside one goes through its effect - clips, lanes and ` +
+        'voiceover alike; where layers cover the same time, a later one works on what the ones before it made)',
+    );
+    for (const [index, layer] of effects.entries()) sound.push(`  ${index}. ${describeAudioEffect(layer, totalMs)}${describeStacking(effects, index, totalMs)}`);
   }
   lines.push(...sound);
 
@@ -343,6 +348,24 @@ function describeAudioEffect(layer: EditAudioEffect, totalMs: number): string {
   const cut = !played ? '; never heard: it starts at or after the end of the post' : played.endMs < layer.endMs ? `; heard only to ${time(played.endMs)}, where the post ends` : '';
   const label = preset?.label.toLowerCase() ?? layer.effect;
   return `"${layer.id}" ${time(layer.startMs)}..${time(layer.endMs)}, ${label} (effect "${layer.effect}"${settings ? `; ${settings}` : ''})${record}${cut}`;
+}
+
+/**
+ * The layers under `layers[index]` that it shares time with, and that time, `; stacked on "slow" at
+ * 4000ms (0:04.0)..5000ms (0:05.0)`, or '' for none: where it works on what they made, which no
+ * layer's own line says. Each pair is said once, on the upper one. By what the post plays of each
+ * ([audioEffectWindow]), so two layers that meet only past the end of the post stack on nothing.
+ */
+function describeStacking(layers: readonly EditAudioEffect[], index: number, totalMs: number): string {
+  const upper = audioEffectWindow(layers[index]!, totalMs);
+  if (!upper) return '';
+  const under = layers.slice(0, index).flatMap(layer => {
+    const lower = audioEffectWindow(layer, totalMs);
+    const startMs = lower ? Math.max(lower.startMs, upper.startMs) : 0;
+    const endMs = lower ? Math.min(lower.endMs, upper.endMs) : 0;
+    return endMs > startMs ? [`"${layer.id}" at ${time(startMs)}..${time(endMs)}`] : [];
+  });
+  return under.length > 0 ? `; stacked on ${under.join(', ')}` : '';
 }
 
 /** `4500ms (0:04.5)`, and a plain `0ms` for the start, where a clock adds nothing. */

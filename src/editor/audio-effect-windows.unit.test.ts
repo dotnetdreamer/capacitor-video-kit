@@ -108,15 +108,19 @@ describe('the parser', () => {
     expect(refusal([{ startMs: 0, endMs: 9, effect, zz: 1 }])).toBe('[0].zz');
     // A window's own fields come before where it sits, and the first window that breaks is the one named.
     expect(refusal([{ startMs: 0, endMs: 900, effect }, { startMs: 800, endMs: 'b', effect }])).toBe('[1].endMs');
-    expect(refusal([{ startMs: 0, endMs: 900, effect }, { startMs: 800, endMs: 1000, effect }])).toBe('[1].startMs');
     expect(refusal([{ startMs: 'a' }, { startMs: 'b' }])).toBe('[0].startMs');
   });
 
-  it('lets one window start where the one before it ends, and orders by how they came', () => {
+  it('takes windows over the same time, in the order they came - the stack - whatever their times', () => {
     const effect = megaphone()!;
-    expect(normaliseAudioEffectWindows([{ startMs: 0, endMs: 900, effect }, { startMs: 900, endMs: 1000, effect }])).toHaveLength(2);
-    // A window left out still holds its place: the next one may not start inside it.
-    expect(refusal([{ startMs: 0, endMs: 900 }, { startMs: 800, endMs: 1000, effect }])).toBe('[1].startMs');
+    const slow = slowReverb()!;
+    const stacked = [
+      { startMs: 500, endMs: 1000, effect },
+      { startMs: 0, endMs: 900, speed: 0.8, effect: slow },
+      { startMs: 0, endMs: 900, speed: 0.8, effect: slow },
+      { startMs: 900, endMs: 1000, effect },
+    ];
+    expect(normaliseAudioEffectWindows(stacked)).toEqual(stacked);
   });
 
   it('hands back new objects, so nothing that holds a spec can change it', () => {
@@ -199,6 +203,20 @@ describe('the arithmetic', () => {
     }
   });
 
+  it('comes out the same in pieces with windows stacked, a slowed one on a slowed one', () => {
+    const windows: ComposeAudioEffect[] = [
+      { startMs: 300, endMs: 800, effect: megaphone()! },
+      { startMs: 50, endMs: 600, speed: 0.6, effect: slowReverb()! },
+      { startMs: 200, endMs: 700, speed: 0.8, effect: slowReverb()! },
+    ];
+    const input = quiet(RATE);
+    const whole = run(windows, input);
+    for (const piece of [1, 7, 333, 4096, 10_000]) {
+      const pieces = run(windows, input, piece);
+      for (let c = 0; c < 2; c++) for (let i = 0; i < RATE; i += 101) expect(pieces[c]![i]).toBe(whole[c]![i]);
+    }
+  });
+
   it('starts from a stream handed over from just before the window as it would from the beginning', () => {
     const windows: ComposeAudioEffect[] = [{ startMs: 200, endMs: 450, speed: 0.75, effect: slowReverb()! }];
     const input = quiet(RATE);
@@ -257,6 +275,43 @@ describe('the arithmetic', () => {
     expect(out[0]![100]).not.toBe(out[1]![100]);
   });
 
+  it('stacks: where windows cover the same time, a later one works on what an earlier one made', () => {
+    const flat = [new Float32Array(RATE).fill(0.8)];
+    const half: ComposeAudioEffect['effect'] = { ops: [{ op: 'gain', db: -6.020599913279624 }] };
+    const out = run(
+      [
+        { startMs: 100, endMs: 600, effect: half },
+        { startMs: 300, endMs: 500, effect: half },
+      ],
+      flat,
+    );
+    expect(out[0]![frameAt(200, RATE)]).toBeCloseTo(0.4, 6);
+    expect(out[0]![frameAt(400, RATE)]).toBeCloseTo(0.2, 6);
+    expect(out[0]![frameAt(550, RATE)]).toBeCloseTo(0.4, 6);
+    // The order is the stack's, so the same two the other way round are another sound.
+    const input = quiet(RATE);
+    const slow: ComposeAudioEffect = { startMs: 100, endMs: 500, effect: slowReverb()! };
+    const loud: ComposeAudioEffect = { startMs: 200, endMs: 400, effect: megaphone()! };
+    const up = run([slow, loud], input);
+    const down = run([loud, slow], input);
+    expect(up[0]![frameAt(300, RATE)]).not.toBeCloseTo(down[0]![frameAt(300, RATE)]!, 3);
+  });
+
+  it('plays two slowed windows over the same time at the product of their speeds', () => {
+    const input = [tone(1000, 0.5, RATE)];
+    const out = run(
+      [
+        { startMs: 0, endMs: 800, speed: 0.8 },
+        { startMs: 0, endMs: 800, speed: 0.8 },
+      ],
+      input,
+    );
+    const ramp = frameAt(AUDIO_EFFECT_RAMP_MS, RATE);
+    const end = frameAt(800, RATE);
+    // 1 kHz at 0.8 x 0.8: 640 Hz.
+    expect(crossings(out[0]!, ramp, end - ramp)).toBeCloseTo(crossings(input[0]!, ramp, end - ramp) * 0.64, -1);
+  });
+
   it('runs each window on what the one before it left', () => {
     const input = quiet(RATE);
     const first: ComposeAudioEffect = { startMs: 100, endMs: 300, effect: slowReverb()! };
@@ -296,6 +351,33 @@ describe('the arithmetic', () => {
       expect(right[i]).toBeCloseTo(r, 6);
     }
   });
+
+  /*
+   * The stacked numbers of `AudioEffectWindowsTest.kt` and `AudioEffectWindowsTests.swift`: on the same
+   * fragment, three windows in an order their times do not follow - the megaphone over 60..170 ms at
+   * the bottom, slow + reverb at 0.8x over 20..120 ms on it, and slow + reverb again at 0.7x over
+   * 40..100 ms on top - so 60..100 ms is slowed twice over and goes through both rooms and the
+   * megaphone.
+   */
+  it('matches the golden numbers for stacked windows every engine is held to', () => {
+    const n = 9600;
+    const left = new Float32Array(n);
+    const right = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      left[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / RATE) + 0.2 * Math.sin((2 * Math.PI * 3100 * i) / RATE);
+      right[i] = 0.3 * Math.sin((2 * Math.PI * 220 * i) / RATE + 0.5);
+    }
+    const windows: ComposeAudioEffect[] = [
+      { startMs: 60, endMs: 170, effect: soundEffectPreset('megaphone')!.effect },
+      { startMs: 20, endMs: 120, speed: 0.8, effect: soundEffectPreset('slowReverb')!.effect },
+      { startMs: 40, endMs: 100, speed: 0.7, effect: soundEffectPreset('slowReverb')!.effect },
+    ];
+    new AudioEffectRunner(windows, RATE).process([left, right]);
+    for (const [i, l, r] of STACKED_GOLDEN) {
+      expect(left[i]).toBeCloseTo(l, 6);
+      expect(right[i]).toBeCloseTo(r, 6);
+    }
+  });
 });
 
 const GOLDEN: [number, number, number][] = [
@@ -324,4 +406,32 @@ const GOLDEN: [number, number, number][] = [
   [9119, -0.16030138731002808, -0.20032526552677155],
   [9120, -0.102406345307827, -0.1977843940258026],
   [9599, -0.3330191373825073, 0.15811549127101898],
+];
+
+const STACKED_GOLDEN: [number, number, number][] = [
+  [0, 0, 0.1438276618719101],
+  [959, -0.659309446811676, 0.046941254287958145],
+  [960, -0.5706338882446289, 0.03839000314474106],
+  [961, -0.4800061583518982, 0.029803428798913956],
+  [1500, -0.6783002614974976, -0.03017522394657135],
+  [1919, -0.4438980221748352, -0.07496683299541473],
+  [1920, -0.45043906569480896, -0.06907276809215546],
+  [1921, -0.4494432806968689, -0.06311457604169846],
+  [2400, 0.38878923654556274, -0.09857215732336044],
+  [2879, -0.2437334656715393, 0.02293088473379612],
+  [2880, -0.2360772043466568, 0.019143102690577507],
+  [3500, -0.18928048014640808, 0.03702017292380333],
+  [4000, 0.010632151737809181, 0.03684902563691139],
+  [4799, -0.08010885119438171, -0.035095661878585815],
+  [4800, -0.0975487008690834, -0.04343155398964882],
+  [5000, 0.11491679400205612, 0.09258368611335754],
+  [5759, 0.14631494879722595, 0.08428686112165451],
+  [5760, 0.12154743820428848, 0.05453965440392494],
+  [6500, 0.1746111661195755, 0.07624474167823792],
+  [7000, 0.24912786483764648, -0.013168036937713623],
+  [8159, -0.8366613388061523, 0.033284276723861694],
+  [8160, -0.7561161518096924, 0.02355377748608589],
+  [8500, -0.21113882958889008, 0.07811340689659119],
+  [9000, 0.14763520658016205, 0.23983116447925568],
+  [9599, -0.020595934242010117, 0.1534087210893631],
 ];

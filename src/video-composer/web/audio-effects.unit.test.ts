@@ -88,7 +88,10 @@ describe('the windows on the wire', () => {
       'invalid_spec:audio.effects[0].effect.ops at most 16 steps',
     );
     expect(refusal(post([{}], new Array(51).fill(0).map((_, i) => ({ startMs: i * 10, endMs: i * 10 + 5, effect: halve }))))).toBe('invalid_spec:audio.effects at most 50 windows');
-    expect(refusal(post([{}], [{ startMs: 0, endMs: 900, effect: halve }, { startMs: 800, endMs: 1000, effect: halve }]))).toBe('invalid_spec:audio.effects[1].startMs');
+  });
+
+  it('take windows over the same time: they stack', () => {
+    expect(refusal(post([{}], [{ startMs: 0, endMs: 900, effect: halve }, { startMs: 800, endMs: 1000, effect: halve }]))).toBe('accepted');
   });
 });
 
@@ -110,6 +113,13 @@ describe('the windows in the web mix', () => {
     expect(at(mix, 2000)).toBeCloseTo(LEVEL / 2, 6);
     expect(at(mix, 3000)).toBeCloseTo(LEVEL, 6);
     expect(at(mix, 4900)).toBe(LEVEL);
+  });
+
+  it('stack where they cover the same time, each on what the ones before it made', async () => {
+    const mix = (await mixdown(buildPlan(validateSpec(post([{}], [{ startMs: 1000, endMs: 4000, effect: halve }, { startMs: 2000, endMs: 3000, effect: halve }])), new Map()), new AbortController().signal))!;
+    expect(at(mix, 1500)).toBeCloseTo(LEVEL / 2, 6);
+    expect(at(mix, 2500)).toBeCloseTo(LEVEL / 4, 6);
+    expect(at(mix, 3500)).toBeCloseTo(LEVEL / 2, 6);
   });
 
   it('play a slowed window from its start, and go back to where the timeline is after it', async () => {

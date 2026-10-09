@@ -1206,21 +1206,19 @@ class ComposeSpecParserTest {
             "audio.effects[1].endMs",
             JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps},{"startMs":800,"endMs":"b","effect":$steps}]"""),
         )
-        expectInvalidEffects(
-            "audio.effects[1].startMs",
-            JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps},{"startMs":800,"endMs":1000,"effect":$steps}]"""),
-        )
         expectInvalidEffects("audio.effects[0].startMs", JSONArray("""[{"startMs":"a"},{"startMs":"b"}]"""))
     }
 
     @Test
-    fun `audio effect windows may meet but not overlap, and one left out still holds its place`() {
-        val met = effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps},{"startMs":900,"endMs":1000,"effect":$steps}]"""))
-        assertEquals(2, met.size)
-        expectInvalidEffects(
-            "audio.effects[1].startMs",
-            JSONArray("""[{"startMs":0,"endMs":900},{"startMs":800,"endMs":1000,"effect":$steps}]"""),
+    fun `audio effect windows over the same time stack, in the order they came whatever their times`() {
+        val stacked = effectsOf(
+            JSONArray(
+                """[{"startMs":500,"endMs":1000,"effect":$steps},{"startMs":0,"endMs":900,"speed":0.8,"effect":$steps},""" +
+                    """{"startMs":0,"endMs":900,"speed":0.8,"effect":$steps},{"startMs":900,"endMs":1000,"effect":$steps}]""",
+            ),
         )
+        assertEquals(listOf(500.0, 0.0, 0.0, 900.0), stacked.map { it.startMs })
+        assertEquals(listOf(1.0, 0.8, 0.8, 1.0), stacked.map { it.speed })
     }
 
     @Test

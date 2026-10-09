@@ -198,8 +198,8 @@ export interface ZoomDrag extends DragBase {
 }
 
 /**
- * An audio effect layer's window being moved or retimed: a zoom's drag on the effects' row, which is
- * one effect at a time as the zooms are one camera, so it stops at its neighbours as a zoom does.
+ * An audio effect layer's window being moved or retimed: a zoom's drag on the layer's own lane, held
+ * only to the post (`lo` 0, `hi` its end) - layers stack, so no other one stops it.
  */
 export interface AudioEffectDrag extends Omit<ZoomDrag, 'kind'> {
   kind: 'afx';
@@ -262,6 +262,8 @@ export interface ClipReorderDrag extends DragBase {
 
 export interface LayerReorderDrag extends DragBase {
   kind: 'layer-reorder';
+  /** Whose lanes: the picture layers', or the audio effect layers'. Both run top of the stack first. */
+  media: 'overlay' | 'afx';
   id: string;
   from: number;
   to: number;

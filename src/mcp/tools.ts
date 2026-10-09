@@ -487,9 +487,13 @@ export const OP_REFERENCE: Record<string, string> = {
     'speaker driven hard - the middle of the voice, buzzing, a little louder - which is how one word of a line is made to stand out: put ' +
     'a layer over just that word. "slowReverb" is the slowed and reverberant edit of a song, in a big soft room: what it covers plays ' +
     'from the layer’s start at speed, lower as well as slower as a record does, so a layer at 0.8 plays the first 80% of what is under ' +
-    'it and the post picks up where it has got to at the layer’s end. One effect is heard at a time, so layers never overlap: a new ' +
-    `one is shortened to the room before the next layer and the end of the post, and refused when less than ${MIN_LAYER_MS}ms fits at ` +
-    `startMs; an endMs under ${MIN_LAYER_MS}ms after startMs is refused. effectSettings moves the effect’s sliders, each ` +
+    'it and the post picks up where it has got to at the layer’s end. Layers STACK, as the picture’s layers do: a new one goes on top ' +
+    'of the others, over whatever already covers that time, and where layers cover the same time a later one works on what the ones ' +
+    'before it made, so their order is part of the sound - a megaphone over slow + reverb puts the slowed room through the horn, and ' +
+    'slow + reverb over a megaphone slows the horn and puts it in the room; moveAudioEffect and moveAudioEffectTo change the order. ' +
+    'Slows multiply: two slowReverb layers at 0.8 over the same time play it at 0.64x. A layer is cut at the end of the post, and ' +
+    `refused when it starts less than ${MIN_LAYER_MS}ms before the end; an endMs under ${MIN_LAYER_MS}ms after startMs is refused. ` +
+    'effectSettings moves the effect’s sliders, each ' +
     `0..${SOUND_EFFECT_SETTING_MAX}, the rest staying at their defaults: ${AUDIO_EFFECT_SLIDERS}. The megaphone’s intensity is how hard it ` +
     'is driven and its tone the size of the horn, dull at 0 and tinny at 100; slowReverb’s reverb is how much of the room is heard and ' +
     `its room how long and dark the room is. A slider the effect has not got is refused. speed is for an effect that slows - ` +
@@ -497,16 +501,25 @@ export const OP_REFERENCE: Record<string, string> = {
   patchAudioEffect:
     'id, patch {effect?, effectSettings?, speed?, startMs?, endMs?} - what the audio effects sheet and a drag on the timeline change. ' +
     'Another effect comes on at its defaults, sliders and speed alike, unless the patch sets them; effectSettings moves the sliders it ' +
-    'names and leaves the rest where they are; speed as addAudioEffect takes it. startMs and endMs move or trim the layer between the ' +
-    'layers either side: a window that would overlap one or pass it is refused naming it (to put a layer past another, remove it and ' +
-    `add it again there), and so is one under ${MIN_LAYER_MS}ms or starting too late for the post to hear that much of it; one running ` +
-    'past the end of the post ends there. Any other field is refused, and so is null.',
+    'names and leaves the rest where they are; speed as addAudioEffect takes it. startMs and endMs move or trim the layer anywhere on ' +
+    'the post, over or under any other layer, as a drag on the timeline does; it keeps its place in the stack. A window under ' +
+    `${MIN_LAYER_MS}ms, or starting too late for the post to hear that much of it, is refused; one running past the end of the post ` +
+    'ends there. Any other field is refused, and so is null.',
   splitAudioEffect:
     'id, atMs, newId - the layer in two at atMs on the post, both halves its effect, sliders and speed, the second one newId, so one ' +
-    `half can be given another effect. Each half is at least ${MIN_LAYER_MS}ms, or the op is refused.`,
+    'half can be given another effect. Both stay where the layer was in the stack, the second just above the first. Each half is at ' +
+    `least ${MIN_LAYER_MS}ms, or the op is refused.`,
   duplicateAudioEffect:
-    'id, newId - a copy straight after the layer, as long as it where there is room and shortened where there is less; refused when ' +
-    `less than ${MIN_LAYER_MS}ms fits before the next layer and the end of the post.`,
+    'id, newId - a copy straight after the layer in time, as long as it and cut at the end of the post, and one place above it in the ' +
+    `stack, over whatever covers that time; refused when the layer ends less than ${MIN_LAYER_MS}ms before the end of the post.`,
+  moveAudioEffect:
+    'id, move ("forward" | "backward" | "front" | "back") - the layer’s place in the stack, as its Forward, Backward, To front and To ' +
+    'back do: forward is one place up and front the top, where it works on what every layer under it made; backward and back go down ' +
+    'the same way. Refused when the layer is already on top (forward, front) or at the bottom (backward, back).',
+  moveAudioEffectTo:
+    'id, toIndex - the layer at that place in the stack, 0 the bottom and the number of layers less one the top, as holding it on the ' +
+    'timeline and dropping it there does; the layers it passes close up. A toIndex that is not a whole number in that range is ' +
+    'refused, and the place the layer already has changes nothing.',
   removeAudioEffect: 'id.',
 
   /* zooms */
@@ -717,7 +730,7 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
       title: 'Read a post',
       description:
         'Reads a manifest back: how long the post runs, what is on the base track and on each video ' +
-        'layer over it, every layer with its id and time window, the sounds, voiceover and audio effects, and the ' +
+        'layer over it, every layer with its id and time window, the sounds, voiceover and audio effects (in the order they stack), and the ' +
         'colour operations the render will actually apply once the filter, its intensity and the ' +
         'Adjust sliders are folded together.',
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -879,8 +892,10 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
       return {
         data: { maxPerPost: MAX_AUDIO_EFFECTS, minMs: MIN_LAYER_MS, effects },
         lines:
-          'Audio effects (addAudioEffect effect), each a layer over a window of the post that puts everything heard inside it through the effect, ' +
-          `one at a time - at most ${MAX_AUDIO_EFFECTS} on a post, each at least ${MIN_LAYER_MS}ms:\n` +
+          'Audio effects (addAudioEffect effect), each a layer over a window of the post that puts everything heard inside it through the effect. ' +
+          'Layers stack in any number, a new one on top: where they cover the same time a later one works on what the ones before it made, so ' +
+          'their order (moveAudioEffect) changes the sound, and two slowReverb layers at 0.8 over the same time play it at 0.64x - ' +
+          `at most ${MAX_AUDIO_EFFECTS} on a post, each at least ${MIN_LAYER_MS}ms:\n` +
           effects.map(effect => `  ${effect.id} (${effect.label}) - ${takes(effect)}`).join('\n'),
       };
     }
@@ -1022,7 +1037,7 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
           '  clip speed is 0.25x to 4x, with pitch preserved\n' +
           `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins\n` +
           `  the music's section and its stop leave at least ${MIN_LAYER_MS}ms of sound; its fade in and fade out run 0 (none) to ${MAX_MUSIC_FADE_MS}ms each\n` +
-          `  at most ${MAX_AUDIO_EFFECTS} audio effects, one heard at a time, each at least ${MIN_LAYER_MS}ms\n` +
+          `  at most ${MAX_AUDIO_EFFECTS} audio effects, any number of them over the same time, each at least ${MIN_LAYER_MS}ms\n` +
           zooms,
       };
     }

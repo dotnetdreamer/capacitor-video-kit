@@ -1256,7 +1256,8 @@ export class VeTimeline {
   private readonly showZoomRow = computed(() => this.zoomBars.value.length > 0 && (!this.compactSig.value || this.ctx.store.panel.value === 'zoom'));
 
   /**
-   * The audio effect layers' bars, one row of them, as a zoom's are: one effect at a time. Compared
+   * The audio effect layers' bars, a lane each, the top of the stack first - as the picture layers'
+   * lanes run, front-most first - so the lane above works on what the lanes under it made. Compared
    * element by element, for the zoom bars' reason - a drag rewrites the layer on every frame.
    */
   private readonly afxBars = computedWith<AudioEffectBarView[]>(
@@ -1284,7 +1285,8 @@ export class VeTimeline {
             text,
             label: selected ? `${text} effect, selected` : `${text} effect`,
           };
-        });
+        })
+        .reverse();
     },
     (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.selected === y.selected && x.text === y.text),
   );
@@ -1296,9 +1298,9 @@ export class VeTimeline {
   });
 
   /**
-   * The audio effects' row sits with the lanes, over the sounds it changes. In the slim timeline it
-   * stays while the Audio effects sheet is open, as the zoom row stays under the zoom sheet, so the
-   * layer being changed is on screen.
+   * The audio effects' lanes sit with the others, over the sounds they change. In the slim timeline the
+   * selected layer's lane stays while the Audio effects sheet is open, as the zoom row stays under the
+   * zoom sheet, so the layer being changed is on screen; the rest are not, for the room.
    */
   private readonly showAfxRow = computed(() => this.afxBars.value.length > 0 && (!this.compactSig.value || this.ctx.store.panel.value === 'audioEffects'));
 
@@ -1323,7 +1325,8 @@ export class VeTimeline {
     (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.url === y.url && x.label === y.label && x.wave === y.wave && x.x === y.x),
   );
 
-  private readonly layerReorder = signal<{ id: string; from: number; to: number } | null>(null);
+  /** The lane held up and moving through its stack: a picture layer's, or an audio effect layer's. */
+  private readonly layerReorder = signal<{ media: LayerReorderDrag['media']; id: string; from: number; to: number } | null>(null);
 
   /* -- gesture state (plain fields: read and written per frame) ------------------------------ */
 
@@ -1551,10 +1554,10 @@ export class VeTimeline {
   /* Template helpers                                                                          */
   /* ========================================================================================= */
 
-  /** The other layer lanes slide a row up or down to show where the lifted one would land. */
-  private laneShift(index: number): string | null {
+  /** The other lanes of the lifted one's stack slide a row up or down to show where it would land. */
+  private laneShift(index: number, media: LayerReorderDrag['media']): string | null {
     const r = this.layerReorder.value;
-    if (!r || index === r.from) return null;
+    if (!r || r.media !== media || index === r.from) return null;
     if (r.from < r.to && index > r.from && index <= r.to) return `translateY(${-LANE_PITCH}px)`;
     if (r.from > r.to && index >= r.to && index < r.from) return `translateY(${LANE_PITCH}px)`;
     return null;
@@ -2175,8 +2178,13 @@ export class VeTimeline {
     // A base segment lifts once there is a second one: with only one, there is nothing to reorder it
     // past and nowhere to carry it either, because the base track may not be emptied. A segment on a
     // layer always lifts - it has the base track and every other layer to go to, and the gap under
-    // any of them.
-    const canLift = (kind === 'clip' && store.slots.value.length > 1) || kind === 'track-clip' || kind === 'audio' || (kind === 'layer' && store.layerCount.value > 1);
+    // any of them. An audio effect layer lifts once there is another to carry it past in the stack.
+    const canLift =
+      (kind === 'clip' && store.slots.value.length > 1) ||
+      kind === 'track-clip' ||
+      kind === 'audio' ||
+      (kind === 'layer' && store.layerCount.value > 1) ||
+      (kind === 'afx' && this.afxBars.value.length > 1);
     if (canLift) press.timer = setTimeout(() => this.onLongPress(press), LONG_PRESS_MS);
     this.press = press;
   };
@@ -2431,7 +2439,8 @@ export class VeTimeline {
     press.timer = null;
     this.press = null;
     if (press.kind === 'clip' || press.kind === 'track-clip' || press.kind === 'audio') this.startClipReorder(press);
-    else if (press.kind === 'layer') this.startLayerReorder(press);
+    else if (press.kind === 'layer') this.startLayerReorder(press, 'overlay');
+    else if (press.kind === 'afx') this.startLayerReorder(press, 'afx');
   }
 
   private isSelectedBody(press: Press): boolean {
@@ -2655,7 +2664,9 @@ export class VeTimeline {
     const layer = layers.find(one => one.id === id);
     if (!layer) return;
     const total = store.totalMs.value;
-    const { lo, hi } = zoomNeighbours(layers, id, total);
+    // Layers stack, so nothing but the post's own ends stops one.
+    const lo = 0;
+    const hi = Math.max(total, MIN_LAYER_MS);
     this.beginDrag({
       ...base,
       kind: 'afx',
@@ -2867,18 +2878,24 @@ export class VeTimeline {
     });
   }
 
-  private startLayerReorder(press: Press): void {
+  /**
+   * A lane held up to be carried up or down its stack: a picture layer's among the picture layers, an
+   * audio effect layer's among the audio effects. Nothing to carry with one lane.
+   */
+  private startLayerReorder(press: Press, media: LayerReorderDrag['media']): void {
     const store = this.ctx.store;
-    const lanes = this.layerLanes.value;
+    const lanes = media === 'afx' ? this.afxBars.value : this.layerLanes.value;
     const from = lanes.findIndex(lane => lane.id === press.id);
     if (!press.id || from < 0 || lanes.length < 2) return;
     // The window the rows pan in, which is the whole timeline: a lane held at its top edge brings the
     // rows above it back down, the filmstrip among them.
     const rect = this.contentEl?.getBoundingClientRect();
-    const row = this.lanesEl?.querySelector<HTMLElement>(`[data-lane-id="${CSS.escape(press.id)}"]`) ?? null;
+    const attribute = media === 'afx' ? 'data-afx-lane' : 'data-lane-id';
+    const row = this.lanesEl?.querySelector<HTMLElement>(`[${attribute}="${CSS.escape(press.id)}"]`) ?? null;
     const drag: LayerReorderDrag = {
       ...this.dragBase(press.pointerId, press.x, press.y),
       kind: 'layer-reorder',
+      media,
       id: press.id,
       from,
       to: from,
@@ -2890,7 +2907,7 @@ export class VeTimeline {
     };
     this.beginDrag(drag);
     const id = press.id;
-    this.layerReorder.value = { id, from, to: from };
+    this.layerReorder.value = { media, id, from, to: from };
     store.haptic('medium');
   }
 
@@ -3269,7 +3286,7 @@ export class VeTimeline {
     if (to !== drag.to) {
       drag.to = to;
       this.ctx.store.haptic('selection');
-      this.layerReorder.value = { id: drag.id, from: drag.from, to };
+      this.layerReorder.value = { media: drag.media, id: drag.id, from: drag.from, to };
     }
     return scrolling;
   }
@@ -3371,11 +3388,18 @@ export class VeTimeline {
       case 'layer-reorder': {
         drag.row?.style.removeProperty('--lift');
         this.layerReorder.value = null;
+        if (cancelled || drag.to === drag.from) break;
+        if (drag.media === 'afx') {
+          // Into the place in the stack of the layer whose lane it was dropped on: lanes run top
+          // first, the manifest bottom to top, and a layer past the end of the post has no lane.
+          const onto = this.afxBars.value[drag.to];
+          const toIndex = onto ? store.audioEffects.value.findIndex(layer => layer.id === onto.id) : -1;
+          if (toIndex >= 0) store.moveAudioEffectTo(drag.id, toIndex);
+          break;
+        }
         // Lanes run front-most first; the manifest runs bottom to top.
         const toIndex = drag.count - 1 - drag.to;
-        if (!cancelled && drag.to !== drag.from && store.commit('Layer order', m => moveLayerTo(m, drag.id, toIndex))) {
-          store.haptic('light');
-        }
+        if (store.commit('Layer order', m => moveLayerTo(m, drag.id, toIndex))) store.haptic('light');
         break;
       }
     }
@@ -3443,7 +3467,7 @@ export class VeTimeline {
       case 'zoom':
         return rows.querySelector<HTMLElement>('[data-row="zoom"]');
       case 'audioEffect':
-        return rows.querySelector<HTMLElement>('[data-row="afx"]');
+        return rows.querySelector<HTMLElement>(`[data-afx-lane="${CSS.escape(selection.id)}"]`);
       case 'clip': {
         // The base track pans away with everything else, and a segment on it is selected from
         // outside the timeline too: by touching the video on the preview, or by Edit and Crop.
@@ -3675,15 +3699,27 @@ export class VeTimeline {
   }
 
   /**
-   * The audio effects' row: one bar per layer, its effect's sign and name on it, and the selected one's
-   * two handles. Buttons named with their state, never `aria-pressed`, for the reason the zoom bars
-   * give; no `touch-action` of their own until selected, so a swipe that starts on one scrolls.
+   * The audio effects' lanes: one per layer, the top of the stack first, each with its bar - its
+   * effect's sign and name on it - and the selected one's two handles. Held, a bar lifts its lane to
+   * carry it up or down the stack. In the slim timeline only the selected one's lane is drawn. Buttons
+   * named with their state, never `aria-pressed`, for the reason the zoom bars give; no `touch-action`
+   * of their own until selected, so a swipe that starts on one scrolls.
    */
-  private afxRow() {
+  private afxRows() {
     const handles = this.afxHandles.value;
-    return (
-      <div class="lane" key="afx-row" data-row="afx">
-        {this.afxBars.value.map(bar => (
+    const compact = this.compactSig.value;
+    const lifted = this.layerReorder.value;
+    return this.afxBars.value.map((bar, i) => {
+      if (compact && !bar.selected) return null;
+      const shift = this.laneShift(i, 'afx');
+      return (
+        <div
+          class={{ 'lane': true, 'lane--lifted': lifted?.media === 'afx' && lifted.id === bar.id }}
+          key={`afx-lane-${bar.id}`}
+          data-row="afx"
+          data-afx-lane={bar.id}
+          style={shift ? { transform: shift } : undefined}
+        >
           <button
             type="button"
             key={`afx-${bar.id}`}
@@ -3702,15 +3738,15 @@ export class VeTimeline {
               </span>
             </span>
           </button>
-        ))}
-        {handles
-          ? [
-              <span class="handle handle--in" key="afx-in" data-hit="afx-start" data-id={handles.id} style={{ left: `${handles.inX}px` }}></span>,
-              <span class="handle handle--out" key="afx-out" data-hit="afx-end" data-id={handles.id} style={{ left: `${handles.outX}px` }}></span>,
-            ]
-          : null}
-      </div>
-    );
+          {handles?.id === bar.id
+            ? [
+                <span class="handle handle--in" key="afx-in" data-hit="afx-start" data-id={handles.id} style={{ left: `${handles.inX}px` }}></span>,
+                <span class="handle handle--out" key="afx-out" data-hit="afx-end" data-id={handles.id} style={{ left: `${handles.outX}px` }}></span>,
+              ]
+            : null}
+        </div>
+      );
+    });
   }
 
   /**
@@ -3920,7 +3956,7 @@ export class VeTimeline {
         {compact
           ? null
           : this.layerLanes.value.map((lane, i) => {
-              const shift = this.laneShift(i);
+              const shift = this.laneShift(i, 'overlay');
               return (
                 <div
                   class={{ 'lane': true, 'lane--lifted': this.layerReorder.value?.id === lane.id }}
@@ -3950,7 +3986,7 @@ export class VeTimeline {
               );
             })}
 
-        {this.showAfxRow.value ? this.afxRow() : null}
+        {this.showAfxRow.value ? this.afxRows() : null}
         {compact ? null : this.audioLanes.value.map((lane, i) => this.audioRow(lane, i))}
         {compact || (this.audioLanes.value.length && !this.ctx.store.manifest.value.music) ? null : this.musicRow(pad)}
         {this.showVoiceLane.value ? this.voiceRow() : null}

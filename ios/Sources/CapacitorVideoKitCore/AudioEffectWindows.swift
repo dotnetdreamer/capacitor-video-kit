@@ -41,7 +41,7 @@ func frameAt(_ ms: Double, rate: Double) -> Int64 {
 /// frame, line for line as `AudioEffectRunner` in audio-effect-windows.ts and Android's runner run it.
 /// The stream comes in order, in pieces of any size, interleaved, and leaves exactly as it would in
 /// one; the first frame of the first piece is output frame `firstFrame`. Each window runs on what the
-/// one before it left.
+/// ones before it in the list left - where they cover the same frames, that is the stack.
 final class AudioEffectRunner {
     private let stages: [WindowStage]
     private var frame: Int64

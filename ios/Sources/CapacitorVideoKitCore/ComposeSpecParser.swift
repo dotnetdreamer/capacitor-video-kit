@@ -1733,13 +1733,11 @@ private struct AudioDTO: Decodable {
             if (list.count ?? 0) > AudioEffectWindow.maxCount {
                 throw SpecError("audio.effects", "invalid_spec:audio.effects at most \(AudioEffectWindow.maxCount) windows")
             }
-            var previousEndMs = -Double.infinity
+            // In the order they came, which is the stack: windows over the same time are not refused.
             while !list.isAtEnd {
                 let path = "audio.effects[\(list.currentIndex)]"
                 guard let w = try? list.nestedContainer(keyedBy: AnyKey.self) else { throw SpecError(path) }
                 let window = try Self.window(w, path)
-                if window.start < previousEndMs { throw SpecError("\(path).startMs") }
-                previousEndMs = window.end
                 // One that would change nothing is left off, as the web's parser leaves it.
                 if window.effect == nil && window.speed == 1 { continue }
                 windows.append(AudioEffectWindow(startMs: window.start, endMs: window.end, speed: window.speed, effect: window.effect))
@@ -1749,7 +1747,7 @@ private struct AudioDTO: Decodable {
     }
 
     /// One window's own fields, in the contract's order: `startMs`, `endMs`, `speed`, `effect`, then a
-    /// key that is none of these. Where it sits among the others is the caller's to check.
+    /// key that is none of these.
     private static func window(_ w: KeyedDecodingContainer<AnyKey>, _ path: String) throws -> (start: Double, end: Double, speed: Double, effect: SoundEffect?) {
         func number(_ name: String) -> Double? {
             guard let key = AnyKey(stringValue: name), w.has(key), let value = try? w.decode(Double.self, forKey: key), value.isFinite else { return nil }

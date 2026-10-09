@@ -827,7 +827,9 @@ export interface ComposeAudio {
    * before this key, and the builder never sends an empty list: an engine decides once, when it
    * builds its plan, that it has none, and mixes exactly as it always has.
    *
-   * Sorted by `startMs` and never overlapping, at most [MAX_AUDIO_EFFECTS]. See [ComposeAudioEffect].
+   * In the order they stack, bottom first, whatever their times: windows may cover the same moment,
+   * and each runs on what the ones before it in the list left. At most [MAX_AUDIO_EFFECTS]. See
+   * [ComposeAudioEffect].
    */
   effects?: ComposeAudioEffect[];
 }
@@ -841,10 +843,11 @@ export interface ComposeAudio {
  * (16-bit, at the first sound's rate, and made stereo first where it is mono, so a room is as wide
  * as on the others), iOS on the 48 kHz stereo mix its audio mix makes, the web on its 48 kHz stereo
  * mix. Frame `n` is the output instant `n / fs`. Windows run one after another, in
- * the order of the list, each on what the one before it left - so a tail ringing on into the next
- * window goes through that window too. An engine whose mix would end before the post does keeps it
- * running, silent, to the end of the post while there is a window, so a tail is heard past the last
- * sound.
+ * the order of the list, each on what the ones before it left: where two cover the same frames the
+ * later one works on what the earlier one made - the stack, so two slowed 0.8x play that stretch at
+ * 0.64x - and a tail ringing on into a later window goes through it too. An engine whose mix would end
+ * before the post does keeps it running, silent, to the end of the post while there is a window, so a
+ * tail is heard past the last sound.
  *
  * THE ARITHMETIC, for a window with `S = round(startMs * fs / 1000)` and `E = round(endMs * fs / 1000)`
  * (`round` is half up), its input `x` and its output `y`:
@@ -871,11 +874,11 @@ export interface ComposeAudio {
  * Each parser refuses, with the path that broke, as a shape error: `effects` that is there and is not
  * an array, more than [MAX_AUDIO_EFFECTS] windows, a window that is not an object, a `startMs` or an
  * `endMs` that is missing or not finite, an `endMs` not after its `startMs`, a `speed` that is there
- * and not finite, an [effect] its own rules refuse, a key nobody defined - the alphabetically first -
- * and a window that starts before the one before it ends (named by its `startMs`). In that order, a
- * window at a time. It CLAMPS `startMs` to 0 and up and [speed] to [MIN_AUDIO_EFFECT_SPEED]..1, and
- * drops a window with no steps and a speed of 1, which would change nothing. `normaliseAudioEffectWindows`
- * states these rules once for the web engine and the tests.
+ * and not finite, an [effect] its own rules refuse, and a key nobody defined - the alphabetically
+ * first. In that order, a window at a time. Windows that overlap are not refused: they stack. It
+ * CLAMPS `startMs` to 0 and up and [speed] to [MIN_AUDIO_EFFECT_SPEED]..1, and drops a window with no
+ * steps and a speed of 1, which would change nothing. `normaliseAudioEffectWindows` states these rules
+ * once for the web engine and the tests.
  */
 export interface ComposeAudioEffect {
   /** Output-timeline milliseconds. */

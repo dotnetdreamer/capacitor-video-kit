@@ -91,6 +91,19 @@ describe('which layers share a copy', () => {
     expect(copyGroups([])).toEqual([]);
   });
 
+  it('puts stacked layers in one copy, in the order they stack, grouped by when they are heard', () => {
+    // Bottom to top: a long one, one far later, and one stacked inside the first, which starts first.
+    const long = { startMs: 1000, endMs: 9000 };
+    const later = { startMs: 9000 + MAX_COPY_TAIL_MS, endMs: 20_000 };
+    const inside = { startMs: 500, endMs: 2000 };
+    expect(copyGroups([long, later, inside])).toEqual([[long, inside], [later]]);
+    // A short layer under a long one does not end the group the long one is still heard in.
+    const short = { startMs: 0, endMs: 100 };
+    const over = { startMs: 0, endMs: 9000 };
+    const after = { startMs: 100 + MAX_COPY_TAIL_MS + 1, endMs: 12_000 };
+    expect(copyGroups([short, over, after])).toEqual([[short, over, after]]);
+  });
+
   it('lets a copy ring on for its longest reverb, a moment without one, and never past the longest room', () => {
     expect(copyTailMs(null)).toBe(50);
     expect(copyTailMs({ ops: [{ op: 'reverb', decayMs: 3500, dampHz: 5500, wet: 0.5, dry: 0.8 }] })).toBe(3500);
@@ -113,6 +126,16 @@ describe('what a copy is made of', () => {
     expect(copySoundKey(buildPlan(post([{ startMs: 4000, volume: 0.5 }]), new Map()), windows)).not.toBe(copySoundKey(plan, windows));
     expect(copySoundKey(plan, [{ startMs: 5000, endMs: 9000 }])).not.toBe(copySoundKey(plan, windows));
   });
+
+  it('is the same for the same layers stacked another way: the order is the effects', () => {
+    const plan = buildPlan(post([{ startMs: 0 }]), new Map());
+    const a = { startMs: 5000, endMs: 8000 };
+    const b = { startMs: 2000, endMs: 6000 };
+    expect(copySoundKey(plan, [a, b])).toBe(copySoundKey(plan, [b, a]));
+    // And reads from just before the earliest, wherever it is in the stack.
+    const early = buildPlan(post([{ startMs: 0 }, { uri: 'file:///tone-1000.m4a', startMs: 1500 }]), new Map());
+    expect(copySoundKey(early, [a, b])).not.toBe(copySoundKey(plan, [a, b]));
+  });
 });
 
 describe('a copy', () => {
@@ -131,6 +154,21 @@ describe('a copy', () => {
     expect(wav.at(Math.round((AUDIO_EFFECT_RAMP_MS * rate) / 2000))).toBeCloseTo(LEVEL * 0.75, 2);
     expect(wav.at(rate)).toBeCloseTo(LEVEL / 2, 3);
     expect(wav.at(wav.frames - 1)).toBeCloseTo(LEVEL, 3);
+  });
+
+  it('starts at the earliest layer of a stack, wherever it is, and runs them in the order they stack', async () => {
+    const plan = buildPlan(post([{ startMs: 0 }]), new Map());
+    const windows: ComposeAudioEffect[] = [
+      { startMs: 2000, endMs: 3000, effect: halve },
+      { startMs: 1000, endMs: 4000, effect: halve },
+    ];
+    const made = (await makeEffectCopy(plan, windows, new CopySources(), new AbortController().signal))!;
+    const rate = COPY_RATES[0]!;
+    expect(made.startMs).toBe(1000);
+    const wav = await samplesOf(made.blob);
+    expect(wav.at(Math.round(0.5 * rate))).toBeCloseTo(LEVEL / 2, 3);
+    expect(wav.at(Math.round(1.5 * rate))).toBeCloseTo(LEVEL / 4, 3);
+    expect(wav.at(Math.round(2.5 * rate))).toBeCloseTo(LEVEL / 2, 3);
   });
 
   it('runs every window of a group, each on what the one before it left', async () => {

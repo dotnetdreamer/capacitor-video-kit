@@ -5,7 +5,7 @@ Use it with React, Vue, Angular, or plain JavaScript on Android, iOS, and the we
 
 ## Features
 
-- Trim, join, crop, and change clip speed; add filters, transitions, text, stickers, music, voiceovers, and audio effects over everything heard
+- Trim, join, crop, and change clip speed; add filters, transitions, text, stickers, music, voiceovers, and stackable audio effects over everything heard
 - Render on the device with `VideoComposer`, or use the browser's encoder
 - Upload files and finalize a request to your own API with `BackgroundPublisher`
 - Embed `<ve-editor>` or build your own interface using the shared edit manifest and composition API

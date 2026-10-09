@@ -172,20 +172,14 @@ describe('ve-audio-effects-sheet', () => {
     expect(layersOf(store)).toEqual([]);
   });
 
-  it('stops a new layer short of the next one', async () => {
-    const { store, sheet } = await mount([megaphone({ id: 'later', startMs: 8000, endMs: 9000 })], null, 2000);
+  it('stacks a new layer on top of those it covers, whatever is under the playhead', async () => {
+    const { store, sheet } = await mount([megaphone(), megaphone({ id: 'later', startMs: 8000, endMs: 9000 })], null, 3000);
     tile(sheet, 'Slow + reverb').click();
-    expect(layersOf(store).map(({ startMs, endMs, effect }) => [startMs, endMs, effect])).toEqual([
-      [2000, 8000, 'slowReverb'],
-      [8000, 9000, 'megaphone'],
+    expect(layersOf(store).map(({ id, startMs, endMs, effect }) => [id, startMs, endMs, effect])).toEqual([
+      ['afx', 1000, 6000, 'megaphone'],
+      ['later', 8000, 9000, 'megaphone'],
+      [store.selectedAudioEffect.value!.id, 3000, 20_000, 'slowReverb'],
     ]);
-  });
-
-  it('changes the effect of the layer under the playhead when none is selected', async () => {
-    const { store, sheet } = await mount([megaphone()], null, 3000);
-    tile(sheet, 'Slow + reverb').click();
-    expect(layersOf(store)).toEqual([megaphone({ effect: 'slowReverb' })]);
-    expect(store.selection.value).toEqual({ kind: 'audioEffect', id: 'afx' });
   });
 
   it('gives the selected layer another effect at its defaults, sliders and Slow alike', async () => {

@@ -67,10 +67,11 @@ import {
   soundEffectPreset,
   MAX_AUDIO_EFFECTS,
   addAudioEffect as addAudioEffectOp,
-  audioEffectAt,
   deleteAudioEffect as deleteAudioEffectOp,
   duplicateAudioEffect as duplicateAudioEffectOp,
   findAudioEffect,
+  moveAudioEffect as moveAudioEffectOp,
+  moveAudioEffectTo as moveAudioEffectToOp,
   setAudioEffectSetting as setAudioEffectSettingOp,
   setAudioEffectWindow as setAudioEffectWindowOp,
   splitAudioEffect as splitAudioEffectOp,
@@ -306,9 +307,10 @@ export class EditorStore {
   readonly previewUrls = signal<ReadonlyMap<string, string>>(new Map());
   /**
    * The preview's copies of what is heard under the audio effect layers, by the ids of the layers each
-   * covers, joined by commas: a file the preview plays in the place of every sound those layers cover -
-   * the post's own sound through them, by the render's arithmetic - since an element plays a file and
-   * not an effect. See `effect-copy.ts` for why it is a file, and for why layers close together share one.
+   * is of, sorted and joined by commas: a file the preview plays in the place of every sound those
+   * layers cover - the post's own sound through them, stacked as they are, by the render's arithmetic -
+   * since an element plays a file and not an effect. See `effect-copy.ts` for why it is a file, and for
+   * why layers stacked or close together share one.
    *
    * Filled in by `EditorMedia` and played by the preview alone (`PreviewPlayer`), so no render, draft or
    * result ever carries one. A layer with no copy has one still being made: the preview plays the sounds
@@ -577,8 +579,10 @@ export class EditorStore {
   readonly selection = signal<EditorSelection | null>(null);
   readonly panel = signal<EditorPanel | null>(null);
   readonly toolbarMode = signal<ToolbarMode>('root');
-  /** The Sound tool's little menu (Add sound / Sound effect / Voiceover). */
+  /** The Sound tool's little menu (Add sound / Sound effects / Voiceover). */
   readonly soundMenuOpen = signal(false);
+  /** The Effects tool's little menu: the picture's effects (Video) or the sound's (Audio). */
+  readonly effectsMenuOpen = signal(false);
   /** The timeline plus button's Video / Audio choice, shared with the editor's Back handler. */
   readonly timelineAddMenuOpen = signal(false);
   /** What the volume sheet is adjusting while it is open. */
@@ -964,6 +968,7 @@ export class EditorStore {
   select(selection: EditorSelection | null): void {
     this.selection.value = selection;
     this.soundMenuOpen.value = false;
+    this.effectsMenuOpen.value = false;
     this.timelineAddMenuOpen.value = false;
     if (selection) this.toolbarMode.value = 'root';
     // A sheet that was about the old selection makes no sense for the new one.
@@ -982,6 +987,7 @@ export class EditorStore {
 
   openPanel(panel: EditorPanel | null): void {
     this.soundMenuOpen.value = false;
+    this.effectsMenuOpen.value = false;
     this.timelineAddMenuOpen.value = false;
     if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
     if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
@@ -2227,7 +2233,7 @@ export class EditorStore {
   /* Audio effect layers                                                                       */
   /* ========================================================================================= */
 
-  /** Every audio effect layer, in time order. */
+  /** Every audio effect layer, bottom to top: a later one works on what the ones under it made. */
   readonly audioEffects = computed(() => this.manifest.value.audioEffects ?? []);
   readonly selectedAudioEffect = computed(() => {
     const sel = this.selection.value;
@@ -2235,36 +2241,34 @@ export class EditorStore {
   });
 
   /**
-   * The Sound menu's Audio effects: the sheet on the layer under the playhead when there is one, since
-   * the effect heard there is the one to change, and otherwise on no layer at all, where a tile adds
-   * one ([chooseAudioEffect]). Paused, so the sound is where the customer left it.
+   * The Sound menu's Audio effects: the sheet on no layer at all, where a tile adds one on top of
+   * whatever is already at the playhead ([chooseAudioEffect]) - an effect layer is added from here
+   * and changed from its own tools, as a picture layer is. Paused, so the sound is where the customer
+   * left it.
    */
   openAudioEffects(): void {
-    const layer = audioEffectAt(this.manifest.value, this.playheadMs.value);
     this.pause();
-    this.select(layer ? { kind: 'audioEffect', id: layer.id } : null);
+    this.select(null);
     this.openPanel('audioEffects');
   }
 
   /**
-   * A tile of the Audio effects sheet: the selected layer becomes `effectId` at its defaults, or -
-   * with none selected - the layer under the playhead does, or a new one is added there
-   * ([addAudioEffectAtPlayhead]). One undo step named for the effect ("Undo: Megaphone"). Returns
-   * whether anything changed.
+   * A tile of the Audio effects sheet: the selected layer becomes `effectId` at its defaults, or - with
+   * none selected - a new one is added at the playhead ([addAudioEffectAtPlayhead]). One undo step named
+   * for the effect ("Undo: Megaphone"). Returns whether anything changed.
    */
   chooseAudioEffect(effectId: string): boolean {
     const preset = soundEffectPreset(effectId);
     if (!preset) return false;
-    const layer = this.selectedAudioEffect.value ?? audioEffectAt(this.manifest.value, this.playheadMs.value);
+    const layer = this.selectedAudioEffect.value;
     if (!layer) return this.addAudioEffectAtPlayhead(preset.id) !== null;
-    if (!this.isSelected({ kind: 'audioEffect', id: layer.id })) this.select({ kind: 'audioEffect', id: layer.id });
     return this.commit(preset.label, m => updateAudioEffectOp(m, layer.id, { effect: preset.id }));
   }
 
   /**
-   * A layer of `effectId` from the playhead to the end of the post - stopping short of the next layer,
-   * as one effect is heard at a time - selected, as one undo step named for the effect. Its id, or
-   * null with the customer told why: at the cap, or with no room at the playhead.
+   * A layer of `effectId` from the playhead to the end of the post, on top of every other layer -
+   * stacked over any already there, as a picture layer is added over the others - selected, as one
+   * undo step named for the effect. Its id, or null with the customer told why: at the cap.
    */
   addAudioEffectAtPlayhead(effectId: string): string | null {
     const preset = soundEffectPreset(effectId);
@@ -2279,11 +2283,8 @@ export class EditorStore {
     const at = this.playheadMs.value >= total - MIN_LAYER_MS ? 0 : Math.round(this.playheadMs.value);
     const id = this.newId('afx');
     const layer: EditAudioEffect = { id, startMs: at, endMs: total, effect: preset.id };
-    if (!this.commit(preset.label, m => addAudioEffectOp(m, layer, total))) {
-      this.showToast('No room for an audio effect here');
-      this.haptic('warning');
-      return null;
-    }
+    // Refused only for a post too short to hold a layer at all.
+    if (!this.commit(preset.label, m => addAudioEffectOp(m, layer, total))) return null;
     this.select({ kind: 'audioEffect', id });
     this.haptic('light');
     return id;
@@ -2303,9 +2304,9 @@ export class EditorStore {
   }
 
   /**
-   * Moves a layer's window, stopping at its neighbours and the end of the post and never shorter than
-   * [MIN_LAYER_MS]. One undo step labelled 'Audio effect'; the timeline's drags pass a `coalesce` key
-   * from [coalesceKey], and every call with it folds into that one step, as a zoom's drag does.
+   * Moves a layer's window, held to the post and never shorter than [MIN_LAYER_MS], over or under any
+   * other layer. One undo step labelled 'Audio effect'; the timeline's drags pass a `coalesce` key from
+   * [coalesceKey], and every call with it folds into that one step, as a zoom's drag does.
    */
   setAudioEffectWindow(id: string, startMs: number, endMs: number, opts?: { coalesce?: CoalesceKey }): void {
     const total = this.totalMs.value;
@@ -2315,7 +2316,7 @@ export class EditorStore {
   /**
    * Start here and End here: the layer's edge to the playhead, as a picture layer's
    * ([setSelectedOverlayEdge]) - or, with the playhead past its other edge, the whole layer moved
-   * there at its length. Its neighbours still stop it.
+   * there at its length - over or under whatever other layers are there.
    */
   setAudioEffectEdge(id: string, edge: 'start' | 'end'): void {
     const layer = findAudioEffect(this.manifest.value, id);
@@ -2331,16 +2332,17 @@ export class EditorStore {
         : at >= layer.startMs + MIN_LAYER_MS
           ? [layer.startMs, at]
           : [Math.max(0, at - length), at];
-    if (this.commit(edge === 'start' ? 'Start here' : 'End here', m => setAudioEffectWindowOp(m, id, s, e, total))) return;
-    this.showToast('There is no room for that effect here');
-    this.haptic('warning');
+    this.commit(edge === 'start' ? 'Start here' : 'End here', m => setAudioEffectWindowOp(m, id, s, e, total));
   }
 
-  /** A copy straight after the layer, selected. Says so when there is no room for one. */
+  /**
+   * A copy straight after the layer and one place above it, selected. Says why when there is none: at
+   * the cap, or with the layer ending at the end of the post, where nothing can come after it.
+   */
   duplicateAudioEffect(id: string): void {
     const newId = this.newId('afx');
     if (!this.commit('Duplicate', m => duplicateAudioEffectOp(m, id, newId, this.totalMs.value))) {
-      this.showToast('No room for a copy after this effect');
+      this.showToast(this.audioEffects.value.length >= MAX_AUDIO_EFFECTS ? `You can add up to ${MAX_AUDIO_EFFECTS} audio effects` : 'No room for a copy after this effect');
       this.haptic('warning');
       return;
     }
@@ -2352,12 +2354,38 @@ export class EditorStore {
   splitAudioEffectAtPlayhead(id: string): void {
     const newId = this.newId('afx');
     if (!this.commit('Cut', m => splitAudioEffectOp(m, id, this.playheadMs.value, newId))) {
-      this.showToast('Move the playhead inside the effect to cut it');
+      // A cut makes a second layer, so at the cap it is refused however well the playhead is placed.
+      this.showToast(this.audioEffects.value.length >= MAX_AUDIO_EFFECTS ? `You can add up to ${MAX_AUDIO_EFFECTS} audio effects` : 'Move the playhead inside the effect to cut it');
       this.haptic('warning');
       return;
     }
     this.select({ kind: 'audioEffect', id: newId });
     this.haptic('light');
+  }
+
+  /**
+   * The selected layer's place in the stack, with a picture layer's four moves ([moveSelectedLayer]):
+   * one up works on what the one it passes made, one down is worked on by it.
+   */
+  moveAudioEffect(id: string, move: LayerMove): void {
+    const labels: Record<LayerMove, string> = {
+      forward: 'Bring forward',
+      backward: 'Send backward',
+      front: 'Bring to front',
+      back: 'Send to back',
+    };
+    if (this.commit(labels[move], m => moveAudioEffectOp(m, id, move))) {
+      this.haptic('light');
+    } else {
+      this.showToast(move === 'forward' || move === 'front' ? 'Already on top' : 'Already at the bottom');
+    }
+  }
+
+  /** A layer held and dropped at another place in the stack on the timeline, 0 being the bottom. */
+  moveAudioEffectTo(id: string, toIndex: number): boolean {
+    if (!this.commit('Effect order', m => moveAudioEffectToOp(m, id, toIndex))) return false;
+    this.haptic('light');
+    return true;
   }
 
   /** Deletes a layer; its sheet closes with it when it was the one open. */

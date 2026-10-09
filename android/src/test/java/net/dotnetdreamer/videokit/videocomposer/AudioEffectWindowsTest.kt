@@ -218,6 +218,35 @@ class AudioEffectWindowsTest {
     }
 
     @Test
+    fun `stacked windows come out the same in pieces, a slowed one on a slowed one`() {
+        val windows = listOf(window(300.0, 800.0, effect = megaphone), window(50.0, 600.0, 0.6, slowReverb), window(200.0, 700.0, 0.8, slowReverb))
+        val input = quiet()
+        val whole = run(windows, input)
+        for (piece in listOf(1, 7, 333, 4_096, 10_000)) {
+            val pieces = run(windows, input, piece)
+            for (c in 0..1) assertArrayEquals("piece $piece, channel $c", whole[c], pieces[c], 0f)
+        }
+    }
+
+    @Test
+    fun `windows over the same time stack, a later one working on what an earlier one made`() {
+        val half = gain(-6.020599913279624)
+        val out = run(listOf(window(100.0, 600.0, effect = half), window(300.0, 500.0, effect = half)), listOf(FloatArray(rate) { 0.8f }))
+        assertEquals(0.4, out[0][frameAt(200.0).toInt()].toDouble(), 5e-7)
+        assertEquals(0.2, out[0][frameAt(400.0).toInt()].toDouble(), 5e-7)
+        assertEquals(0.4, out[0][frameAt(550.0).toInt()].toDouble(), 5e-7)
+    }
+
+    @Test
+    fun `two slowed windows over the same time play it at the product of their speeds`() {
+        val input = listOf(tone(1_000.0, 0.5, rate))
+        val out = run(listOf(window(0.0, 800.0, 0.8), window(0.0, 800.0, 0.8)), input)
+        val ramp = frameAt(AudioEffectWindow.RAMP_MS).toInt()
+        val end = frameAt(800.0).toInt()
+        assertEquals(crossings(input[0], ramp, end - ramp) * 0.64, crossings(out[0], ramp, end - ramp).toDouble(), 5.0)
+    }
+
+    @Test
     fun `each window runs on what the one before it left`() {
         val first = window(100.0, 300.0, effect = slowReverb)
         val second = window(300.0, 500.0, effect = megaphone)
@@ -278,6 +307,29 @@ class AudioEffectWindowsTest {
         val (left, right) = goldenFragment()
         AudioEffectRunner(goldenWindows, rate).process(arrayOf(left, right))
         assertGolden(left, right)
+    }
+
+    /*
+     * The stacked numbers of `audio-effect-windows.unit.test.ts` and `AudioEffectWindowsTests.swift`: on
+     * the same fragment, three windows in an order their times do not follow - the megaphone over
+     * 60..170 ms at the bottom, slow + reverb at 0.8x over 20..120 ms on it, and slow + reverb again at
+     * 0.7x over 40..100 ms on top.
+     */
+    private val stackedWindows: List<AudioEffectWindow>
+        get() = listOf(window(60.0, 170.0, effect = megaphone), window(20.0, 120.0, 0.8, slowReverb), window(40.0, 100.0, 0.7, slowReverb))
+
+    private fun assertStackedGolden(left: FloatArray, right: FloatArray) {
+        for ((i, l, r) in STACKED_GOLDEN) {
+            assertEquals("sample $i, left", l, left[i].toDouble(), 5e-7)
+            assertEquals("sample $i, right", r, right[i].toDouble(), 5e-7)
+        }
+    }
+
+    @Test
+    fun `stacked windows match the golden numbers every engine is held to`() {
+        val (left, right) = goldenFragment()
+        AudioEffectRunner(stackedWindows, rate).process(arrayOf(left, right))
+        assertStackedGolden(left, right)
     }
 
     /* ------------------------------------------------------------------------------------- */
@@ -366,6 +418,15 @@ class AudioEffectWindowsTest {
         val (l, r) = floatsOf(out, 2)
         assertEquals(9_600, l.size)
         assertGolden(l, r)
+    }
+
+    @Test
+    fun `media3's side matches the stacked golden numbers too`() {
+        val (left, right) = goldenFragment()
+        val format = AudioFormat(rate, 2, C.ENCODING_PCM_FLOAT)
+        val (_, out) = pipe(listOf(AudioEffectWindowsProcessor(stackedWindows)), format, floatPcm(listOf(left, right)), piece = 333)
+        val (l, r) = floatsOf(out, 2)
+        assertStackedGolden(l, r)
     }
 
     @Test
@@ -521,6 +582,35 @@ class AudioEffectWindowsTest {
             Triple(9119, -0.16030138731002808, -0.20032526552677155),
             Triple(9120, -0.102406345307827, -0.1977843940258026),
             Triple(9599, -0.3330191373825073, 0.15811549127101898),
+        )
+
+        /** `STACKED_GOLDEN` in audio-effect-windows.unit.test.ts, likewise. */
+        val STACKED_GOLDEN = listOf(
+            Triple(0, 0.0, 0.1438276618719101),
+            Triple(959, -0.659309446811676, 0.046941254287958145),
+            Triple(960, -0.5706338882446289, 0.03839000314474106),
+            Triple(961, -0.4800061583518982, 0.029803428798913956),
+            Triple(1500, -0.6783002614974976, -0.03017522394657135),
+            Triple(1919, -0.4438980221748352, -0.07496683299541473),
+            Triple(1920, -0.45043906569480896, -0.06907276809215546),
+            Triple(1921, -0.4494432806968689, -0.06311457604169846),
+            Triple(2400, 0.38878923654556274, -0.09857215732336044),
+            Triple(2879, -0.2437334656715393, 0.02293088473379612),
+            Triple(2880, -0.2360772043466568, 0.019143102690577507),
+            Triple(3500, -0.18928048014640808, 0.03702017292380333),
+            Triple(4000, 0.010632151737809181, 0.03684902563691139),
+            Triple(4799, -0.08010885119438171, -0.035095661878585815),
+            Triple(4800, -0.0975487008690834, -0.04343155398964882),
+            Triple(5000, 0.11491679400205612, 0.09258368611335754),
+            Triple(5759, 0.14631494879722595, 0.08428686112165451),
+            Triple(5760, 0.12154743820428848, 0.05453965440392494),
+            Triple(6500, 0.1746111661195755, 0.07624474167823792),
+            Triple(7000, 0.24912786483764648, -0.013168036937713623),
+            Triple(8159, -0.8366613388061523, 0.033284276723861694),
+            Triple(8160, -0.7561161518096924, 0.02355377748608589),
+            Triple(8500, -0.21113882958889008, 0.07811340689659119),
+            Triple(9000, 0.14763520658016205, 0.23983116447925568),
+            Triple(9599, -0.020595934242010117, 0.1534087210893631),
         )
     }
 }

@@ -364,8 +364,9 @@ export interface EditMusic {
  * through one megaphone by being put under it, and one is kept out of it by moving or shortening it.
  *
  * On the OUTPUT timeline, like the zooms: no clip or sound op moves one, and only cutting the post
- * shortens one. One effect at a time: [EditManifest.audioEffects] is sorted by `startMs` and never
- * overlaps, though two layers may touch.
+ * shortens one. Layers STACK as the picture's do: [EditManifest.audioEffects] runs bottom to top, and
+ * where two cover the same moment the upper one works on what the lower one made - five slow + reverbs
+ * over one line play it five times slower and roomier. Any number may cover a moment.
  */
 export interface EditAudioEffect {
   id: string;
@@ -618,10 +619,11 @@ export interface EditManifest {
   /** Absent in older drafts, which continue to use the single `music` field. */
   audioTracks?: EditAudioTrack[];
   /**
-   * The audio effect layers, sorted by `startMs` and never overlapping. Absent is none, which is every
-   * manifest written before version 18 and every post nobody has put one on, and what [toComposeSpec]
-   * turns into no `effects` on the wire. Like [audioTracks], optional so a post without any is stored
-   * exactly as before.
+   * The audio effect layers, bottom to top: a later layer works on what the ones before it made, where
+   * they cover the same moment, as a later picture layer is drawn over an earlier one. Absent is none,
+   * which is every manifest written before version 18 and every post nobody has put one on, and what
+   * [toComposeSpec] turns into no `effects` on the wire. Like [audioTracks], optional so a post without
+   * any is stored exactly as before.
    */
   audioEffects?: EditAudioEffect[];
   /** Sorted by `startMs`, never overlapping. */
@@ -1818,8 +1820,9 @@ export function emptyManifest(): EditManifest {
  * saved with an `effect` is read as a layer over where it was heard, with its sliders; a slow +
  * reverb sound goes back to 1x and its speed becomes the layer's Slow, so the layer plays all of it
  * from its start as the sound played before ([soundEffectLayers]). What else is under such a layer
- * now goes through it too, which is the point of a layer. Bumped because an older build reading a
- * version-18 draft drops every layer.
+ * now goes through it too, which is the point of a layer. The layers stack, bottom to top, so two
+ * sounds that had effects at the same time keep both, each layer over both sounds. Bumped because an
+ * older build reading a version-18 draft drops every layer.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -2368,32 +2371,24 @@ export function audioEffectSpeed(layer: Pick<EditAudioEffect, 'effect' | 'speed'
 }
 
 /**
- * Stored layers made into the list [EditManifest.audioEffects] promises: sorted, one effect at a time,
- * at most [MAX_AUDIO_EFFECTS]. Ids are made unique (the clip `~` idiom), and an overlap is resolved by
- * starting the later layer where the earlier one ends - dropping it if what is left is under
- * [MIN_LAYER_MS]. Not cut to the post's length, for the zooms' reason: a layer past the end is not
- * heard ([audioEffectWindow]) and comes back when the end does.
+ * Stored layers made into the list [EditManifest.audioEffects] promises: in the order they were stored,
+ * which is the stack, bottom to top, and at most [MAX_AUDIO_EFFECTS] - the bottom ones, as the editor
+ * never lets a post have more. Ids are made unique (the clip `~` idiom). Layers that cover the same
+ * moment are left to: that is the stack. Not cut to the post's length, for the zooms' reason: a layer
+ * past the end is not heard ([audioEffectWindow]) and comes back when the end does.
  */
 export function normaliseAudioEffectLayers(value: readonly unknown[]): EditAudioEffect[] {
   const used = new Set<string>();
-  const read: EditAudioEffect[] = [];
+  const out: EditAudioEffect[] = [];
   value.forEach((raw, i) => {
+    if (out.length === MAX_AUDIO_EFFECTS) return;
     const layer = normaliseAudioEffect(raw, `afx-${i}`);
     if (!layer) return;
     let id = layer.id;
     while (used.has(id)) id = `${id}~`;
     used.add(id);
-    read.push(id === layer.id ? layer : { ...layer, id });
+    out.push(id === layer.id ? layer : { ...layer, id });
   });
-  read.sort((a, b) => a.startMs - b.startMs);
-  const out: EditAudioEffect[] = [];
-  for (const layer of read) {
-    const prev = out[out.length - 1];
-    const startMs = prev ? Math.max(layer.startMs, prev.endMs) : layer.startMs;
-    if (layer.endMs - startMs < MIN_LAYER_MS) continue;
-    out.push(startMs === layer.startMs ? layer : { ...layer, startMs });
-    if (out.length === MAX_AUDIO_EFFECTS) break;
-  }
   return out;
 }
 

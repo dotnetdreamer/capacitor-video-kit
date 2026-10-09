@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { MAX_AUDIO_EFFECTS } from '../video-composer/definitions';
+
 import { toComposeSoundSpec, toComposeSpec } from './compose';
 import {
   MANIFEST_VERSION,
@@ -16,11 +18,12 @@ import {
 import {
   addAudioClip,
   addAudioEffect,
-  audioEffectAt,
   cutPostTo,
   deleteAudioEffect,
   duplicateAudioEffect,
   findAudioClip,
+  moveAudioEffect,
+  moveAudioEffectTo,
   setAudioEffectSetting,
   setAudioEffectWindow,
   splitAudioEffect,
@@ -31,9 +34,10 @@ import { soundEffectPreset, soundEffectSteps } from './sound-effects';
 
 /*
  * The audio effect layers in the edit: windows of the post with an effect id, its sliders and, for an
- * effect that slows, its Slow - kept one at a time on one row, moved and cut like a zoom, and turned
- * into windows of steps on the wire. The steps are `sound-effects.unit.test.ts`'s and the arithmetic
- * over the mix `audio-effect-windows.unit.test.ts`'s.
+ * effect that slows, its Slow - stacked bottom to top as the picture's layers are, any number over the
+ * same time, moved and cut like a zoom, and turned into windows of steps on the wire in the order they
+ * stack. The steps are `sound-effects.unit.test.ts`'s and the arithmetic over the mix
+ * `audio-effect-windows.unit.test.ts`'s.
  */
 
 const TOTAL = 20_000;
@@ -98,14 +102,21 @@ describe('an audio effect layer in the manifest', () => {
     expect(read.audioEffects!.map(one => one.id)).toEqual(['c']);
   });
 
-  it('keeps one effect at a time: sorted, a later layer starting where the one before it ends', () => {
+  it('keeps the layers as they were stored, bottom to top, over the same time or not, ids made unique', () => {
     const read = normaliseManifest(withLayers(layer('late', 6000, 9000), layer('early', 1000, 7000), layer('inside', 2000, 6500), layer('dup', 9500, 9900), layer('dup', 9900, 12_000)));
     expect(read.audioEffects!.map(({ id, startMs, endMs }) => [id, startMs, endMs])).toEqual([
+      ['late', 6000, 9000],
       ['early', 1000, 7000],
-      ['late', 7000, 9000],
+      ['inside', 2000, 6500],
       ['dup', 9500, 9900],
       ['dup~', 9900, 12_000],
     ]);
+  });
+
+  it('keeps the bottom ones of a stack taller than the editor allows', () => {
+    const read = normaliseManifest(withLayers(...Array.from({ length: MAX_AUDIO_EFFECTS + 3 }, (_, i) => layer(`l${i}`, 0, 1000))));
+    expect(read.audioEffects).toHaveLength(MAX_AUDIO_EFFECTS);
+    expect(read.audioEffects![MAX_AUDIO_EFFECTS - 1]!.id).toBe(`l${MAX_AUDIO_EFFECTS - 1}`);
   });
 
   it('keeps a layer past the end of the post, which is not heard and comes back when the end does', () => {
@@ -150,39 +161,54 @@ describe('a version 17 draft, whose effects were on its sounds', () => {
     expect(read.audioEffects![0]).toMatchObject({ startMs: 1000, endMs: 3500 });
   });
 
-  it('reads the post’s one music the same way, and keeps the layers of two sounds apart', () => {
+  it('reads the post’s one music the same way, and stacks the layers of two sounds heard together', () => {
     const read = normaliseManifest(v17(post(), [{ ...sound('a', 2000, { loop: true, endMs: 8000 }), effect: 'megaphone' }], { ...sound('m', 0, { speed: 0.8 }), effect: 'slowReverb' }));
     expect(read.music).not.toHaveProperty('effect');
+    // The music's first, as it is read first, and each over the whole of where its sound was heard.
     expect(read.audioEffects!.map(({ startMs, endMs, effect }) => [startMs, endMs, effect])).toEqual([
       [0, 6250, 'slowReverb'],
-      [6250, 8000, 'megaphone'],
+      [2000, 8000, 'megaphone'],
     ]);
   });
 });
 
 describe('the layers as the editor changes them', () => {
-  it('adds a layer shortened to the room before the next one and the end of the post', () => {
+  it('adds a layer on top of the others, over them or not, held to the post', () => {
     const one = addAudioEffect(withLayers(layer('b', 8000, 9000)), layer('a', 2000, 20_000), TOTAL)!;
     expect(one.audioEffects!.map(({ id, startMs, endMs }) => [id, startMs, endMs])).toEqual([
-      ['a', 2000, 8000],
       ['b', 8000, 9000],
+      ['a', 2000, 20_000],
     ]);
     expect(addAudioEffect(post(), layer('a', 18_000, 40_000), TOTAL)!.audioEffects![0]!.endMs).toBe(TOTAL);
+    expect(addAudioEffect(post(), layer('a', -500, 1000), TOTAL)!.audioEffects![0]).toMatchObject({ startMs: 0, endMs: 1000 });
+    expect(addAudioEffect(post(), layer('a', 1000, 1010), TOTAL)!.audioEffects![0]).toMatchObject({ startMs: 1000, endMs: 1000 + MIN_LAYER_MS });
+    // The same effect again over the same time: the user's to choose.
+    const twice = addAudioEffect(withLayers(layer('a', 0, 5000, { effect: 'slowReverb' })), layer('b', 0, 5000, { effect: 'slowReverb' }), TOTAL)!;
+    expect(twice.audioEffects!.map(one => one.id)).toEqual(['a', 'b']);
   });
 
-  it('refuses a layer with no room, one inside another, a taken id and an effect this version has not got', () => {
+  it('refuses a layer the post has no room left for, a taken id, an effect this version has not got and one past the cap', () => {
     const edit = withLayers(layer('b', 8000, 9000));
-    expect(addAudioEffect(edit, layer('a', 8500, 12_000), TOTAL)).toBeNull();
-    expect(addAudioEffect(edit, layer('a', 8000 - MIN_LAYER_MS + 1, 12_000), TOTAL)).toBeNull();
+    expect(addAudioEffect(edit, layer('a', TOTAL - MIN_LAYER_MS + 1, TOTAL), TOTAL)).toBeNull();
     expect(addAudioEffect(edit, layer('b', 1000, 2000), TOTAL)).toBeNull();
     expect(addAudioEffect(edit, layer('a', 1000, 2000, { effect: 'robot' }), TOTAL)).toBeNull();
+    const full = withLayers(...Array.from({ length: MAX_AUDIO_EFFECTS }, (_, i) => layer(`l${i}`, 0, 1000)));
+    expect(addAudioEffect(full, layer('a', 0, 1000), TOTAL)).toBeNull();
   });
 
-  it('finds the layer under a moment, its end not included', () => {
-    const edit = withLayers(layer('a', 1000, 2000), layer('b', 2000, 3000));
-    expect(audioEffectAt(edit, 1000)?.id).toBe('a');
-    expect(audioEffectAt(edit, 2000)?.id).toBe('b');
-    expect(audioEffectAt(edit, 3000)).toBeNull();
+  it('moves a layer up and down the stack as a picture layer moves, the same edit where it already is', () => {
+    const edit = withLayers(layer('a', 0, 1000), layer('b', 0, 1000), layer('c', 0, 1000));
+    const order = (m: EditManifest) => m.audioEffects!.map(one => one.id).join('');
+    expect(order(moveAudioEffect(edit, 'a', 'forward'))).toBe('bac');
+    expect(order(moveAudioEffect(edit, 'a', 'front'))).toBe('bca');
+    expect(order(moveAudioEffect(edit, 'c', 'backward'))).toBe('acb');
+    expect(order(moveAudioEffect(edit, 'c', 'back'))).toBe('cab');
+    expect(moveAudioEffect(edit, 'c', 'forward')).toBe(edit);
+    expect(moveAudioEffect(edit, 'a', 'back')).toBe(edit);
+    expect(moveAudioEffect(edit, 'nope', 'front')).toBe(edit);
+    expect(order(moveAudioEffectTo(edit, 'c', 0))).toBe('cab');
+    expect(order(moveAudioEffectTo(edit, 'a', 9))).toBe('bca');
+    expect(moveAudioEffectTo(edit, 'b', 1)).toBe(edit);
   });
 
   it('starts another effect at its defaults, sliders and Slow alike', () => {
@@ -207,31 +233,43 @@ describe('the layers as the editor changes them', () => {
     expect(updateAudioEffect(edit, 'a', { speed: 0.7 }).audioEffects![0]!.speed).toBe(0.7);
   });
 
-  it('moves and retimes a layer between its neighbours, a whole one keeping its length', () => {
+  it('moves and retimes a layer over and under the others, held to the post, a whole one keeping its length', () => {
     const edit = withLayers(layer('a', 1000, 3000), layer('b', 5000, 7000), layer('c', 9000, 10_000));
     const window = (m: EditManifest) => m.audioEffects!.find(one => one.id === 'b')!;
     expect(window(setAudioEffectWindow(edit, 'b', 4000, 8000, TOTAL))).toMatchObject({ startMs: 4000, endMs: 8000 });
-    expect(window(setAudioEffectWindow(edit, 'b', 2000, 7000, TOTAL))).toMatchObject({ startMs: 3000, endMs: 7000 });
-    expect(window(setAudioEffectWindow(edit, 'b', 5000, 12_000, TOTAL))).toMatchObject({ startMs: 5000, endMs: 9000 });
-    expect(window(setAudioEffectWindow(edit, 'b', 8000, 10_000, TOTAL))).toMatchObject({ startMs: 7000, endMs: 9000 });
+    expect(window(setAudioEffectWindow(edit, 'b', 2000, 7000, TOTAL))).toMatchObject({ startMs: 2000, endMs: 7000 });
+    expect(window(setAudioEffectWindow(edit, 'b', 5000, 25_000, TOTAL))).toMatchObject({ startMs: 5000, endMs: TOTAL });
+    expect(window(setAudioEffectWindow(edit, 'b', 19_000, 21_000, TOTAL))).toMatchObject({ startMs: 18_000, endMs: TOTAL });
+    expect(window(setAudioEffectWindow(edit, 'b', -500, 1500, TOTAL))).toMatchObject({ startMs: 0, endMs: 2000 });
     expect(window(setAudioEffectWindow(edit, 'b', 5000, 5010, TOTAL))).toMatchObject({ startMs: 5000, endMs: 5000 + MIN_LAYER_MS });
+    // Its place in the stack goes with it.
+    expect(setAudioEffectWindow(edit, 'b', 1000, 3000, TOTAL).audioEffects!.map(one => one.id)).toEqual(['a', 'b', 'c']);
   });
 
-  it('puts a copy straight after a layer, shortened to the room there is, and none where there is no room', () => {
-    const edit = withLayers(layer('a', 1000, 3000), layer('c', 4000, 5000));
+  it('puts a copy straight after a layer in time and one above it in the stack, cut at the end of the post', () => {
+    const edit = withLayers(layer('a', 1000, 3000), layer('c', 2000, 5000));
     expect(duplicateAudioEffect(edit, 'a', 'b', TOTAL)!.audioEffects!.map(({ id, startMs, endMs }) => [id, startMs, endMs])).toEqual([
       ['a', 1000, 3000],
-      ['b', 3000, 4000],
-      ['c', 4000, 5000],
+      ['b', 3000, 5000],
+      ['c', 2000, 5000],
     ]);
-    expect(duplicateAudioEffect(withLayers(layer('a', 1000, 3000), layer('c', 3000, 5000)), 'a', 'b', TOTAL)).toBeNull();
+    expect(duplicateAudioEffect(withLayers(layer('a', 15_000, 19_000)), 'a', 'b', TOTAL)!.audioEffects![1]).toMatchObject({ startMs: 19_000, endMs: TOTAL });
   });
 
-  it('cuts a layer in two, both halves the same effect, and refuses a cut that leaves a sliver', () => {
+  it('makes no copy with no room left after the layer, under a taken id, or past the cap', () => {
+    expect(duplicateAudioEffect(withLayers(layer('a', 15_000, TOTAL - MIN_LAYER_MS + 1)), 'a', 'b', TOTAL)).toBeNull();
+    expect(duplicateAudioEffect(withLayers(layer('a', 1000, 3000), layer('c', 2000, 5000)), 'a', 'c', TOTAL)).toBeNull();
+    const full = withLayers(...Array.from({ length: MAX_AUDIO_EFFECTS }, (_, i) => layer(`l${i}`, 0, 1000)));
+    expect(duplicateAudioEffect(full, 'l0', 'b', TOTAL)).toBeNull();
+  });
+
+  it('cuts a layer in two, both halves the same effect where it was in the stack, and refuses a cut that leaves a sliver', () => {
     const edit = withLayers(layer('a', 1000, 3000, { effectSettings: { tone: 70 } }));
     expect(splitAudioEffect(edit, 'a', 2000, 'b')!.audioEffects).toEqual([layer('a', 1000, 2000, { effectSettings: { tone: 70 } }), layer('b', 2000, 3000, { effectSettings: { tone: 70 } })]);
     expect(splitAudioEffect(edit, 'a', 1050, 'b')).toBeNull();
     expect(splitAudioEffect(edit, 'a', 3500, 'b')).toBeNull();
+    const stack = withLayers(layer('x', 0, 5000), layer('a', 1000, 3000), layer('y', 0, 5000));
+    expect(splitAudioEffect(stack, 'a', 2000, 'b')!.audioEffects!.map(one => one.id)).toEqual(['x', 'a', 'b', 'y']);
   });
 
   it('deletes a layer, and the key with the last one', () => {
@@ -264,6 +302,15 @@ describe('the layers on the wire', () => {
       { startMs: 1000, endMs: 3000, effect: soundEffectSteps('megaphone', { intensity: 90 }) },
       { startMs: 4000, endMs: 9000, speed: 0.8, effect: soundEffectPreset('slowReverb')!.effect },
       { startMs: 9000, endMs: 10_000, speed: 0.6, effect: soundEffectPreset('slowReverb')!.effect },
+    ]);
+  });
+
+  it('sends the layers in the order they stack, whatever their times', async () => {
+    const sent = await spec(withLayers(layer('a', 5000, 9000), layer('b', 1000, 6000, { effect: 'slowReverb' }), layer('c', 1000, 6000, { effect: 'slowReverb', speed: 0.5 })));
+    expect(sent.audio.effects!.map(({ startMs, speed }) => [startMs, speed])).toEqual([
+      [5000, undefined],
+      [1000, 0.8],
+      [1000, 0.5],
     ]);
   });
 

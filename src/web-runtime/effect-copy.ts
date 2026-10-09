@@ -61,19 +61,27 @@ export interface EffectCopyFile {
 }
 
 /**
- * The windows that make one copy each: a window starts a new copy only [MAX_COPY_TAIL_MS] or more after
- * the one before it ends, so no copy rings on into another. Settled by where the windows are and by
- * nothing about their effects, so a slider never regroups them. In the order given, which is time.
+ * The windows that make one copy each, in time: a window starts a new copy only [MAX_COPY_TAIL_MS] or
+ * more after every window before it in time has ended, so no copy rings on into another, and windows
+ * stacked over the same moment always share one. Settled by where the windows are and by nothing
+ * about their effects, so a slider never regroups them. Each group keeps the order the windows were
+ * given in, which is the stack.
  */
 export function copyGroups<T extends Pick<ComposeAudioEffect, 'startMs' | 'endMs'>>(windows: readonly T[]): T[][] {
-  const groups: T[][] = [];
-  for (const window of windows) {
+  const byTime = windows.map((window, index) => ({ window, index })).sort((a, b) => a.window.startMs - b.window.startMs || a.index - b.index);
+  const groups: { window: T; index: number }[][] = [];
+  let reach = -Infinity;
+  for (const one of byTime) {
     const group = groups[groups.length - 1];
-    const last = group?.[group.length - 1];
-    if (group && last && window.startMs < last.endMs + MAX_COPY_TAIL_MS) group.push(window);
-    else groups.push([window]);
+    if (group && one.window.startMs < reach + MAX_COPY_TAIL_MS) {
+      group.push(one);
+      reach = Math.max(reach, one.window.endMs);
+    } else {
+      groups.push([one]);
+      reach = one.window.endMs;
+    }
   }
-  return groups;
+  return groups.map(group => group.sort((a, b) => a.index - b.index).map(one => one.window));
 }
 
 /**
@@ -83,9 +91,9 @@ export function copyGroups<T extends Pick<ComposeAudioEffect, 'startMs' | 'endMs
  */
 export async function makeEffectCopy(plan: RenderPlan, windows: readonly ComposeAudioEffect[], sources: CopySources, signal: AbortSignal): Promise<EffectCopyFile | null> {
   const rate = sources.sampleRate;
-  const first = windows[0];
-  if (!rate || !first) return null;
-  const start = frameAt(first.startMs, rate);
+  if (!rate || windows.length === 0) return null;
+  // The earliest window, wherever it is in the stack.
+  const start = Math.min(...windows.map(window => frameAt(window.startMs, rate)));
   const last = Math.ceil((plan.totalUs / 1_000_000) * rate);
   const to = Math.min(last, Math.max(...windows.map(window => frameAt(window.endMs, rate) + frameAt(copyTailMs(window.effect), rate))));
   // From the frame before the first layer, which a slowed one reads at its first frames.
@@ -119,10 +127,12 @@ export async function makeEffectCopy(plan: RenderPlan, windows: readonly Compose
  * layers does not.
  */
 export function copySoundKey(plan: RenderPlan, windows: readonly Pick<ComposeAudioEffect, 'startMs' | 'endMs'>[]): string {
-  const fromUs = Math.round((windows[0]?.startMs ?? 0) * 1000) - 1000;
+  const fromUs = Math.round((windows.length ? Math.min(...windows.map(window => window.startMs)) : 0) * 1000) - 1000;
   const toUs = Math.round((Math.max(0, ...windows.map(window => window.endMs)) + MAX_COPY_TAIL_MS) * 1000);
   const heard = (startUs: number, endUs: number): boolean => endUs > fromUs && startUs < toUs;
-  const parts: unknown[] = [windows.map(window => [Math.round(window.startMs), Math.round(window.endMs)]), plan.totalUs];
+  // Where the layers are, in time: their order in the stack is an effect of theirs, not the sound's.
+  const spans = windows.map(window => [Math.round(window.startMs), Math.round(window.endMs)]).sort((a, b) => a[0]! - b[0]! || a[1]! - b[1]!);
+  const parts: unknown[] = [spans, plan.totalUs];
   plan.clips.forEach((clip, i) => {
     const atUs = plan.prefixOutUs[i] ?? 0;
     if (!clip.removeAudio && heard(atUs, atUs + clip.outDurUs)) parts.push(['c', i, clip.clip.uri, clip.inUs, clip.outUs, clip.speed, clip.gain, atUs]);

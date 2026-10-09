@@ -65,8 +65,8 @@ export function createVideoKitMcpServer(options: VideoKitMcpServerOptions = {}):
       instructions:
         'This server builds and edits the video EditManifest that @capacitor-video-kit/core renders. A manifest ' +
         'is the whole of an edit: the clips and their trims, the video layers over them, the text, ' +
-        'stickers, photos and effects drawn on top, the sounds and voiceover and the audio effects they go ' +
-        'through, and the frame it all renders at.\n\n' +
+        'stickers, photos and effects drawn on top, the sounds and voiceover and the stack of audio effects ' +
+        'they go through, and the frame it all renders at.\n\n' +
         'Start with manifest_create, change it with manifest_edit, and read it back with ' +
         'manifest_inspect. Every tool returns a manifestId, so the manifest itself only has to be ' +
         'passed when it came from somewhere else. catalog_list is where the filter, effect, audio effect, ' +

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest } from '../../editor';
+import { MAX_LAYERS, emptyManifest, type EditManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import type { VideoEditorHost } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
@@ -288,10 +288,10 @@ describe('ve-toolbar', () => {
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
     store.closePanel();
 
-    // An audio effect layer: its sheet, and where it is on the post.
+    // An audio effect layer: its sheet, where it is in the stack and where it is on the post.
     const layer = store.addAudioEffectAtPlayhead('megaphone')!;
     await until('the audio effect row', () => label(bar) === 'Audio effect tools');
-    expect(ids(bar)).toEqual(['effects', 'split', 'duplicate', 'start-here', 'end-here', 'delete']);
+    expect(ids(bar)).toEqual(['effects', 'split', 'duplicate', 'forward', 'backward', 'front', 'back', 'start-here', 'end-here', 'delete']);
     tile(bar, 'effects').click();
     expect(store.panel.value).toBe('audioEffects');
     expect(store.selection.value).toEqual({ kind: 'audioEffect', id: layer });
@@ -559,8 +559,8 @@ describe('ve-toolbar', () => {
     expect(sound.getAttribute('aria-expanded')).toBe('false');
 
     sound.click();
-    await until('the menu', () => menuItems(bar).length === 4);
-    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Add sound', 'Audio effects', 'Sound effect', 'Voiceover']);
+    await until('the menu', () => menuItems(bar).length === 3);
+    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Add sound', 'Sound effects', 'Voiceover']);
     expect(tile(bar, 'sound').getAttribute('aria-expanded')).toBe('true');
     // A tap opened it, so the focus stays on the row: taking it would show a focus ring nobody
     // asked for, and the arrow keys are for the customer who did.
@@ -574,18 +574,18 @@ describe('ve-toolbar', () => {
     await until('the menu to close', () => menuItems(bar).length === 0);
 
     sound.click();
-    await until('the menu', () => menuItems(bar).length === 4);
+    await until('the menu', () => menuItems(bar).length === 3);
     press(root(bar).querySelector('.tb__menu')!, 'Escape');
     await until('the menu to close', () => menuItems(bar).length === 0);
     expect(store.soundMenuOpen.value).toBe(false);
     expect(root(bar).activeElement).toBe(tile(bar, 'sound'));
   });
 
-  it('opens the Audio effects sheet from the Sound menu, on the layer under the playhead when there is one', async () => {
+  it('opens the audio effects sheet from the Sound menu’s Sound effects to add a layer, over any already at the playhead', async () => {
     const { store, bar } = await mount();
     const open = async () => {
       tile(bar, 'sound').click();
-      await until('the menu', () => menuItems(bar).length === 4);
+      await until('the menu', () => menuItems(bar).length === 3);
       menuItems(bar)[1]!.click();
     };
     await open();
@@ -594,11 +594,96 @@ describe('ve-toolbar', () => {
     expect(store.selection.value).toBe(null);
     store.closePanel();
 
-    const layer = store.addAudioEffectAtPlayhead('megaphone')!;
+    // A layer under the playhead is changed from its own tools; from here the next one stacks on it.
+    store.addAudioEffectAtPlayhead('megaphone');
     store.select(null);
     await open();
     expect(store.panel.value).toBe('audioEffects');
-    expect(store.selection.value).toEqual({ kind: 'audioEffect', id: layer });
+    expect(store.selection.value).toBe(null);
+  });
+
+  it('opens a Video and Audio menu from Effects, each opening its own effects, and one menu at a time', async () => {
+    const { store, bar } = await mount();
+    const effects = tile(bar, 'effects');
+    expect(effects.getAttribute('aria-haspopup')).toBe('menu');
+    expect(effects.getAttribute('aria-expanded')).toBe('false');
+
+    effects.click();
+    await until('the menu', () => menuItems(bar).length === 2);
+    expect(root(bar).querySelector('.tb__menu')!.getAttribute('aria-label')).toBe('Effects');
+    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Video', 'Audio']);
+    expect(tile(bar, 'effects').getAttribute('aria-expanded')).toBe('true');
+    expect(tile(bar, 'effects').classList.contains('tile--pressed')).toBe(true);
+
+    // Sound's menu takes Effects' place rather than opening over it.
+    tile(bar, 'sound').click();
+    await until('the Sound menu', () => menuItems(bar).length === 3);
+    expect(store.effectsMenuOpen.value).toBe(false);
+    tile(bar, 'sound').click();
+    await until('no menu', () => menuItems(bar).length === 0);
+
+    // Video: the picture's effects, a layer each, as the tile opened them before it had a menu.
+    tile(bar, 'effects').click();
+    await until('the menu', () => menuItems(bar).length === 2);
+    menuItems(bar)[0]!.click();
+    expect(store.panel.value).toBe('effects');
+    expect(store.effectsMenuOpen.value).toBe(false);
+    store.closePanel();
+
+    // Audio: the same sheet as the Sound menu's Sound effects.
+    await until('the root row', () => label(bar) === 'Editing tools');
+    tile(bar, 'effects').click();
+    await until('the menu', () => menuItems(bar).length === 2);
+    menuItems(bar)[1]!.click();
+    expect(store.panel.value).toBe('audioEffects');
+    expect(store.selection.value).toBe(null);
+    expect(store.effectsMenuOpen.value).toBe(false);
+  });
+
+  it('dims the Effects menu’s Video at the layer cap, which still says why, and leaves Audio as it is', async () => {
+    const { store, bar } = await mount();
+    const [first] = store.manifest.value.overlays;
+    const overlays = Array.from({ length: MAX_LAYERS }, (_, i) => ({ ...first!, id: `full-${i}` }));
+    store.manifest.value = { ...store.manifest.value, overlays };
+    await until('the Effects tile still bright', () => !tile(bar, 'effects').classList.contains('tile--dim'));
+    tile(bar, 'effects').click();
+    await until('the menu', () => menuItems(bar).length === 2);
+    const [video, audio] = menuItems(bar);
+    expect(video!.getAttribute('aria-disabled')).toBe('true');
+    expect(audio!.hasAttribute('aria-disabled')).toBe(false);
+    video!.click();
+    expect(store.toast.value?.text).toBe(`You can add up to ${MAX_LAYERS} layers`);
+    expect(store.panel.value).toBe(null);
+  });
+
+  it('closes the Effects menu with Escape and gives the tile its focus back', async () => {
+    const { store, bar } = await mount();
+    tile(bar, 'effects').click();
+    await until('the menu', () => menuItems(bar).length === 2);
+    press(root(bar).querySelector('.tb__menu')!, 'Escape');
+    await until('the menu to close', () => menuItems(bar).length === 0);
+    expect(store.effectsMenuOpen.value).toBe(false);
+    expect(root(bar).activeElement).toBe(tile(bar, 'effects'));
+  });
+
+  it('moves an audio effect layer through the stack, the ends dimmed and saying why', async () => {
+    const { store, bar } = await mount();
+    const bottom = store.addAudioEffectAtPlayhead('megaphone')!;
+    const top = store.addAudioEffectAtPlayhead('slowReverb')!;
+    const order = () => (store.manifest.value.audioEffects ?? []).map(layer => layer.id);
+    await until('the audio effect row', () => label(bar) === 'Audio effect tools');
+    // The new one is on top: it cannot come forward.
+    expect(tile(bar, 'forward').getAttribute('aria-disabled')).toBe('true');
+    tile(bar, 'forward').click();
+    expect(store.toast.value?.text).toBe('Already on top');
+    tile(bar, 'back').click();
+    expect(order()).toEqual([top, bottom]);
+    tile(bar, 'front').click();
+    expect(order()).toEqual([bottom, top]);
+    tile(bar, 'backward').click();
+    expect(order()).toEqual([top, bottom]);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Send backward');
   });
 
   it('walks the row with the arrow keys', async () => {

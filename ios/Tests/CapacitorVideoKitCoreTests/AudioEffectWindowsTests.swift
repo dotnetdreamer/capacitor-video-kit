@@ -59,6 +59,44 @@ final class AudioEffectWindowsTests: RenderTestCase {
         AudioEffectWindow(startMs: 150, endMs: 190, speed: 1, effect: megaphone),
     ]
 
+    /// `STACKED_GOLDEN` in audio-effect-windows.unit.test.ts and `AudioEffectWindowsTest.kt`: on the same
+    /// fragment, three windows in an order their times do not follow - the megaphone over 60..170 ms at
+    /// the bottom, slow + reverb at 0.8x over 20..120 ms on it, and slow + reverb again at 0.7x over
+    /// 40..100 ms on top.
+    private static let stackedGolden: [(Int, Double, Double)] = [
+        (0, 0.0, 0.1438276618719101),
+        (959, -0.659309446811676, 0.046941254287958145),
+        (960, -0.5706338882446289, 0.03839000314474106),
+        (961, -0.4800061583518982, 0.029803428798913956),
+        (1500, -0.6783002614974976, -0.03017522394657135),
+        (1919, -0.4438980221748352, -0.07496683299541473),
+        (1920, -0.45043906569480896, -0.06907276809215546),
+        (1921, -0.4494432806968689, -0.06311457604169846),
+        (2400, 0.38878923654556274, -0.09857215732336044),
+        (2879, -0.2437334656715393, 0.02293088473379612),
+        (2880, -0.2360772043466568, 0.019143102690577507),
+        (3500, -0.18928048014640808, 0.03702017292380333),
+        (4000, 0.010632151737809181, 0.03684902563691139),
+        (4799, -0.08010885119438171, -0.035095661878585815),
+        (4800, -0.0975487008690834, -0.04343155398964882),
+        (5000, 0.11491679400205612, 0.09258368611335754),
+        (5759, 0.14631494879722595, 0.08428686112165451),
+        (5760, 0.12154743820428848, 0.05453965440392494),
+        (6500, 0.1746111661195755, 0.07624474167823792),
+        (7000, 0.24912786483764648, -0.013168036937713623),
+        (8159, -0.8366613388061523, 0.033284276723861694),
+        (8160, -0.7561161518096924, 0.02355377748608589),
+        (8500, -0.21113882958889008, 0.07811340689659119),
+        (9000, 0.14763520658016205, 0.23983116447925568),
+        (9599, -0.020595934242010117, 0.1534087210893631),
+    ]
+
+    private static let stackedWindows = [
+        AudioEffectWindow(startMs: 60, endMs: 170, speed: 1, effect: megaphone),
+        AudioEffectWindow(startMs: 20, endMs: 120, speed: 0.8, effect: room),
+        AudioEffectWindow(startMs: 40, endMs: 100, speed: 0.7, effect: room),
+    ]
+
     /// The fragment the sound effects' golden tests use, a fifth of a second of it, interleaved.
     private static func fragment(_ frames: Int = 9600) -> [Double] {
         var out = [Double](repeating: 0, count: frames * 2)
@@ -100,6 +138,34 @@ final class AudioEffectWindowsTests: RenderTestCase {
         for piece in [1, 7, 4096] {
             XCTAssertEqual(Self.run(Self.goldenWindows, input, piece: piece), whole, "in pieces of \(piece)")
         }
+    }
+
+    func testStackedWindowsMatchTheGoldenNumbersEveryEngineIsHeldTo() {
+        let out = Self.run(Self.stackedWindows, Self.fragment())
+        for (i, l, r) in Self.stackedGolden {
+            XCTAssertEqual(out[2 * i], l, accuracy: 5e-7, "left at \(i)")
+            XCTAssertEqual(out[2 * i + 1], r, accuracy: 5e-7, "right at \(i)")
+        }
+    }
+
+    func testStackedWindowsComeOutTheSameInPieces() {
+        let input = Self.fragment()
+        let whole = Self.run(Self.stackedWindows, input)
+        for piece in [1, 7, 4096] {
+            XCTAssertEqual(Self.run(Self.stackedWindows, input, piece: piece), whole, "in pieces of \(piece)")
+        }
+    }
+
+    func testWindowsOverTheSameTimeStackALaterOneOnWhatAnEarlierOneMade() {
+        let half = SoundEffect(mono: false, ops: [.gain(db: -6.020599913279624)])
+        let flat = [Double](repeating: 0.8, count: Int(Self.rate) * 2)
+        let out = Self.run([
+            AudioEffectWindow(startMs: 100, endMs: 600, speed: 1, effect: half),
+            AudioEffectWindow(startMs: 300, endMs: 500, speed: 1, effect: half),
+        ], flat)
+        XCTAssertEqual(out[2 * 9600], 0.4, accuracy: 5e-7)
+        XCTAssertEqual(out[2 * 19200], 0.2, accuracy: 5e-7)
+        XCTAssertEqual(out[2 * 26400], 0.4, accuracy: 5e-7)
     }
 
     func testLeavesEveryFrameOutsideAWindowAndItsTailAsItWas() {
@@ -159,11 +225,18 @@ final class AudioEffectWindowsTests: RenderTestCase {
         assertRefused([["startMs": 0, "endMs": 900, "effect": ["ops": Array(repeating: ["op": "gain", "db": 1] as [String: Any], count: 17)] as [String: Any]] as [String: Any]],
                       "audio.effects[0].effect.ops", message: "invalid_spec:audio.effects[0].effect.ops at most 16 steps")
         assertRefused([["startMs": 0, "endMs": 900, "effect": gain, "volume": 1, "layer": 2] as [String: Any]], "audio.effects[0].layer")
-        assertRefused([["startMs": 0, "endMs": 900, "effect": gain] as [String: Any], ["startMs": 800, "endMs": 1000, "effect": gain] as [String: Any]],
-                      "audio.effects[1].startMs")
-        // A window's own fields come before where it sits.
         assertRefused([["startMs": 0, "endMs": 900, "effect": gain] as [String: Any], ["startMs": 800, "endMs": "b"] as [String: Any]],
                       "audio.effects[1].endMs")
+    }
+
+    func testWindowsOverTheSameTimeStackInTheOrderTheyCame() throws {
+        let effects = try TestCalls.parse(spec([
+            ["startMs": 500, "endMs": 1000, "effect": gain] as [String: Any],
+            ["startMs": 0, "endMs": 900, "speed": 0.8, "effect": gain] as [String: Any],
+            ["startMs": 0, "endMs": 900, "speed": 0.8, "effect": gain] as [String: Any],
+        ])).audio.effects
+        XCTAssertEqual(effects.map(\.startMs), [500, 0, 0])
+        XCTAssertEqual(effects.map(\.speed), [1, 0.8, 0.8])
     }
 
     // MARK: - The render

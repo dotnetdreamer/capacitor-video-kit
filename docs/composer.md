@@ -105,11 +105,14 @@ The web stretches each pass with the SOLA the clips use, together with the first
 after it, so a loop has no gap at its seams.
 
 **An audio effect is a layer over the finished mix.** `ComposeAudio.effects` is a list of windows
-of the output, one at a time, and each puts everything heard in it - every clip's own sound, every
-sound on every lane, every voiceover - through one effect together, and nothing outside it but the
-tail its steps leave ringing. That is the editor's audio effect layer (`EditManifest.audioEffects`):
-it belongs to the time it covers rather than to a sound, so many sounds go through one megaphone by
-being put under it. A window comes in and goes out over 30 ms, so neither edge clicks, and a window
+of the output, and each puts everything heard in it - every clip's own sound, every sound on every
+lane, every voiceover - through one effect together, and nothing outside it but the tail its steps
+leave ringing. That is the editor's audio effect layer (`EditManifest.audioEffects`): it belongs to
+the time it covers rather than to a sound, so many sounds go through one megaphone by being put
+under it. Layers STACK, as the picture's layers do: the list runs bottom to top, any number of
+windows may cover the same moment, and each runs on what the ones before it left - a megaphone over
+slow + reverb puts the slowed room through the megaphone, and two slowed 0.8x play that stretch at
+0.64x. A window comes in and goes out over 30 ms, so neither edge clicks, and a window
 with a `speed` under 1 plays the mix from its start slower and lower, as a record, and goes back to
 where the timeline is at its end - slow + reverb's slowness. Every engine runs the windows on the mix
 after it is summed and held to -1..1: Android as one composition-level audio processor after Media3's
@@ -137,8 +140,9 @@ handed a filter, and the preview never adds its sounds together, so it plays a c
 sound under each layer made by the same TypeScript (`src/web-runtime/effect-copy.ts`): the web
 render's mix over the window and as much of the tail as is heard, through the window, written as a
 32 kHz WAV on the post's timeline. While the playhead is inside a copy every sound it covers plays on
-muted, the clips' own included, so each is where the post is when the copy ends. Layers close enough
-for one to ring into the next share a copy. A slider let go has a new copy made once the edit is
+muted, the clips' own included, so each is where the post is when the copy ends. Layers stacked over
+the same time, or close enough for one to ring into the next, share a copy, made through them in the
+order they stack. A slider let go, or the layers restacked, has a new copy made once the edit is
 still for a quarter of a second, and the copy it had plays until the new one lands; an edit to what
 is under the layer takes its copy away at once, and the sounds play as they are until the new one
 is made.

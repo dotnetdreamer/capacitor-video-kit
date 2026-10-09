@@ -239,7 +239,8 @@
 }
 
 /*
- * `--tb-menu-x` is written by the component from where the Sound tile actually is, because the tile
+ * `--tb-menu-x` is written by the component from where the tile that opened the menu actually is -
+ * Sound's or Effects' - because the tile
  * moves: the row centres itself, so on a wide screen the tile is nowhere near this host's left edge
  * and a menu pinned to it opened a screen's width away from the button that was pressed. The
  * fallback is the phone's old position, and it is also what is used if the tile cannot be measured.
@@ -293,6 +294,11 @@
 
 .tb__menu-item:active {
   background: var(--ve-raised-2, #3a3a3c);
+}
+
+/* An item that cannot do anything now, at a tile's dimmed strength: it still answers a tap. */
+.tb__menu-item--dim {
+  opacity: 0.4;
 }
 
 /* ------------------------------------------------------------------------------------- mouse */

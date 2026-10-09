@@ -790,11 +790,11 @@ object ComposeSpecParser {
      * REFUSED, as shape errors: `effects` that is there and is not an array, more than
      * [AudioEffectWindow.MAX_WINDOWS] windows, and then each window's own: not an object, a `startMs` or
      * an `endMs` that is missing or not a finite JSON number, an `endMs` not after the start, a `speed`
-     * that is there and not finite, an `effect` [parseSoundEffect] refuses, a key nobody defined (the
-     * alphabetically first), and a start before the end of the window before it. CLAMPED: the start to
-     * 0 and up - before `endMs` is checked against it - and the speed to
-     * [AudioEffectWindow.MIN_SPEED]..1. Left OUT: a window with no steps and a speed of 1, which would
-     * change nothing - but it still holds its place, and the next window may not start inside it.
+     * that is there and not finite, an `effect` [parseSoundEffect] refuses, and a key nobody defined
+     * (the alphabetically first). Windows over the same time are not refused: they stack, in the order
+     * they came. CLAMPED: the start to 0 and up - before `endMs` is checked against it - and the speed
+     * to [AudioEffectWindow.MIN_SPEED]..1. Left OUT: a window with no steps and a speed of 1, which
+     * would change nothing.
      */
     private fun parseAudioEffects(value: Any?): List<AudioEffectWindow> {
         if (value == null || value == JSONObject.NULL) return emptyList()
@@ -806,7 +806,6 @@ object ComposeSpecParser {
             )
         }
         val kept = ArrayList<AudioEffectWindow>(list.length())
-        var previousEndMs = Double.NEGATIVE_INFINITY
         for (i in 0 until list.length()) {
             val path = "audio.effects[$i]"
             val o = list.opt(i) as? JSONObject ?: throw SpecException(path)
@@ -821,8 +820,6 @@ object ComposeSpecParser {
             }
             val effect = parseSoundEffect(o.opt("effect"), "$path.effect")
             firstUnknownKey(o, AUDIO_EFFECT_KEYS)?.let { throw SpecException("$path.$it") }
-            if (start < previousEndMs) throw SpecException("$path.startMs")
-            previousEndMs = endMs
             if (effect == null && speed == 1.0) continue
             kept += AudioEffectWindow(start, endMs, speed, effect)
         }

@@ -32,15 +32,15 @@ const WINDOW_KEYS: readonly string[] = ['effect', 'endMs', 'speed', 'startMs'];
 
 /**
  * A window list made safe to run, by the rules [ComposeAudioEffect] states: a NEW array of new windows
- * in the order they came, every number held to its range, and a window that would change nothing left
- * out. Empty for none. Throws [AudioEffectWindowError] for a list no engine could play.
+ * in the order they came - the order they stack in, whatever their times - every number held to its
+ * range, and a window that would change nothing left out. Empty for none. Throws
+ * [AudioEffectWindowError] for a list no engine could play.
  */
 export function normaliseAudioEffectWindows(value: unknown): ComposeAudioEffect[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new AudioEffectWindowError('');
   if (value.length > MAX_AUDIO_EFFECTS) throw new AudioEffectWindowError('', ` at most ${MAX_AUDIO_EFFECTS} windows`);
   const kept: ComposeAudioEffect[] = [];
-  let previousEndMs = -Infinity;
   value.forEach((raw: unknown, i) => {
     const at = `[${i}]`;
     if (!isRecord(raw)) throw new AudioEffectWindowError(at);
@@ -67,8 +67,6 @@ export function normaliseAudioEffectWindows(value: unknown): ComposeAudioEffect[
       .filter(key => !WINDOW_KEYS.includes(key))
       .sort()[0];
     if (unknown !== undefined) throw new AudioEffectWindowError(`${at}.${unknown}`);
-    if (start < previousEndMs) throw new AudioEffectWindowError(`${at}.startMs`);
-    previousEndMs = endMs;
     if (!effect && speed === 1) return;
     kept.push({ startMs: start, endMs, ...(speed !== 1 ? { speed } : {}), ...(effect ? { effect } : {}) });
   });
@@ -93,9 +91,9 @@ export function frameAt(ms: number, sampleRate: number): number {
 /**
  * Every window of a list running on a stream of sound: [ComposeAudioEffect]'s arithmetic, frame for
  * frame. The stream comes in order, in pieces of any size, and leaves exactly as it would in one; the
- * first frame of the first piece is output frame `firstFrame`. Each window is run on what the one
- * before it left, and keeps what it has not yet read of that - for a slowed window, what it has fallen
- * behind.
+ * first frame of the first piece is output frame `firstFrame`. Each window is run on what the ones
+ * before it in the list left - where they cover the same frames, that is the stack - and keeps what
+ * it has not yet read of that: for a slowed window, what it has fallen behind.
  */
 export class AudioEffectRunner {
   private readonly stages: WindowStage[];

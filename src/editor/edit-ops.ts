@@ -1226,48 +1226,39 @@ function sortedZooms(zooms: EditZoom[]): EditZoom[] {
 }
 
 /*
- * Audio effect layers are one row with one effect at a time, so these keep the list the way
- * [EditManifest.audioEffects] promises it - sorted, never overlapping - as the zooms' ops keep theirs:
- * two windows that overlapped would put a moment through two effects in an order nothing chose. They
- * sit on the OUTPUT timeline, like the zooms: no clip or sound op moves them, and only [cutPostTo]
- * cuts them.
+ * Audio effect layers stack as the picture's layers do: [EditManifest.audioEffects] runs bottom to top,
+ * and where two cover the same moment the upper one works on what the lower one made - a megaphone
+ * over slow + reverb puts the slowed room through the megaphone. Any number may cover a moment, the
+ * same effect again included, and each moves on its own: nothing here keeps them apart, and the order
+ * is changed only on purpose ([moveAudioEffect]). They sit on the OUTPUT timeline, like the zooms: no
+ * clip or sound op moves them, and only [cutPostTo] cuts them.
  */
 
 export function findAudioEffect(manifest: EditManifest, id: string): EditAudioEffect | null {
   return manifest.audioEffects?.find(layer => layer.id === id) ?? null;
 }
 
-/** The layer whose window holds `outputMs` - there is at most one. */
-export function audioEffectAt(manifest: EditManifest, outputMs: number): EditAudioEffect | null {
-  return manifest.audioEffects?.find(layer => outputMs >= layer.startMs && outputMs < layer.endMs) ?? null;
-}
-
 /**
- * How long a layer starting at `startMs` may run before it would reach the next layer or the end of the
- * post. 0 when `startMs` is inside a layer. The [zoomRoomAt] rule, for the same one-row reason.
- */
-export function audioEffectRoomAt(manifest: EditManifest, startMs: number, totalMs: number, ignoreId?: string): number {
-  const layers = (manifest.audioEffects ?? []).filter(layer => layer.id !== ignoreId);
-  if (layers.some(layer => startMs >= layer.startMs && startMs < layer.endMs)) return 0;
-  const next = layers.filter(layer => layer.startMs >= startMs).sort((a, b) => a.startMs - b.startMs)[0];
-  return Math.max(0, Math.min(next ? next.startMs : totalMs, totalMs) - startMs);
-}
-
-/**
- * Adds a layer, SHORTENED to the room it has before the next layer and the end of the post, as
- * [addZoom] does. Null at [MAX_AUDIO_EFFECTS], for an id already in use, for an effect this version does
- * not know, and when less than [MIN_LAYER_MS] fits.
+ * Adds a layer on top of the others, wherever they are, cut at the end of the post and never under
+ * [MIN_LAYER_MS]. Null at [MAX_AUDIO_EFFECTS], for an id already in use, for an effect this version
+ * does not know, and for a start too near the end of the post for [MIN_LAYER_MS] to fit.
  */
 export function addAudioEffect(manifest: EditManifest, layer: EditAudioEffect, totalMs: number): EditManifest | null {
   const layers = manifest.audioEffects ?? [];
   if (layers.length >= MAX_AUDIO_EFFECTS || findAudioEffect(manifest, layer.id)) return null;
-  const startMs = Math.max(0, Math.round(layer.startMs));
-  const room = audioEffectRoomAt(manifest, startMs, totalMs);
-  if (room < MIN_LAYER_MS) return null;
-  const length = clamp(Math.round(layer.endMs - layer.startMs), MIN_LAYER_MS, room);
-  const placed = normaliseAudioEffect({ ...layer, startMs, endMs: startMs + length }, layer.id);
-  if (!placed) return null;
-  return { ...manifest, audioEffects: sortedAudioEffects([...layers, placed]) };
+  const placed = placedAudioEffect(layer, Math.round(layer.startMs), Math.round(layer.endMs), totalMs);
+  return placed ? { ...manifest, audioEffects: [...layers, placed] } : null;
+}
+
+/**
+ * `layer` from `startMs` to `endMs`, held to the post: never before 0, cut at its end, and at least
+ * [MIN_LAYER_MS] long. Null where the post has no [MIN_LAYER_MS] left after `startMs`, or for an
+ * effect [normaliseAudioEffect] does not keep.
+ */
+function placedAudioEffect(layer: EditAudioEffect, startMs: number, endMs: number, totalMs: number): EditAudioEffect | null {
+  const start = Math.max(0, startMs);
+  if (totalMs - start < MIN_LAYER_MS) return null;
+  return normaliseAudioEffect({ ...layer, startMs: start, endMs: clamp(endMs, start + MIN_LAYER_MS, totalMs) }, layer.id);
 }
 
 /** What a layer is, apart from where it is: [setAudioEffectWindow] owns the timing. */
@@ -1305,46 +1296,77 @@ export function setAudioEffectSetting(manifest: EditManifest, id: string, key: s
 }
 
 /**
- * Sets when a layer runs, keeping it at least [MIN_LAYER_MS] long and between its neighbours and the
- * end of the post: [setZoomWindow]'s rules, neighbours found from where the layer IS so a drag stops at
- * the next one instead of jumping it, a window dragged whole keeping its length.
+ * Sets when a layer runs, held to the post and at least [MIN_LAYER_MS] long, whatever else covers that
+ * time: [setZoomWindow]'s rules with the whole post for room, a window dragged whole keeping its length.
+ * Its place in the stack stays where it is.
  */
 export function setAudioEffectWindow(manifest: EditManifest, id: string, startMs: number, endMs: number, totalMs: number): EditManifest {
   const layer = findAudioEffect(manifest, id);
-  if (!layer) return manifest;
-  const others = manifest.audioEffects!.filter(other => other.id !== id);
-  const before = others.filter(other => other.endMs <= layer.startMs).sort((a, b) => b.endMs - a.endMs)[0];
-  const after = others.filter(other => other.startMs >= layer.endMs).sort((a, b) => a.startMs - b.startMs)[0];
-  const lo = before ? before.endMs : 0;
-  const hi = after ? after.startMs : Math.max(totalMs, lo);
-  if (hi - lo < MIN_LAYER_MS) return manifest;
-  const [start, end] = clampSpan(startMs, endMs, lo, hi, layer.startMs, layer.endMs, MIN_LAYER_MS);
+  if (!layer || totalMs < MIN_LAYER_MS) return manifest;
+  const [start, end] = clampSpan(startMs, endMs, 0, totalMs, layer.startMs, layer.endMs, MIN_LAYER_MS);
   if (start === layer.startMs && end === layer.endMs) return manifest;
-  return { ...manifest, audioEffects: sortedAudioEffects(manifest.audioEffects!.map(other => (other.id === id ? { ...layer, startMs: start, endMs: end } : other))) };
+  return { ...manifest, audioEffects: manifest.audioEffects!.map(other => (other.id === id ? { ...layer, startMs: start, endMs: end } : other)) };
 }
 
 /**
- * A copy placed straight after the original, as long as it where there is room and shortened where
- * there is less ([duplicateZoom]). Null when less than [MIN_LAYER_MS] fits there, or at the cap.
+ * A copy straight after the original in time, as long as it and cut at the end of the post, one place
+ * above it in the stack as a picture layer's copy is ([duplicateOverlay]). Null when less than
+ * [MIN_LAYER_MS] of the post is left after the original, at the cap, or for an id already in use.
  */
 export function duplicateAudioEffect(manifest: EditManifest, id: string, newId: string, totalMs: number): EditManifest | null {
-  const layer = findAudioEffect(manifest, id);
-  if (!layer) return null;
-  return addAudioEffect(manifest, { ...layer, id: newId, startMs: layer.endMs, endMs: layer.endMs + (layer.endMs - layer.startMs) }, totalMs);
+  const layers = manifest.audioEffects ?? [];
+  const index = layers.findIndex(layer => layer.id === id);
+  if (index < 0 || layers.length >= MAX_AUDIO_EFFECTS || findAudioEffect(manifest, newId)) return null;
+  const layer = layers[index]!;
+  const copy = placedAudioEffect({ ...layer, id: newId }, layer.endMs, layer.endMs + (layer.endMs - layer.startMs), totalMs);
+  if (!copy) return null;
+  const audioEffects = [...layers];
+  audioEffects.splice(index + 1, 0, copy);
+  return { ...manifest, audioEffects };
 }
 
 /**
  * A layer cut in two at `atMs`, the second half `newId`, both the effect the layer was - so one half
- * can be given another. Null when either half would be under [MIN_LAYER_MS], at the cap, or for an id
- * already in use.
+ * can be given another - and both where the layer was in the stack, the second just above the first,
+ * as a picture layer's halves are ([splitOverlayAt]). Null when either half would be under
+ * [MIN_LAYER_MS], at the cap, or for an id already in use.
  */
 export function splitAudioEffect(manifest: EditManifest, id: string, atMs: number, newId: string): EditManifest | null {
-  const layer = findAudioEffect(manifest, id);
   const layers = manifest.audioEffects ?? [];
-  if (!layer || layers.length >= MAX_AUDIO_EFFECTS || findAudioEffect(manifest, newId)) return null;
+  const index = layers.findIndex(layer => layer.id === id);
+  if (index < 0 || layers.length >= MAX_AUDIO_EFFECTS || findAudioEffect(manifest, newId)) return null;
+  const layer = layers[index]!;
   const cut = Math.round(atMs);
   if (cut - layer.startMs < MIN_LAYER_MS || layer.endMs - cut < MIN_LAYER_MS) return null;
-  return { ...manifest, audioEffects: sortedAudioEffects([...layers.filter(one => one.id !== id), { ...layer, endMs: cut }, { ...layer, id: newId, startMs: cut }]) };
+  const audioEffects = [...layers];
+  audioEffects.splice(index, 1, { ...layer, endMs: cut }, { ...layer, id: newId, startMs: cut });
+  return { ...manifest, audioEffects };
+}
+
+/**
+ * Changes where a layer is in the stack, as [moveLayer] changes a picture layer's: `front` is the top,
+ * which works on what every layer under it made. The same manifest when it is already there.
+ */
+export function moveAudioEffect(manifest: EditManifest, id: string, move: LayerMove): EditManifest {
+  const layers = manifest.audioEffects ?? [];
+  const from = layers.findIndex(layer => layer.id === id);
+  if (from < 0) return manifest;
+  const last = layers.length - 1;
+  const to = move === 'forward' ? Math.min(last, from + 1) : move === 'backward' ? Math.max(0, from - 1) : move === 'front' ? last : 0;
+  return moveAudioEffectTo(manifest, id, to);
+}
+
+/** Puts a layer at an exact place in the stack, 0 being the bottom, as [moveLayerTo] does a picture layer. */
+export function moveAudioEffectTo(manifest: EditManifest, id: string, toIndex: number): EditManifest {
+  const layers = manifest.audioEffects ?? [];
+  const from = layers.findIndex(layer => layer.id === id);
+  if (from < 0) return manifest;
+  const to = clamp(Math.round(toIndex), 0, layers.length - 1);
+  if (to === from) return manifest;
+  const audioEffects = [...layers];
+  const [moved] = audioEffects.splice(from, 1);
+  audioEffects.splice(to, 0, moved!);
+  return { ...manifest, audioEffects };
 }
 
 export function deleteAudioEffect(manifest: EditManifest, id: string): EditManifest {
@@ -1354,10 +1376,6 @@ export function deleteAudioEffect(manifest: EditManifest, id: string): EditManif
   if (audioEffects.length > 0) return { ...manifest, audioEffects };
   const { audioEffects: _gone, ...rest } = manifest;
   return rest;
-}
-
-function sortedAudioEffects(layers: EditAudioEffect[]): EditAudioEffect[] {
-  return [...layers].sort((a, b) => a.startMs - b.startMs);
 }
 
 function sameAudioEffect(a: EditAudioEffect, b: EditAudioEffect): boolean {

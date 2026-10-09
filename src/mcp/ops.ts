@@ -21,9 +21,10 @@
  *
  *  - An op the editor answers with `null` - the capacity limits, the moves that cannot be made -
  *    throws with the reason spelled out rather than the `null`, because `null` arriving at an agent
- *    is a value it will try to edit. So does the one refusal the editor answers with the manifest
- *    unchanged instead, the music's: a section or a stop under [MIN_LAYER_MS] is not kept, and an
- *    unchanged manifest reads to an agent exactly like the success it was not.
+ *    is a value it will try to edit. So do the refusals the editor answers with the manifest
+ *    unchanged instead - the music's, a section or a stop under [MIN_LAYER_MS] not kept, and an
+ *    audio effect layer moved past the end of its stack - because an unchanged manifest reads to an
+ *    agent exactly like the success it was not.
  *
  * `totalMs` is never taken from the caller. Three ops need it, and it is a function of the manifest
  * ([totalDurationMs]) rather than a choice, so an agent passing its own would be passing a number
@@ -83,6 +84,8 @@ import {
   deleteAudioEffect,
   duplicateAudioEffect,
   findAudioEffect,
+  moveAudioEffect,
+  moveAudioEffectTo,
   setAudioEffectWindow,
   splitAudioEffect,
   updateAudioEffect,
@@ -716,25 +719,20 @@ function layerTimeOf(raw: Record<string, unknown>, path: string, key: string): n
 }
 
 /**
- * Why no layer fits at `atMs`, naming what is in the way: [audioEffectRoomAt]'s rule, said rather than
- * made - the layer it would start inside, the next one, or the end of the post.
+ * Why layer `id` cannot start at `startMs`: the post ends too soon after it for [MIN_LAYER_MS] to fit.
+ * The one place a layer is refused for where it is. Layers stack, so whatever else covers that time
+ * is never in the way: the layer goes over it or under it.
  */
-function audioEffectBlocker(manifest: EditManifest, atMs: number, totalMs: number): string {
-  const at = Math.max(0, Math.round(atMs));
-  const layers = manifest.audioEffects ?? [];
-  const inside = layers.find(layer => at >= layer.startMs && at < layer.endMs);
-  if (inside) return `"${inside.id}" runs ${inside.startMs}ms..${inside.endMs}ms there, and one audio effect is heard at a time`;
-  const next = layers.filter(layer => layer.startMs >= at).sort((a, b) => a.startMs - b.startMs)[0];
-  return `${next && next.startMs < totalMs ? `"${next.id}" starts at ${next.startMs}ms` : `the post ends at ${totalMs}ms`}, and a layer runs at least ${MIN_LAYER_MS}ms`;
+function startsTooLate(id: string, startMs: number, totalMs: number): string {
+  return `"${id}" cannot start at ${startMs}ms - the post ends at ${Math.round(totalMs)}ms, and a layer runs at least ${MIN_LAYER_MS}ms`;
 }
 
 /**
  * A layer moved or trimmed to the window a patch asks for, by the timeline's own drag
- * ([setAudioEffectWindow]), and refused wherever that drag would put it somewhere else: into or past
- * the layer either side, where it stops; under [MIN_LAYER_MS], which it stretches; or so late that
- * the post hears less than that. Past the end of the post it ends there, as the drag and an add end
- * it. The neighbours are the drag's, found from where the layer IS - which is why a window beyond the
- * next layer is refused rather than reached: no drag gets there.
+ * ([setAudioEffectWindow]), and refused wherever that drag would put it somewhere else: under
+ * [MIN_LAYER_MS], which it stretches, or so late that the post hears less than that. Past the end of
+ * the post it ends there, as the drag and an add end it. Whatever other layers cover the time it moves
+ * to stay as they are: it goes over or under each by its place in the stack, which no window changes.
  */
 function audioEffectWindowed(manifest: EditManifest, layer: EditAudioEffect, patch: Record<string, unknown>): EditManifest {
   const totalMs = totalDurationMs(manifest);
@@ -742,23 +740,20 @@ function audioEffectWindowed(manifest: EditManifest, layer: EditAudioEffect, pat
   const start = Math.round(patch['startMs'] !== undefined ? layerTimeOf(patch, 'patch', 'startMs') : layer.startMs);
   const end = Math.min(Math.round(patch['endMs'] !== undefined ? layerTimeOf(patch, 'patch', 'endMs') : layer.endMs), totalMs);
   if (end - start < MIN_LAYER_MS) {
-    throw new Error(
-      start > totalMs - MIN_LAYER_MS
-        ? `"${id}" cannot start at ${start}ms - the post ends at ${totalMs}ms, and a layer runs at least ${MIN_LAYER_MS}ms`
-        : `"${id}" would run ${start}ms..${end}ms, and a layer runs at least ${MIN_LAYER_MS}ms`,
-    );
+    throw new Error(start > totalMs - MIN_LAYER_MS ? startsTooLate(id, start, totalMs) : `"${id}" would run ${start}ms..${end}ms, and a layer runs at least ${MIN_LAYER_MS}ms`);
   }
-  const others = (manifest.audioEffects ?? []).filter(other => other.id !== id);
-  const before = others.filter(other => other.endMs <= layer.startMs).sort((a, b) => b.endMs - a.endMs)[0];
-  const after = others.filter(other => other.startMs >= layer.endMs).sort((a, b) => a.startMs - b.startMs)[0];
-  const blocked = (other: EditAudioEffect, past: boolean, edge: string): string =>
-    past
-      ? `"${id}" cannot move past "${other.id}" (${other.startMs}ms..${other.endMs}ms) - a layer moves only between the layers either side of it, ` +
-        'as on the timeline; remove it and add it again there instead'
-      : `"${id}" cannot ${edge} - "${other.id}" runs ${other.startMs}ms..${other.endMs}ms, and one audio effect is heard at a time`;
-  if (before && start < before.endMs) throw new Error(blocked(before, end <= before.startMs, `start at ${start}ms`));
-  if (after && end > after.startMs) throw new Error(blocked(after, start >= after.endMs, `end at ${end}ms`));
   return setAudioEffectWindow(manifest, id, start, end, totalMs);
+}
+
+/**
+ * Why `move` leaves layer `id` where it is: it is already at the end of the stack the move goes to.
+ * [moveAudioEffect] answers that with the post as it was, and the editor greys the button out and says
+ * "Already on top"; an agent is told which end, and that nothing is past it.
+ */
+function stackEndRefusal(manifest: EditManifest, id: string, move: LayerMove): string {
+  const up = move === 'forward' || move === 'front';
+  const why = (manifest.audioEffects ?? []).length === 1 ? 'it is the only audio effect on this post' : `no audio effect is ${up ? 'above' : 'under'} it in the stack`;
+  return `"${id}" is already ${up ? 'on top' : 'at the bottom'} - ${why}`;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1278,10 +1273,11 @@ const OPS: Record<string, Apply> = {
 
   /*
    * The Audio effects sheet's tile, which adds a layer at the playhead running to the end of the post:
-   * here from `startMs`, and to `endMs` when the op gives one. SHORTENED to the room before the next
-   * layer and the end of the post, as the editor's add is and as `addZoom` is, and refused, naming
-   * what is in the way, when less than [MIN_LAYER_MS] fits at `startMs`. A window the op gives under
-   * [MIN_LAYER_MS] is refused rather than stretched: `endMs` 0 is not "until the end" here.
+   * here from `startMs`, and to `endMs` when the op gives one. On TOP of the stack, over whatever
+   * other layers cover that time, as the editor's add puts it and as `addText` puts a picture layer;
+   * cut at the end of the post, and refused, saying where the post ends, only when that is less than
+   * [MIN_LAYER_MS] after `startMs`. A window the op gives under [MIN_LAYER_MS] is refused rather than
+   * stretched: `endMs` 0 is not "until the end" here.
    */
   addAudioEffect: (manifest, op) => {
     const id = str(op, 'id');
@@ -1303,8 +1299,9 @@ const OPS: Record<string, Apply> = {
       ...(given('effectSettings') ? { effectSettings: effectSettingsOf(op, '', preset) } : {}),
       ...(given('speed') ? { speed: slowOf(op, '', preset) } : {}),
     };
+    // Its id, the cap and its effect are all checked above, so the start is all the editor can refuse.
     const next = addAudioEffect(manifest, layer, totalMs);
-    if (!next) throw new Error(`there is no room for an audio effect at ${Math.round(startMs)}ms - ${audioEffectBlocker(manifest, startMs, totalMs)}`);
+    if (!next) throw new Error(startsTooLate(id, Math.round(startMs), totalMs));
     return next;
   },
 
@@ -1312,8 +1309,9 @@ const OPS: Record<string, Apply> = {
    * The sheet and the timeline's drag on one layer. Another `effect` comes on at its defaults, sliders
    * and Slow alike, unless the patch sets them ([updateAudioEffect]); `effectSettings` moves the
    * sliders it names and leaves the rest where they are, as the sheet's sliders do
-   * ([setAudioEffectSetting]); the window is [audioEffectWindowed]'s. Any other field is refused, and
-   * so is null, as `patchMusic` refuses them.
+   * ([setAudioEffectSetting]); the window is [audioEffectWindowed]'s, anywhere on the post, and the
+   * layer keeps its place in the stack, which only `moveAudioEffect` and `moveAudioEffectTo` change.
+   * Any other field is refused, and so is null, as `patchMusic` refuses them.
    */
   patchAudioEffect: (manifest, op) => {
     const id = str(op, 'id');
@@ -1337,7 +1335,13 @@ const OPS: Record<string, Apply> = {
     return has('startMs') || has('endMs') ? audioEffectWindowed(next, findAudioEffect(next, id)!, patch) : next;
   },
 
-  /* The layer's Cut and Duplicate, by the very functions its buttons call. */
+  /*
+   * The layer's Cut and Duplicate, by the very functions its buttons call. Both halves of a cut stay
+   * where the layer was in the stack, the second just above the first; a copy goes straight after the
+   * layer in time and one place above it in the stack, as a picture layer's copy does, over whatever
+   * covers that time - so it is refused, past the cap, only for a layer ending too near the end of
+   * the post for a copy to fit after it.
+   */
   splitAudioEffect: (manifest, op) => {
     const id = str(op, 'id');
     const layer = requireAudioEffect(manifest, id);
@@ -1358,8 +1362,44 @@ const OPS: Record<string, Apply> = {
     requireAudioEffectRoom(manifest);
     const totalMs = totalDurationMs(manifest);
     const next = duplicateAudioEffect(manifest, id, newId, totalMs);
-    if (!next) throw new Error(`there is no room for a copy right after audio effect "${id}", at ${layer.endMs}ms - ${audioEffectBlocker(manifest, layer.endMs, totalMs)}`);
+    if (!next) {
+      throw new Error(
+        `"${id}" cannot be copied - its copy would start where it ends, at ${layer.endMs}ms, and the post ends at ${Math.round(totalMs)}ms; ` +
+          `a layer runs at least ${MIN_LAYER_MS}ms`,
+      );
+    }
     return next;
+  },
+
+  /*
+   * The layer's Forward, Backward, To front and To back, by the very function they call: `front` is
+   * the top of the stack, which works on what every layer under it made. A move past the end of the
+   * stack is refused ([stackEndRefusal]), where the editor greys the button out.
+   */
+  moveAudioEffect: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudioEffect(manifest, id);
+    const move = oneOf(op, 'move', LAYER_MOVES);
+    const next = moveAudioEffect(manifest, id, move);
+    if (next === manifest) throw new Error(stackEndRefusal(manifest, id, move));
+    return next;
+  },
+
+  /*
+   * Holding a layer on its lane of the timeline and dropping it at another place in the stack, by the
+   * function the drop calls. A place the stack has not got is refused rather than held to its ends as
+   * the drop holds it: an agent's -1 for the top would land the layer at the bottom. The place it
+   * already has is no move and no refusal, as dropping a lane back where it was is neither.
+   */
+  moveAudioEffectTo: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudioEffect(manifest, id);
+    const toIndex = num(op, 'toIndex');
+    const top = manifest.audioEffects!.length - 1;
+    if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex > top) {
+      throw new Error(`"toIndex" must be a whole number from 0, the bottom of the stack, to ${top}, the top`);
+    }
+    return moveAudioEffectTo(manifest, id, toIndex);
   },
 
   removeAudioEffect: (manifest, op) => {

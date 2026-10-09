@@ -67,23 +67,39 @@ does: the sounds it passes close up behind it, each keeping its length and setti
 
 Audio effects are layers over the post's time, as they are in the editor: from a layer's `startMs`
 to its `endMs`, everything heard - every clip's own sound, every sound on every lane, every
-voiceover - goes through its effect, one effect at a time. `addAudioEffect` puts one down with its
-`effect`, `"megaphone"` or `"slowReverb"`, anything else refused with the list, running to the end
-of the post unless it is given an `endMs`. Like `addZoom`, it is shortened to the room before the
-next layer and the end of the post, and refused, naming what is in the way, when less than 100 ms
-fits where it starts. One word of a line gets a megaphone from a layer over just that word.
-`effectSettings` moves the effect's sliders, 0 to 100 each - the megaphone's `intensity` and `tone`,
-slow + reverb's `reverb` and `room` - and a slider the effect has not got is refused with the ones it
-has. `speed` is slow + reverb's Slow, 0.5 to 1 and 0.8 unless it is set: what the layer covers plays
-from its start that much slower, and lower, as a record does, and at the layer's end the sound
-jumps to where the post is, skipping what the slowing left unplayed. Any other effect refuses a
-`speed`. `patchAudioEffect` changes a layer as the sheet does - another effect comes on at its
-defaults, and the sliders it names move while the rest stay where they are - and moves or trims its
-window between the layers either side, as a drag on the timeline does: a window that would overlap
-or pass another layer is refused naming it, and one running past the end of the post ends there.
-`splitAudioEffect` cuts a layer in two, `duplicateAudioEffect` puts a copy straight after it and
-`removeAudioEffect` takes it away. A draft saved when effects were a sound's own opens with each one
-as a layer over where its sound was heard.
+voiceover - goes through its effect. `addAudioEffect` puts one down with its `effect`,
+`"megaphone"` or `"slowReverb"`, anything else refused with the list, running to the end of the
+post unless it is given an `endMs`. A layer running past the end of the post is cut there, and one
+starting less than 100 ms before the end is refused, saying where the post ends. One word of a line
+gets a megaphone from a layer over just that word. `effectSettings` moves the effect's sliders, 0 to
+100 each - the megaphone's `intensity` and `tone`, slow + reverb's `reverb` and `room` - and a
+slider the effect has not got is refused with the ones it has. `speed` is slow + reverb's Slow, 0.5
+to 1 and 0.8 unless it is set: what the layer covers plays from its start that much slower, and
+lower, as a record does, and at the layer's end the sound jumps to where the post is, skipping what
+the slowing left unplayed. Any other effect refuses a `speed`.
+
+The layers stack, as the picture's layers do. The manifest's `audioEffects` runs bottom to top, any
+number of layers (up to 50) may cover the same moment, the same effect again included, and a new
+one goes on top. Where layers cover the same time, a later one works on what the ones before it
+made, so the order is part of the sound: a megaphone over slow + reverb puts the slowed room through
+the horn, and slow + reverb over a megaphone slows the horn and puts it in the room. Slows multiply,
+so two slow + reverb layers at 0.8 over the same time play it at 0.64x. `moveAudioEffect` moves a
+layer `"forward"` or `"backward"` one place, or to the `"front"`, the top, or the `"back"`, as the
+layer's Forward, Backward, To front and To back do, and is refused when the layer is already at that
+end of the stack. `moveAudioEffectTo` puts it at an exact place, 0 being the bottom, as holding it
+on the timeline and dropping it there does; a place the stack has not got is refused, and the place
+it already has changes nothing. The summary lists the layers in stack order, numbered from the
+bottom, each with the layers under it that it shares time with.
+
+`patchAudioEffect` changes a layer as the sheet does - another effect comes on at its defaults, and
+the sliders it names move while the rest stay where they are - and moves or trims its window
+anywhere on the post, over or under other layers, as a drag on the timeline does. It keeps its
+place in the stack; a window under 100 ms is refused, and one running past the end of the post
+ends there. `splitAudioEffect` cuts a layer in two, both halves where it was in the stack.
+`duplicateAudioEffect` puts a copy straight after it in time and one place above it in the stack,
+and is refused only when the layer ends less than 100 ms before the end of the post.
+`removeAudioEffect` takes a layer away. A draft saved when effects were a sound's own opens with
+each one as a layer over where its sound was heard.
 
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different

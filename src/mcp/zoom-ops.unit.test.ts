@@ -293,6 +293,16 @@ describe('no op makes a zoom on a post that has none', () => {
       { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
       { op: 'duplicateAudioEffect', id: 'afx', newId: 'afx2' },
     ],
+    moveAudioEffect: [
+      { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
+      { op: 'addAudioEffect', id: 'afx2', effect: 'slowReverb', startMs: 2000, endMs: 4000 },
+      { op: 'moveAudioEffect', id: 'afx', move: 'front' },
+    ],
+    moveAudioEffectTo: [
+      { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
+      { op: 'addAudioEffect', id: 'afx2', effect: 'slowReverb', startMs: 2000, endMs: 4000 },
+      { op: 'moveAudioEffectTo', id: 'afx2', toIndex: 0 },
+    ],
     removeAudioEffect: [
       { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
       { op: 'removeAudioEffect', id: 'afx' },

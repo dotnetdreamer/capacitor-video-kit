@@ -26,7 +26,7 @@ export interface ToolTile {
    * `disabled` attribute: a disabled button takes no click at all and answers nothing.
    */
   disabled?: boolean;
-  /** Looks held down while the thing it opened is open (the Sound menu). */
+  /** Looks held down while the thing it opened is open (the Sound or Effects menu). */
   pressed?: boolean;
   /** For an on/off tool (Loop): its state. Undefined for tools that are not toggles. */
   toggled?: boolean;
@@ -45,11 +45,16 @@ export interface ToolRow {
 
 type LayerPlace = 'only' | 'top' | 'bottom' | 'middle';
 
-/** Named because closing the Sound menu puts the focus back on the tile that opened it. */
-const SOUND_TILE = 'sound';
+/** The two tiles that open a little menu rather than a sheet: Sound, and Effects. */
+type ToolbarMenu = 'sound' | 'effects';
 
-/** How close the Sound menu may come to either side of the toolbar, which is also where it opens
- *  when the tile cannot be measured. It matches the tool row's own edge padding, `--tb-edge`. */
+/** Named because closing a menu puts the focus back on the tile that opened it. */
+const SOUND_TILE = 'sound';
+const EFFECTS_TILE = 'effects';
+const MENU_TILES: Record<ToolbarMenu, string> = { sound: SOUND_TILE, effects: EFFECTS_TILE };
+
+/** How close a menu may come to either side of the toolbar, which is also where it opens when the
+ *  tile cannot be measured. It matches the tool row's own edge padding, `--tb-edge`. */
 const MENU_EDGE_PX = 10;
 
 /**
@@ -124,6 +129,18 @@ export class VeToolbar {
     return index === 0 ? 'bottom' : 'middle';
   });
 
+  /** Where the selected audio effect layer sits in the stack: [layerPlace], for its four move tools. */
+  private readonly audioEffectPlace = computed<LayerPlace | null>(() => {
+    const sel = this.ctx.store.selection.value;
+    if (sel?.kind !== 'audioEffect') return null;
+    const layers = this.ctx.store.audioEffects.value;
+    const index = layers.findIndex(layer => layer.id === sel.id);
+    if (index < 0) return null;
+    if (layers.length === 1) return 'only';
+    if (index === layers.length - 1) return 'top';
+    return index === 0 ? 'bottom' : 'middle';
+  });
+
   private readonly rowKind = computed<ToolbarRowKind>(() => {
     if (this.clipSelected.value) return 'clip';
     if (this.layerKind.value) return 'layer';
@@ -148,7 +165,7 @@ export class VeToolbar {
   componentDidRender() {
     this.resetScroll();
     this.updateEdges();
-    this.anchorSoundMenu();
+    this.anchorMenu();
     this.focusFirstMenuItem();
   }
 
@@ -175,7 +192,7 @@ export class VeToolbar {
   }
 
   /**
-   * Puts the Sound menu under the Sound tile.
+   * Puts the open menu - Sound's or Effects' - under the tile that opened it.
    *
    * The menu is positioned against this host, and the tile is not: the row centres itself while it
    * fits and scrolls sideways when it does not, so on anything wider than a phone the tile is
@@ -186,10 +203,11 @@ export class VeToolbar {
    * render, which is what keeps the menu under the tile while the row is scrolled under it, and it
    * writes nothing at all while the menu is closed, so the usual repaint costs one `if`.
    */
-  private anchorSoundMenu(): void {
-    if (!this.ctx.store.soundMenuOpen.value) return;
+  private anchorMenu(): void {
+    const open = this.menuOpen();
+    if (!open) return;
     const root = this.el.shadowRoot;
-    const tile = root?.querySelector<HTMLElement>(`[data-tile="${SOUND_TILE}"]`);
+    const tile = root?.querySelector<HTMLElement>(`[data-tile="${MENU_TILES[open]}"]`);
     const menu = root?.querySelector<HTMLElement>('.tb__menu');
     if (!tile || !menu) return;
     // Left edges, both in this host's own coordinates, then held inside it so that a tile at the
@@ -290,39 +308,52 @@ export class VeToolbar {
     tile.run();
   }
 
+  /** Which tile's menu is open, if either is: one at a time, as opening one closes the other. */
+  private menuOpen(): ToolbarMenu | null {
+    const store = this.ctx.store;
+    return store.soundMenuOpen.value ? 'sound' : store.effectsMenuOpen.value ? 'effects' : null;
+  }
+
   /**
    * Opened from the keyboard, the menu takes focus so the arrow keys reach it. A finger's tap
    * leaves the focused tile without `:focus-visible`, and then nothing moves.
    */
-  private toggleSoundMenu(): void {
-    const opening = !this.ctx.store.soundMenuOpen.value;
+  private toggleMenu(which: ToolbarMenu): void {
+    const store = this.ctx.store;
+    const opening = this.menuOpen() !== which;
     const fromKeyboard = this.focusIsVisible();
-    this.ctx.store.soundMenuOpen.value = opening;
+    store.soundMenuOpen.value = opening && which === 'sound';
+    store.effectsMenuOpen.value = opening && which === 'effects';
     // Answered by componentDidRender, because the menu is not in the DOM until the repaint this
     // write asks for has happened. Angular's afterNextRender said the same thing.
     this.focusMenu = opening && fromKeyboard;
   }
 
-  private readonly closeSoundMenu = (returnFocus = false) => {
+  private readonly closeMenu = (returnFocus = false) => {
+    const open = this.menuOpen();
     this.ctx.store.soundMenuOpen.value = false;
-    if (!returnFocus) return;
-    this.el.shadowRoot?.querySelector<HTMLButtonElement>(`[data-tile="${SOUND_TILE}"]`)?.focus();
+    this.ctx.store.effectsMenuOpen.value = false;
+    if (!returnFocus || !open) return;
+    this.el.shadowRoot?.querySelector<HTMLButtonElement>(`[data-tile="${MENU_TILES[open]}"]`)?.focus();
   };
 
   private readonly addSound = () => {
-    this.closeSoundMenu();
+    this.closeMenu();
     this.ctx.media.openSound();
   };
 
-  private readonly soundEffect = () => {
-    this.closeSoundMenu();
-    this.ctx.store.showToast('Sound effect is coming soon');
-    this.ctx.store.haptic('light');
-  };
-
-  /** The Audio effects sheet, on the layer under the playhead or ready to add one; opening it closes the menu. */
+  /**
+   * The audio effects sheet, ready to add a layer on top of any at the playhead: the Sound menu's
+   * Sound effects and the Effects menu's Audio are the one sheet. Opening it closes the menu.
+   */
   private readonly audioEffects = () => {
     this.ctx.store.openAudioEffects();
+  };
+
+  /** The picture's effects, as the Effects tile opened them before it had a menu: a layer each. */
+  private readonly videoEffects = () => {
+    this.closeMenu();
+    this.openLayerPanel('effects');
   };
 
   private readonly voiceover = () => {
@@ -364,7 +395,7 @@ export class VeToolbar {
   private readonly onMenuKeydown = (event: KeyboardEvent) => {
     if (event.key === 'Escape') {
       event.preventDefault();
-      this.closeSoundMenu(true);
+      this.closeMenu(true);
       return;
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
@@ -408,6 +439,7 @@ export class VeToolbar {
     const store = this.ctx.store;
     const full = store.layersFull.value;
     const soundOpen = store.soundMenuOpen.value;
+    const effectsOpen = store.effectsMenuOpen.value;
     // Beside Crop, the other tool about framing. It adds a zoom at the playhead and opens its sheet;
     // the store says so when there is no room for one, or when the post is at its cap. Not there at
     // all on a host that does not offer Zoom (`editing.zoom`), rather than dimmed: dimmed says "not
@@ -443,15 +475,18 @@ export class VeToolbar {
           icon: 'musical-note-outline',
           pressed: soundOpen,
           expanded: soundOpen,
-          run: () => this.toggleSoundMenu(),
+          run: () => this.toggleMenu('sound'),
         },
         { id: 'text', label: 'Text', icon: 'text-outline', run: () => (store.toolbarMode.value = 'text') },
+        // A menu, as Sound's is: the picture's effects or the sound's. Never dimmed, because the
+        // sound's have no part in the layer cap; the menu's Video says why at the cap instead.
         {
-          id: 'effects',
+          id: EFFECTS_TILE,
           label: 'Effects',
           icon: 'sparkles-outline',
-          disabled: full,
-          run: () => this.openLayerPanel('effects'),
+          pressed: effectsOpen,
+          expanded: effectsOpen,
+          run: () => this.toggleMenu('effects'),
         },
         {
           id: 'overlay',
@@ -880,12 +915,16 @@ export class VeToolbar {
 
   /**
    * The tools for a selected audio effect layer, a picture layer's in time: Effects opens the sheet on
-   * it, and the rest place it - cut, copied, an edge to the playhead - or take it away. Where it starts
-   * and ends is also dragged on its row of the timeline. The layer's id is read at tap time, as a
-   * zoom's is, for the reason [zoomSelected] gives.
+   * it, and the rest place it - cut, copied, moved up or down the stack, an edge to the playhead - or
+   * take it away. Where it starts and ends is also dragged on its lane of the timeline, and its place
+   * in the stack by holding it there. The layer's id is read at tap time, as a zoom's is, for the
+   * reason [zoomSelected] gives.
    */
   private audioEffectRow(): ToolRow {
     const store = this.ctx.store;
+    const place = this.audioEffectPlace.value;
+    const atTop = place === 'top' || place === 'only';
+    const atBottom = place === 'bottom' || place === 'only';
     const withLayer = (act: (id: string) => void) => () => {
       const layer = store.selectedAudioEffect.value;
       if (layer) act(layer.id);
@@ -898,6 +937,10 @@ export class VeToolbar {
         { id: 'effects', label: 'Effects', icon: 'sparkles-outline', run: () => store.openPanel('audioEffects') },
         { id: 'split', label: 'Cut', icon: 'cut-outline', run: withLayer(id => store.splitAudioEffectAtPlayhead(id)) },
         { id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withLayer(id => store.duplicateAudioEffect(id)) },
+        { id: 'forward', label: 'Forward', icon: 'arrow-up-outline', disabled: atTop, run: withLayer(id => store.moveAudioEffect(id, 'forward')) },
+        { id: 'backward', label: 'Backward', icon: 'arrow-down-outline', disabled: atBottom, run: withLayer(id => store.moveAudioEffect(id, 'backward')) },
+        { id: 'front', label: 'To front', icon: 'arrow-up-circle-outline', disabled: atTop, run: withLayer(id => store.moveAudioEffect(id, 'front')) },
+        { id: 'back', label: 'To back', icon: 'arrow-down-circle-outline', disabled: atBottom, run: withLayer(id => store.moveAudioEffect(id, 'back')) },
         { id: 'start-here', label: 'Start here', icon: 'play-skip-back-outline', run: withLayer(id => store.setAudioEffectEdge(id, 'start')) },
         { id: 'end-here', label: 'End here', icon: 'play-skip-forward-outline', run: withLayer(id => store.setAudioEffectEdge(id, 'end')) },
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: withLayer(id => store.deleteAudioEffect(id)) },
@@ -989,7 +1032,7 @@ export class VeToolbar {
     // again, which is the mistake this component is the easiest one in the package to make.
     return this.watcher.run(() => {
       const row = this.row();
-      const menuOpen = this.ctx.store.soundMenuOpen.value;
+      const menu = this.menuOpen();
       return (
         <Host>
           <div
@@ -1048,27 +1091,43 @@ export class VeToolbar {
             </div>
           </div>
 
-          {menuOpen && [
+          {menu && [
             // Behind the menu and over the whole editor: a tap anywhere else only closes the menu.
-            <div key="catcher" class="tb__catcher" aria-hidden="true" onClick={() => this.closeSoundMenu()}></div>,
-            <div key="menu" class="tb__menu" role="menu" aria-label="Sound" onKeyDown={this.onMenuKeydown}>
-              <button type="button" role="menuitem" class="tb__menu-item" onClick={this.addSound}>
-                <ve-icon name="musical-note-outline"></ve-icon>
-                <span>Add sound</span>
-              </button>
-              <button type="button" role="menuitem" class="tb__menu-item" onClick={this.audioEffects}>
-                <ve-icon name="sparkles-outline"></ve-icon>
-                <span>Audio effects</span>
-              </button>
-              <button type="button" role="menuitem" class="tb__menu-item" aria-label="Sound effect, coming soon" onClick={this.soundEffect}>
-                <ve-icon name="musical-notes-outline"></ve-icon>
-                <span>Sound effect</span>
-              </button>
-              <button type="button" role="menuitem" class="tb__menu-item" onClick={this.voiceover}>
-                <ve-icon name="mic-outline"></ve-icon>
-                <span>Voiceover</span>
-              </button>
-            </div>,
+            <div key="catcher" class="tb__catcher" aria-hidden="true" onClick={() => this.closeMenu()}></div>,
+            menu === 'sound' ? (
+              <div key="sound-menu" class="tb__menu" role="menu" aria-label="Sound" onKeyDown={this.onMenuKeydown}>
+                <button type="button" role="menuitem" class="tb__menu-item" onClick={this.addSound}>
+                  <ve-icon name="musical-note-outline"></ve-icon>
+                  <span>Add sound</span>
+                </button>
+                <button type="button" role="menuitem" class="tb__menu-item" onClick={this.audioEffects}>
+                  <ve-icon name="volume-high-outline"></ve-icon>
+                  <span>Sound effects</span>
+                </button>
+                <button type="button" role="menuitem" class="tb__menu-item" onClick={this.voiceover}>
+                  <ve-icon name="mic-outline"></ve-icon>
+                  <span>Voiceover</span>
+                </button>
+              </div>
+            ) : (
+              <div key="effects-menu" class="tb__menu" role="menu" aria-label="Effects" onKeyDown={this.onMenuKeydown}>
+                {/* Dimmed at the layer cap but still a button, as a dimmed tile is: the tap says why. */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class={{ 'tb__menu-item': true, 'tb__menu-item--dim': this.ctx.store.layersFull.value }}
+                  aria-disabled={this.ctx.store.layersFull.value ? 'true' : null}
+                  onClick={this.videoEffects}
+                >
+                  <ve-icon name="sparkles-outline"></ve-icon>
+                  <span>Video</span>
+                </button>
+                <button type="button" role="menuitem" class="tb__menu-item" onClick={this.audioEffects}>
+                  <ve-icon name="volume-high-outline"></ve-icon>
+                  <span>Audio</span>
+                </button>
+              </div>
+            ),
           ]}
         </Host>
       );
