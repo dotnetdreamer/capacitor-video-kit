@@ -295,16 +295,18 @@ describe('the rows', () => {
   });
 
   /*
-   * The ruler and the filmstrip used to stand still while everything under them panned, so with
-   * more rows than fit only the lanes moved. The whole timeline is one column now, and a swipe that
-   * starts on the filmstrip - which used to do nothing - pans it like a swipe anywhere else.
+   * The filmstrip used to stand still while everything under it panned, so with more rows than fit
+   * only the lanes moved. The rows are one column now, and a swipe that starts on the filmstrip -
+   * which used to do nothing - pans it like a swipe anywhere else. The ruler stays where it is, over
+   * them, so the times are still there to read a row against once the filmstrip has gone under it.
    */
-  it('pans the ruler and the filmstrip with the lanes, and the add button with the filmstrip', async () => {
+  it('pans the filmstrip with the lanes and the add button with the filmstrip, under a ruler that stays', async () => {
     const { tl } = await mount(fiveLayers());
     const ruler = root(tl).querySelector<HTMLElement>('.tl__ruler')!;
     const add = root(tl).querySelector<HTMLElement>('.tl__add')!;
-    const tops = () => [ruler, row(tl, 'base'), row(tl, 'vt-5'), add].map(el => el.getBoundingClientRect().top);
+    const tops = () => [row(tl, 'base'), row(tl, 'vt-5'), add].map(el => el.getBoundingClientRect().top);
     const before = tops();
+    const rulerTop = ruler.getBoundingClientRect().top;
 
     const from = centre(segmentEl(tl, 'seg-a'));
     await swipeUp(tl, segmentEl(tl, 'seg-a'), from, 60);
@@ -312,6 +314,15 @@ describe('the rows', () => {
     const moved = tops().map((top, i) => before[i] - top);
     expect(moved[0]).toBeGreaterThan(40);
     for (const by of moved) expect(by).toBeCloseTo(moved[0], 0);
+    expect(ruler.getBoundingClientRect().top).toBeCloseTo(rulerTop, 0);
+
+    // The filmstrip has gone up under the ruler, and the ruler is what a finger there touches.
+    const box = ruler.getBoundingClientRect();
+    const under = root(tl).elementFromPoint(from.x, box.bottom - 2);
+    expect(under === ruler || ruler.contains(under)).toBe(true);
+    // The add button went with the filmstrip, so it is cut off at the ruler's foot too.
+    const layer = root(tl).querySelector<HTMLElement>('.tl__add-layer')!;
+    expect(layer.style.clipPath).not.toBe('');
   });
 
   /*

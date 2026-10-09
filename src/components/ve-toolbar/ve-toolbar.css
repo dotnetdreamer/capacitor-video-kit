@@ -222,6 +222,65 @@
   pointer-events: none;
 }
 
+/* ------------------------------------------------------------------------------ wide screens */
+
+/*
+ * From a tablet up the row runs the whole width, as CapCut's tablet tool row does. The root row's
+ * tools share it out, each between a little under its phone width and 96px: fourteen fit an upright
+ * tablet without scrolling, and a monitor's row is not fourteen tiles huddled in the middle of it.
+ * The breakpoint is `ve-tokens.css`'s; see the wide screens section of ve-editor.css.
+ *
+ * A row with the way back on it keeps its tools at their own width and stands in the middle, chevron
+ * and all. Spread out, a short row put the chevron half a screen from the tools it closes.
+ */
+@media (min-width: 700px) {
+  .tb {
+    justify-content: center;
+  }
+
+  /* Its own width while the tools do not fit, so the row scrolls with its end padding intact. */
+  .tb__track {
+    box-sizing: border-box;
+    justify-content: center;
+    min-width: 100%;
+  }
+
+  /*
+   * 54px at the least, which is what the row's width is worked out from: still room for "Transition",
+   * the longest label, at 49px. The `width` and not only the basis, because the track's own width is
+   * the sum of the tiles' widths before anything grows.
+   */
+  .tile {
+    flex: 1 0 54px;
+    width: 54px;
+    max-width: 96px;
+  }
+
+  .tile--collapse {
+    flex: 0 0 var(--tb-back-w);
+    width: var(--tb-back-w);
+  }
+
+  .tile--collapse + .tb__scroller {
+    flex: 0 1 auto;
+  }
+
+  .tile--collapse + .tb__scroller .tb__track {
+    min-width: 0;
+  }
+
+  .tile--collapse + .tb__scroller .tile {
+    flex: 0 0 var(--tb-tile-w);
+    width: var(--tb-tile-w);
+  }
+
+  /* Over the icon's corner at any tile width: where `right: 2px` puts it on a 58px tile. */
+  .tile__soon {
+    right: auto;
+    left: calc(50% + 3px);
+  }
+}
+
 /* -------------------------------------------------------------------------------- sound menu */
 
 /*

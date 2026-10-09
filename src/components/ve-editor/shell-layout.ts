@@ -68,6 +68,8 @@ export function shellLayout(panel: EditorPanel | null): 'main' | 'compact' | 'ta
  * Whether the open sheet can be pulled up past its tall height by its grabber. Only the Sound sheet,
  * whose list of tracks is the one that grows long, and which is the one that draws a grabber; the
  * sticker and text sheets have a search field and a keyboard to keep clear of instead.
+ *
+ * It opens pulled up, laid over the editor, which keeps its size under it at either height.
  */
 export function canExpand(panel: EditorPanel | null): boolean {
   return panel === 'sound';

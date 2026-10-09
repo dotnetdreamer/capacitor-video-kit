@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { EditorContext } from '../../bridge/editor-context';
 import { defaultClipEdit, emptyManifest, type EditManifest } from '../../editor';
 import type { EditorRenderHost, EditorSource, RenderRequest, SoundCategory, VideoEditorHost } from '../../host/host.types';
 
@@ -653,11 +654,47 @@ describe('ve-editor leaving an edit with changes', () => {
 });
 
 /*
- * The Sound sheet's grabber. The sheet opens at the height every tall sheet rests at, a drag of its
- * head pulls it up to 90% of the column or down off the screen, and where it settles is the
- * stylesheet's. What a browser pins that nothing else can: the heights it settles at, that the
- * stage is NOT laid out again while a finger holds the sheet, and that a toast still shows above a
- * pulled up sheet.
+ * A WebView left playing goes on playing behind the home screen, sound and all, so the editor stops
+ * playback itself. Android's WebView hides the page and Capacitor on iOS fires `pause` on the
+ * document; either one is enough, and an editor that has gone hears neither.
+ */
+describe('ve-editor when the app goes to the background', () => {
+  function pretendVisibility(state: DocumentVisibilityState): void {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  it('pauses on either signal, and only for an editor still on the screen', async () => {
+    const { editor } = await mount();
+    const store = (inside(editor, 've-toolbar') as HTMLElement & { ctx: EditorContext }).ctx.store;
+    const pause = vi.spyOn(store, 'pause');
+    try {
+      pretendVisibility('hidden');
+      expect(pause).toHaveBeenCalledTimes(1);
+      // Coming back plays nothing, and has nothing to pause.
+      pretendVisibility('visible');
+      expect(pause).toHaveBeenCalledTimes(1);
+
+      document.dispatchEvent(new Event('pause'));
+      expect(pause).toHaveBeenCalledTimes(2);
+
+      editor.remove();
+      document.dispatchEvent(new Event('pause'));
+      pretendVisibility('hidden');
+      expect(pause).toHaveBeenCalledTimes(2);
+    } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+      pause.mockRestore();
+    }
+  });
+});
+
+/*
+ * The Sound sheet's grabber. The sheet opens pulled up to 90% of the column, laid over the editor,
+ * a drag of its head lowers it to the height every tall sheet rests at, raises it again or takes it
+ * off the screen, and where it settles is the stylesheet's. What a browser pins that nothing else
+ * can: the heights it settles at, that the stage is NOT laid out again at either of them or while a
+ * finger holds the sheet, and that a toast still shows above a pulled up sheet.
  */
 describe("ve-editor's Sound sheet, pulled by its grabber", () => {
   /** Enough tracks that the list is longer than the sheet at rest. */
@@ -728,42 +765,45 @@ describe("ve-editor's Sound sheet, pulled by its grabber", () => {
     await until(`the sheet to settle ${expanded ? 'pulled up' : 'at rest'}`, () => sheet.classList.contains('ve__sheet--expanded') === expanded && !sheet.style.height, 2000);
   }
 
-  it('pulls up to 90% of the column and back, keeping a strip of stage above it', async () => {
+  it('opens pulled up to 90% of the column, over a stage that keeps its size at either height', async () => {
     const { editor } = await mount(MUSIC);
     const { sheet, grab } = await openSoundSheet(editor);
     const stage = inside(editor, '.ve__stage')!;
-    const rest = sheet.getBoundingClientRect().height;
-    expect(grab().getAttribute('aria-label')).toBe('Expand');
-
-    await hold(grab(), -300)();
     await settled(sheet, true);
+    const under = stage.getBoundingClientRect().toJSON();
+    expect(grab().getAttribute('aria-label')).toBe('Collapse');
 
     const pulled = sheet.getBoundingClientRect();
     expect(pulled.height).toBeCloseTo(COLUMN * 0.9, 0);
     expect(pulled.bottom).toBeCloseTo(SCREEN.height, 0);
-    // The stage is laid out again once the sheet has settled, into the strip the sheet leaves.
-    expect(stage.getBoundingClientRect().bottom).toBeCloseTo(pulled.top, 0);
-    expect(stage.getBoundingClientRect().height).toBeGreaterThanOrEqual(64);
-    await until('the grabber to offer the way back', () => grab().getAttribute('aria-label') === 'Collapse');
+    // Over the stage rather than beside it: the stage runs on down under the sheet to the foot.
+    expect(stage.getBoundingClientRect().bottom).toBeGreaterThan(pulled.top + 100);
+    const probe = { x: pulled.left + 20, y: pulled.top + pulled.height / 2 };
+    expect(editor.shadowRoot!.elementFromPoint(probe.x, probe.y)?.closest('ve-sound-sheet')).toBe(sheet);
 
-    // A short pull down from there goes back up; a long one goes back to rest, exactly where it was.
+    // A short pull down from there goes back up; a long one lowers it, and the stage stays put.
     await hold(grab(), 100)();
     await settled(sheet, true);
     await hold(grab(), 300)();
     await settled(sheet, false);
-    expect(sheet.getBoundingClientRect().height).toBeCloseTo(rest, 0);
+    await until('the grabber to offer the way up', () => grab().getAttribute('aria-label') === 'Expand');
+    expect(sheet.getBoundingClientRect().height).toBeLessThan(pulled.height - 100);
+    expect(sheet.getBoundingClientRect().bottom).toBeCloseTo(SCREEN.height, 0);
+    expect(stage.getBoundingClientRect().toJSON()).toEqual(under);
   });
 
   it('moves the sheet over the stage while it is held, and leaves the stage where it was', async () => {
     const { editor } = await mount(MUSIC);
     const { sheet, grab } = await openSoundSheet(editor);
+    await settled(sheet, true);
     const stage = inside(editor, '.ve__stage')!.getBoundingClientRect();
     const top = sheet.getBoundingClientRect().top;
 
-    const letGo = hold(grab(), -200);
+    // Down, and not so far that it would settle lower: it opens as high as it goes.
+    const letGo = hold(grab(), 150);
     // A new stage size resizes the preview's compositor, so under a moving finger it must not change.
     expect(inside(editor, '.ve__stage')!.getBoundingClientRect().toJSON()).toEqual(stage.toJSON());
-    expect(sheet.getBoundingClientRect().top).toBeCloseTo(top - 200, 0);
+    expect(sheet.getBoundingClientRect().top).toBeCloseTo(top + 150, 0);
     // Painted over the stage it covers, not under it.
     const probe = sheet.getBoundingClientRect();
     expect((editor.shadowRoot!.elementFromPoint(probe.left + 20, probe.top + 4) as HTMLElement | null)?.tagName).toBe('VE-SOUND-SHEET');
@@ -772,23 +812,32 @@ describe("ve-editor's Sound sheet, pulled by its grabber", () => {
     await settled(sheet, true);
   });
 
-  it('closes when it is dragged well down from rest, and opens at rest the next time', async () => {
+  it('closes when it is dragged well down from rest, and opens pulled up the next time', async () => {
     const { editor } = await mount(MUSIC);
     const first = await openSoundSheet(editor);
+    await settled(first.sheet, true);
+    const pulled = first.sheet.getBoundingClientRect().height;
+    first.grab().click();
+    await settled(first.sheet, false);
     const rest = first.sheet.getBoundingClientRect().height;
 
     await hold(first.grab(), Math.round(rest * 0.7))();
     await until('the sheet to close', () => !inside(editor, 've-sound-sheet') && !!inside(editor, 've-toolbar'));
 
     const again = await openSoundSheet(editor);
-    expect(again.sheet.getBoundingClientRect().height).toBeCloseTo(rest, 0);
-    expect(again.sheet.classList.contains('ve__sheet--expanded')).toBe(false);
+    await settled(again.sheet, true);
+    expect(again.sheet.getBoundingClientRect().height).toBeCloseTo(pulled, 0);
   });
 
-  it('pulls up and back on a press of the grabber, which is how a keyboard or a screen reader does it', async () => {
+  it('lowers and pulls back up on a press of the grabber, which is how a keyboard or a screen reader does it', async () => {
     const { editor } = await mount(MUSIC);
     const { sheet, grab } = await openSoundSheet(editor);
+    await settled(sheet, true);
+
+    grab().click();
+    await settled(sheet, false);
     const rest = sheet.getBoundingClientRect().height;
+    expect(rest).toBeLessThan(COLUMN * 0.9 - 100);
 
     grab().click();
     await settled(sheet, true);
@@ -801,8 +850,7 @@ describe("ve-editor's Sound sheet, pulled by its grabber", () => {
 
   it('shows a toast above a pulled up sheet, where the customer can read it', async () => {
     const { editor } = await mount(MUSIC);
-    const { sheet, grab } = await openSoundSheet(editor);
-    grab().click();
+    const { sheet } = await openSoundSheet(editor);
     await settled(sheet, true);
 
     sheet.shadowRoot!.querySelector<HTMLButtonElement>('.snd__pick')!.click();
@@ -817,8 +865,7 @@ describe("ve-editor's Sound sheet, pulled by its grabber", () => {
 
   it('goes with Escape or Back like any sheet, pulled up or not', async () => {
     const { editor } = await mount(MUSIC);
-    const { sheet, grab } = await openSoundSheet(editor);
-    grab().click();
+    const { sheet } = await openSoundSheet(editor);
     await settled(sheet, true);
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));

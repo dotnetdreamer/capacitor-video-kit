@@ -1,14 +1,13 @@
 import type { EditorStore } from '../../state/editor-store';
 
 /**
- * A sheet pulled up by its grabber: the Sound sheet opens at the height every tall sheet has, and a
- * drag of its head takes it up to most of the column, back down, or off the screen.
+ * A sheet pulled up by its grabber: the Sound sheet opens pulled up to most of the column, and a
+ * drag of its head takes it down to the height every tall sheet has, back up, or off the screen.
  *
- * The two heights are the stylesheet's, never numbers in here. `.ve__sheet--tall` is the one a
- * sheet opens at and `.ve__sheet--expanded` the pulled up one, with `.ve--expanded` giving the stage
- * the little it keeps under it. Both are MEASURED when a drag starts, by putting the other pair of
- * classes on for one synchronous layout and taking them off again, so the place a sheet settles is
- * always exactly where the stylesheet then puts it.
+ * The two heights are the stylesheet's, never numbers in here. `.ve__sheet--tall` is the lower one
+ * and `.ve__sheet--expanded` the pulled up one. Both are MEASURED when a drag starts, by putting the
+ * other pair of classes on for one synchronous layout and taking them off again, so the place a
+ * sheet settles is always exactly where the stylesheet then puts it.
  */
 
 /** On the open sheet's slot while it is pulled up. */
@@ -77,11 +76,11 @@ export interface SheetSlot {
 /**
  * Moves the open sheet under the finger and settles it where it was let go.
  *
- * While a finger has it the slot keeps the height it was laid out at, and the sheet grows over the
- * stage, or shrinks off it, with a negative or positive top margin that keeps its outer height the
- * same. So the stage is never laid out again under a moving finger: a new stage size resizes the
- * preview's compositor, which is a canvas reallocated on every frame of a drag on a cheap phone.
- * Only where the sheet settles is laid out, once, when `store.sheetExpanded` flips the classes.
+ * The sheet is laid over the stage (`.ve__sheet--over`) and anchored to the foot of the column, so
+ * its height is all a finger changes and the stage is never laid out again under it: a new stage
+ * size resizes the preview's compositor, which is a canvas reallocated on every frame of a drag on a
+ * cheap phone. Where the sheet settles is handed back to the stylesheet once, when
+ * `store.sheetExpanded` flips the classes.
  *
  * Everything it writes is an inline style on the slot, and it takes all of it off once the sheet
  * has settled. The classes are the vdom's, so it only ever toggles them for a measurement inside
@@ -90,7 +89,7 @@ export interface SheetSlot {
 export class SheetDragger {
   /** The slot being moved, while a finger has it or it is settling. */
   private sheet: HTMLElement | null = null;
-  /** The slot's laid out height while it is held, which the margin keeps it at. */
+  /** The slot's laid out height when the finger took it. */
   private outer = 0;
   /** The sheet's height when the finger took it. */
   private start = 0;
@@ -195,19 +194,15 @@ export class SheetDragger {
     this.column = column.clientHeight - (parseFloat(getComputedStyle(column).paddingTop) || 0);
   }
 
-  /** The sheet at `height`, grown over the stage or shrunk off it, its slot unmoved. */
+  /** The sheet at `height`, grown over the stage or shrunk off it from the foot of the column. */
   private apply(height: number): void {
     const sheet = this.sheet!;
     this.height = height;
     const style = sheet.style;
-    // Above the stage, which is a positioned box earlier in the column and would paint over it.
-    style.position = 'relative';
-    style.zIndex = '2';
     // The stylesheet's caps are for the resting height and would hold a pulled sheet to it.
     style.minHeight = '0';
     style.maxHeight = 'none';
     style.height = `${height}px`;
-    style.marginTop = `${this.outer - height}px`;
   }
 
   /** Runs the sheet to where it settles, then hands it to the stylesheet or closes it. */
@@ -224,7 +219,7 @@ export class SheetDragger {
     // The start has to be a computed value before the transition is, or a sheet that was never
     // dragged - the grabber tapped - would run from the stylesheet's percentage instead.
     void sheet.offsetHeight;
-    sheet.style.transition = `height ${SETTLE_MS}ms ${SETTLE_EASE}, margin-top ${SETTLE_MS}ms ${SETTLE_EASE}`;
+    sheet.style.transition = `height ${SETTLE_MS}ms ${SETTLE_EASE}`;
     this.apply(target);
 
     const listener = (event: TransitionEvent) => {
@@ -275,7 +270,7 @@ function arrange(column: HTMLElement, sheet: HTMLElement, expanded: boolean): vo
 }
 
 function clearInline(sheet: HTMLElement): void {
-  for (const property of ['position', 'z-index', 'min-height', 'max-height', 'height', 'margin-top', 'transition']) {
+  for (const property of ['min-height', 'max-height', 'height', 'transition']) {
     sheet.style.removeProperty(property);
   }
 }

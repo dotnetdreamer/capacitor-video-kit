@@ -366,27 +366,101 @@
 }
 
 /*
- * The Sound sheet pulled up by its grabber, to most of the column; a tall sheet at rest is held to
- * the compact cap above. `SheetDragger` measures these two rules rather than repeating their numbers,
- * so a sheet let go settles exactly where they then put it.
+ * A sheet laid over the editor instead of given a share of the column: the Sound sheet, the one
+ * that can be pulled up. The stage keeps the whole column under it at either height, so the video
+ * is never shrunk to a strip and grown back around a choice of sound. Over the stage, which is a
+ * positioned box earlier in the column and would otherwise paint over it.
+ */
+.ve__sheet--over {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+}
+
+/*
+ * The Sound sheet pulled up, which is how it opens, to 90% of the column under the status bar; at
+ * rest it is held to the compact cap above. Out of the flow, its percentages are of the column's
+ * padding box, which includes the status bar's inset, hence the subtraction. `SheetDragger`
+ * measures these two rules rather than repeating their numbers, so a sheet let go settles exactly
+ * where they then put it.
  */
 .ve__sheet--expanded {
-  height: 90%;
+  height: calc(0.9 * (100% - var(--ve-safe-top)));
   max-height: none;
 }
 
 /*
- * What the stage keeps under a pulled up sheet: a strip with the video small in it, and room for a
- * toast, which sits at the bottom of the stage and so just above the sheet.
+ * The toast goes to the top of the stage while a sheet is over its foot, where it would be read
+ * through nothing. The top rather than just above the sheet: the sheet has two heights and a finger
+ * moves it between them, and the top is clear at all of them.
  */
-.ve--expanded .ve__stage {
-  min-height: 64px;
+.ve--over .ve__stage > ve-toast {
+  top: 12px;
+  bottom: auto;
 }
 
 /* The text sheet sizes itself to its content, which sits above the keyboard. */
 .ve__sheet--text {
   height: auto;
   max-height: 62%;
+}
+
+/* ---------------------------------------------------------------------------- wide screens */
+
+/*
+ * A tablet, a phone on its side and a desktop, laid out as CapCut lays out a tablet: Back at one end
+ * of the screen and Next at the other rather than beside the picture, the post's settings as a chip
+ * beside Next, and every row under the picture the whole width of the screen (`--ve-transport-max`
+ * and `--ve-toolbar-max` are `none`). A phone held upright keeps everything above.
+ *
+ * The breakpoint is `ve-tokens.css`'s, repeated here and in ve-toolbar.css because what changes is
+ * where things ARE, which no token value can say. Change all three together.
+ */
+@media (min-width: 700px) {
+  .ve__round {
+    --ve-round-x: 16px;
+  }
+
+  /* Off the picture now, so a chip of its own says it is a control rather than a caption on it. */
+  .ve__quality {
+    right: calc(16px + 44px + 12px);
+    left: auto;
+    transform: none;
+    padding: 0 10px 0 14px;
+    background: var(--ve-raised);
+    text-shadow: none;
+  }
+
+  .ve__quality:active {
+    transform: scale(0.94);
+  }
+
+  .ve__quality ve-icon {
+    filter: none;
+  }
+
+  .ve__quality-sep {
+    box-shadow: none;
+  }
+}
+
+/*
+ * Where the screen is also tall enough, the three get a strip of their own above the picture, as
+ * CapCut's top bar is, so a wide post never runs under them; `--ve-stage-gutter` comes down to match.
+ * Not on a phone on its side, whose stage is already down to its floor: there they stay over the
+ * stage's top corners, which a picture that short never reaches.
+ */
+@media (min-width: 700px) and (min-height: 520px) {
+  .ve__stage {
+    padding-top: 62px;
+  }
+
+  /* A tall sheet's stage has no chrome over it, so no strip either. */
+  .ve--tall .ve__stage {
+    padding-top: 6px;
+  }
 }
 
 /* --------------------------------------------------------------------- mouse and keyboard */

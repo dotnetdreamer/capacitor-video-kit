@@ -119,23 +119,22 @@
    * `--ve-stage-gutter` is what the preview keeps free either side of the video frame, TOGETHER,
    * for the Back and Next circles. On a phone they hang over the picture's top corners, and 128px
    * (two 44px buttons, 12px in from each edge, and air) is what keeps them off it. From a tablet up
-   * there is room to stand them beside the frame instead, which is what the wider value buys.
+   * they stand at the two ends of the screen, and on a screen tall enough for a strip of their own
+   * above the picture the gutter is only air.
    *
    * `--ve-chrome-max` is how wide a row of chrome - a sheet's controls, a grid of tiles - may run
    * before it stops growing and centres itself. `none` is the phone, where a row should use every
    * pixel there is. A volume slider drawn across a 2000px monitor should not.
    *
-   * `--ve-transport-max` is the same question for the transport, and it gets an answer of its own
-   * because that row is three groups pushed apart rather than one block of content: the clock takes
-   * the room to the left of the play button and the undo/redo/full screen buttons take the room to
-   * its right, so every pixel the row is given is a pixel BETWEEN them. At a sheet's width the
-   * clock ends up a third of a screen from the button it belongs to.
+   * `--ve-transport-max` and `--ve-toolbar-max` are the same question for the transport and the
+   * tool row, and the editor's answer is `none` at every size: from a tablet up the two run the
+   * whole width under the picture, as CapCut's do, with the clock and the transport's buttons at
+   * the ends of the screen and the root tools shared out along it. They stay tokens for a host that
+   * wants either held in. A sub-row's chevron keeps beside its tools at any width without one; see
+   * the wide screens section of ve-toolbar.css.
    *
-   * `--ve-toolbar-max` is the third, and it is a different number again because the tool row has a
-   * chevron standing OUTSIDE the tiles, in the corner, while the tiles centre themselves on the row.
-   * Every pixel the row is given puts the two further apart, so on a monitor the chevron ended up
-   * against the edge of the screen with the tools half a screen away. It has to stay wide enough
-   * that the longest row - the clip row, 760px of chevron and tiles - still fits without scrolling.
+   * The 700px breakpoint below is repeated in ve-editor.css and ve-toolbar.css, for the things that
+   * change PLACE on a wide screen, which no value here can say. The three change together.
    */
   --ve-stage-gutter: 128px;
   --ve-chrome-max: none;
@@ -152,8 +151,8 @@
 }
 
 /*
- * A tablet, and a phone on its side. The circles come off the picture and stand beside it, and the
- * chrome stops growing well short of the screen's edge.
+ * A tablet, a phone on its side, and a desktop. The circles go to the ends of the screen (see the
+ * wide screens section of ve-editor.css), and a sheet's chrome stops growing well short of the edge.
  *
  * A viewport query rather than a container query, for the reason the top of `ve-editor.css` gives
  * about transforms: `container-type` carries `contain: layout`, which would make this element the
@@ -169,8 +168,13 @@
   :host {
     --ve-stage-gutter: 184px;
     --ve-chrome-max: 640px;
-    --ve-transport-max: 440px;
-    --ve-toolbar-max: 800px;
+  }
+}
+
+/* With Back and Next in a strip above the picture; see `.ve__stage` in ve-editor.css. */
+@media (min-width: 700px) and (min-height: 520px) {
+  :host {
+    --ve-stage-gutter: 48px;
   }
 }
 

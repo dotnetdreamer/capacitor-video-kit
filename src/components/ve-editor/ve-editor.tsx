@@ -272,6 +272,9 @@ export class VeEditor {
      */
     window.addEventListener('keydown', this.onKeyDown);
 
+    document.addEventListener('visibilitychange', this.onAppHidden);
+    document.addEventListener('pause', this.onAppHidden);
+
     /*
      * Deliberately not awaited. Stencil waits for a promise handed back from this hook before it
      * paints anything, so returning this one would hold the whole editor off the screen while
@@ -385,6 +388,8 @@ export class VeEditor {
     this.unwatchChange = null;
     window.removeEventListener('resize', this.onWindowResize);
     window.removeEventListener('keydown', this.onKeyDown);
+    document.removeEventListener('visibilitychange', this.onAppHidden);
+    document.removeEventListener('pause', this.onAppHidden);
     if (this.measureTimer) clearTimeout(this.measureTimer);
     this.measureTimer = null;
 
@@ -558,6 +563,19 @@ export class VeEditor {
 
   private readonly onRedo = (): void => {
     this.store.redo();
+  };
+
+  /**
+   * Stops playback when the app goes to the background. Nothing else does: a WebView left playing
+   * goes on playing the video and its sound behind the home screen, or behind a picker the editor
+   * itself opened.
+   *
+   * Two signals, because neither reaches every host. Android's WebView hides the page, and so does a
+   * browser tab; Capacitor on iOS also fires `pause` on the document as the scene goes. Coming back
+   * plays nothing: the customer presses Play, as after any other pause.
+   */
+  private readonly onAppHidden = (event: Event): void => {
+    if (event.type === 'pause' || document.visibilityState === 'hidden') this.store.pause();
   };
 
   /* ========================================================================================= */
@@ -966,6 +984,7 @@ export class VeEditor {
               've': true,
               've--compact': layout === 'compact',
               've--tall': layout === 'tall',
+              've--over': canExpand(panel),
               [EXPANDED_COLUMN]: expanded,
               've--fullscreen': fullscreen,
             }}
@@ -1118,7 +1137,8 @@ export class VeEditor {
    * element - which lays out as nothing and throws nothing. [PANEL_LAYOUT] is what keeps the list
    * exhaustive; this switch is what makes the elements.
    *
-   * `expanded` is the Sound sheet pulled up by its grabber, which only it has ([canExpand]).
+   * `expanded` is the Sound sheet pulled up by its grabber, which only it has ([canExpand]). It is
+   * also the one laid over the editor rather than given a share of the column; see `.ve__sheet--over`.
    */
   private renderTools(ctx: EditorContext, panel: EditorPanel | null, expanded: boolean) {
     switch (panel) {
@@ -1149,7 +1169,7 @@ export class VeEditor {
         // it leaves the document, and the vdom moving it would end the take with no press.
         return <ve-voiceover-sheet key="voiceover" class="ve__sheet" ctx={ctx} />;
       case 'sound':
-        return <ve-sound-sheet key="sound" class={{ 've__sheet': true, 've__sheet--tall': true, [EXPANDED_SHEET]: expanded }} ctx={ctx} />;
+        return <ve-sound-sheet key="sound" class={{ 've__sheet': true, 've__sheet--tall': true, 've__sheet--over': true, [EXPANDED_SHEET]: expanded }} ctx={ctx} />;
       case 'transition':
         return <ve-transition-sheet key="transition" class="ve__sheet" ctx={ctx} />;
       case 'zoom':

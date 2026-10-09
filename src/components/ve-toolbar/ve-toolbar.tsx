@@ -1120,11 +1120,11 @@ export class VeToolbar {
                   onClick={this.videoEffects}
                 >
                   <ve-icon name="sparkles-outline"></ve-icon>
-                  <span>Video</span>
+                  <span>Video effects</span>
                 </button>
                 <button type="button" role="menuitem" class="tb__menu-item" onClick={this.audioEffects}>
                   <ve-icon name="volume-high-outline"></ve-icon>
-                  <span>Audio</span>
+                  <span>Audio effects</span>
                 </button>
               </div>
             ),

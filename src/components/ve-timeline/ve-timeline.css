@@ -75,8 +75,9 @@
 }
 
 /*
- * Every row of the timeline - the ruler, the filmstrip, the zoom row and the lanes - in one column
- * that pans up and down as one, under a transform the component writes.
+ * Every row of the timeline - the filmstrip, the zoom row and the lanes - in one column that pans up
+ * and down as one, under a transform the component writes. The padding is the ruler's room: the
+ * ruler is not in the column, and the column pans up under it.
  *
  * `position: relative` so it is every row's `offsetParent`: the reveal measures a row's `offsetTop`
  * against this element, and against any other it would be measuring against the offset it is trying
@@ -86,13 +87,24 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  padding-top: var(--ruler-h);
 }
 
 /* ----------------------------------------------------------------------------------- ruler */
 
+/*
+ * Pinned to the top of the content: it scrolls sideways with the rows but never pans up with them.
+ * Opaque and over them, so a row panned up goes under it rather than through the times. Under the
+ * playhead (5), whose dot sits on it.
+ */
 .tl__ruler {
-  position: relative;
-  flex: 0 0 var(--ruler-h);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  height: var(--ruler-h);
+  background: var(--ve-bg, #000);
 }
 
 .tl__ruler-dots {

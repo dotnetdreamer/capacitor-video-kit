@@ -22,6 +22,9 @@ import type { Filmstrip } from '../../state/editor.types';
 export const MIN_PPS = 6;
 export const MAX_PPS = 320;
 
+/** The time ruler's height (`--ruler-h`), which the rows pan under. None in compact mode. */
+export const RULER_H = 24;
+
 /** The video track's height, which is also the width of one filmstrip tile. */
 export const TRACK_H = 56;
 export const TRACK_H_COMPACT = 48;

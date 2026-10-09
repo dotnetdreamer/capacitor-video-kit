@@ -66,6 +66,7 @@ import {
   MAX_PPS,
   MIN_ITEM_PX,
   MIN_PPS,
+  RULER_H,
   SEGMENT_GAP_PX,
   TRACK2_H,
   TRACK_H,
@@ -1421,7 +1422,7 @@ export class VeTimeline {
    */
   private readonly keepAddLayer = (el?: HTMLDivElement | null) => {
     this.addLayerEl = el ?? undefined;
-    if (el) el.style.transform = panTransform(this.laneY);
+    if (el) panAddLayer(el, this.laneY);
   };
 
   /*
@@ -2887,9 +2888,10 @@ export class VeTimeline {
     const lanes = media === 'afx' ? this.afxBars.value : this.layerLanes.value;
     const from = lanes.findIndex(lane => lane.id === press.id);
     if (!press.id || from < 0 || lanes.length < 2) return;
-    // The window the rows pan in, which is the whole timeline: a lane held at its top edge brings the
-    // rows above it back down, the filmstrip among them.
+    // The window the rows pan in, which is the whole timeline under the ruler: a lane held at its top
+    // edge brings the rows above it back down, the filmstrip among them.
     const rect = this.contentEl?.getBoundingClientRect();
+    const rulerH = this.rulerH();
     const attribute = media === 'afx' ? 'data-afx-lane' : 'data-lane-id';
     const row = this.lanesEl?.querySelector<HTMLElement>(`[${attribute}="${CSS.escape(press.id)}"]`) ?? null;
     const drag: LayerReorderDrag = {
@@ -2901,8 +2903,8 @@ export class VeTimeline {
       to: from,
       count: lanes.length,
       laneY0: this.laneY,
-      viewTop: rect?.top ?? 0,
-      viewHeight: rect?.height ?? 0,
+      viewTop: (rect?.top ?? 0) + rulerH,
+      viewHeight: Math.max(0, (rect?.height ?? 0) - rulerH),
       row,
     };
     this.beginDrag(drag);
@@ -3414,10 +3416,11 @@ export class VeTimeline {
   /* ========================================================================================= */
 
   /*
-   * Every row pans up and down as one column - the ruler, the filmstrip and the zoom row as well as
-   * the lanes - so a post with more rows than fit is read top to bottom like any other list. The
-   * names below still say "lane" from the days when the lanes panned under a fixed ruler and base
-   * track; `laneY` is how far the whole column is panned.
+   * Every row pans up and down as one column - the filmstrip and the zoom row as well as the lanes -
+   * so a post with more rows than fit is read top to bottom like any other list. The ruler stays
+   * where it is and the column pans up under it, so the times a row is read against never leave the
+   * screen. The names below still say "lane" from the days when the base track stood still too;
+   * `laneY` is how far the whole column is panned.
    */
 
   /**
@@ -3486,10 +3489,14 @@ export class VeTimeline {
   private setLaneY(y: number, max = this.laneMaxY()): void {
     const next = clamp(y, 0, max);
     this.laneY = next;
-    const transform = panTransform(next);
-    if (this.rowsEl) this.rowsEl.style.transform = transform;
+    if (this.rowsEl) this.rowsEl.style.transform = panTransform(next);
     // The add button sits outside the scroller, level with the base track, so it is moved with it.
-    if (this.addLayerEl) this.addLayerEl.style.transform = transform;
+    if (this.addLayerEl) panAddLayer(this.addLayerEl, next);
+  }
+
+  /** The ruler's height, which is the top of the window the rows can be seen in. */
+  private rulerH(): number {
+    return this.compactSig.value ? 0 : RULER_H;
   }
 
   private startLaneInertia(velocity: number, max: number): void {
@@ -3527,8 +3534,8 @@ export class VeTimeline {
     if (!view || !row) return;
     const gap = this.compactSig.value ? 4 : 8;
     const bottom = row.offsetTop + row.offsetHeight;
-    // The base track comes back with the ruler over it, the times it is read against.
-    const top = headRow(row) === 'base' ? 0 : row.offsetTop;
+    // Any other row comes to rest just under the ruler, which hides whatever has panned up under it.
+    const top = headRow(row) === 'base' ? 0 : row.offsetTop - this.rulerH();
     const height = view.clientHeight;
     if (top < this.laneY) this.setLaneY(top);
     else if (bottom > this.laneY + height) this.setLaneY(bottom - height + gap);
@@ -3580,9 +3587,10 @@ export class VeTimeline {
             {/* One native horizontal scroller for every row, so they can never drift apart. */}
             <div class="tl__scroller" key="scroller" ref={this.keepScroller}>
               <div class="tl__content" key="content" ref={this.keepContent} style={{ width: `${this.contentWidth.value}px` }}>
-                <div class="tl__rows" key="rows" ref={this.keepRows}>
-                  {compact ? null : this.rulerRow(pad)}
+                {/* Outside the column, so the rows pan up under it and the times stay in sight. */}
+                {compact ? null : this.rulerRow(pad)}
 
+                <div class="tl__rows" key="rows" ref={this.keepRows}>
                   <div
                     class={{
                       'tl__track': true,
@@ -3905,8 +3913,8 @@ export class VeTimeline {
 
   /**
    * Everything under the base track (and the zoom row): the extra video layers first, then a lane
-   * for each overlay, the sound and the voiceover. All of it pans up and down with the ruler and the
-   * filmstrip above it, as one column - see `laneY`. There is no cap on how many video layers a post
+   * for each overlay, the sound and the voiceover. All of it pans up and down with the filmstrip above
+   * it, as one column, under the ruler - see `laneY`. There is no cap on how many video layers a post
    * may have, and fifteen rows of 48 px is three times the whole timeline.
    */
   private lanes(compact: boolean, pad: number, rows: TrackRowView[], marks: { on: number; under: number }, reorder: ClipReorderView | null) {
@@ -4381,6 +4389,16 @@ function edgeHandles(x: number, w: number): EdgeHandlesView {
  */
 function panTransform(y: number): string {
   return y > 0 ? `translate3d(0, ${-y}px, 0)` : '';
+}
+
+/**
+ * Pans the add button's layer with the rows, and cuts it off at the foot of the ruler as the rows
+ * are: the layer is above the playhead and the ruler is not, so the button cannot pass under it. The
+ * cut is in the layer's own, panned, coordinates, which is why it grows by the pan.
+ */
+function panAddLayer(layer: HTMLElement, y: number): void {
+  layer.style.transform = panTransform(y);
+  layer.style.clipPath = y > 0 ? `inset(calc(var(--ruler-h) + ${y}px) 0 0 0)` : '';
 }
 
 /** Which of the two rows at the head of the column this is - the base track or the zoom row - if either. */

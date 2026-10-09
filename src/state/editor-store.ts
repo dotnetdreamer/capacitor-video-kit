@@ -593,8 +593,9 @@ export class EditorStore {
    */
   readonly soundReplaceTarget = signal<SoundReplaceTarget | null>(null);
   /**
-   * The open sheet has been pulled up by its grabber, to most of the column. Only the Sound sheet
-   * has a grabber. Goes with the sheet, so every sheet opens at its own height.
+   * The open sheet is pulled up, to most of the column. Only the Sound sheet has a grabber, and it
+   * opens pulled up; the grabber lowers it and raises it again. Goes with the sheet, so every sheet
+   * opens at its own height.
    */
   readonly sheetExpanded = signal(false);
   /**
@@ -994,7 +995,8 @@ export class EditorStore {
     // A layout opening still being played is the layout sheet's, and goes with it.
     if (this.panel.value === 'layout' && panel !== 'layout') this.endAudition();
     if (panel !== 'sound') this.soundReplaceTarget.value = null;
-    if (panel !== this.panel.value) this.sheetExpanded.value = false;
+    // The Sound sheet opens pulled up to most of the screen, over the editor; see `canExpand`.
+    if (panel !== this.panel.value) this.sheetExpanded.value = panel === 'sound';
     this.panel.value = panel;
   }
 

@@ -602,7 +602,7 @@ describe('ve-toolbar', () => {
     expect(store.selection.value).toBe(null);
   });
 
-  it('opens a Video and Audio menu from Effects, each opening its own effects, and one menu at a time', async () => {
+  it('opens a Video effects and Audio effects menu from Effects, each opening its own effects, and one menu at a time', async () => {
     const { store, bar } = await mount();
     const effects = tile(bar, 'effects');
     expect(effects.getAttribute('aria-haspopup')).toBe('menu');
@@ -611,7 +611,7 @@ describe('ve-toolbar', () => {
     effects.click();
     await until('the menu', () => menuItems(bar).length === 2);
     expect(root(bar).querySelector('.tb__menu')!.getAttribute('aria-label')).toBe('Effects');
-    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Video', 'Audio']);
+    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Video effects', 'Audio effects']);
     expect(tile(bar, 'effects').getAttribute('aria-expanded')).toBe('true');
     expect(tile(bar, 'effects').classList.contains('tile--pressed')).toBe(true);
 
