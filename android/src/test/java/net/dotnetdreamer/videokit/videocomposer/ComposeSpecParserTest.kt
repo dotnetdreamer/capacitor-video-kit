@@ -747,6 +747,35 @@ class ComposeSpecParserTest {
     }
 
     @Test
+    fun `music varispeed is kept for a sound off 1x, and is nothing at 1x or when absent`() {
+        val json = minimalJson().apply {
+            getJSONObject("audio").put(
+                "music",
+                JSONObject().put("uri", "file:///m.m4a").put("inMs", 0).put("outMs", 5_000).put("speed", 0.8),
+            )
+        }
+        val music = json.getJSONObject("audio").getJSONObject("music")
+        // Absent keeps the pitch, which is what every spec written before the key says.
+        val kept = ComposeSpecParser.parse(json).audio.music!!
+        assertFalse(kept.varispeed)
+        music.put("varispeed", true)
+        val record = ComposeSpecParser.parse(json).audio.music!!
+        assertTrue(record.varispeed)
+        assertEquals(0.8f, record.speed, 1e-6f)
+        music.put("varispeed", false)
+        assertFalse(ComposeSpecParser.parse(json).audio.music!!.varispeed)
+        // At 1x a record and a stretch play the same samples, so the sound is built exactly as one
+        // without the key, whether the speed is sent or left at its default.
+        music.put("varispeed", true).put("speed", 1)
+        val atOne = ComposeSpecParser.parse(json).audio.music!!
+        assertFalse(atOne.varispeed)
+        music.remove("speed")
+        assertFalse(ComposeSpecParser.parse(json).audio.music!!.varispeed)
+        music.remove("varispeed")
+        assertEquals(ComposeSpecParser.parse(json).audio.music!!, atOne)
+    }
+
+    @Test
     fun `a missing audio block is treated as unedited sound`() {
         val json = minimalJson().apply { remove("audio") }
         val audio = ComposeSpecParser.parse(json).audio

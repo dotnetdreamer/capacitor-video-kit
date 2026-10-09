@@ -783,6 +783,8 @@ object ComposeSpecParser {
         val inMs = o.optLong("inMs", 0L).coerceAtLeast(0L)
         val outMs = o.optLong("outMs", 0L)
         if (outMs <= inMs) throw SpecException("$path.outMs")
+        // Held to the clips' range, as a clip's own speed is; absent is 1x.
+        val speed = o.optDouble("speed", 1.0).toFloat().coerceIn(MIN_SPEED, MAX_SPEED)
         return Music(
             uri = uri,
             startMs = o.optLong("startMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
@@ -794,11 +796,13 @@ object ComposeSpecParser {
             fadeOutMs = o.optLong("fadeOutMs", 0L).coerceAtLeast(0L),
             endMs = o.optLong("endMs", 0L).coerceIn(0L, MAX_TIMELINE_MS),
             phaseMs = o.optLong("phaseMs", 0L),
-            // Held to the clips' range, as a clip's own speed is; absent is 1x.
-            speed = o.optDouble("speed", 1.0).toFloat().coerceIn(MIN_SPEED, MAX_SPEED),
-            // Last of the sound's fields, so a sound broken somewhere else reports the same first
-            // failure it always did.
+            speed = speed,
+            // Last of the sound's fields that can fail, so a sound broken somewhere else reports the
+            // same first failure it always did.
             effect = parseSoundEffect(o.opt("effect"), "$path.effect"),
+            // Read as `loop` is, and kept only for a sound off 1x: at 1x a record and a stretch play
+            // the same samples, so a sound there is built exactly as one without the key.
+            varispeed = speed != 1f && o.optBoolean("varispeed", false),
         )
     }
 
@@ -857,7 +861,11 @@ object ComposeSpecParser {
             "lowpass" -> SoundOp.Lowpass(read[0], read[1])
             "peak" -> SoundOp.Peak(read[0], read[1], read[2])
             "drive" -> SoundOp.Drive(read[0], read[1].takeUnless { it.isNaN() })
-            else -> SoundOp.Gain(read[0])
+            "gain" -> SoundOp.Gain(read[0])
+            "reverb" -> SoundOp.Reverb(read[0], read[1], read[2], read[3])
+            // Every op is named above. One given numbers in [SOUND_OP_FIELDS] and not a step here is
+            // refused as nobody's, rather than read as some other step with its numbers.
+            else -> throw SpecException("$path.op")
         }
     }
 
@@ -948,6 +956,12 @@ object ComposeSpecParser {
             "peak" to listOf(hz, q, SoundOpField("db", -24.0, 24.0)),
             "drive" to listOf(SoundOpField("db", 0.0, 40.0), SoundOpField("followMs", 1.0, 10_000.0, optional = true)),
             "gain" to listOf(SoundOpField("db", -40.0, 24.0)),
+            "reverb" to listOf(
+                SoundOpField("decayMs", 100.0, 20_000.0),
+                SoundOpField("dampHz", 10.0, 20_000.0),
+                SoundOpField("wet", 0.0, 1.0),
+                SoundOpField("dry", 0.0, 1.0),
+            ),
         )
     }
 

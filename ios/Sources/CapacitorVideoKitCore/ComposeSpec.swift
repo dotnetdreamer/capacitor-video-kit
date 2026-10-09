@@ -393,11 +393,18 @@ struct ComposeMusic: Sendable {
     let loop: Bool
     let fadeInMs: Int64
     let fadeOutMs: Int64
-    /// How fast the section plays, 0.25..4, pitch preserved - a clip's speed, for a sound. `inMs`,
-    /// `outMs` and `phaseMs` stay places in the FILE, so one pass lasts `(outMs - inMs) / speed` of the
-    /// output; `startMs`, `endMs` and the fades stay places on the output. A defaulted `var`, so the
-    /// memberwise initialiser every caller already uses still builds the 1x sound it always did.
+    /// How fast the section plays, 0.25..4, pitch preserved unless `varispeed` - a clip's speed, for a
+    /// sound. `inMs`, `outMs` and `phaseMs` stay places in the FILE, so one pass lasts
+    /// `(outMs - inMs) / speed` of the output; `startMs`, `endMs` and the fades stay places on the
+    /// output. A defaulted `var`, so the memberwise initialiser every caller already uses still builds
+    /// the 1x sound it always did.
     var speed: Double = 1
+    /// `speed` played as a record plays it: the pitch goes with it, so 0.8x is slower AND lower - what
+    /// a slowed and reverberant edit of a song is made of. False, which is every spec written before the
+    /// key, keeps the pitch at any speed (D3). Only the samples differ: a pass lasts what `speed` says
+    /// either way, so `CompositionBuilder.addMusic` lays the passes out as it always does and asks the
+    /// track's mix for `.varispeed` in place of `.spectral`. Defaulted for `speed`'s reason.
+    var varispeed: Bool = false
     /// What the sound is put through before its level and fades - see `SoundEffect` and
     /// `SoundEffectTap`. Nil, which is every spec written before sounds had effects and what the parser
     /// makes of one that does nothing, is the sound as it is. Defaulted for `speed`'s reason.

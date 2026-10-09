@@ -689,6 +689,20 @@ export interface ComposeMusic {
    */
   speed?: number;
   /**
+   * The [speed] played as a record or a tape plays one: the pitch goes with it, so a sound at 0.8 is
+   * lower as well as slower, where without this every engine keeps the pitch at any speed (D3). It is
+   * what a slowed and reverberant edit of a song is made of (`slowReverb` in
+   * `src/editor/sound-effects.ts`). Absent is false, which is every spec written before this key, and
+   * the builder never sends it for a sound at 1x, where it changes nothing.
+   *
+   * Only the samples differ: a pass lasts what [speed] says it lasts either way, so nothing about
+   * where a sound is heard moves. Android resamples in Sonic, its speed and its pitch set alike; iOS
+   * scales the pass under `AVAudioTimePitchAlgorithm.varispeed` in place of `.spectral`; the web reads
+   * the file at the speed through a cubic interpolator. An [effect] runs on what that leaves, as it
+   * runs on a stretch.
+   */
+  varispeed?: boolean;
+  /**
    * What the sound is put through on its way into the mix: a megaphone, say. Absent is the sound as
    * it is, which is every spec written before this key, and the builder never sends an effect that
    * does nothing - an engine takes the path it always took for a sound with none.
@@ -710,10 +724,12 @@ export interface ComposeMusic {
  * RUNNING IT. Every engine works in 64-bit floating point on samples at the rate the sound is
  * processed at, `fs`, as numbers in -1..1 (16-bit PCM read as `v / 32768`). With [mono] the channels
  * of each frame are first replaced by their MEAN, the steps run once on it, and the result goes back
- * to every channel; without it each channel runs the steps with a state of its own. Every state starts
- * at 0 where a pass of the sound starts - an engine may carry it across the seams of a loop instead,
- * as iOS's tap does, which differs only in the few milliseconds a filter takes to settle. The steps
- * run in array order on every sample:
+ * to every channel; without it each channel runs the steps with a state of its own, and is the channel
+ * numbered `k` from 0 in the frame's order - the folded one is 0. Every state starts at 0 where a pass
+ * of the sound starts - an engine may carry it across the seams of a loop instead, as iOS's tap does,
+ * which differs only in the few milliseconds a filter takes to settle and in a reverb's tail, which
+ * carries over a seam there and starts again from silence elsewhere. The steps run in array order on
+ * every sample:
  *
  *   highpass, lowpass, peak - the biquads of the Audio EQ Cookbook (Bristow-Johnson), with
  *     `f = min(hz, 0.45 * fs)`, `w0 = 2 * PI * f / fs`, `alpha = sin(w0) / (2 * q)`:
@@ -729,14 +745,32 @@ export interface ComposeMusic {
  *       level = |x| > level ? |x| : level * exp(-1000 / (followMs * fs))
  *       e = max(level, 10^(-50 / 20));  y = e * tanh(g * x / e)
  *   gain - `y = 10^(db / 20) * x`.
+ *   reverb - a Schroeder-Moorer reverberator on Jezar's Freeverb tunings: eight feedback combs side by
+ *     side, then four allpasses one after another. With `n(t) = max(1, floor((t + 23 * k) * fs / 44100 + 0.5))`
+ *     - the 23 samples a channel are what make a stereo tail wide - comb `i` delays by `D = n(COMB[i])`
+ *     and allpass `j` by `A = n(ALLPASS[j])`:
+ *       COMB = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]    ALLPASS = [556, 441, 341, 225]
+ *     Each comb falls 60 dB in `decayMs`, `g = 10^(-3 * D / (fs * decayMs / 1000))`, and takes
+ *     `c = sqrt((1 - g * g) / 8)` of the sound, so the tail is about as loud as the sound itself at
+ *     any length, below where it is damped; every comb damps alike,
+ *     `d = exp(-2 * PI * min(dampHz, 0.45 * fs) / fs)`. Every
+ *     buffer and every `f` starts at 0, each `p` at the start of its buffer, and on every sample:
+ *       r = 0
+ *       each comb, in order:     o = buf[p];  f = (1 - d) * o + d * f;  buf[p] = c * x + g * f;  r = r + o
+ *       each allpass, in order:  b = buf[p];  v = r + 0.5 * b;  buf[p] = v;  r = b - 0.5 * v
+ *       y = dry * x + wet * r
+ *     and each `p` then moves on one, back to the start of its buffer from its end. The allpasses are
+ *     true ones, where Freeverb's own lift the tail by some 15 dB on average.
  *
- * A filter's two state values are set to 0 together once BOTH are under 1e-20 in size, and the
- * drive's level once it is, so a long silence ends in exact silence rather than running on denormal
- * numbers - one value zeroed alone unbalances the recurrence and holds it just over the line. The
- * result is written back in the stream's own format, held to -1..1.
+ * A filter's two state values are set to 0 together once BOTH are under 1e-20 in size, the drive's
+ * level once it is, and a comb's `f` and every value written into a reverb's buffer as it is stored,
+ * so a long silence ends in exact silence rather than running on denormal numbers - one value of a
+ * filter zeroed alone unbalances the recurrence and holds it just over the line. The result is
+ * written back in the stream's own format, held to -1..1.
  *
  * Each parser CLAMPS the numbers - `hz` to 10..20000, `q` to 0.1..10, a peak's `db` to -24..24, a
- * drive's to 0..40 and its `followMs` to 1..10000, a gain's to -40..24. REFUSED, as shape errors,
+ * drive's to 0..40 and its `followMs` to 1..10000, a gain's to -40..24, a reverb's `decayMs` to
+ * 100..20000, its `dampHz` to 10..20000 and its `wet` and `dry` to 0..1. REFUSED, as shape errors,
  * with the path that broke: an effect that is not an object, a `mono` that is not a boolean, `ops`
  * that is there and is not an array, more than [MAX_SOUND_OPS] steps, a step that is not an object,
  * an `op` nobody defined, a number a step needs that is missing or not finite (an absent `followMs` is
@@ -761,7 +795,8 @@ export type SoundOp =
   | { op: 'lowpass'; hz: number; q: number }
   | { op: 'peak'; hz: number; q: number; db: number }
   | { op: 'drive'; db: number; followMs?: number }
-  | { op: 'gain'; db: number };
+  | { op: 'gain'; db: number }
+  | { op: 'reverb'; decayMs: number; dampHz: number; wet: number; dry: number };
 
 /** The most steps one effect may carry. A spec with more is refused rather than cut short. */
 export const MAX_SOUND_OPS = 16;

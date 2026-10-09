@@ -3,6 +3,7 @@ package net.dotnetdreamer.videokit.videocomposer
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.VideoCompositorSettings
+import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.audio.SpeedProvider
@@ -15,8 +16,13 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.PI
 import kotlin.math.floor
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
  * What the plan says and what Media3 is actually handed have to be the same thing.
@@ -84,8 +90,11 @@ class CompositionBuilderTest {
      * The device's spec on 2026-10-06: a minute of video with its own sound off, and on a lane the
      * seeded 12 s tone at 2x, played once with a one-second fade out.
      */
-    private fun spedSoundPlan(speed: Float = 2f, effect: SoundEffect? = null): RenderPlan {
-        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = false, fadeInMs = 0, fadeOutMs = 1_000, speed = speed, effect = effect)
+    private fun spedSoundPlan(speed: Float = 2f, effect: SoundEffect? = null, varispeed: Boolean = false): RenderPlan {
+        val music = Music(
+            "file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = false, fadeInMs = 0, fadeOutMs = 1_000,
+            speed = speed, effect = effect, varispeed = varispeed,
+        )
         return RenderPlan.build(
             spec(listOf(clip("a", outMs = 60_000))).copy(audio = Audio(true, 1f, null, emptyList(), musicTracks = listOf(listOf(music)))),
             mapOf("file:///a.mp4" to probe(60_000), "file:///m.m4a" to probe(12_000)),
@@ -145,6 +154,74 @@ class CompositionBuilderTest {
     fun `a sound at 1x has no stretch at all`() {
         val item = CompositionBuilder.toComposition(spedSoundPlan(speed = 1f), emptyList(), null).sequences.last().editedMediaItems.single()
         assertTrue(item.effects.audioProcessors.none { it is SonicAudioProcessor })
+        // Nor does one played as a record: at 1x it is the same samples.
+        val record = CompositionBuilder.toComposition(spedSoundPlan(speed = 1f, varispeed = true), emptyList(), null).sequences.last().editedMediaItems.single()
+        assertTrue(record.effects.audioProcessors.none { it is SonicAudioProcessor })
+    }
+
+    /** The processors Media3 is handed for the single pass of [plan]'s sound. */
+    private fun soundProcessors(plan: RenderPlan): List<AudioProcessor> =
+        CompositionBuilder.toComposition(plan, emptyList(), null).sequences.last().editedMediaItems.single().effects.audioProcessors
+
+    /** Everything [p] makes of [input], mono 16-bit PCM at [rate], as it hands it over. */
+    private fun played(p: AudioProcessor, input: FloatArray, rate: Int): FloatArray {
+        p.configure(AudioProcessor.AudioFormat(rate, 1, C.ENCODING_PCM_16BIT))
+        p.flush(AudioProcessor.StreamMetadata.DEFAULT)
+        val pcm = ByteBuffer.allocateDirect(input.size * 2).order(ByteOrder.nativeOrder())
+        for (v in input) pcm.putShort((v * 32767f).roundToInt().toShort())
+        pcm.flip()
+        val out = ArrayList<Float>()
+        fun drain() {
+            val buffer = p.output
+            while (buffer.remaining() >= 2) out += buffer.short / 32768f
+        }
+        p.queueInput(pcm)
+        assertFalse("the processor must take the whole buffer", pcm.hasRemaining())
+        drain()
+        p.queueEndOfStream()
+        repeat(8) { if (!p.isEnded) drain() }
+        assertTrue(p.isEnded)
+        return out.toFloatArray()
+    }
+
+    /** A tone's frequency, from how often it rises through 0 in its middle eight tenths. */
+    private fun frequencyOf(samples: FloatArray, rate: Int): Double {
+        val from = samples.size / 10
+        val to = samples.size - samples.size / 10
+        var rises = 0
+        for (i in from + 1 until to) if (samples[i - 1] < 0f && samples[i] >= 0f) rises++
+        return rises * rate.toDouble() / (to - from)
+    }
+
+    /** Half a second of a 1 kHz tone at 48 kHz: the sound both speed tests below put through Sonic. */
+    private val kiloHertz = FloatArray(24_000) { (0.5 * sin(2 * PI * 1_000 * it / 48_000)).toFloat() }
+
+    /*
+     * Played as a record plays it ([Music.varispeed]): the same processor in the same place, and the
+     * same length on the output, but the pitch goes with the speed. Sonic's speed and pitch set alike
+     * leave it only its resampler (see `timeStretch` in [CompositionBuilder]), so half speed is twice
+     * the samples an octave down.
+     */
+    @Test
+    fun `a varispeed sound is resampled by its first processor, slower and lower together`() {
+        val processors = soundProcessors(spedSoundPlan(speed = 0.5f, varispeed = true))
+        assertEquals(3, processors.size)
+        val sonic = processors[0] as SonicAudioProcessor
+        assertTrue(processors[1] is ExactLengthAudioProcessor)
+        // Twelve seconds of file at 0.5x is 24 s on the output, as it is for a sound that keeps its pitch.
+        assertEquals(24_000_000L, sonic.getDurationAfterProcessorApplied(12_000_000L))
+        val out = played(sonic, kiloHertz, 48_000)
+        assertEquals(2.0 * kiloHertz.size, out.size.toDouble(), 0.01 * kiloHertz.size)
+        assertEquals(500.0, frequencyOf(out, 48_000), 5.0)
+    }
+
+    @Test
+    fun `a sound that keeps its pitch is stretched instead, as long at the same speed`() {
+        val sonic = soundProcessors(spedSoundPlan(speed = 0.5f))[0] as SonicAudioProcessor
+        assertEquals(24_000_000L, sonic.getDurationAfterProcessorApplied(12_000_000L))
+        val out = played(sonic, kiloHertz, 48_000)
+        assertEquals(2.0 * kiloHertz.size, out.size.toDouble(), 0.01 * kiloHertz.size)
+        assertEquals(1_000.0, frequencyOf(out, 48_000), 20.0)
     }
 
     @Test

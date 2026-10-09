@@ -40,7 +40,7 @@ import {
 } from './edit-manifest';
 import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
-import { normaliseSoundEffectId } from './sound-effects';
+import { normaliseSoundEffectId, normaliseSoundEffectSettings, sameSoundEffectSettings, soundEffectPreset } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -1361,6 +1361,13 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
   const effect = normaliseSoundEffectId(next.effect);
   if (effect) next.effect = effect;
   else delete next.effect;
+  // Its sliders by the same rule, against the effect the sound has now - only those moved off their
+  // defaults - and the very object it had when they have not moved, so that a patch of anything else
+  // is still no change ([sameFields] compares by identity).
+  const settings = normaliseSoundEffectSettings(effect, next.effectSettings);
+  const had = manifest.music.effectSettings;
+  if (!settings) delete next.effectSettings;
+  else next.effectSettings = had && sameSoundEffectSettings(settings, had) ? had : settings;
   if (next.outMs > 0 && next.outMs - next.inMs < MIN_LAYER_MS) return manifest;
   if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;
@@ -1558,17 +1565,56 @@ export function setMusicSpeed(manifest: EditManifest, speed: number): EditManife
 }
 
 /**
- * One sound on the lanes through an effect from [SOUND_EFFECTS], or through none for `null`. Nothing
- * else about it changes - an effect never makes a sound longer - so it cannot come to meet its
- * neighbour, and an id this version does not know is none.
+ * What putting `sound` through `effectId` - or through none, for `null` - patches it with, or null
+ * when that is the effect it already has. The effect, its sliders back at their defaults, and the
+ * speed only where an effect holds it ([SoundEffectSpeed]): slowed to the effect's own when it takes
+ * the speed over, unless the sound is slower already, and back to 1x when the effect that held it
+ * comes off, since that slowness was the effect's. An id this version does not know is none.
  */
-export function setAudioEffect(manifest: EditManifest, id: string, effectId: string | null): EditManifest {
-  return patchAudioClip(manifest, id, { effect: effectId ?? undefined });
+export function soundEffectPatch(sound: EditMusic, effectId: string | null): Partial<EditMusic> | null {
+  const next = soundEffectPreset(effectId);
+  const was = soundEffectPreset(sound.effect);
+  if ((next?.id ?? null) === (was?.id ?? null)) return null;
+  const patch: Partial<EditMusic> = { effect: next?.id, effectSettings: undefined };
+  if (next?.speed) {
+    if (musicSpeed(sound) >= 1) patch.speed = next.speed.default;
+  } else if (was?.speed) {
+    patch.speed = 1;
+  }
+  return patch;
 }
 
-/** The post's music through an effect, or through none; see [setAudioEffect]. */
+/**
+ * One sound on the lanes through an effect from [SOUND_EFFECTS], or through none for `null`; see
+ * [soundEffectPatch] for what comes with it. An effect alone never makes a sound longer, but one that
+ * slows it may run it into the next sound on its lane, which stops it there as the Speed sheet's
+ * slower speed would ([audioSpeedPatch]).
+ */
+export function setAudioEffect(manifest: EditManifest, id: string, effectId: string | null): EditManifest {
+  const clip = findAudioClip(manifest, id);
+  const patch = clip ? soundEffectPatch(clip, effectId) : null;
+  if (!patch) return manifest;
+  return patchAudioClip(manifest, id, patch.speed !== undefined ? { ...patch, ...audioSpeedPatch(manifest, id, patch.speed) } : patch);
+}
+
+/** The post's music through an effect, or through none; see [setAudioEffect]. Nothing shares its row. */
 export function setMusicEffect(manifest: EditManifest, effectId: string | null): EditManifest {
-  return patchMusic(manifest, { effect: effectId ?? undefined });
+  const patch = manifest.music ? soundEffectPatch(manifest.music, effectId) : null;
+  return patch ? patchMusic(manifest, patch) : manifest;
+}
+
+/**
+ * One of a sound's effect sliders moved to `value` on its 0..100 scale ([EditMusic.effectSettings]).
+ * The same edit back for a sound whose effect has no such slider, or for where it already is.
+ */
+export function setAudioEffectSetting(manifest: EditManifest, id: string, key: string, value: number): EditManifest {
+  const clip = findAudioClip(manifest, id);
+  return clip ? patchAudioClip(manifest, id, { effectSettings: { ...clip.effectSettings, [key]: value } }) : manifest;
+}
+
+/** The post's music's effect slider moved; see [setAudioEffectSetting]. */
+export function setMusicEffectSetting(manifest: EditManifest, key: string, value: number): EditManifest {
+  return manifest.music ? patchMusic(manifest, { effectSettings: { ...manifest.music.effectSettings, [key]: value } }) : manifest;
 }
 
 /**
@@ -1787,7 +1833,8 @@ export function joinContinuousAudio(clips: readonly EditAudioClip[]): EditAudioC
 }
 
 /**
- * Whether `next` carries `sound` on unbroken: the same file at the same speed, level and effect,
+ * Whether `next` carries `sound` on unbroken: the same file at the same speed, level and effect -
+ * the effect's sliders included -
  * nothing fading where they meet, and `next` starting where `sound` stops - on the post and in the file, to
  * within the millisecond a cut rounds a sped-up sound by. A loop goes on in the same section, its
  * repeats where the earlier one's had got to; a sound played once ends on its section, which the
@@ -1795,8 +1842,9 @@ export function joinContinuousAudio(clips: readonly EditAudioClip[]): EditAudioC
  */
 function playsOn(sound: EditAudioClip, next: EditAudioClip): boolean {
   if (next.uri !== sound.uri || musicSpeed(next) !== musicSpeed(sound) || next.volume !== sound.volume || next.loop !== sound.loop) return false;
-  // A word cut out of a line for a megaphone is a different sound from the line either side of it.
-  if (next.effect !== sound.effect) return false;
+  // A word cut out of a line for a megaphone is a different sound from the line either side of it, and
+  // so is one put through the same megaphone driven harder.
+  if (next.effect !== sound.effect || !sameSoundEffectSettings(next.effectSettings, sound.effectSettings)) return false;
   if (sound.fadeOutMs > 0 || (next.fadeInMs ?? 0) > 0) return false;
   const speed = musicSpeed(sound);
   if (sound.loop) {

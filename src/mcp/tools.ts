@@ -108,7 +108,7 @@ import { EFFECT_CATEGORIES, EFFECT_PRESETS } from '../editor/effects';
 import { DEFAULT_LAYOUT_ANIMATION_MS, LAYOUT_ANIMATIONS, MAX_LAYOUT_ANIMATION_MS, MIN_LAYOUT_ANIMATION_MS } from '../editor/layout-animation';
 import { layoutPresets } from '../editor/layout-presets';
 import { MAX_OVERLAY_LOOP_MS, MAX_OVERLAY_MOVE_MS, MIN_OVERLAY_LOOP_MS, MIN_OVERLAY_MOVE_MS, OVERLAY_ANIMATIONS } from '../editor/motion';
-import { SOUND_EFFECTS } from '../editor/sound-effects';
+import { SOUND_EFFECTS, SOUND_EFFECT_SETTING_MAX, soundEffectPreset } from '../editor/sound-effects';
 import { DEFAULT_TRANSITION_MS, MAX_TRANSITION_MS, MIN_TRANSITION_MS, TRANSITIONS, TRANSITION_CATEGORIES } from '../editor/transitions';
 import { DEFAULT_TEXT_STYLE_ID, TEXT_STYLES, TEXT_STYLE_CATEGORIES } from '../data/text-styles';
 import { applyEditOps, opNamesFor, zoomOffered, type EditOp, type McpEditingOptions } from './ops';
@@ -426,7 +426,7 @@ export const OP_REFERENCE: Record<string, string> = {
 
   /* sound */
   setMusic:
-    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?, speed?, effect?}) or null to take it away. ' +
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?, speed?, effect?, effectSettings?}) or null to take it away. ' +
     'inMs..outMs is the section of the track (outMs 0: to the end of the track), startMs where it starts on the post, and endMs where it ' +
     'stops (0, the default: until the end); a looping section repeats until endMs, or until the video ends. phaseMs offsets ' +
     'the first pass within the section and wraps at its end; it may be negative, and later passes use the full section. An outMs or endMs that is ' +
@@ -438,7 +438,14 @@ export const OP_REFERENCE: Record<string, string> = {
     '(outMs - inMs) / speed on the post, while startMs, endMs and the fades stay places on the post. effect puts the sound through ' +
     `one of ${SOUND_EFFECTS.map(preset => `"${preset.id}"`).join(', ')}, or "none" (the default) for the sound as it is: "megaphone" is a ` +
     'voice through a small horn speaker driven hard - the middle of the voice, buzzing, a little louder - which is how one word of a ' +
-    'line is made to stand out: cut the word out with splitAudio and patch that piece alone. Any other field is refused; a field ' +
+    'line is made to stand out: cut the word out with splitAudio and patch that piece alone. "slowReverb" is the slowed and reverberant ' +
+    'edit of a song: it plays the sound’s speed as a record does, lower as well as slower, in a big soft room. Putting it on slows the ' +
+    `sound to ${soundEffectPreset('slowReverb')?.speed?.default}x unless the op sends a speed (a sound already slower keeps its own), and taking it off ` +
+    'puts the speed back to 1; set how slow with speed, as for any sound. effectSettings moves the effect’s sliders, each a whole ' +
+    `number from 0 to ${SOUND_EFFECT_SETTING_MAX}: ${SOUND_EFFECTS.map(preset => `${preset.id} {${preset.controls.map(control => `${control.key} (default ${control.default})`).join(', ')}}`).join(', ')}. ` +
+    'The megaphone’s intensity is how hard it is driven, and its tone the size of the horn, dull at 0 and tinny at 100; ' +
+    'slowReverb’s reverb is how much of the room is heard, and its room how long and dark the room is. A new effect starts at its ' +
+    'defaults unless the op sends effectSettings, and a slider the effect has not got is refused. Any other field is refused; a field ' +
     'sent as null takes its default.',
   patchMusic:
     'patch - any of the fields setMusic takes, checked the same way; any other field is refused, and so is null - send 0 for no stop, ' +

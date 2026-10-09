@@ -1260,6 +1260,23 @@ class RenderPlanTest {
         assertEquals(musicGainAt(musicPlan(plain, videoMs = 10_000, trackMs = 3_000), 9_800_000L), musicGainAt(musicPlan(plain.copy(effect = effect), videoMs = 10_000, trackMs = 3_000), 9_800_000L), 1e-6f)
     }
 
+    /*
+     * A sound played as a record plays it: only the samples differ, so the plan lays every pass where
+     * the stretch that keeps its pitch would have, for as long, and hands the builder the one flag.
+     */
+    @Test
+    fun `every pass of a varispeed sound carries it, and is laid exactly as one that keeps its pitch`() {
+        val kept = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 500, speed = 0.8f)
+        val record = musicPlan(kept.copy(varispeed = true), videoMs = 10_000, trackMs = 3_000).music!!.items
+        val stretched = musicPlan(kept, videoMs = 10_000, trackMs = 3_000).music!!.items
+        assertTrue(record.size > 1)
+        assertTrue(record.all { it.varispeed && it.speed == 0.8f })
+        assertTrue(stretched.none { it.varispeed })
+        val laid = { items: List<RenderPlan.MusicItem> -> items.map { listOf(it.inUs, it.outUs, it.atUs, it.decodeEndUs, it.lengthUs) } }
+        assertEquals(laid(stretched), laid(record))
+        assertEquals(musicGainAt(musicPlan(kept, videoMs = 10_000, trackMs = 3_000), 9_800_000L), musicGainAt(musicPlan(kept.copy(varispeed = true), videoMs = 10_000, trackMs = 3_000), 9_800_000L), 1e-6f)
+    }
+
     /* ------------------------------------------------------------------------------------- */
 
     @Test

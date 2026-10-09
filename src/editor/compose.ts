@@ -27,7 +27,7 @@ import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
-import { soundEffectPreset } from './sound-effects';
+import { soundEffectPlaysSpeedAsRecord, soundEffectSteps } from './sound-effects';
 import { compileTransition, transitionSpans } from './transitions';
 import { compileCamera } from './zoom';
 
@@ -269,22 +269,24 @@ export async function toComposeSpec(
  * A sound's speed as the wire carries it: only when it is not 1x, so a sound nobody sped up is the
  * music this package has always sent, byte for byte, and every engine keeps the path it takes for it.
  */
-function wireSpeed(music: EditMusic): { speed?: number } {
+function wireSpeed(music: EditMusic): { speed?: number; varispeed?: true } {
   const speed = musicSpeed(music);
-  return speed !== 1 ? { speed } : {};
+  if (speed === 1) return {};
+  // Slow + reverb's slowness is a record's, lower as well as slower; every other speed keeps its pitch.
+  return soundEffectPlaysSpeedAsRecord(music.effect) ? { speed, varispeed: true } : { speed };
 }
 
 /**
- * A sound's effect as the wire carries it: the steps its id stands for, and no key at all for none
- * or for an id this version does not know, so a sound nobody put through anything is the music this
- * package has always sent. The steps are copied off the frozen catalogue rather than handed over, so
- * nothing that holds the spec can change an effect for every post after it.
+ * A sound's effect as the wire carries it: the steps its id stands for at the sound's own settings,
+ * and no key at all for none or for an id this version does not know, so a sound nobody put through
+ * anything is the music this package has always sent - and a megaphone whose sliders were never
+ * moved is the one it sent before there were sliders. The steps are made afresh for every spec
+ * rather than handed over from the frozen catalogue, so nothing that holds the spec can change an
+ * effect for every post after it.
  */
 function wireEffect(music: EditMusic): { effect?: ComposeSoundEffect } {
-  const preset = soundEffectPreset(music.effect);
-  if (!preset) return {};
-  const { mono, ops } = preset.effect;
-  return { effect: { ...(mono ? { mono } : {}), ops: ops.map(op => ({ ...op })) } };
+  const effect = soundEffectSteps(music.effect, music.effectSettings);
+  return effect ? { effect } : {};
 }
 
 /**

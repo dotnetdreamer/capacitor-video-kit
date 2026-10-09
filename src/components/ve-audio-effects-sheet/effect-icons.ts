@@ -10,4 +10,6 @@ import type { EditorIconName } from '../../icons/icons';
  */
 export const SOUND_EFFECT_ICONS: Readonly<Record<string, EditorIconName>> = {
   megaphone: 'megaphone-outline',
+  // A record, since slow + reverb plays the sound as a record played under its speed.
+  slowReverb: 'disc-outline',
 };

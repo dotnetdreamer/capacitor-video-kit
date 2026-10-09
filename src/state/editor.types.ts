@@ -1,4 +1,4 @@
-import type { RasterisedOverlay } from '../editor';
+import { musicSpeed, normaliseSoundEffectId, normaliseSoundEffectSettings, soundEffectPlaysSpeedAsRecord, type EditMusic, type RasterisedOverlay } from '../editor';
 
 /** What the customer has picked on the timeline or the preview. At most one thing at a time. */
 export type EditorSelection =
@@ -64,12 +64,41 @@ export function clipWaveKey(sourceKey: string): string {
 }
 
 /**
- * What a sound's copy through an effect is filed under in `store.soundCopies`: the effect and the
- * file, since one file through two effects is two copies and two sounds of one file through the same
- * effect - the halves of a cut - are one.
+ * What a sound's copy through its effect is filed under in `store.soundCopies`, or null for a sound
+ * that has none: the effect and the file, since one file through two effects is two copies and two
+ * sounds of one file through the same effect - the halves of a cut - are one. Sliders moved off their
+ * defaults, and the speed of an effect that plays it as a record does ([soundCopyRate]), follow on a
+ * line of their own, since each is another copy; a line break is the one thing no URI holds, so what
+ * is before it is always [soundCopyFamily]'s.
  */
-export function soundCopyKey(uri: string, effectId: string): string {
-  return `${effectId}:${uri}`;
+export function soundCopyKey(sound: Pick<EditMusic, 'uri' | 'effect' | 'effectSettings' | 'speed'>): string | null {
+  const family = soundCopyFamily(sound);
+  if (!family) return null;
+  const settings = normaliseSoundEffectSettings(sound.effect, sound.effectSettings);
+  const rate = soundCopyRate(sound);
+  const variant = `${settings ? JSON.stringify(settings) : ''}${rate !== 1 ? `@${rate}` : ''}`;
+  return variant ? `${family}\n${variant}` : family;
+}
+
+/**
+ * What every copy of one file through one effect is filed under, whatever its sliders say: the part
+ * of a [soundCopyKey] before its line break, or all of one with none. Any of them is the same sound on
+ * the same timeline, near enough to play while the one a slider asked for is still being made.
+ */
+export function soundCopyFamily(sound: Pick<EditMusic, 'uri' | 'effect'>): string | null {
+  const effect = normaliseSoundEffectId(sound.effect);
+  return effect ? `${effect}:${sound.uri}` : null;
+}
+
+/**
+ * The rate a sound's copy is heard at, as a multiple of its file's own: the sound's speed when its
+ * effect plays that speed as a record does, since the element plays the copy at it with the pitch let
+ * go, and 1 for every other copy, which keeps its pitch whatever its speed. `sound-copy.ts` works the
+ * effect out at that rate, so it comes out where the render, which treats the sound after slowing it,
+ * puts it.
+ */
+export function soundCopyRate(sound: Pick<EditMusic, 'effect' | 'speed'>): number {
+  return soundEffectPlaysSpeedAsRecord(sound.effect) ? musicSpeed(sound) : 1;
 }
 
 export interface Filmstrip {

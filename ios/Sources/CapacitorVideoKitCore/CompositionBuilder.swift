@@ -555,8 +555,9 @@ enum CompositionBuilder {
             // `.spectral`, and never `.varispeed`. The contract preserves pitch across a speed
             // change (D3), and varispeed is the one algorithm that does not; Apple's own header
             // calls spectral the best choice for scaled edits and it is already the offline export
-            // default. The clip-audio track is the only scaled one, so it is the only place this
-            // choice is audible - music and voice carry it for consistency, not effect.
+            // default. A sound is scaled by its own speed and keeps its pitch the same way, unless it
+            // asks to play as a record does (`addMusic`); the voice carries it for consistency, not
+            // effect.
             p.audioTimePitchAlgorithm = .spectral
             // A level per clip, the silent ones included, held from the clip's start to its end
             // (see `hold`). A silent clip's 0 is redundant while nothing is inserted under it, and
@@ -1227,7 +1228,8 @@ enum CompositionBuilder {
                 throw BuildError.unreadable("music", "insert: \(error)")
             }
             // Scaled at once, before the next pass goes in after it: `scaleTimeRange` ripples everything
-            // after the range it touches. The pitch is kept by the `.spectral` algorithm, below.
+            // after the range it touches. The pitch is kept by the `.spectral` algorithm below, or goes
+            // with the speed under `.varispeed` for a sound that plays as a record does.
             if speed != 1 {
                 track.scaleTimeRange(CMTimeRange(start: at, duration: slice.duration), toDuration: played)
             }
@@ -1238,7 +1240,13 @@ enum CompositionBuilder {
         guard slices > 0 else { return nil }
 
         let p = AVMutableAudioMixInputParameters(track: track)
-        p.audioTimePitchAlgorithm = .spectral
+        // `.spectral` keeps a sound's pitch at any speed (D3). A sound that asks to play its speed as a
+        // record does (`ComposeMusic.varispeed`) is scaled under `.varispeed` instead, the one algorithm
+        // that lets the pitch go with the rate, so 0.8x comes out slower and lower; set on the track's
+        // own parameters, it is used in place of whatever the session or `WriterEngine`'s mix output
+        // carries. Only a scaled pass is touched by either, so at 1x the sound keeps the path it took.
+        let pitch: AVAudioTimePitchAlgorithm = m.varispeed && speed != 1 ? .varispeed : .spectral
+        p.audioTimePitchAlgorithm = pitch
         // Ahead of the volume ramps below, which are the sound's level and its fades: a pre-effects
         // tap hears the sound before them (`SoundEffectTap`). A tap MediaToolbox would not make fails
         // the render rather than post the sound without the effect the customer heard in the preview.

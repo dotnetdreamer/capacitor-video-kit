@@ -4,6 +4,7 @@ import type { ComposeSoundEffect } from '../definitions';
 
 import { musicForSource, type MusicItem, type MusicPlan, type PlannedClip, type RenderPlan, type VoiceItem } from './plan';
 import { timeStretch } from './time-stretch';
+import { varispeed } from './varispeed';
 
 /**
  * The soundtrack, mixed in one pass over sample arrays.
@@ -214,8 +215,9 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
  * silence exactly where the music stops ([MusicPlan]).
  *
  * A repetition of music played at another speed is stretched first, at its own pitch, and laid at the
- * length the plan gave it on the output; see [stretchedPass] for what `next` is for. Music with an
- * effect is put through it next ([treatedPass]), and only then given its level and fades.
+ * length the plan gave it on the output; see [stretchedPass] for what `next` is for. Music whose speed
+ * is a record's is read at it instead, lower as well as slower ([recordPass]). Music with an effect
+ * is put through it next ([treatedPass]), and only then given its level and fades.
  */
 function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, music: MusicPlan, next?: MusicItem): boolean {
   const from = samplesAt(item.inUs, mix.sampleRate);
@@ -244,7 +246,9 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, mus
       passes.push({ input: whole, offset: from });
       continue;
     }
-    const input = stretched.get(whole) ?? stretchedPass(whole, from, to, next, speed, mix.sampleRate);
+    const input =
+      stretched.get(whole) ??
+      (music.varispeed ? recordPass(whole, from, to, next, speed, count, mix.sampleRate) : stretchedPass(whole, from, to, next, speed, mix.sampleRate));
     stretched.set(whole, input);
     passes.push({ input, offset: 0 });
   }
@@ -275,13 +279,39 @@ interface Pass {
  * engines start one with every pass: a copy of the `count` samples each channel plays, run together -
  * a megaphone folds them into one - and handed back in place of the originals, which the next
  * repetition still reads. Cut where the shortest channel runs out, as the copy loop would have been.
+ *
+ * A mono file is one channel read twice, and goes through the effect once, as the one channel it is:
+ * Android treats the decoder's one channel before Media3 spreads it over two, so a reverb's room is
+ * a mono room on both, where running the two copies apart would give each a tail of its own.
  */
 function treatedPass(passes: readonly Pass[], count: number, effect: ComposeSoundEffect, sampleRate: number): Pass[] {
   const length = Math.max(0, Math.min(count, ...passes.map(pass => pass.input.length - pass.offset)));
-  const copies = passes.map(pass => pass.input.slice(pass.offset, pass.offset + length));
+  const first = passes[0];
+  const mono = first !== undefined && passes.every(pass => pass.input === first.input && pass.offset === first.offset);
+  const copies = (mono ? [first] : passes).map(pass => pass.input.slice(pass.offset, pass.offset + length));
   new SoundEffectRunner(effect, sampleRate).process(copies);
-  return copies.map(input => ({ input, offset: 0 }));
+  return passes.map((_, channel) => ({ input: copies[mono ? 0 : channel]!, offset: 0 }));
 }
+
+/**
+ * One repetition read as a record plays at `speed` ([MusicPlan.varispeed]): `count` samples, the
+ * section from `from` at `speed` samples a sample, with the sample before it and the first few of
+ * what follows - the next pass's start, or the file going on - for the interpolator to read the ends
+ * between, as [stretchedPass] runs on into the next pass so a loop's seam has no gap.
+ */
+function recordPass(whole: Float32Array, from: number, to: number, next: MusicItem | undefined, speed: number, count: number, sampleRate: number): Float32Array {
+  const lead = from > 0 && from <= whole.length ? 1 : 0;
+  const own = whole.subarray(Math.min(from - lead, whole.length), Math.min(to, whole.length));
+  const followFrom = next ? samplesAt(next.inUs, sampleRate) : to;
+  const follow = whole.subarray(Math.min(followFrom, whole.length), Math.min(followFrom + RECORD_RUN_ON, whole.length));
+  const input = new Float32Array(own.length + follow.length);
+  input.set(own);
+  input.set(follow, own.length);
+  return varispeed(input, speed, count, lead);
+}
+
+/** The samples of what follows a pass that [recordPass] reads past its end: the cubic's reach and a spare. */
+const RECORD_RUN_ON = 4;
 
 /** How much of what follows a sped-up repetition is stretched along with it, in seconds of the file. */
 const STRETCH_RUN_ON_S = 0.1;

@@ -331,10 +331,10 @@ data class Music(
     /** Signed offset into [inMs]..[outMs] at the first playback, wrapping within the section. */
     val phaseMs: Long = 0L,
     /**
-     * How fast the section plays, 0.25..4, pitch preserved - a clip's [Clip.speed], for a sound.
-     * [inMs], [outMs] and [phaseMs] stay places in the FILE, so one pass lasts `(outMs - inMs) /
-     * speed` of the output; [startMs], [endMs] and the fades stay places on the output. Last and
-     * defaulted, so every sound built without one is the 1x sound it always was.
+     * How fast the section plays, 0.25..4, pitch preserved unless [varispeed] - a clip's
+     * [Clip.speed], for a sound. [inMs], [outMs] and [phaseMs] stay places in the FILE, so one pass
+     * lasts `(outMs - inMs) / speed` of the output; [startMs], [endMs] and the fades stay places on
+     * the output. Last and defaulted, so every sound built without one is the 1x sound it always was.
      */
     val speed: Float = 1f,
     /**
@@ -344,6 +344,15 @@ data class Music(
      * without one is built exactly as it was.
      */
     val effect: SoundEffect? = null,
+    /**
+     * [speed] played as a record plays it, the pitch going with it: a sound at 0.8 is lower as well as
+     * slower, where without this every engine keeps the pitch at any speed
+     * ([CompositionBuilder.MAINTAIN_PITCH]). Only the samples differ - a pass lasts what [speed] says
+     * either way, so nothing about where the sound is heard moves - and the [effect] runs on what the
+     * resampling leaves, as it runs on a stretch. The parser keeps it only for a sound off 1x, where it
+     * means something. Last and defaulted, so every sound built without one is built exactly as it was.
+     */
+    val varispeed: Boolean = false,
 )
 
 data class Voiceover(

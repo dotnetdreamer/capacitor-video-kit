@@ -178,6 +178,11 @@ export interface MusicPlan {
    */
   speed?: number;
   /**
+   * The [speed] read as a record plays it, the pitch going with it, rather than stretched at its own
+   * pitch: [ComposeMusic.varispeed]. Absent at 1x, and for every sound that keeps its pitch.
+   */
+  varispeed?: true;
+  /**
    * What each repetition is put through after its stretch and before its level and fades,
    * [ComposeMusic.effect], from a state of its own. Absent for the sound as it is.
    */
@@ -566,6 +571,7 @@ function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, Probe
   const speed = music.speed !== undefined && Number.isFinite(music.speed) ? clamp(music.speed, 0.25, 4) : 1;
   return layMusic({
     ...(speed !== 1 ? { speed } : {}),
+    ...(speed !== 1 && music.varispeed === true ? { varispeed: true as const } : {}),
     ...(music.effect ? { effect: music.effect } : {}),
     uri: music.uri,
     volume: clamp(music.volume, 0, 1),

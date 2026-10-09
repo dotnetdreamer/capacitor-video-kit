@@ -95,6 +95,7 @@ describe('setMusic', () => {
       fadeOutMs: 1200,
       speed: 1.5,
       effect: 'megaphone',
+      effectSettings: { intensity: 80, tone: 30 },
     };
     expect(applyEditOps(post(), [{ op: 'setMusic', music }]).music).toEqual(music);
     const before = applyEditOps(post(), set({ sourceDurationMs: 60_000 }));

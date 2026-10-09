@@ -368,6 +368,12 @@ class RenderPlan private constructor(
         val speed: Float = 1f,
         /** What the builder puts this pass through after its stretch; see [Music.effect]. */
         val effect: SoundEffect? = null,
+        /**
+         * Whether the builder resamples this pass to [speed] rather than stretching it, the pitch going
+         * with the speed; see [Music.varispeed]. Nothing in the plan counts it: the pass is laid at
+         * [lengthUs] either way.
+         */
+        val varispeed: Boolean = false,
     )
 
     data class MusicPlan(
@@ -1241,6 +1247,7 @@ class RenderPlan private constructor(
                     lengthUs = lenUs,
                     speed = speed,
                     effect = music.effect,
+                    varispeed = music.varispeed,
                 )
             }
             return MusicPlan(uri = music.uri, leadGapUs = startUs, items = items)

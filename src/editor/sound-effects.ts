@@ -1,30 +1,76 @@
 import { MAX_SOUND_OPS, type ComposeSoundEffect, type SoundOp } from '../video-composer/definitions';
 
 /**
- * What a sound can be put through: a megaphone today, and whatever is added beside it.
+ * What a sound can be put through - a megaphone, a slowed and reverberant edit - and how far.
  *
- * A sound in the manifest names its effect by id ([EditMusic.effect]) and nothing more, the way a
- * post names its filter. What the effect IS - the filters, the drive, the level - is here, and goes
- * on the wire as plain steps ([ComposeSoundEffect]) for the engines to run. So the sound of an effect
- * is decided in one place: a new one built from the same steps needs no new engine, and the preview,
- * the web render and both phones hear the same arithmetic.
+ * A sound in the manifest names its effect by id ([EditMusic.effect]) and keeps where the customer
+ * left its sliders ([EditMusic.effectSettings]), the way a post names its filter and keeps its
+ * strength. What the effect IS at those settings - the filters, the drive, the reverb, the level - is
+ * here, and goes on the wire as plain steps ([ComposeSoundEffect]) for the engines to run. So the
+ * sound of an effect is decided in one place: a new one built from the same steps needs no new
+ * engine, a slider moves numbers in steps every engine already runs, and the preview, the web render
+ * and both phones hear the same arithmetic.
  */
+
+/**
+ * One adjustment an effect offers: a slider in the Audio effects sheet, in whole steps from 0 to
+ * [SOUND_EFFECT_SETTING_MAX], which the effect turns into the numbers of its steps.
+ */
+export interface SoundEffectControl {
+  /** Stored in a manifest ([EditMusic.effectSettings]), so permanent: renaming one is a migration. */
+  key: string;
+  /** The word beside the slider. */
+  label: string;
+  /** The slider's name to a screen reader, and the undo step a drag of it is: "Undo: Megaphone tone". */
+  name: string;
+  /** Where the slider is for a sound just put through the effect, and what a sound with no value has. */
+  default: number;
+}
+
+/** The top of every [SoundEffectControl]'s scale; the bottom is 0. */
+export const SOUND_EFFECT_SETTING_MAX = 100;
+
+/** A sound's settings for its effect, by [SoundEffectControl.key]. */
+export type SoundEffectSettings = Readonly<Record<string, number>>;
+
+/**
+ * An effect that plays the sound's speed as a record plays one, slower being lower
+ * ([ComposeMusic.varispeed]), and offers that speed as one of its sliders. The slider sets the
+ * sound's own [EditMusic.speed] - the one the Speed sheet shows - because a sound has one speed:
+ * putting the effect on slows the sound to [default], and taking it off puts it back to 1x.
+ */
+export interface SoundEffectSpeed {
+  label: string;
+  name: string;
+  /** What a sound is slowed to when the effect is put on it. */
+  default: number;
+  /** The slider's range, as speeds. */
+  min: number;
+  max: number;
+}
 
 /** One effect, as the Effects sheet offers it. */
 export interface SoundEffectPreset {
   /** Stored in a manifest, so permanent: renaming one is a migration. */
   id: string;
   label: string;
-  /** What it is made of, exactly as it goes on the wire. */
+  /** Its sliders, in the order the sheet shows them under [speed]'s. */
+  controls: readonly SoundEffectControl[];
+  /** Its hold on the sound's speed, for an effect that has one; see [SoundEffectSpeed]. */
+  speed?: SoundEffectSpeed;
+  /** What it is made of at its default settings, exactly as it goes on the wire. */
   effect: ComposeSoundEffect;
+  /**
+   * What it is made of at `settings`, which has a value for every one of its [controls], already held
+   * to the scale. A new object on every call; [soundEffectSteps] is the way in from a manifest.
+   */
+  steps(settings: SoundEffectSettings): ComposeSoundEffect;
 }
 
 /** A second-order Butterworth: the flattest pass band a biquad has, with no bump at the corner. */
 const BUTTERWORTH_Q = Math.SQRT1_2;
 
 /**
- * Every effect, in the order the sheet offers them.
- *
  * THE MEGAPHONE is a voice through a small horn speaker driven too hard: only the middle of the voice
  * comes through, it buzzes on every loud syllable, and it is a little louder than it was. Each step
  * is that, in order:
@@ -40,26 +86,93 @@ const BUTTERWORTH_Q = Math.SQRT1_2;
  *    its peaks, so a word put through it stands out without clipping the mix.
  * Measured on 2026-10-09 against a synthesised voice at -19.7 LUFS: -16.5 LUFS and -4.0 dBFS true
  * peak out, from -0.3 in; the same 3.2 LU and the same spectrum at 12 and 24 dB quieter.
+ *
+ * Those are its settings at the middle of both sliders, exactly - a megaphone put on before the
+ * sliders existed is that one. INTENSITY is the drive, 0 to 40 dB with 20 at the middle, and the level
+ * after it moves the other way by [MEGAPHONE_LEVEL_PER_DB] for each decibel, so a harder megaphone
+ * buzzes more without getting much louder. TONE moves the whole horn together, every corner and the
+ * honk, by up to [MEGAPHONE_TONE_OCTAVES] either side: down is a bigger, duller horn, up a tinny one.
  */
-export const SOUND_EFFECTS: readonly SoundEffectPreset[] = freezeAll([
-  {
-    id: 'megaphone',
-    label: 'Megaphone',
-    effect: {
-      mono: true,
-      ops: [
-        { op: 'highpass', hz: 600, q: BUTTERWORTH_Q },
-        { op: 'highpass', hz: 600, q: BUTTERWORTH_Q },
-        { op: 'lowpass', hz: 5000, q: BUTTERWORTH_Q },
-        { op: 'peak', hz: 1800, q: 1, db: 6 },
-        { op: 'drive', db: 20, followMs: 300 },
-        { op: 'lowpass', hz: 3500, q: BUTTERWORTH_Q },
-        { op: 'lowpass', hz: 3500, q: BUTTERWORTH_Q },
-        { op: 'gain', db: -4 },
+function megaphone(settings: SoundEffectSettings): ComposeSoundEffect {
+  const drive = (40 * setting(settings, 'intensity')) / SOUND_EFFECT_SETTING_MAX;
+  const scale = Math.pow(2, ((setting(settings, 'tone') - 50) / 50) * MEGAPHONE_TONE_OCTAVES);
+  const hz = (at: number) => Math.round(at * scale);
+  return {
+    mono: true,
+    ops: [
+      { op: 'highpass', hz: hz(600), q: BUTTERWORTH_Q },
+      { op: 'highpass', hz: hz(600), q: BUTTERWORTH_Q },
+      { op: 'lowpass', hz: hz(5000), q: BUTTERWORTH_Q },
+      { op: 'peak', hz: hz(1800), q: 1, db: 6 },
+      { op: 'drive', db: drive, followMs: 300 },
+      { op: 'lowpass', hz: hz(3500), q: BUTTERWORTH_Q },
+      { op: 'lowpass', hz: hz(3500), q: BUTTERWORTH_Q },
+      { op: 'gain', db: -4 - MEGAPHONE_LEVEL_PER_DB * (drive - 20) },
+    ],
+  };
+}
+
+/** How far the megaphone's Tone takes the horn, in octaves either side of the middle. */
+const MEGAPHONE_TONE_OCTAVES = 0.6;
+/** How much quieter the megaphone is put for each decibel more drive; see [megaphone]. */
+const MEGAPHONE_LEVEL_PER_DB = 0.15;
+
+/**
+ * SLOW + REVERB is the slowed and reverberant edit of a song: slower and lower together, as a record
+ * played under its speed is ([SoundEffectSpeed]), in a big, soft room. The slowing is the sound's own
+ * speed, so all this has to make is the room:
+ *  - REVERB is how much of the room is heard: the tail comes up from nothing to as loud as the sound,
+ *    and the sound itself goes down to 0.6 of what it was;
+ *  - ROOM is how big it is: the tail takes from 1 to 6 seconds to fall 60 dB, and a bigger room is a
+ *    darker one, its damping coming down from 8 kHz to 3 kHz.
+ * The tail is about as loud as the sound at any length ([ComposeSoundEffect]), so neither slider moves
+ * the level much, and nothing after the reverb has to make room for it. Measured on 2026-10-09 with
+ * three songs from the catalogue at -14 LUFS, slowed to 0.8: within 1.7 LU of the song at every corner
+ * of both sliders and 1.1 to 1.5 under it at the middle, never over -0.4 dBTP from songs peaking at
+ * -1.2 to -2.8, and a tail that dies away in 0.8 to 4.9 seconds - the damping takes the top of it
+ * sooner - with its two channels all but unrelated (0.02 to 0.06), so it is as wide as the speakers.
+ */
+function slowReverb(settings: SoundEffectSettings): ComposeSoundEffect {
+  const amount = setting(settings, 'reverb') / SOUND_EFFECT_SETTING_MAX;
+  const room = setting(settings, 'room') / SOUND_EFFECT_SETTING_MAX;
+  return {
+    ops: [
+      {
+        op: 'reverb',
+        decayMs: Math.round(1000 + 5000 * room),
+        dampHz: Math.round(8000 - 5000 * room),
+        wet: round3(amount),
+        dry: round3(1 - 0.4 * amount),
+      },
+    ],
+  };
+}
+
+/** Every effect, in the order the sheet offers them. */
+export const SOUND_EFFECTS: readonly SoundEffectPreset[] = freezeAll(
+  [
+    {
+      id: 'megaphone',
+      label: 'Megaphone',
+      controls: [
+        { key: 'intensity', label: 'Intensity', name: 'Megaphone intensity', default: 50 },
+        { key: 'tone', label: 'Tone', name: 'Megaphone tone', default: 50 },
       ],
+      steps: megaphone,
     },
-  },
-]);
+    {
+      id: 'slowReverb',
+      label: 'Slow + reverb',
+      // Named Speed to a screen reader and in the undo toast, as the Speed sheet's slider is: it is that speed.
+      speed: { label: 'Slow', name: 'Speed', default: 0.8, min: 0.5, max: 1 },
+      controls: [
+        { key: 'reverb', label: 'Reverb', name: 'Reverb amount', default: 50 },
+        { key: 'room', label: 'Room', name: 'Room size', default: 50 },
+      ],
+      steps: slowReverb,
+    },
+  ].map((preset: Omit<SoundEffectPreset, 'effect'>): SoundEffectPreset => ({ ...preset, effect: preset.steps(defaultsOf(preset.controls)) })),
+);
 
 /** The effect `id` names, or null for none and for an id this version does not know. */
 export function soundEffectPreset(id: unknown): SoundEffectPreset | null {
@@ -74,6 +187,71 @@ export function soundEffectPreset(id: unknown): SoundEffectPreset | null {
  */
 export function normaliseSoundEffectId(value: unknown): string | undefined {
   return soundEffectPreset(value)?.id;
+}
+
+/**
+ * A sound's settings as a manifest keeps them, for the effect `effectId`: a value for each of that
+ * effect's sliders that is not at its default, held to the scale and to whole steps, in the order the
+ * effect lists them - or `undefined`, the absent key, when there is none, so a sound whose sliders
+ * were never moved is stored exactly as one put through the effect before it had any. A key the effect
+ * has no slider for is dropped, a later version's included, as an id this version does not know is.
+ */
+export function normaliseSoundEffectSettings(effectId: unknown, value: unknown): Record<string, number> | undefined {
+  const preset = soundEffectPreset(effectId);
+  if (!preset || !isRecord(value)) return undefined;
+  const kept: Record<string, number> = {};
+  for (const control of preset.controls) {
+    const raw = value[control.key];
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue;
+    const held = Math.round(Math.min(SOUND_EFFECT_SETTING_MAX, Math.max(0, raw)));
+    if (held !== control.default) kept[control.key] = held;
+  }
+  return Object.keys(kept).length > 0 ? kept : undefined;
+}
+
+/** Every slider of `effectId` where `settings` leaves it: the stored value, or the default. Empty for none. */
+export function soundEffectSettings(effectId: unknown, settings: unknown): Record<string, number> {
+  const preset = soundEffectPreset(effectId);
+  if (!preset) return {};
+  return { ...defaultsOf(preset.controls), ...(normaliseSoundEffectSettings(preset.id, settings) ?? {}) };
+}
+
+/** Whether two sounds' stored settings are the same, a missing value being the default either way. */
+export function sameSoundEffectSettings(a: SoundEffectSettings | undefined, b: SoundEffectSettings | undefined): boolean {
+  const x = a ?? {};
+  const y = b ?? {};
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+  for (const key of keys) if (x[key] !== y[key]) return false;
+  return true;
+}
+
+/**
+ * What `effectId` at `settings` is made of, as the wire carries it: a NEW object, so nothing that
+ * holds a spec can change an effect for every post after it. Null for none and for an id this
+ * version does not know.
+ */
+export function soundEffectSteps(effectId: unknown, settings?: unknown): ComposeSoundEffect | null {
+  const preset = soundEffectPreset(effectId);
+  return preset ? preset.steps(soundEffectSettings(preset.id, settings)) : null;
+}
+
+/** Whether `effectId` plays the sound's speed as a record does; see [SoundEffectSpeed]. */
+export function soundEffectPlaysSpeedAsRecord(effectId: unknown): boolean {
+  return soundEffectPreset(effectId)?.speed !== undefined;
+}
+
+function defaultsOf(controls: readonly SoundEffectControl[]): Record<string, number> {
+  return Object.fromEntries(controls.map(control => [control.key, control.default]));
+}
+
+/** A setting `steps` was handed, which [soundEffectSettings] has made sure is there. */
+function setting(settings: SoundEffectSettings, key: string): number {
+  return settings[key] ?? 0;
+}
+
+/** Three places: what a gain on the wire needs, and no float dust in a spec somebody reads. */
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -112,6 +290,12 @@ const OP_FIELDS: Readonly<Record<SoundOp['op'], readonly OpField[]>> = {
     { name: 'followMs', min: 1, max: 10_000, optional: true },
   ],
   gain: [{ name: 'db', min: -40, max: 24 }],
+  reverb: [
+    { name: 'decayMs', min: 100, max: 20_000 },
+    { name: 'dampHz', min: 10, max: 20_000 },
+    { name: 'wet', min: 0, max: 1 },
+    { name: 'dry', min: 0, max: 1 },
+  ],
 };
 
 const EFFECT_KEYS: readonly string[] = ['mono', 'ops'];
@@ -239,12 +423,86 @@ class Gain implements Step {
   }
 }
 
-function stepFor(op: SoundOp, rate: number): Step {
+/** Jezar's Freeverb tunings, in samples at [TUNING_RATE]: the combs' delays, then the allpasses'. */
+const COMB_TUNING: readonly number[] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
+const ALLPASS_TUNING: readonly number[] = [556, 441, 341, 225];
+const TUNING_RATE = 44_100;
+/** How many samples, at [TUNING_RATE], each channel's delays are longer than the one before it's. */
+const STEREO_SPREAD = 23;
+
+/**
+ * The reverb, exactly as [ComposeSoundEffect] writes it down: Freeverb's combs and allpasses, every
+ * comb tuned to fall 60 dB in the same time and fed in proportion, so the room's length and its level
+ * are two separate numbers. Its buffers are made here, once, and a sample only reads and writes them.
+ */
+class Reverb implements Step {
+  private readonly combs: Float64Array[];
+  private readonly combAt: Int32Array;
+  /** Each comb's `g` and `c`, and its damped value `f`. */
+  private readonly feedback: Float64Array;
+  private readonly take: Float64Array;
+  private readonly damped: Float64Array;
+  private readonly allpasses: Float64Array[];
+  private readonly allpassAt: Int32Array;
+  private readonly d: number;
+  private readonly undamped: number;
+  private readonly wet: number;
+  private readonly dry: number;
+
+  constructor(op: Extract<SoundOp, { op: 'reverb' }>, rate: number, channel: number) {
+    this.wet = op.wet;
+    this.dry = op.dry;
+    const delay = (tuning: number) => Math.max(1, Math.floor(((tuning + STEREO_SPREAD * channel) * rate) / TUNING_RATE + 0.5));
+    const combLengths = COMB_TUNING.map(delay);
+    this.combs = combLengths.map(length => new Float64Array(length));
+    this.combAt = new Int32Array(combLengths.length);
+    this.feedback = Float64Array.from(combLengths, length => Math.pow(10, (-3 * length) / ((rate * op.decayMs) / 1000)));
+    this.take = Float64Array.from(this.feedback, g => Math.sqrt((1 - g * g) / 8));
+    this.damped = new Float64Array(combLengths.length);
+    this.allpasses = ALLPASS_TUNING.map(tuning => new Float64Array(delay(tuning)));
+    this.allpassAt = new Int32Array(ALLPASS_TUNING.length);
+    this.d = Math.exp((-2 * Math.PI * Math.min(op.dampHz, MAX_HZ_OF_RATE * rate)) / rate);
+    this.undamped = 1 - this.d;
+  }
+
+  run(x: number): number {
+    let r = 0;
+    for (let i = 0; i < this.combs.length; i++) {
+      const buffer = this.combs[i]!;
+      const p = this.combAt[i]!;
+      const o = buffer[p]!;
+      let f = this.undamped * o + this.d * this.damped[i]!;
+      if (f < TINY && f > -TINY) f = 0;
+      this.damped[i] = f;
+      let stored = this.take[i]! * x + this.feedback[i]! * f;
+      if (stored < TINY && stored > -TINY) stored = 0;
+      buffer[p] = stored;
+      this.combAt[i] = p + 1 === buffer.length ? 0 : p + 1;
+      r = r + o;
+    }
+    for (let j = 0; j < this.allpasses.length; j++) {
+      const buffer = this.allpasses[j]!;
+      const p = this.allpassAt[j]!;
+      const b = buffer[p]!;
+      let v = r + 0.5 * b;
+      if (v < TINY && v > -TINY) v = 0;
+      buffer[p] = v;
+      r = b - 0.5 * v;
+      this.allpassAt[j] = p + 1 === buffer.length ? 0 : p + 1;
+    }
+    return this.dry * x + this.wet * r;
+  }
+}
+
+/** The step `op` stands for at `rate`, on the channel numbered `channel` - which only a reverb asks. */
+function stepFor(op: SoundOp, rate: number, channel: number): Step {
   switch (op.op) {
     case 'drive':
       return new Drive(Math.pow(10, op.db / 20), op.followMs ? Math.exp(-1000 / (op.followMs * rate)) : null);
     case 'gain':
       return new Gain(Math.pow(10, op.db / 20));
+    case 'reverb':
+      return new Reverb(op, rate, channel);
     default: {
       const w0 = (2 * Math.PI * Math.min(op.hz, MAX_HZ_OF_RATE * rate)) / rate;
       const cos = Math.cos(w0);
@@ -301,7 +559,7 @@ export class SoundEffectRunner {
   private chain(index: number): Step[] {
     let chain = this.chains[index];
     if (!chain) {
-      chain = this.effect.ops.map(op => stepFor(op, this.sampleRate));
+      chain = this.effect.ops.map(op => stepFor(op, this.sampleRate, index));
       this.chains[index] = chain;
     }
     return chain;

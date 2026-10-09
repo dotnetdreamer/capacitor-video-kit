@@ -869,6 +869,59 @@ describe('a sound through an effect', () => {
     expect(el.src).toBe(word.uri);
   });
 
+  it('keeps playing the copy it has while the one a slider asked for is made, and then that one', async () => {
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
+    const [el] = r.lanes;
+    r.store.soundCopies.value = new Map([[copyKey, copy]]);
+    await playFrom(r, 0);
+    await playTo(r, 500);
+    expect(el.src).toBe(copy);
+
+    // A harder megaphone: another copy, still being made - the sound goes on as it was meanwhile.
+    r.store.setSoundEffectSetting({ kind: 'audio', id: 'word' }, 'intensity', 90);
+    await playTo(r, 1000);
+    expect(el.src).toBe(copy);
+    const harder = 'blob:capacitor://localhost/word-through-a-harder-megaphone';
+    r.store.soundCopies.value = new Map([
+      [copyKey, copy],
+      [`${copyKey}\n{"intensity":90}`, harder],
+    ]);
+    await playTo(r, 1500);
+    expect(el.src).toBe(harder);
+    expect(Math.abs(el.currentTime * 1000 - r.store.playheadMs.value)).toBeLessThan(200);
+  });
+
+  it('plays the file, not another effect’s copy, while a new effect’s copy is made', async () => {
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
+    const [el] = r.lanes;
+    r.store.soundCopies.value = new Map([[copyKey, copy]]);
+    await playFrom(r, 0);
+    await playTo(r, 500);
+    // Through a room now: the megaphone's copy is the same file on the same timeline, and the wrong sound.
+    r.store.setSoundEffect({ kind: 'audio', id: 'word' }, 'slowReverb');
+    await playTo(r, 1000);
+    expect(el.src).toBe(word.uri);
+  });
+
+  it('plays slow + reverb’s speed as a record does, lower as well as slower', async () => {
+    const slowed = { ...word, effect: 'slowReverb', speed: 0.8 };
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [slowed] }] });
+    const [el] = r.lanes;
+    await playFrom(r, 0);
+    await playTo(r, 500);
+    expect(el.playbackRate).toBe(0.8);
+    expect(el.preservesPitch).toBe(false);
+    // Taken off, it is back at its own pitch - and, having been the effect's slowness, at 1x.
+    r.store.setSoundEffect({ kind: 'audio', id: 'word' }, null);
+    await playTo(r, 1000);
+    expect(el.playbackRate).toBe(1);
+    // And the same speed kept on the Speed sheet keeps its pitch.
+    r.store.setAudioSpeed('word', 0.8);
+    await playTo(r, 1500);
+    expect(el.playbackRate).toBe(0.8);
+    expect(el.preservesPitch).toBe(true);
+  });
+
   it('puts the post’s one music on its copy too', async () => {
     const r = await rig('chromium', { ...LOOPED, uri: word.uri, effect: 'megaphone' });
     r.store.soundCopies.value = new Map([[copyKey, copy]]);

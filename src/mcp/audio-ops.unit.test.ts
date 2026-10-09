@@ -153,7 +153,8 @@ describe('a sound’s speed through the ops', () => {
  * stores one - and how an agent gives one word of a line a megaphone: cut it out, then patch that piece.
  */
 describe('a sound’s effect through the ops', () => {
-  const effectOf = (manifest: EditManifest, id: string): string | undefined => manifest.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === id)?.effect;
+  const clipOf = (manifest: EditManifest, id: string) => manifest.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === id);
+  const effectOf = (manifest: EditManifest, id: string): string | undefined => clipOf(manifest, id)?.effect;
 
   it('takes an effect with the sound, and leaves "none" without the key', () => {
     const manifest = applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'megaphone' } }), add('b', 6000, { sound: { ...sound('b', 6000), effect: 'none' } })]);
@@ -176,8 +177,42 @@ describe('a sound’s effect through the ops', () => {
   });
 
   it('refuses an effect the editor does not have, naming the ones it does', () => {
-    expect(() => applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'echo' } })])).toThrow(/"sound\.effect" must be "megaphone" or "none"/);
-    expect(() => applyEditOps(post(), [add('a', 0), { op: 'patchAudio', id: 'a', patch: { effect: 2 } }])).toThrow(/"patch\.effect" must be "megaphone" or "none"/);
+    expect(() => applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'echo' } })])).toThrow(/"sound\.effect" must be "megaphone", "slowReverb" or "none"/);
+    expect(() => applyEditOps(post(), [add('a', 0), { op: 'patchAudio', id: 'a', patch: { effect: 2 } }])).toThrow(/"patch\.effect" must be "megaphone", "slowReverb" or "none"/);
+  });
+
+  it('moves an effect’s sliders, storing only those off their defaults', () => {
+    const on = applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'megaphone', effectSettings: { intensity: 80, tone: 50 } } })]);
+    expect(clipOf(on, 'a')).toMatchObject({ effect: 'megaphone', effectSettings: { intensity: 80 } });
+    const toned = applyEditOps(on, [{ op: 'patchAudio', id: 'a', patch: { effectSettings: { intensity: 80, tone: 20 } } }]);
+    expect(clipOf(toned, 'a')?.effectSettings).toEqual({ intensity: 80, tone: 20 });
+    // The same sliders again ask for nothing, and are the success they look like.
+    expect(applyEditOps(toned, [{ op: 'patchAudio', id: 'a', patch: { effectSettings: { tone: 20, intensity: 80 } } }])).toEqual(toned);
+  });
+
+  it('refuses a slider the effect has not got, or one off its scale, naming what there is', () => {
+    const on = applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'megaphone' } })]);
+    expect(() => applyEditOps(on, [{ op: 'patchAudio', id: 'a', patch: { effectSettings: { room: 80 } } }])).toThrow(
+      /"patch\.effectSettings\.room" is not a slider of "megaphone" - its sliders are "intensity", "tone"/,
+    );
+    expect(() => applyEditOps(on, [{ op: 'patchAudio', id: 'a', patch: { effectSettings: { intensity: 120 } } }])).toThrow(
+      /"patch\.effectSettings" must be an object of the effect's sliders, each a number from 0 to 100/,
+    );
+    expect(() => applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effectSettings: { intensity: 80 } } })])).toThrow(
+      /"sound\.effectSettings" needs an effect to be the settings of - the sound has none/,
+    );
+  });
+
+  it('puts slow + reverb on as the editor does: slower, at its sliders’ defaults, and back to 1x as it comes off', () => {
+    const on = applyEditOps(post(), [add('a', 0), { op: 'patchAudio', id: 'a', patch: { effect: 'slowReverb' } }]);
+    expect(clipOf(on, 'a')).toMatchObject({ effect: 'slowReverb', speed: 0.8 });
+    expect(clipOf(applyEditOps(on, [{ op: 'patchAudio', id: 'a', patch: { effect: 'none' } }]), 'a')).not.toHaveProperty('speed');
+    // A speed sent with it is the speed, and so are sliders.
+    const slower = applyEditOps(post(), [add('a', 0), { op: 'patchAudio', id: 'a', patch: { effect: 'slowReverb', speed: 0.6, effectSettings: { reverb: 90 } } }]);
+    expect(clipOf(slower, 'a')).toMatchObject({ speed: 0.6, effectSettings: { reverb: 90 } });
+    // And a whole sound through it is a slower one, unless it says its own speed.
+    expect(clipOf(applyEditOps(post(), [add('b', 0, { sound: { ...sound('b', 0), effect: 'slowReverb' } })]), 'b')?.speed).toBe(0.8);
+    expect(clipOf(applyEditOps(post(), [add('b', 0, { sound: { ...sound('b', 0), effect: 'slowReverb', speed: 0.7 } })]), 'b')?.speed).toBe(0.7);
   });
 
   it('puts the post’s one music through an effect too', () => {
@@ -187,11 +222,18 @@ describe('a sound’s effect through the ops', () => {
 
   it('says the effect in the summary', () => {
     const summary = summariseManifest(applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'megaphone' } })]));
-    expect(summary).toMatch(/"a" a\.m4a, from 0ms, at 0ms on the post, 100%, through the megaphone \(effect "megaphone"\); heard 0ms\.\.5000ms/);
+    expect(summary).toMatch(/"a" a\.m4a, from 0ms, at 0ms on the post, 100%, through the megaphone \(effect "megaphone"; intensity 50, tone 50\); heard 0ms\.\.5000ms/);
+  });
+
+  it('says where the sliders are, and a record’s speed as one', () => {
+    const summary = summariseManifest(applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'slowReverb', effectSettings: { room: 80 } } })]));
+    expect(summary).toMatch(/"a" a\.m4a, .*, at 0\.8x as a record plays it, lower as well as slower, through the slow \+ reverb \(effect "slowReverb"; reverb 50, room 80\)/);
   });
 
   it('tells an agent what an effect is and how to give one word a megaphone', () => {
-    expect(OP_REFERENCE['setMusic']).toMatch(/effect puts the sound through one of "megaphone", or "none"/);
+    expect(OP_REFERENCE['setMusic']).toMatch(/effect puts the sound through one of "megaphone", "slowReverb", or "none"/);
+    expect(OP_REFERENCE['setMusic']).toMatch(/megaphone \{intensity \(default 50\), tone \(default 50\)\}, slowReverb \{reverb \(default 50\), room \(default 50\)\}/);
+    expect(OP_REFERENCE['setMusic']).toMatch(/slows the sound to 0\.8x unless the op sends a speed/);
     expect(OP_REFERENCE['setMusic']).toMatch(/cut the word out with splitAudio and patch that piece alone/);
   });
 });

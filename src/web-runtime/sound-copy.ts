@@ -21,6 +21,13 @@
  *
  * In steps, giving the page back between them, so a long sound does not hold the editor up while it
  * is made: the runner keeps its state from one step to the next, so the steps join as if they were one.
+ *
+ * A sound whose effect plays its speed as a record does - slow + reverb - is played from its copy at
+ * that speed with the pitch let go, so the copy is slowed AFTER it was treated, where the render
+ * treats the sound after slowing it: a reverb's every delay and its damping would come out a speed's
+ * worth longer and lower. So the effect is worked out as if the copy's rate were already the one it is
+ * heard at, `rateScale` times its own - it is that rate, to the ear - and comes out where the render
+ * puts it: the reverb is linear and runs the same arithmetic either side of a change of rate.
  */
 import { SoundEffectRunner } from '../editor/sound-effects';
 import type { ComposeSoundEffect } from '../video-composer/definitions';
@@ -62,9 +69,10 @@ export function copyRateFor(effect: ComposeSoundEffect): number {
 /**
  * `src` through `effect`, as a WAV on the file's own timeline, or null when no copy can be made: a
  * file too long to decode, one this WebView cannot decode, a browser with no Web Audio. The preview
- * then plays the file as it is, and the render has the effect either way.
+ * then plays the file as it is, and the render has the effect either way. `rateScale` is the rate the
+ * copy is heard at as a multiple of its file's (`soundCopyRate`), which the effect is worked out for.
  */
-export async function makeSoundCopy(src: string, effect: ComposeSoundEffect, sourceDurationMs = 0): Promise<Blob | null> {
+export async function makeSoundCopy(src: string, effect: ComposeSoundEffect, sourceDurationMs = 0, rateScale = 1): Promise<Blob | null> {
   if (sourceDurationMs > MAX_SOURCE_MS) return null;
   const rate = copyRateFor(effect);
   const context = audioContext(rate);
@@ -78,8 +86,9 @@ export async function makeSoundCopy(src: string, effect: ComposeSoundEffect, sou
     for (let c = 0; c < decoded.numberOfChannels; c++) channels.push(decoded.getChannelData(c));
 
     // The buffer's OWN rate, never the one asked for: a browser that would not resample hands back
-    // the file's, and filters designed for another rate would sit in the wrong place.
-    const runner = new SoundEffectRunner(effect, decoded.sampleRate);
+    // the file's, and filters designed for another rate would sit in the wrong place. Times the speed
+    // the copy is heard at, for the reason at the top of this file.
+    const runner = new SoundEffectRunner(effect, decoded.sampleRate * rateScale);
     const step = Math.max(1, Math.round(decoded.sampleRate * STEP_S));
     for (let from = 0; from < decoded.length; from += step) {
       runner.process(channels, from, Math.min(step, decoded.length - from));

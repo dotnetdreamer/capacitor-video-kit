@@ -115,6 +115,33 @@ describe('a sound’s effect in the web mix', () => {
     expect(worst(left!.subarray(n, 2 * n), pass)).toBeLessThan(1e-6);
   });
 
+  it('puts a mono file through the effect once, so a room on it is a mono room as on Android', async () => {
+    const room = soundEffectPreset('slowReverb')!.effect;
+    const [left, right] = await mixOf(post({ uri: 'file:///sine-330-600.m4a', effect: room }, 1000));
+    const expected = tone(330, 600);
+    new SoundEffectRunner(room, MIX_SAMPLE_RATE).process([expected]);
+    expect(worst(left!.subarray(0, expected.length), expected)).toBeLessThan(1e-6);
+    expect(Array.from(right!.subarray(0, expected.length))).toEqual(Array.from(left!.subarray(0, expected.length)));
+  });
+
+  it('reads a sound whose speed is a record’s at that speed, lower as well as slower, and fills its pass', async () => {
+    // 600 Hz for half a second at 0.5: a second of 300 Hz, through no effect so only the speed shows.
+    const slowed = post({ uri: 'file:///sine-600-500.m4a', speed: 0.5, varispeed: true }, 2000);
+    delete slowed.audio.music!.effect;
+    const [left] = await mixOf(slowed);
+    const heard = left!.subarray(0, MIX_SAMPLE_RATE - 10);
+    let crossings = 0;
+    for (let i = 1; i < heard.length; i++) if ((heard[i - 1]! < 0) !== (heard[i]! < 0)) crossings++;
+    expect(crossings / 2).toBeCloseTo(300, -1);
+    // And kept: the same file at its own pitch is still about 600 Hz, give or take the stretch's splices.
+    const kept = post({ uri: 'file:///sine-600-500.m4a', speed: 0.5 }, 2000);
+    delete kept.audio.music!.effect;
+    const [same] = await mixOf(kept);
+    let keptCrossings = 0;
+    for (let i = 1; i < MIX_SAMPLE_RATE - 10; i++) if ((same![i - 1]! < 0) !== (same![i]! < 0)) keptCrossings++;
+    expect(keptCrossings / 2).toBeGreaterThan(560);
+  });
+
   it('leaves a sound with no effect exactly as it always mixed', async () => {
     const plain = post({ uri: 'file:///sine-440-500.m4a' }, 1000);
     delete plain.audio.music!.effect;

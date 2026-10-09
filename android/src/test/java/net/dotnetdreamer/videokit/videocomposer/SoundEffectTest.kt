@@ -16,12 +16,13 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * A sound's effect on Android: the parser's rules, the arithmetic [SoundEffectChain] runs, and Media3's
- * side of it. The rules and the numbers are `sound-effects.unit.test.ts`'s - the golden fragment at the
- * end is asserted by the TypeScript and the Swift tests too, to the same tolerance, which is what keeps
- * the three engines playing one megaphone.
+ * side of it. The rules and the numbers are `sound-effects.unit.test.ts`'s - the golden fragments, the
+ * megaphone's and the reverb's, are asserted by the TypeScript and the Swift tests too, to the same
+ * tolerance, which is what keeps the three engines playing one megaphone and one room.
  */
 class SoundEffectTest {
 
@@ -38,6 +39,19 @@ class SoundEffectTest {
           {"op":"gain","db":-4}
         ]}
     """.trimIndent()
+
+    /**
+     * Slow + reverb's room at the middle of its sliders, exactly as the editor sends it
+     * (`SOUND_EFFECTS` in sound-effects.ts). Its slowing is the sound's own speed, not a step.
+     */
+    private val slowReverbJson = """{"ops":[{"op":"reverb","decayMs":3500,"dampHz":5500,"wet":0.5,"dry":0.8}]}"""
+
+    /** A room as the reverb's tests measure one - `room()` in sound-effects.unit.test.ts - all tail unless asked. */
+    private fun room(decayMs: Double = 2_000.0, dampHz: Double = 6_000.0, wet: Double = 1.0, dry: Double = 0.0) =
+        SoundEffect(false, listOf(SoundOp.Reverb(decayMs, dampHz, wet, dry)))
+
+    /** A click, [frames] long: what a room is measured by. */
+    private fun impulse(frames: Int) = FloatArray(frames).also { it[0] = 1f }
 
     private fun specWith(effect: Any?): JSONObject = JSONObject(
         """
@@ -113,7 +127,14 @@ class SoundEffectTest {
         // The alphabetically first of several, as iOS and the browser name it.
         assertEquals("alpha", refusal(JSONObject("""{"zeta":1,"ops":[],"alpha":2}""")))
         assertEquals("ops[0]", refusal(JSONObject("""{"ops":[7]}""")))
-        assertEquals("ops[0].op", refusal(JSONObject("""{"ops":[{"op":"reverb"}]}""")))
+        assertEquals("ops[0].op", refusal(JSONObject("""{"ops":[{"op":"echo"}]}""")))
+        assertEquals("ops[0].op", refusal(JSONObject("""{"ops":[{"op":7}]}""")))
+        // A reverb's numbers in the contract's order, then its unknown keys.
+        assertEquals("ops[0].decayMs", refusal(JSONObject("""{"ops":[{"op":"reverb"}]}""")))
+        assertEquals("ops[0].dampHz", refusal(JSONObject("""{"ops":[{"op":"reverb","decayMs":1000}]}""")))
+        assertEquals("ops[0].dry", refusal(JSONObject("""{"ops":[{"op":"reverb","decayMs":1000,"dampHz":5000,"wet":0.5}]}""")))
+        assertEquals("ops[0].wet", refusal(JSONObject("""{"ops":[{"op":"reverb","decayMs":1000,"dampHz":5000,"wet":"lots","dry":1}]}""")))
+        assertEquals("ops[0].size", refusal(JSONObject("""{"ops":[{"op":"reverb","decayMs":1000,"dampHz":5000,"wet":0.5,"dry":1,"size":2}]}""")))
         assertEquals("ops[1].hz", refusal(JSONObject("""{"ops":[{"op":"gain","db":1},{"op":"lowpass","q":1}]}""")))
         // A string that spells a number is not one, as the browser reads it.
         assertEquals("ops[0].hz", refusal(JSONObject("""{"ops":[{"op":"lowpass","hz":"600","q":1}]}""")))
@@ -135,7 +156,8 @@ class SoundEffectTest {
             JSONObject(
                 """{"ops":[{"op":"highpass","hz":1,"q":0},{"op":"lowpass","hz":96000,"q":50},
                    {"op":"peak","hz":1000,"q":1,"db":-99},{"op":"drive","db":99,"followMs":0},
-                   {"op":"drive","db":-3},{"op":"gain","db":60}]}""",
+                   {"op":"drive","db":-3},{"op":"gain","db":60},
+                   {"op":"reverb","decayMs":5,"dampHz":99999,"wet":2,"dry":-1}]}""",
             ),
         )!!
         assertEquals(
@@ -146,9 +168,15 @@ class SoundEffectTest {
                 SoundOp.Drive(40.0, 1.0),
                 SoundOp.Drive(0.0, null),
                 SoundOp.Gain(24.0),
+                SoundOp.Reverb(100.0, 20_000.0, 1.0, 0.0),
             ),
             effect.ops,
         )
+    }
+
+    @Test
+    fun `slow + reverb's room is read as it was sent`() {
+        assertEquals(SoundEffect(false, listOf(SoundOp.Reverb(3_500.0, 5_500.0, 0.5, 0.8))), parsed(JSONObject(slowReverbJson)))
     }
 
     @Test
@@ -197,6 +225,94 @@ class SoundEffectTest {
         for ((i, value) in golden) {
             assertEquals("sample $i", value, l[i].toDouble(), 1e-6)
             assertEquals("sample $i, the other channel", l[i], r[i])
+        }
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
+    @Test
+    fun `a reverb is the dry sound alone until the first comb's delay has passed`() {
+        val input = sine(440.0, 0.5, 2_400)
+        val out = through(room(wet = 0.7, dry = 0.6), 48_000, input)[0]
+        // 1116 samples at 44.1 kHz is 1215 at 48, and the first of them is sample 0's own silence.
+        for (i in 0..1215) assertEquals("sample $i", (0.6 * input[i]).toFloat(), out[i], 0f)
+        assertTrue(out[1300] != (0.6 * input[1300]).toFloat())
+    }
+
+    @Test
+    fun `a reverb gives each channel a tail of its own, so the room is as wide as the speakers`() {
+        val (l, r) = through(room(), 48_000, impulse(48_000), impulse(48_000))
+        // Channel 1's delays are 23 samples longer at 44.1 kHz: its first comb answers at 1240, not 1215.
+        assertEquals(0f, l[1214], 0f)
+        assertTrue(l[1215] != 0f)
+        assertEquals(0f, r[1239], 0f)
+        assertTrue(r[1240] != 0f)
+        var ab = 0.0
+        var aa = 0.0
+        var bb = 0.0
+        for (i in 48_000 / 20 until l.size) {
+            ab += l[i].toDouble() * r[i]
+            aa += l[i].toDouble() * l[i]
+            bb += r[i].toDouble() * r[i]
+        }
+        val correlation = ab / sqrt(aa * bb)
+        assertTrue("correlation $correlation", abs(correlation) < 0.2)
+    }
+
+    @Test
+    fun `a reverb is the first channel's for a folded sound`() {
+        val left = sine(300.0, 0.5, 9_600)
+        val right = sine(700.0, 0.3, 9_600)
+        val (folded, other) = through(room().copy(mono = true), 48_000, left, right)
+        val first = through(room(), 48_000, FloatArray(left.size) { ((left[it].toDouble() + right[it]) / 2).toFloat() })[0]
+        for (i in first.indices step 7) assertEquals("sample $i", first[i], folded[i], 1e-6f)
+        assertArrayEquals(folded, other, 0f)
+    }
+
+    @Test
+    fun `a reverb leaves silence silent, and falls back to exact silence after a sound`() {
+        assertTrue(through(room(), 48_000, FloatArray(4_800))[0].all { it == 0f })
+        val burst = FloatArray(9 * 48_000)
+        sine(500.0, 0.9, 4_800).copyInto(burst)
+        val after = through(room(decayMs = 1_000.0), 48_000, burst)[0]
+        // Every value it keeps is let go under 1e-20, so the tail ends in zeros rather than denormals.
+        assertTrue(after.copyOfRange(after.size - 48_000, after.size).all { it == 0f })
+    }
+
+    @Test
+    fun `a reverb stays stable at the longest room and the brightest damping`() {
+        val out = through(room(decayMs = 20_000.0, dampHz = 20_000.0, wet = 1.0, dry = 1.0), 48_000, sine(1_000.0, 0.9, 48_000))[0]
+        assertTrue(out.all { it.isFinite() && abs(it) <= 1f })
+    }
+
+    /*
+     * The same numbers `sound-effects.unit.test.ts` and `SoundEffectTests.swift` hold their engines to:
+     * the megaphone's fragment, twice as long, through slow + reverb at the middle of its sliders. Not
+     * folded, so each channel has a room of its own and both are held to their numbers - 1214 and 1215
+     * either side of the left channel's first comb, 1239 and 1240 of the right's.
+     */
+    @Test
+    fun `the reverb matches the golden numbers every engine is held to`() {
+        val rate = 48_000
+        val left = FloatArray(4_800) { (0.6 * sin(2 * PI * 440 * it / rate) + 0.2 * sin(2 * PI * 3100 * it / rate)).toFloat() }
+        val right = FloatArray(4_800) { (0.3 * sin(2 * PI * 220 * it / rate + 0.5)).toFloat() }
+        val (l, r) = through(parsed(JSONObject(slowReverbJson))!!, rate, left, right)
+        val golden = listOf(
+            Triple(0, 0.0, 0.11506213247776031),
+            Triple(1, 0.09078975021839142, 0.1210789903998375),
+            Triple(1214, 0.4370698928833008, -0.18847058713436127),
+            Triple(1215, 0.3962092995643616, -0.19267092645168304),
+            Triple(1239, 0.39520999789237976, -0.23967154324054718),
+            Triple(1240, 0.4382869005203247, -0.2387159764766693),
+            Triple(1500, -0.5940757393836975, -0.06688307225704193),
+            Triple(2000, 0.5418930649757385, 0.23884811997413635),
+            Triple(3000, -0.2069074958562851, -0.22407972812652588),
+            Triple(4000, -0.2956431806087494, 0.14864428341388702),
+            Triple(4799, -0.1521013230085373, 0.08078738301992416),
+        )
+        for ((i, leftValue, rightValue) in golden) {
+            assertEquals("sample $i, left", leftValue, l[i].toDouble(), 1e-6)
+            assertEquals("sample $i, right", rightValue, r[i].toDouble(), 1e-6)
         }
     }
 
@@ -271,6 +387,25 @@ class SoundEffectTest {
         assertArrayEquals(expected, a, 1e-7f)
         // The second pass is not the first one's continuation: every pass of a sound starts at 0.
         assertArrayEquals(expected, b, 1e-7f)
+    }
+
+    @Test
+    fun `media3's side carries a room's tail across its buffers, each channel in a room of its own`() {
+        val rate = 48_000
+        val left = sine(440.0, 0.5, 9_600, rate)
+        val right = sine(660.0, 0.4, 9_600, rate)
+        val pcm = ByteBuffer.allocateDirect(left.size * 8).order(ByteOrder.nativeOrder())
+        for (i in left.indices) {
+            pcm.putFloat(left[i])
+            pcm.putFloat(right[i])
+        }
+        pcm.flip()
+        val effect = room(wet = 0.5, dry = 0.8)
+        // Buffers far shorter than the shortest comb, so every echo is of a sample an earlier one held.
+        val out = process(SoundEffectProcessor(effect), AudioFormat(rate, 2, C.ENCODING_PCM_FLOAT), pcm, 333)
+        val (l, r) = through(effect, rate, left, right)
+        assertArrayEquals(l, FloatArray(left.size) { out.getFloat(it * 8) }, 0f)
+        assertArrayEquals(r, FloatArray(left.size) { out.getFloat(it * 8 + 4) }, 0f)
     }
 
     @Test

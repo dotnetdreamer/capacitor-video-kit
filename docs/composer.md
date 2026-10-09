@@ -107,17 +107,33 @@ after it, so a loop has no gap at its seams.
 **A sound's effect is a few plain steps, run the same way by every engine.** `ComposeMusic.effect`
 is not a name: the editor keeps the names (`SOUND_EFFECTS` in `src/editor/sound-effects.ts`) and
 sends what an effect is made of - cookbook biquads, a soft-clipping drive measured against the
-sound's own peak, a gain, and whether to fold the channels into one - with the arithmetic written down
-in `definitions.ts`. A new effect built from those steps needs no new engine. Every engine runs them
-after a pass's speed change and before its volume and fades, from a state at 0 for each pass: Android
-as a `SoundEffectProcessor` after Sonic and ahead of the exact length and the gain, iOS as an
-`MTAudioProcessingTap` created pre-effects on the sound's own mix parameters, so it runs ahead of the
-volume ramps in both the export session and the reader, and the web on each pass's samples before
-they are added into the mix. The same golden fragment is asserted in all three engines' tests. The
-preview cannot put a filter on an `<audio>` element, so it plays a copy of the file made through the
-same TypeScript (`src/web-runtime/sound-copy.ts`): the whole file on its own timeline, so every
-position the player puts the element at is the same in the copy, at 22.05 kHz for an effect that
-passes nothing above a fifth of that.
+sound's own peak, a gain, a Freeverb-tuned reverb, and whether to fold the channels into one - with
+the arithmetic written down in `definitions.ts`. A new effect built from those steps needs no new
+engine, and neither does a slider: an effect's sliders (`EditMusic.effectSettings`, 0 to 100 each)
+only move the numbers in its steps, and at their defaults an effect is the one that shipped before
+it had sliders. Every engine runs the steps after a pass's speed change and before its volume and
+fades, from a state at 0 for each pass: Android as a `SoundEffectProcessor` after Sonic and ahead of
+the exact length and the gain, iOS as an `MTAudioProcessingTap` created pre-effects on the sound's
+own mix parameters, so it runs ahead of the volume ramps in both the export session and the reader,
+and the web on each pass's samples before they are added into the mix. A reverb's tail therefore
+starts again from silence at each pass of a loop on Android and the web, and rings on across the
+seam on iOS, whose tap keeps its state. The same golden fragments - the megaphone's and slow +
+reverb's - are asserted in all three engines' tests. The preview cannot put a filter on an `<audio>`
+element, so it plays a copy of the file made through the same TypeScript
+(`src/web-runtime/sound-copy.ts`): the whole file on its own timeline, so every position the player
+puts the element at is the same in the copy, at 22.05 kHz for an effect that passes nothing above a
+fifth of that. A slider let go has a new copy made once the edit is still for a quarter of a second,
+and the copy it had plays until the new one lands.
+
+**A sound's speed can be a record's.** `ComposeMusic.varispeed` plays `speed` with the pitch going
+with it, which is what slow + reverb's slowness is: Android sets Sonic's speed and pitch alike, which
+leaves it only resampling; iOS scales the pass under `AVAudioTimePitchAlgorithm.varispeed`, set on
+the sound's own mix parameters, which win over the session's and the reader's `.spectral`; the web
+reads the file at the speed through a cubic interpolator; and the preview plays the element at the
+speed with `preservesPitch` off. A pass lasts what `speed` says either way, so nothing about where a
+sound is heard changes. The preview's copy of such a sound works its effect out at the file's rate
+times the speed - the rate it is heard at - so a reverb's delays and damping come out where the
+render, which treats the sound after slowing it, puts them.
 
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
 into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got

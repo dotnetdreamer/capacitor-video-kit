@@ -73,7 +73,14 @@ import {
   type TextEffect,
 } from '../editor/edit-manifest';
 import { OVERLAY_ANIMATIONS, normaliseOverlayAnimation } from '../editor/motion';
-import { SOUND_EFFECTS, normaliseSoundEffectId, soundEffectPreset } from '../editor/sound-effects';
+import {
+  SOUND_EFFECTS,
+  SOUND_EFFECT_SETTING_MAX,
+  normaliseSoundEffectId,
+  normaliseSoundEffectSettings,
+  sameSoundEffectSettings,
+  soundEffectPreset,
+} from '../editor/sound-effects';
 import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
 import {
   addAudioClip,
@@ -105,6 +112,7 @@ import {
   patchClip,
   patchMusic,
   patchOverlay,
+  soundEffectPatch,
   patchVoiceover,
   removeClip,
   removeOverlay,
@@ -453,7 +461,7 @@ const ASPECTS: readonly OutputAspect[] = ['9:16', '16:9'];
 const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs', 'phaseMs'] as const satisfies readonly (keyof EditMusic)[];
 const MUSIC_FADES = ['fadeInMs', 'fadeOutMs'] as const satisfies readonly (keyof EditMusic)[];
 /** Every field a sound has, in the order the editor writes them - what a refusal lists. */
-const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed', 'effect'] as const satisfies readonly (keyof EditMusic)[];
+const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed', 'effect', 'effectSettings'] as const satisfies readonly (keyof EditMusic)[];
 
 /*
  * And every one of them, held by the compiler. [musicFields] refuses any key not on the list, so a
@@ -511,6 +519,13 @@ function musicFields(raw: Record<string, unknown>, path: string): Partial<EditMu
       if (typeof value !== 'string' || (value !== 'none' && !soundEffectPreset(value))) {
         throw new Error(`${name} must be ${SOUND_EFFECTS.map(preset => `"${preset.id}"`).join(', ')} or "none" - the sound as it is`);
       }
+    } else if (key === 'effectSettings') {
+      // Its shape here; whether each is a slider of the sound's effect is [effectSettingsRefusal]'s, once
+      // the effect it will have is known.
+      const numbers = typeof value === 'object' && value !== null && !Array.isArray(value) ? Object.values(value) : null;
+      if (!numbers || !numbers.every(one => typeof one === 'number' && one >= 0 && one <= SOUND_EFFECT_SETTING_MAX)) {
+        throw new Error(`${name} must be an object of the effect's sliders, each a number from 0 to ${SOUND_EFFECT_SETTING_MAX}`);
+      }
     } else if ((MUSIC_FADES as readonly string[]).includes(key)) {
       if (typeof value !== 'number' || !(value >= 0 && value <= MAX_MUSIC_FADE_MS)) {
         throw new Error(`${name} must be a length in milliseconds from 0 (no fade) to ${MAX_MUSIC_FADE_MS}, the longest the volume sheet sets`);
@@ -556,6 +571,34 @@ function musicRefusal(music: Pick<EditMusic, 'inMs' | 'outMs' | 'startMs' | 'end
 }
 
 /**
+ * Why a sound through `effectId` cannot have `settings`, or null when it can: every key one of that
+ * effect's sliders, named in the refusal with the ones it has - refused rather than dropped, as the
+ * manifest's reader would drop them, because an agent turning up a reverb the megaphone has not got
+ * has to hear that it has not.
+ */
+function effectSettingsRefusal(effectId: unknown, settings: Record<string, number> | undefined, path: string): string | null {
+  const keys = Object.keys(settings ?? {});
+  if (keys.length === 0) return null;
+  const preset = soundEffectPreset(effectId);
+  if (!preset) return `"${path}.effectSettings" needs an effect to be the settings of - the sound has none`;
+  const known = preset.controls.map(control => control.key);
+  const stray = keys.find(key => !known.includes(key));
+  if (stray === undefined) return null;
+  return `"${path}.effectSettings.${stray}" is not a slider of "${preset.id}" - its sliders are ${known.map(key => `"${key}"`).join(', ')}`;
+}
+
+/**
+ * The fields putting an effect on a sound brings with it, as the editor's sheet puts one on
+ * ([soundEffectPatch]) - its sliders at their defaults, and slow + reverb's slower speed - for each
+ * the patch does not set itself. Nothing for a patch that leaves the effect as it is.
+ */
+function withEffectOn(sound: EditMusic, patch: Partial<EditMusic>): void {
+  if (patch.effect === undefined) return;
+  const comes = soundEffectPatch(sound, patch.effect);
+  for (const [key, value] of Object.entries(comes ?? {})) if (!(key in patch)) (patch as Record<string, unknown>)[key] = value;
+}
+
+/**
  * A whole sound out of an op's object - `setMusic`'s `music`, `addAudio`'s `sound` - with the defaults
  * and the refusals both share; `path` names it in a message.
  *
@@ -570,6 +613,12 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
   if (given.uri === undefined) throw new Error(`"${path}.uri" must be a non-empty string`);
   const fadeInMs = given.fadeInMs ?? 0;
   const effect = normaliseSoundEffectId(given.effect);
+  const settingsRefused = effectSettingsRefusal(effect, given.effectSettings, path);
+  if (settingsRefused) throw new Error(settingsRefused);
+  const effectSettings = normaliseSoundEffectSettings(effect, given.effectSettings);
+  // Slow + reverb is a slower sound as well as a room, as the editor's sheet makes it: its own speed
+  // unless the sound says another.
+  const speed = given.speed ?? soundEffectPreset(effect)?.speed?.default;
   const music: EditMusic = {
     uri: given.uri,
     fileName: given.fileName ?? '',
@@ -586,9 +635,10 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
     ...(fadeInMs > 0 ? { fadeInMs } : {}),
     fadeOutMs: given.fadeOutMs ?? 0,
     // The same for the speed, stored as the Speed sheet stores one and never as 1x.
-    ...(given.speed !== undefined && normaliseSpeed(given.speed) !== 1 ? { speed: normaliseSpeed(given.speed) } : {}),
-    // And for an effect, which "none" leaves off.
+    ...(speed !== undefined && normaliseSpeed(speed) !== 1 ? { speed: normaliseSpeed(speed) } : {}),
+    // And for an effect, which "none" leaves off, and its sliders, which their defaults leave off.
     ...(effect ? { effect } : {}),
+    ...(effectSettings ? { effectSettings } : {}),
   };
   const refusal = musicRefusal(music);
   if (refusal) throw new Error(refusal);
@@ -608,6 +658,11 @@ function asksForChange(music: EditMusic, patch: Partial<EditMusic>): boolean {
     if (key === 'speed' && typeof value === 'number') return normaliseSpeed(value) !== musicSpeed(music);
     // "none" is what a sound with no effect already has.
     if (key === 'effect') return (normaliseSoundEffectId(value) ?? null) !== (music.effect ?? null);
+    // Sliders as they are stored, against the effect the patch leaves the sound with.
+    if (key === 'effectSettings') {
+      const effect = patch.effect !== undefined ? normaliseSoundEffectId(patch.effect) : music.effect;
+      return !sameSoundEffectSettings(normaliseSoundEffectSettings(effect, value), normaliseSoundEffectSettings(effect, music.effectSettings));
+    }
     const isTime = (MUSIC_TIMES as readonly string[]).includes(key) || (MUSIC_FADES as readonly string[]).includes(key);
     return isTime && typeof value === 'number' && typeof was === 'number' ? Math.round(value) !== Math.round(was) : value !== was;
   });
@@ -974,14 +1029,22 @@ const OPS: Record<string, Apply> = {
    * A patch the editor hands back unchanged although it asks for something the sound does not have
    * is a refusal, and is said as one ([musicRefusal]). One asking for nothing new - a volume the
    * sound already has - is the success it looks like.
+   *
+   * A new `effect` comes on as the editor's Audio effects sheet puts one on ([withEffectOn]): its
+   * sliders at their defaults, and slow + reverb's slower speed, each unless the patch sets it - and
+   * taking slow + reverb off puts the speed back to 1x. `effectSettings` are refused for a slider
+   * the effect has not got ([effectSettingsRefusal]).
    */
   patchMusic: (manifest, op) => {
     const music = manifest.music;
     if (!music) throw new Error('this post has no music to patch - use setMusic first');
     const patch = musicFields(object(op, 'patch'), 'patch');
+    const settingsRefused = effectSettingsRefusal(patch.effect !== undefined ? normaliseSoundEffectId(patch.effect) : music.effect, patch.effectSettings, 'patch');
+    if (settingsRefused) throw new Error(settingsRefused);
     if (patch.startMs !== undefined && patch.endMs === undefined && music.endMs > 0) {
       Object.assign(patch, musicMovedTo(music, patch.startMs, totalDurationMs(manifest)));
     }
+    withEffectOn(music, patch);
     const next = patchMusic(manifest, patch);
     if (next === manifest && asksForChange(music, patch)) {
       const reason = musicRefusal({ ...music, ...patch });
@@ -1018,16 +1081,21 @@ const OPS: Record<string, Apply> = {
   /*
    * [patchMusic]'s rules, for one sound on the lanes, and refused when it would meet its neighbour -
    * except for a slower `speed` on its own, which stops the sound where the next one on its lane begins,
-   * as the editor's Speed sheet does ([audioSpeedPatch]). Sent with a `startMs` or an `endMs` as well,
-   * the speed is taken as it is, and a sound that would then meet its neighbour is refused.
+   * as the editor's Speed sheet does ([audioSpeedPatch]), and the same for the slower speed slow +
+   * reverb brings with it. Sent with a `startMs` or an `endMs` as well, the speed is taken as it is,
+   * and a sound that would then meet its neighbour is refused.
    */
   patchAudio: (manifest, op) => {
     const id = str(op, 'id');
     const clip = requireAudio(manifest, id);
     const patch = musicFields(object(op, 'patch'), 'patch');
+    const settingsRefused = effectSettingsRefusal(patch.effect !== undefined ? normaliseSoundEffectId(patch.effect) : clip.effect, patch.effectSettings, 'patch');
+    if (settingsRefused) throw new Error(settingsRefused);
     if (patch.startMs !== undefined && patch.endMs === undefined && clip.endMs > 0) {
       Object.assign(patch, musicMovedTo(clip, patch.startMs, totalDurationMs(manifest)));
     }
+    // Before the speed below, so slow + reverb's slower speed stops where the next sound begins as well.
+    withEffectOn(clip, patch);
     if (patch.speed !== undefined && patch.startMs === undefined && patch.endMs === undefined) {
       Object.assign(patch, audioSpeedPatch(manifest, id, patch.speed));
     }

@@ -298,6 +298,8 @@ function normaliseMusic(music: ComposeMusic, path: string): ComposeMusic {
     fadeInMs: Math.max(0, finite(music.fadeInMs, 0)),
     fadeOutMs: Math.max(0, finite(music.fadeOutMs, 0)),
     ...(speed !== 1 ? { speed } : {}),
+    // As a record plays its speed, lower as well as slower - and only where there is a speed to play.
+    ...(speed !== 1 && music.varispeed === true ? { varispeed: true } : {}),
     ...(effect ? { effect } : {}),
   };
 }

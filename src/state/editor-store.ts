@@ -63,8 +63,10 @@ import {
   replaceAudioClip as replaceAudioClipOp,
   setAudioLoop,
   setAudioEffect as setAudioEffectOp,
+  setAudioEffectSetting as setAudioEffectSettingOp,
   setAudioSpeed as setAudioSpeedOp,
   setMusicEffect as setMusicEffectOp,
+  setMusicEffectSetting as setMusicEffectSettingOp,
   setMusicSpeed as setMusicSpeedOp,
   soundEffectPreset,
   removeOverlay,
@@ -2205,13 +2207,24 @@ export class EditorStore {
 
   /**
    * A sound through an effect from [SOUND_EFFECTS], or through none for `null`, as one undo step named
-   * for what it did - "Undo: Megaphone", as Loop's is "Loop off". Nothing about the sound's place or
-   * length changes, so it is never refused for its neighbours. Returns whether anything changed.
+   * for what it did - "Undo: Megaphone", as Loop's is "Loop off" - with its sliders at their defaults.
+   * Slow + reverb slows the sound as it goes on and puts it back to 1x as it comes off, in the same
+   * step ([soundEffectPatch]); a slower sound that would run into the next one on its lane stops where
+   * that one begins, as the Speed sheet's does. Returns whether anything changed.
    */
   setSoundEffect(target: SoundEffectTarget, effectId: string | null): boolean {
     const preset = soundEffectPreset(effectId);
     const label = preset ? preset.label : 'Effect off';
     return this.commit(label, m => (target.kind === 'audio' ? setAudioEffectOp(m, target.id, preset?.id ?? null) : setMusicEffectOp(m, preset?.id ?? null)));
+  }
+
+  /**
+   * One of the sound's effect sliders at `value` on its 0..100 scale: live, inside the slider's
+   * gesture, which lands as one undo step named for the slider ("Undo: Megaphone tone"). A value
+   * changes no length, so it is never refused for a neighbour.
+   */
+  setSoundEffectSetting(target: SoundEffectTarget, key: string, value: number): void {
+    this.preview(m => (target.kind === 'audio' ? setAudioEffectSettingOp(m, target.id, key, value) : setMusicEffectSettingOp(m, key, value)));
   }
 
   /**

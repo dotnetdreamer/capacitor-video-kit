@@ -54,8 +54,14 @@ not keep - a section or a stop under 100 ms - is refused the same way, with the 
 with only a `startMs` moves the stop along with the sound, as the editor's Move does; both fades
 run from 0 to 10000 ms; and a sound's `speed` runs from 0.25 to 4, as a clip's does, a slower one
 sent to `patchAudio` on its own stopping where the next sound on its lane begins, as the editor's
-Speed sheet does; a sound's `effect` is `"megaphone"` or `"none"`, anything else refused with the
-list, and one word of a line gets it by being cut out with `splitAudio` and patched on its own.
+Speed sheet does; a sound's `effect` is `"megaphone"`, `"slowReverb"` or `"none"`, anything else
+refused with the list, and one word of a line gets it by being cut out with `splitAudio` and patched
+on its own. `effectSettings` moves an effect's sliders, 0 to 100 each - the megaphone's `intensity`
+and `tone`, slow + reverb's `reverb` and `room` - and a slider the effect has not got is refused with
+the ones it has. An effect put on through a patch comes on as the editor's sheet puts it on: its
+sliders at their defaults unless the patch sets them, and slow + reverb's slower speed (0.8x, played
+as a record plays it, lower as well as slower) unless the patch sends a speed; taking it off puts
+the speed back to 1x.
 Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
 one lane play one after another and lanes play together, so a sound that would overlap another goes
 on a lane of its own, and one the agent puts on a named lane where it does not fit is refused. A

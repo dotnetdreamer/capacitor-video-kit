@@ -1,9 +1,11 @@
 /*
- * The Audio effects sheet: a row of effect tiles under the frame's head.
+ * The Audio effects sheet: a row of effect tiles under the frame's head, and the sliders of the
+ * effect the sound has under them.
  *
  * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
  * component includes ahead of this file. The tiles are the Filters sheet's thumbnails with a sign
- * where the picture would be, so choosing a sound's effect looks like choosing the post's look.
+ * where the picture would be, and the sliders its strength row, so choosing a sound's effect and how
+ * far looks like choosing the post's look and how strong.
  */
 
 .afx__row {
@@ -107,4 +109,51 @@
   align-items: center;
   color: var(--ve-dim, rgba(255, 255, 255, 0.6));
   font-size: 14px;
+}
+
+/* ------------------------------------------------------------------------------------ sliders */
+
+/*
+ * One row a slider: the word, the bar and the number, as the Filters sheet's strength. 44px each, the
+ * least a finger is given, so the three of slow + reverb and its tiles fit the compact sheet's 340px.
+ */
+.afx__controls {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 16px 8px 20px;
+}
+
+.afx__control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+}
+
+/* One width for every word, so the bars start and end together down the column. */
+.afx__control-label {
+  flex: 0 0 64px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Wide enough for "0.75x", in figures that do not shift the bar as they change. */
+.afx__control-value {
+  flex: 0 0 40px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/*
+ * The slider's own gutter is taken away, because this row already has one: the knob hangs past each
+ * end of the bar into the gaps beside the word and the number, as the Filters sheet's does.
+ */
+.afx__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
 }

@@ -191,6 +191,7 @@ graph TD;
   ve-animation-sheet --> ve-icon
   ve-animation-sheet --> ve-slider
   ve-background-sheet --> ve-sheet
+  ve-audio-effects-sheet --> ve-slider
   ve-audio-effects-sheet --> ve-sheet
   ve-audio-effects-sheet --> ve-icon
   ve-toolbar --> ve-icon

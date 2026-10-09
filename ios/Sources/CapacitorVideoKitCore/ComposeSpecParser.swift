@@ -149,6 +149,7 @@ enum ComposeSpecParser {
                          fadeOutMs: m.fadeOutMs,
                          // Held to the clips' range, as a clip's own speed is; absent is 1x.
                          speed: clamp(m.speed, ComposeSpecParser.minSpeed, ComposeSpecParser.maxSpeed),
+                         varispeed: m.varispeed,
                          effect: m.effect)
         }
         let music = d.audio.music.map(makeMusic)
@@ -1475,10 +1476,11 @@ private struct MusicDTO: Decodable {
     let fadeInMs: Int64
     let fadeOutMs: Int64
     let speed: Double
+    let varispeed: Bool
     let effect: SoundEffect?
 
     private enum K: String, CodingKey {
-        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs, speed, effect
+        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs, speed, varispeed, effect
     }
 
     /// Throws the full `audio.music.*` path itself. A sound on a lane cannot name its own lane and
@@ -1499,6 +1501,9 @@ private struct MusicDTO: Decodable {
         fadeInMs = max(0, c.long(.fadeInMs, 0))
         fadeOutMs = max(0, c.long(.fadeOutMs, 0))
         speed = c.double(.speed, 1)
+        // Read as `loop` is, so it can fail nothing: absent, null or not a boolean is false, the pitch
+        // kept at any speed as it was before the key.
+        varispeed = c.flag(.varispeed, false)
         // Last of the sound's fields, where Android's `parseMusic` reads it, so a sound broken somewhere
         // else reports the same first failure it always did. Absent, or null, is the sound as it is;
         // present and not an object fails as `effect`.
@@ -1546,6 +1551,7 @@ private struct SoundEffectDTO: Decodable {
         "peak": [("hz", 10...20_000, false), ("q", 0.1...10, false), ("db", -24...24, false)],
         "drive": [("db", 0...40, false), ("followMs", 1...10_000, true)],
         "gain": [("db", -40...24, false)],
+        "reverb": [("decayMs", 100...20_000, false), ("dampHz", 10...20_000, false), ("wet", 0...1, false), ("dry", 0...1, false)],
     ]
 
     init(from decoder: Decoder) throws {
@@ -1604,6 +1610,7 @@ private struct SoundEffectDTO: Decodable {
         case "lowpass": return .lowpass(hz: read[0]!, q: read[1]!)
         case "peak": return .peak(hz: read[0]!, q: read[1]!, db: read[2]!)
         case "drive": return .drive(db: read[0]!, followMs: read[1])
+        case "reverb": return .reverb(decayMs: read[0]!, dampHz: read[1]!, wet: read[2]!, dry: read[3]!)
         default: return .gain(db: read[0]!)
         }
     }

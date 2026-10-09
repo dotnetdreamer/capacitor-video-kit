@@ -327,7 +327,9 @@ private final class Transfer: @unchecked Sendable {
             let mix = AVAssetReaderAudioMixOutput(audioTracks: soundTracks, audioSettings: WriterEngine.pcmSettings)
             mix.audioMix = built.audioMix
             // The contract preserves pitch across a speed change (D3), and this is the output-side
-            // half of what `CompositionBuilder` asks of each track's mix parameters.
+            // half of what `CompositionBuilder` asks of each track's mix parameters. A sound that plays
+            // its speed as a record does asks its own parameters for `.varispeed`
+            // (`ComposeMusic.varispeed`), and a track's own algorithm is used in place of this one.
             mix.audioTimePitchAlgorithm = .spectral
             mix.alwaysCopiesSampleData = false
             guard reader.canAdd(mix) else { throw WriterEngine.refused("the mixed audio output") }

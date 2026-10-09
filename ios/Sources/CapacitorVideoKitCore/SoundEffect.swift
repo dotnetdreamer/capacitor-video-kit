@@ -26,6 +26,9 @@ enum SoundOp: Sendable, Equatable {
     /// Soft clipping by `db`; measured against the sound's own recent peak when `followMs` is set.
     case drive(db: Double, followMs: Double?)
     case gain(db: Double)
+    /// A room: a tail that falls 60 dB in `decayMs`, darkened from `dampHz`, heard at `wet` beside the
+    /// sound itself at `dry`. The one step whose arithmetic depends on the channel it runs on.
+    case reverb(decayMs: Double, dampHz: Double, wet: Double, dry: Double)
 }
 
 /// A `SoundEffect` running on a stream of sound at `sampleRate`, one frame at a time: the arithmetic
@@ -34,13 +37,14 @@ enum SoundOp: Sendable, Equatable {
 /// the tap's render thread never allocates; `reset` puts them all back to 0 without making anything.
 final class SoundEffectChain {
     private let mono: Bool
-    /// One chain for a folded sound, else one per channel.
+    /// One chain for a folded sound, else one per channel. Chain `k` is made for the channel numbered
+    /// `k` in the frame's order, the folded one as 0, which only a reverb's delays depend on.
     private let chains: [[any SoundStep]]
 
     init(effect: SoundEffect, sampleRate: Double, channels: Int) {
         mono = effect.mono
         let count = effect.mono ? 1 : max(1, channels)
-        chains = (0..<count).map { _ in effect.ops.map { stepFor($0, rate: sampleRate) } }
+        chains = (0..<count).map { k in effect.ops.map { stepFor($0, rate: sampleRate, channel: k) } }
     }
 
     /// One frame - a sample per channel, in -1...1 - through the effect, in place. A channel past the
@@ -155,12 +159,128 @@ private final class Gain: SoundStep {
     func reset() {}
 }
 
-private func stepFor(_ op: SoundOp, rate: Double) -> any SoundStep {
+/// Jezar's Freeverb tunings, in samples at `tuningRate`: the combs' delays, then the allpasses'.
+private let combTuning = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+private let allpassTuning = [556, 441, 341, 225]
+private let tuningRate = 44_100.0
+/// How many samples, at `tuningRate`, each channel's delays are longer than the one before it's: what
+/// makes a stereo tail wide rather than the same tail out of both speakers.
+private let stereoSpread = 23
+
+/// The reverb, exactly as `ComposeSoundEffect` writes it down and `Reverb` in sound-effects.ts runs it:
+/// Freeverb's eight combs side by side, then its four allpasses one after another, every comb tuned to
+/// fall 60 dB in `decayMs` and fed in proportion, so the room's length and its level are two separate
+/// numbers. `channel` is the chain's number in the frame, which sets its delays.
+///
+/// Every line and every state is made here - the chain is made in `TapState.prepare`, where allocating
+/// is allowed - and given back in `deinit`. A sample only reads and writes them, and `reset` zeroes
+/// them where they are, so the tap's render thread never allocates for a room, however long.
+private final class Reverb: SoundStep {
+    /// Each comb's delay line, and where in it the next sample is read and then written: `p`.
+    private let combs: [UnsafeMutableBufferPointer<Double>]
+    private let combAt: UnsafeMutableBufferPointer<Int>
+    /// Each comb's `g` and `c`, and its damped value `f`.
+    private let feedback: [Double]
+    private let take: [Double]
+    private let damped: UnsafeMutableBufferPointer<Double>
+    /// Each allpass's delay line, and its `p`.
+    private let allpasses: [UnsafeMutableBufferPointer<Double>]
+    private let allpassAt: UnsafeMutableBufferPointer<Int>
+    private let d: Double
+    private let undamped: Double
+    private let wet: Double
+    private let dry: Double
+
+    init(decayMs: Double, dampHz: Double, wet: Double, dry: Double, rate: Double, channel: Int) {
+        // `n(t)` in the contract's order of operations: the tuning moved on by the channel's spread,
+        // scaled from 44.1 kHz to the rate, rounded half up, and never under one sample.
+        func delay(_ tuning: Int) -> Int {
+            max(1, Int((Double(tuning + stereoSpread * channel) * rate / tuningRate + 0.5).rounded(.down)))
+        }
+        let lengths = combTuning.map(delay)
+        let feedback = lengths.map { (length: Int) -> Double in pow(10, (-3 * Double(length)) / ((rate * decayMs) / 1000)) }
+        self.feedback = feedback
+        take = feedback.map { (g: Double) -> Double in ((1 - g * g) / 8).squareRoot() }
+        combs = lengths.map { zeros($0, of: Double.self) }
+        combAt = zeros(lengths.count, of: Int.self)
+        damped = zeros(lengths.count, of: Double.self)
+        allpasses = allpassTuning.map { zeros(delay($0), of: Double.self) }
+        allpassAt = zeros(allpassTuning.count, of: Int.self)
+        let d = exp((-2 * Double.pi * min(dampHz, maxHzOfRate * rate)) / rate)
+        self.d = d
+        undamped = 1 - d
+        self.wet = wet
+        self.dry = dry
+    }
+
+    deinit {
+        for line in combs { line.deallocate() }
+        for line in allpasses { line.deallocate() }
+        combAt.deallocate()
+        damped.deallocate()
+        allpassAt.deallocate()
+    }
+
+    func run(_ x: Double) -> Double {
+        var r = 0.0
+        for i in 0..<combs.count {
+            let line = combs[i]
+            let p = combAt[i]
+            let o = line[p]
+            var f = undamped * o + d * damped[i]
+            if f < tiny && f > -tiny { f = 0 }
+            damped[i] = f
+            var stored = take[i] * x + feedback[i] * f
+            if stored < tiny && stored > -tiny { stored = 0 }
+            line[p] = stored
+            combAt[i] = p + 1 == line.count ? 0 : p + 1
+            r = r + o
+        }
+        for j in 0..<allpasses.count {
+            let line = allpasses[j]
+            let p = allpassAt[j]
+            let b = line[p]
+            var v = r + 0.5 * b
+            if v < tiny && v > -tiny { v = 0 }
+            line[p] = v
+            r = b - 0.5 * v
+            allpassAt[j] = p + 1 == line.count ? 0 : p + 1
+        }
+        return dry * x + wet * r
+    }
+
+    /// Every line silent, every `f` 0 and every `p` at the start of its line, as when it was made: a
+    /// fresh room, written over in place.
+    func reset() {
+        for line in combs { zero(line) }
+        for line in allpasses { zero(line) }
+        zero(combAt)
+        zero(damped)
+        zero(allpassAt)
+    }
+}
+
+/// `count` zeros, made once, for a step to keep: a reverb's lines and its state.
+private func zeros<T: Numeric>(_ count: Int, of _: T.Type) -> UnsafeMutableBufferPointer<T> {
+    let made = UnsafeMutableBufferPointer<T>.allocate(capacity: count)
+    made.initialize(repeating: 0)
+    return made
+}
+
+/// Every value of `buffer` back to 0, where it is: on the render thread, which must not allocate.
+private func zero<T: Numeric>(_ buffer: UnsafeMutableBufferPointer<T>) {
+    for k in buffer.indices { buffer[k] = 0 }
+}
+
+/// The step `op` stands for at `rate`, on the chain numbered `channel` - which only a reverb asks.
+private func stepFor(_ op: SoundOp, rate: Double, channel: Int) -> any SoundStep {
     switch op {
     case let .drive(db, followMs):
         return Drive(g: pow(10, db / 20), decay: followMs.map { exp(-1000 / ($0 * rate)) })
     case let .gain(db):
         return Gain(g: pow(10, db / 20))
+    case let .reverb(decayMs, dampHz, wet, dry):
+        return Reverb(decayMs: decayMs, dampHz: dampHz, wet: wet, dry: dry, rate: rate, channel: channel)
     case let .highpass(hz, q):
         let (cosW, alpha) = corner(hz, q, rate)
         return Biquad((1 + cosW) / 2, -(1 + cosW), (1 + cosW) / 2, 1 + alpha, -2 * cosW, 1 - alpha)
@@ -189,7 +309,8 @@ private func corner(_ hz: Double, _ q: Double, _ rate: Double) -> (Double, Doubl
 /// AVAudioMixInputParameters are applied" - the volume ramps that carry the sound's level and its
 /// fades. So the level and the fades take down what the effect made, `ComposeMusic.effect`'s order on
 /// every engine. Each sound is a track of its own, so the tap hears that sound and nothing else, and
-/// it carries its state across a loop's seams, which the contract allows.
+/// it carries its state across a loop's seams, which the contract allows: a reverb's tail rings on
+/// into the next pass here, where the other engines start each pass from silence.
 ///
 /// It runs wherever the audio mix does: `Exporter`'s session and `WriterEngine`'s reader both take
 /// `BuiltComposition.audioMix`. AVFoundation hands a tap 32-bit float, deinterleaved as a rule; an

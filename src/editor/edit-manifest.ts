@@ -1,7 +1,7 @@
 import type { FilterOp } from '../video-composer/definitions';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
-import { normaliseSoundEffectId } from './sound-effects';
+import { normaliseSoundEffectId, normaliseSoundEffectSettings } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -18,7 +18,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 16;
+export const MANIFEST_VERSION = 17;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -362,8 +362,20 @@ export interface EditMusic {
    *
    * It belongs to the sound, not to the post: a Cut leaves it on both halves and a Duplicate on the
    * copy, which is what lets a customer cut one word out of a line and give only that word a megaphone.
+   *
+   * An effect that plays the speed as a record does - slow + reverb - also makes [speed] a lower
+   * sound as well as a slower one ([SoundEffectSpeed]); the speed itself is still this sound's own.
    */
   effect?: string;
+  /**
+   * Where the customer left [effect]'s sliders, by [SoundEffectControl.key] on its 0..100 scale: a
+   * harder megaphone, a bigger room. Only a slider moved off its default has a value, and a sound with
+   * none has no key at all - every sound of every manifest written before version 17, which plays
+   * exactly as it did, since an effect at its defaults is the effect that shipped. Never stored without
+   * an [effect], and a value its effect has no slider for is dropped when it is read
+   * ([normaliseSoundEffectSettings]). A Cut and a Duplicate keep it with the effect.
+   */
+  effectSettings?: Record<string, number>;
 }
 
 /** One independently placed sound on an audio lane. Its timing is on the output timeline. */
@@ -1776,6 +1788,12 @@ export function emptyManifest(): EditManifest {
  * manifest: a version-15 sound has no `effect`, which is the sound as it is, and [toComposeSpec] sends
  * it with none - byte for byte the spec version 15 produced. Bumped because an older build reading a
  * version-16 draft plays a megaphone's word in the speaker's own voice.
+ *
+ * Version 16 to version 17 adds a sound's [EditMusic.effectSettings] and the slow + reverb effect,
+ * and nothing is written into an older manifest: a version-16 sound has no settings, which is its
+ * effect at its defaults, and [toComposeSpec] sends exactly the steps version 16 sent. Bumped because
+ * an older build reading a version-17 draft plays a slowed + reverb song at its slow speed with its
+ * pitch kept and no room, and a megaphone at whatever its sliders were as one at their middles.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1892,6 +1910,7 @@ export function normaliseManifest(input: unknown): EditManifest {
     const musicStartMs = Math.max(0, num(m.startMs, 0));
     const speed = normaliseSpeed(num(m.speed, 1));
     const effect = normaliseSoundEffectId(m.effect);
+    const effectSettings = normaliseSoundEffectSettings(effect, m.effectSettings);
     return {
       uri: String(m.uri),
       fileName: String(m.fileName ?? 'Music'),
@@ -1908,8 +1927,9 @@ export function normaliseManifest(input: unknown): EditManifest {
       fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
       // The same rule, for a sound played at its own speed.
       ...(speed !== 1 ? { speed } : {}),
-      // And for a sound played as it is.
+      // And for a sound played as it is, or through an effect whose sliders were never moved.
       ...(effect ? { effect } : {}),
+      ...(effectSettings ? { effectSettings } : {}),
     };
   };
   const music: EditMusic | null = raw['music'] ? readMusic(raw['music']) : null;

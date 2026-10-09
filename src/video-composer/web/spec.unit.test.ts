@@ -642,11 +642,21 @@ describe('a sound’s speed and effect', () => {
 
   it('refuses an effect no engine could play, with the path that broke', () => {
     expect(() => validateSpec(withMusic({ effect: 'megaphone' }))).toThrow('invalid_spec:audio.music.effect');
-    expect(() => validateSpec(withMusic({ effect: { ops: [{ op: 'reverb' }] } }))).toThrow('invalid_spec:audio.music.effect.ops[0].op');
+    expect(() => validateSpec(withMusic({ effect: { ops: [{ op: 'echo' }] } }))).toThrow('invalid_spec:audio.music.effect.ops[0].op');
+    expect(() => validateSpec(onLane({ effect: { ops: [{ op: 'reverb', decayMs: 900 }] } }))).toThrow('invalid_spec:audio.musicTracks[0][0].effect.ops[0].dampHz');
     expect(() => validateSpec(onLane({ effect: { mono: 1, ops: [] } }))).toThrow('invalid_spec:audio.musicTracks[0][0].effect.mono');
     expect(() => validateSpec(onLane({ effect: { ops: [{ op: 'drive', db: 6, knee: 2 }] } }))).toThrow('invalid_spec:audio.musicTracks[0][0].effect.ops[0].knee');
     const many = { ops: Array.from({ length: MAX_SOUND_OPS + 1 }, () => ({ op: 'gain', db: 0 })) };
     expect(() => validateSpec(withMusic({ effect: many }))).toThrow(`invalid_spec:audio.music.effect.ops at most ${MAX_SOUND_OPS} steps`);
+  });
+
+  it('keeps a speed played as a record plays one, and only where there is a speed to play', () => {
+    expect(validateSpec(withMusic({ speed: 0.8, varispeed: true })).audio.music).toMatchObject({ speed: 0.8, varispeed: true });
+    expect(validateSpec(onLane({ speed: 0.8, varispeed: true })).audio.musicTracks?.[0]?.[0]).toMatchObject({ speed: 0.8, varispeed: true });
+    // At 1x it would change nothing; anything but true is a speed that keeps its pitch, as `loop` is read.
+    expect(validateSpec(withMusic({ varispeed: true })).audio.music).not.toHaveProperty('varispeed');
+    expect(validateSpec(withMusic({ speed: 0.8, varispeed: 'yes' })).audio.music).not.toHaveProperty('varispeed');
+    expect(validateSpec(withMusic({ speed: 0.8 })).audio.music).not.toHaveProperty('varispeed');
   });
 
   it('reports a sound broken somewhere else first, as the native parsers do', () => {

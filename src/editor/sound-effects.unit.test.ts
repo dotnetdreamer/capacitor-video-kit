@@ -2,7 +2,20 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_SOUND_OPS, type ComposeSoundEffect } from '../video-composer/definitions';
 
-import { SOUND_EFFECTS, SoundEffectError, SoundEffectRunner, normaliseSoundEffect, normaliseSoundEffectId, soundEffectPreset } from './sound-effects';
+import {
+  SOUND_EFFECTS,
+  SOUND_EFFECT_SETTING_MAX,
+  SoundEffectError,
+  SoundEffectRunner,
+  normaliseSoundEffect,
+  normaliseSoundEffectId,
+  normaliseSoundEffectSettings,
+  sameSoundEffectSettings,
+  soundEffectPlaysSpeedAsRecord,
+  soundEffectPreset,
+  soundEffectSettings,
+  soundEffectSteps,
+} from './sound-effects';
 
 /*
  * A sound's effect: the steps the wire carries and the arithmetic every engine runs on them. The
@@ -46,9 +59,10 @@ function refusal(value: unknown): string {
 }
 
 describe('the catalogue', () => {
-  it('offers the megaphone first', () => {
-    expect(SOUND_EFFECTS.map(preset => preset.id)).toEqual(['megaphone']);
+  it('offers the megaphone first, then slow + reverb', () => {
+    expect(SOUND_EFFECTS.map(preset => preset.id)).toEqual(['megaphone', 'slowReverb']);
     expect(soundEffectPreset('megaphone')?.label).toBe('Megaphone');
+    expect(soundEffectPreset('slowReverb')?.label).toBe('Slow + reverb');
   });
 
   it('is wire data every engine takes as it is', () => {
@@ -61,12 +75,118 @@ describe('the catalogue', () => {
     expect(() => {
       step.hz = 20;
     }).toThrow();
+    expect(Object.isFrozen(soundEffectPreset('slowReverb')!.controls[0])).toBe(true);
   });
 
   it('keeps an id only when this version can play it', () => {
     expect(normaliseSoundEffectId('megaphone')).toBe('megaphone');
+    expect(normaliseSoundEffectId('slowReverb')).toBe('slowReverb');
     for (const other of ['none', 'echo', '', 'Megaphone', 42, null, undefined, {}]) expect(normaliseSoundEffectId(other)).toBeUndefined();
     expect(soundEffectPreset('toString')).toBeNull();
+  });
+
+  it('gives every slider a key of its own, a name for the undo step and a default on its scale', () => {
+    for (const preset of SOUND_EFFECTS) {
+      const keys = preset.controls.map(control => control.key);
+      expect(new Set(keys).size).toBe(keys.length);
+      for (const control of preset.controls) {
+        expect(control.label).toMatch(/\S/);
+        expect(control.name).toMatch(/\S/);
+        expect(Number.isInteger(control.default)).toBe(true);
+        expect(control.default).toBeGreaterThanOrEqual(0);
+        expect(control.default).toBeLessThanOrEqual(SOUND_EFFECT_SETTING_MAX);
+      }
+    }
+  });
+
+  it('puts every effect on the wire at every corner of its sliders', () => {
+    // A slider pushed to either end is still an effect each engine plays, held to nothing.
+    for (const preset of SOUND_EFFECTS) {
+      for (const at of [0, SOUND_EFFECT_SETTING_MAX]) {
+        const settings = Object.fromEntries(preset.controls.map(control => [control.key, at]));
+        const steps = soundEffectSteps(preset.id, settings)!;
+        expect(normaliseSoundEffect(steps)).toEqual(steps);
+      }
+    }
+  });
+
+  /*
+   * A megaphone put on a sound before the sliders existed is stored as the id alone, and has to sound
+   * exactly as it did: these are the steps that shipped, number for number.
+   */
+  it('makes the megaphone that shipped at the middle of its sliders', () => {
+    expect(megaphone()).toEqual({
+      mono: true,
+      ops: [
+        { op: 'highpass', hz: 600, q: Math.SQRT1_2 },
+        { op: 'highpass', hz: 600, q: Math.SQRT1_2 },
+        { op: 'lowpass', hz: 5000, q: Math.SQRT1_2 },
+        { op: 'peak', hz: 1800, q: 1, db: 6 },
+        { op: 'drive', db: 20, followMs: 300 },
+        { op: 'lowpass', hz: 3500, q: Math.SQRT1_2 },
+        { op: 'lowpass', hz: 3500, q: Math.SQRT1_2 },
+        { op: 'gain', db: -4 },
+      ],
+    });
+    expect(soundEffectSteps('megaphone')).toEqual(megaphone());
+    expect(soundEffectSteps('megaphone', { intensity: 50, tone: 50 })).toEqual(megaphone());
+  });
+});
+
+describe('the settings', () => {
+  it('keeps a value for each slider moved off its default, on the scale and in whole steps', () => {
+    expect(normaliseSoundEffectSettings('megaphone', { intensity: 80 })).toEqual({ intensity: 80 });
+    expect(normaliseSoundEffectSettings('megaphone', { intensity: 79.6, tone: -20 })).toEqual({ intensity: 80, tone: 0 });
+    expect(normaliseSoundEffectSettings('megaphone', { tone: 250 })).toEqual({ tone: SOUND_EFFECT_SETTING_MAX });
+    // In the effect's own order, whatever order they came in, so two equal settings are stored alike.
+    expect(Object.keys(normaliseSoundEffectSettings('megaphone', { tone: 10, intensity: 90 })!)).toEqual(['intensity', 'tone']);
+  });
+
+  it('stores nothing for sliders at their defaults, as the sound before it had any', () => {
+    expect(normaliseSoundEffectSettings('megaphone', { intensity: 50, tone: 50 })).toBeUndefined();
+    expect(normaliseSoundEffectSettings('megaphone', { intensity: 50.2 })).toBeUndefined();
+    expect(normaliseSoundEffectSettings('megaphone', {})).toBeUndefined();
+  });
+
+  it('drops what the effect has no slider for, and everything for an effect it does not know', () => {
+    expect(normaliseSoundEffectSettings('megaphone', { intensity: 70, room: 10, toString: 3 })).toEqual({ intensity: 70 });
+    expect(normaliseSoundEffectSettings('megaphone', { intensity: '70', tone: Number.NaN })).toBeUndefined();
+    expect(normaliseSoundEffectSettings('echo', { intensity: 70 })).toBeUndefined();
+    expect(normaliseSoundEffectSettings(undefined, { intensity: 70 })).toBeUndefined();
+    expect(normaliseSoundEffectSettings('megaphone', [70])).toBeUndefined();
+    expect(normaliseSoundEffectSettings('megaphone', null)).toBeUndefined();
+  });
+
+  it('reads every slider where a sound leaves it, the defaults filling the rest', () => {
+    expect(soundEffectSettings('slowReverb', { room: 90 })).toEqual({ reverb: 50, room: 90 });
+    expect(soundEffectSettings('slowReverb', undefined)).toEqual({ reverb: 50, room: 50 });
+    expect(soundEffectSettings('echo', { room: 90 })).toEqual({});
+  });
+
+  it('tells two sounds’ settings apart by value, a missing one being the default', () => {
+    expect(sameSoundEffectSettings(undefined, undefined)).toBe(true);
+    expect(sameSoundEffectSettings({ room: 90 }, { room: 90 })).toBe(true);
+    expect(sameSoundEffectSettings({ room: 90 }, undefined)).toBe(false);
+    expect(sameSoundEffectSettings({ room: 90 }, { room: 91 })).toBe(false);
+  });
+
+  it('builds a new effect every time, so a spec can be changed without changing the catalogue', () => {
+    const a = soundEffectSteps('megaphone', { intensity: 90 })!;
+    const b = soundEffectSteps('megaphone', { intensity: 90 })!;
+    expect(a).toEqual(b);
+    expect(a).not.toBe(b);
+    expect(Object.isFrozen(a.ops[0])).toBe(false);
+    expect(soundEffectSteps('echo')).toBeNull();
+    expect(soundEffectSteps(undefined)).toBeNull();
+  });
+
+  it('knows which effects play the sound’s speed as a record does', () => {
+    expect(soundEffectPlaysSpeedAsRecord('slowReverb')).toBe(true);
+    expect(soundEffectPlaysSpeedAsRecord('megaphone')).toBe(false);
+    expect(soundEffectPlaysSpeedAsRecord(undefined)).toBe(false);
+    const speed = soundEffectPreset('slowReverb')!.speed!;
+    expect(speed.default).toBeGreaterThanOrEqual(speed.min);
+    expect(speed.default).toBeLessThan(speed.max);
   });
 });
 
@@ -91,8 +211,11 @@ describe('the parser', () => {
     expect(refusal({ zeta: 1, ops: [], alpha: 2 })).toBe('alpha');
     expect(refusal({ ops: [{ op: 'gain', db: 1, zeta: 1, beta: 2 }] })).toBe('ops[0].beta');
     expect(refusal({ ops: [7] })).toBe('ops[0]');
-    expect(refusal({ ops: [{ op: 'reverb' }] })).toBe('ops[0].op');
+    expect(refusal({ ops: [{ op: 'echo' }] })).toBe('ops[0].op');
     expect(refusal({ ops: [{ op: 'toString' }] })).toBe('ops[0].op');
+    expect(refusal({ ops: [{ op: 'reverb', decayMs: 1000 }] })).toBe('ops[0].dampHz');
+    expect(refusal({ ops: [{ op: 'reverb', decayMs: 1000, dampHz: 5000, wet: 0.5 }] })).toBe('ops[0].dry');
+    expect(refusal({ ops: [{ op: 'reverb', decayMs: 1000, dampHz: 5000, wet: 0.5, dry: 1, size: 2 }] })).toBe('ops[0].size');
     expect(refusal({ ops: [{ op: 'gain', db: 1 }, { op: 'lowpass', q: 1 }] })).toBe('ops[1].hz');
     expect(refusal({ ops: [{ op: 'lowpass', hz: Number.NaN, q: 1 }] })).toBe('ops[0].hz');
     expect(refusal({ ops: [{ op: 'peak', hz: 1000, q: 1 }] })).toBe('ops[0].db');
@@ -123,6 +246,7 @@ describe('the parser', () => {
           { op: 'drive', db: 99, followMs: 0 },
           { op: 'drive', db: -3 },
           { op: 'gain', db: 60 },
+          { op: 'reverb', decayMs: 5, dampHz: 99_999, wet: 2, dry: -1 },
         ],
       }),
     ).toEqual({
@@ -133,6 +257,7 @@ describe('the parser', () => {
         { op: 'drive', db: 40, followMs: 1 },
         { op: 'drive', db: 0 },
         { op: 'gain', db: 24 },
+        { op: 'reverb', decayMs: 100, dampHz: 20_000, wet: 1, dry: 0 },
       ],
     });
   });
@@ -323,6 +448,197 @@ describe('the megaphone', () => {
     for (const [i, value] of golden) {
       expect(left[i]).toBeCloseTo(value, 6);
       expect(right[i]).toBe(left[i]);
+    }
+  });
+});
+
+describe('the megaphone’s sliders', () => {
+  const at = (settings: Record<string, number>) => soundEffectSteps('megaphone', settings)!;
+  const drive = (settings: Record<string, number>) => (at(settings).ops[4] as { db: number }).db;
+  const corner = (settings: Record<string, number>) => (at(settings).ops[0] as { hz: number }).hz;
+
+  it('drives harder with Intensity, from none at all to the most a drive takes', () => {
+    expect(drive({ intensity: 0 })).toBe(0);
+    expect(drive({ intensity: 50 })).toBe(20);
+    expect(drive({ intensity: SOUND_EFFECT_SETTING_MAX })).toBe(40);
+  });
+
+  it('buzzes more with Intensity without coming out much louder', () => {
+    // A 140 Hz buzz with every harmonic at 1/k^2, the voice the peak test above uses.
+    const voice = new Float32Array(RATE / 2);
+    for (let k = 1; k <= 40; k++) for (let i = 0; i < voice.length; i++) voice[i] = voice[i]! + (0.4 * Math.sin((2 * Math.PI * 140 * k * i) / RATE)) / (k * k);
+    const middle = rms(through(at({ intensity: 50 }), voice)[0]!);
+    const hard = rms(through(at({ intensity: SOUND_EFFECT_SETTING_MAX }), voice)[0]!);
+    expect(Math.abs(db(hard / middle))).toBeLessThan(2);
+  });
+
+  it('moves the whole horn with Tone, by up to 0.6 of an octave either way', () => {
+    expect(corner({ tone: 50 })).toBe(600);
+    expect(corner({ tone: 0 })).toBe(Math.round(600 * Math.pow(2, -0.6)));
+    expect(corner({ tone: SOUND_EFFECT_SETTING_MAX })).toBe(Math.round(600 * Math.pow(2, 0.6)));
+    // Every corner and the honk together, so the horn changes size rather than shape.
+    const corners = (at({ tone: 0 }).ops as { hz?: number }[]).flatMap(step => (step.hz === undefined ? [] : [step.hz]));
+    expect(corners).toEqual([600, 600, 5000, 1800, 3500, 3500].map(hz => Math.round(hz * Math.pow(2, -0.6))));
+  });
+});
+
+describe('the reverb', () => {
+  const room = (overrides: Partial<{ decayMs: number; dampHz: number; wet: number; dry: number }> = {}): ComposeSoundEffect => ({
+    ops: [{ op: 'reverb', decayMs: 2000, dampHz: 6000, wet: 1, dry: 0, ...overrides }],
+  });
+
+  it('is the dry sound alone until the first comb’s delay has passed', () => {
+    const input = sine(440, 0.5, 0.05);
+    const [out] = through(room({ wet: 0.7, dry: 0.6 }), input);
+    // 1116 samples at 44.1 kHz is 1215 at 48, and the first of them is sample 0's own silence.
+    for (let i = 0; i <= 1215; i++) expect(out![i]).toBe(Math.fround(0.6 * input[i]!));
+    expect(out![1300]).not.toBe(Math.fround(0.6 * input[1300]!));
+  });
+
+  /** A click in every channel, `seconds` long: what a room is measured by. */
+  const impulse = (seconds: number): Float32Array => {
+    const out = new Float32Array(Math.round(seconds * RATE));
+    out[0] = 1;
+    return out;
+  };
+
+  /**
+   * The same noise on every run - a linear congruential generator - with the slope of a song, most of
+   * it under 1 kHz. A steady tone is a poor thing to measure a room with: it comes out as the same tone,
+   * louder or quieter by where it falls among the combs' resonances.
+   */
+  const noise = (seconds: number, amplitude: number): Float32Array => {
+    const out = new Float32Array(Math.round(seconds * RATE));
+    const a = Math.exp((-2 * Math.PI * 1000) / RATE);
+    let seed = 1;
+    let y = 0;
+    for (let i = 0; i < out.length; i++) {
+      seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+      y = (1 - a) * (seed / 2 ** 31 - 1) + a * y;
+      out[i] = 4 * amplitude * y;
+    }
+    return out;
+  };
+
+  it('rings on after the sound, falling 60 dB in about its decay', () => {
+    // Measured as rooms are, by Schroeder's backward integral of the impulse response from 5 to 25 dB
+    // down, times three. Damped above anything that matters, though a click's very top still dies a
+    // little sooner than the rest, which is all that keeps it under the 1000 ms asked for.
+    const [out] = through(room({ decayMs: 1000, dampHz: 20_000 }), impulse(3));
+    const left = new Float64Array(out!.length);
+    let sum = 0;
+    for (let i = out!.length - 1; i >= 0; i--) left[i] = sum += out![i]! ** 2;
+    const down = (dB: number) => left.findIndex(e => 10 * Math.log10(e / left[0]!) <= -dB);
+    const rt60 = ((down(25) - down(5)) / RATE) * 3;
+    expect(rt60).toBeGreaterThan(0.8);
+    expect(rt60).toBeLessThan(1.1);
+  });
+
+  it('is about as loud as the sound at any length, so a longer room is not a louder one', () => {
+    const sound = noise(3, 0.3);
+    const short = rms(through(room({ decayMs: 800 }), sound)[0]!, RATE);
+    const long = rms(through(room({ decayMs: 6000 }), sound)[0]!, RATE);
+    expect(Math.abs(db(long / short))).toBeLessThan(2.5);
+    expect(Math.abs(db(short / rms(sound, RATE)))).toBeLessThan(1.5);
+  });
+
+  it('gives each channel a tail of its own, so the room is as wide as the speakers', () => {
+    const [l, r] = through(room(), impulse(1), impulse(1));
+    let ab = 0;
+    let aa = 0;
+    let bb = 0;
+    for (let i = RATE / 20; i < l!.length; i++) {
+      ab += l![i]! * r![i]!;
+      aa += l![i]! ** 2;
+      bb += r![i]! ** 2;
+    }
+    expect(Math.abs(ab / Math.sqrt(aa * bb))).toBeLessThan(0.2);
+  });
+
+  it('is the first channel’s for a folded sound', () => {
+    const left = sine(300, 0.5, 0.2);
+    const right = sine(700, 0.3, 0.2);
+    const [folded] = through({ mono: true, ...room() }, left, right);
+    const [first] = through(room(), left.map((v, i) => (v + right[i]!) / 2));
+    for (let i = 0; i < first!.length; i += 7) expect(folded![i]).toBeCloseTo(first![i]!, 6);
+  });
+
+  it('comes out the same handed over in pieces as in one', () => {
+    const input = sine(330, 0.7, 0.2);
+    const [whole] = through(room({ dry: 0.5 }), input);
+    const pieces = input.slice();
+    const runner = new SoundEffectRunner(room({ dry: 0.5 }), RATE);
+    runner.process([pieces], 0, 1500);
+    runner.process([pieces], 1500, 1);
+    runner.process([pieces], 1501, pieces.length - 1501);
+    expect(Array.from(pieces)).toEqual(Array.from(whole!));
+  });
+
+  it('leaves silence silent, and falls back to exact silence after a sound', () => {
+    const [silent] = through(room(), new Float32Array(4800));
+    expect(silent!.every(v => v === 0)).toBe(true);
+    const burst = new Float32Array(9 * RATE);
+    burst.set(sine(500, 0.9, 0.1));
+    const [after] = through(room({ decayMs: 1000 }), burst);
+    // Every value it keeps is let go under 1e-20, so the tail ends in zeros rather than denormals.
+    expect(after!.subarray(after!.length - RATE).every(v => v === 0)).toBe(true);
+  });
+
+  it('stays stable at the longest room and the brightest damping', () => {
+    const [out] = through(room({ decayMs: 20_000, dampHz: 20_000, wet: 1, dry: 1 }), sine(1000, 0.9, 1));
+    expect(out!.every(v => Number.isFinite(v) && Math.abs(v) <= 1)).toBe(true);
+  });
+});
+
+describe('slow + reverb', () => {
+  const at = (settings: Record<string, number>) => soundEffectSteps('slowReverb', settings)!;
+
+  it('is a room after the sound and nothing else, its slowing being the sound’s own speed', () => {
+    expect(at({}).ops.map(step => step.op)).toEqual(['reverb']);
+    expect(at({}).mono).toBeUndefined();
+    expect(soundEffectPreset('slowReverb')!.speed).toMatchObject({ default: 0.8, min: 0.5, max: 1 });
+  });
+
+  it('turns Reverb into how much of the room is heard, and Room into how long and dark it is', () => {
+    expect(at({ reverb: 0 }).ops[0]).toMatchObject({ wet: 0, dry: 1 });
+    expect(at({ reverb: 50 }).ops[0]).toMatchObject({ wet: 0.5, dry: 0.8 });
+    expect(at({ reverb: 100 }).ops[0]).toMatchObject({ wet: 1, dry: 0.6 });
+    expect(at({ room: 0 }).ops[0]).toMatchObject({ decayMs: 1000, dampHz: 8000 });
+    expect(at({ room: 50 }).ops[0]).toMatchObject({ decayMs: 3500, dampHz: 5500 });
+    expect(at({ room: 100 }).ops[0]).toMatchObject({ decayMs: 6000, dampHz: 3000 });
+  });
+
+  /*
+   * The same numbers as `SoundEffectTest.kt` and `SoundEffectTests.swift`: the megaphone's fragment,
+   * twice as long, through slow + reverb at the middle of its sliders. Not folded, so each channel has
+   * a room of its own and both are held to their numbers.
+   */
+  it('matches the golden numbers every engine is held to', () => {
+    const n = 4800;
+    const left = new Float32Array(n);
+    const right = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      left[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / RATE) + 0.2 * Math.sin((2 * Math.PI * 3100 * i) / RATE);
+      right[i] = 0.3 * Math.sin((2 * Math.PI * 220 * i) / RATE + 0.5);
+    }
+    expect(soundEffectPreset('slowReverb')!.effect).toEqual({ ops: [{ op: 'reverb', decayMs: 3500, dampHz: 5500, wet: 0.5, dry: 0.8 }] });
+    new SoundEffectRunner(soundEffectPreset('slowReverb')!.effect, RATE).process([left, right]);
+    const golden: [number, number, number][] = [
+      [0, 0, 0.11506213247776031],
+      [1, 0.09078975021839142, 0.1210789903998375],
+      [1214, 0.4370698928833008, -0.18847058713436127],
+      [1215, 0.3962092995643616, -0.19267092645168304],
+      [1239, 0.39520999789237976, -0.23967154324054718],
+      [1240, 0.4382869005203247, -0.2387159764766693],
+      [1500, -0.5940757393836975, -0.06688307225704193],
+      [2000, 0.5418930649757385, 0.23884811997413635],
+      [3000, -0.2069074958562851, -0.22407972812652588],
+      [4000, -0.2956431806087494, 0.14864428341388702],
+      [4799, -0.1521013230085373, 0.08078738301992416],
+    ];
+    for (const [i, l, r] of golden) {
+      expect(left[i]).toBeCloseTo(l, 6);
+      expect(right[i]).toBeCloseTo(r, 6);
     }
   });
 });

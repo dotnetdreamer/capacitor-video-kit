@@ -120,6 +120,25 @@ describe('makeSoundCopy', () => {
     expect(Math.abs(audio.duration - 1.5)).toBeLessThan(0.01);
   });
 
+  /*
+   * A sound whose speed is a record's plays its copy at that speed with the pitch let go, which takes
+   * every frequency in it down by the speed - a corner of the effect's included. The copy is worked
+   * out for the rate it is heard at, so the corner lands where the render, which treats the sound
+   * after slowing it, puts it: a 1 kHz low-pass for half speed is a 2 kHz one in the copy, which half
+   * speed brings down to 1 kHz. A 1600 Hz tone, slowed to 800 Hz, comes through it as the render lets
+   * it through - where the same low-pass at the file's own rate all but takes it away.
+   */
+  it('works the effect out at the rate the copy is heard at', async () => {
+    const lowpass = { ops: [1, 2, 3, 4].map(() => ({ op: 'lowpass' as const, hz: 1000, q: Math.SQRT1_2 })) };
+    const source = tone(1, 1600, 0.5);
+    const asIs = await decode((await makeSoundCopy(urlFor(source), lowpass, 1000))!, 44_100);
+    const halved = await decode((await makeSoundCopy(urlFor(source), lowpass, 1000, 0.5))!, 44_100);
+    // Four Butterworths: 0.84 each at 0.8 of their corner, 0.36 each at 1.6 of it.
+    const level = (copy: AudioBuffer) => rms(copy.getChannelData(0), 4410);
+    expect(level(halved) / (0.5 * Math.SQRT1_2)).toBeCloseTo(0.84 ** 4, 1);
+    expect(level(asIs)).toBeLessThan(level(halved) * 0.1);
+  });
+
   it('makes no copy of a sound too long to decode, or of a file that is not sound', async () => {
     expect(await makeSoundCopy(urlFor(tone(0.5, 440, 0.5)), megaphone, 11 * 60 * 1000)).toBeNull();
     expect(await makeSoundCopy(urlFor(new Blob(['not sound'], { type: 'audio/wav' })), megaphone, 1000)).toBeNull();
@@ -157,7 +176,7 @@ describe('the copies EditorMedia makes', () => {
     const media = new EditorMedia(store, host);
     store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), post(uri));
 
-    const key = soundCopyKey(uri, 'megaphone');
+    const key = soundCopyKey({ uri, effect: 'megaphone' })!;
     await until('the copy', () => typeof store.soundCopies.value.get(key) === 'string');
     const copy = store.soundCopies.value.get(key)!;
     expect(copy.startsWith('blob:')).toBe(true);

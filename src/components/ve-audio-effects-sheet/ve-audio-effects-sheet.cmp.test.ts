@@ -85,6 +85,46 @@ function tile(sheet: HTMLElement, label: string): HTMLButtonElement {
   return found;
 }
 
+/** The words beside the sheet's sliders, top to bottom, and the numbers at their ends. */
+function controls(sheet: HTMLElement): { labels: string[]; values: string[] } {
+  const rows = [...(sheet.shadowRoot?.querySelectorAll<HTMLElement>('.afx__control') ?? [])];
+  return {
+    labels: rows.map(row => row.querySelector('.afx__control-label')?.textContent ?? ''),
+    values: rows.map(row => row.querySelector('.afx__control-value')?.textContent ?? ''),
+  };
+}
+
+/** The slider in the row whose word is `label`. */
+function sliderFor(sheet: HTMLElement, label: string): HTMLElement {
+  const row = [...(sheet.shadowRoot?.querySelectorAll<HTMLElement>('.afx__control') ?? [])].find(
+    one => one.querySelector('.afx__control-label')?.textContent === label,
+  );
+  const slider = row?.querySelector<HTMLElement>('ve-slider');
+  if (!slider) throw new Error(`no ${label} slider`);
+  return slider;
+}
+
+let pointerId = 0;
+
+/**
+ * One whole drag along a slider's bar, from `from` to `to` in its own units, exactly as a finger does
+ * it - pressed on the knob, moved, lifted - which is one gesture and so one undo step.
+ */
+async function drag(sheet: HTMLElement, label: string, from: number, to: number): Promise<void> {
+  const slider = sliderFor(sheet, label) as HTMLElement & { componentOnReady?: () => Promise<unknown>; min: number; max: number };
+  await slider.componentOnReady?.();
+  const bar = slider.shadowRoot!.querySelector('.sl__track')!.getBoundingClientRect();
+  const at = (value: number) => bar.left + ((value - slider.min) / (slider.max - slider.min)) * bar.width;
+  pointerId += 1;
+  for (const [type, x] of [
+    ['pointerdown', at(from)],
+    ['pointermove', at(to)],
+    ['pointerup', at(to)],
+  ] as const) {
+    slider.dispatchEvent(new PointerEvent(type, { pointerId, isPrimary: true, clientX: x, bubbles: true }));
+  }
+}
+
 /** Polls a frame at a time, because a repaint is Stencil's to schedule and not ours to await. */
 async function until(what: string, ready: () => boolean, ms = 2000): Promise<void> {
   const deadline = performance.now() + ms;
@@ -158,6 +198,64 @@ describe('ve-audio-effects-sheet', () => {
     const { store, sheet } = await mount({ kind: 'music' });
     tile(sheet, 'Megaphone').click();
     expect(store.manifest.value.music?.effect).toBe('megaphone');
+    expect(lineOf(store)).not.toHaveProperty('effect');
+  });
+
+  it('shows the sliders of the effect the sound has, and none for a sound with none', async () => {
+    const { sheet } = await mount({ kind: 'audio', id: 'line' });
+    expect(controls(sheet).labels).toEqual([]);
+
+    tile(sheet, 'Megaphone').click();
+    await until('the megaphone’s sliders', () => controls(sheet).labels.length === 2);
+    expect(controls(sheet)).toEqual({ labels: ['Intensity', 'Tone'], values: ['50', '50'] });
+
+    tile(sheet, 'Slow + reverb').click();
+    await until('slow + reverb’s sliders', () => controls(sheet).labels.length === 3);
+    expect(controls(sheet)).toEqual({ labels: ['Slow', 'Reverb', 'Room'], values: ['0.8x', '50', '50'] });
+    // Each named for what it changes, as a screen reader and the undo toast will say it.
+    expect(sliderFor(sheet, 'Room').getAttribute('aria-label')).toBe('Room size');
+    expect(sliderFor(sheet, 'Slow').getAttribute('aria-label')).toBe('Speed');
+  });
+
+  it('moves a slider as one undo step named for it', async () => {
+    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
+    tile(sheet, 'Megaphone').click();
+    await until('the sliders', () => controls(sheet).labels.length === 2);
+
+    await drag(sheet, 'Intensity', 50, 80);
+    expect(lineOf(store)?.effectSettings).toEqual({ intensity: 80 });
+    await until('the readout', () => controls(sheet).values[0] === '80');
+
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Megaphone intensity');
+    expect(lineOf(store)).not.toHaveProperty('effectSettings');
+    expect(lineOf(store)?.effect).toBe('megaphone');
+  });
+
+  it('slows the sound as slow + reverb goes on, in the same step, and sets its speed with Slow', async () => {
+    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
+    tile(sheet, 'Slow + reverb').click();
+    expect(lineOf(store)).toMatchObject({ effect: 'slowReverb', speed: 0.8 });
+    await until('the sliders', () => controls(sheet).labels.length === 3);
+
+    await drag(sheet, 'Slow', 80, 60);
+    expect(lineOf(store)?.speed).toBe(0.6);
+    await until('the readout', () => controls(sheet).values[0] === '0.6x');
+
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Speed');
+    expect(lineOf(store)?.speed).toBe(0.8);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Slow + reverb');
+    expect(lineOf(store)).not.toHaveProperty('speed');
+    expect(lineOf(store)).not.toHaveProperty('effect');
+  });
+
+  it('puts the sound back at 1x when slow + reverb comes off', async () => {
+    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
+    tile(sheet, 'Slow + reverb').click();
+    head(sheet, '[aria-label="No effect"]')!.click();
+    expect(lineOf(store)).not.toHaveProperty('speed');
     expect(lineOf(store)).not.toHaveProperty('effect');
   });
 

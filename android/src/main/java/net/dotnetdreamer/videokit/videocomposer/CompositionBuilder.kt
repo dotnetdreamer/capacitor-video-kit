@@ -63,7 +63,10 @@ object CompositionBuilder {
      */
     const val OVERLAYS_PER_EFFECT = 7
 
-    /** Pitch is preserved across speed changes; flipping this also means flipping the other engines. */
+    /**
+     * Pitch is preserved across speed changes, but for a sound that asks to be played as a record
+     * ([Music.varispeed]); flipping this also means flipping the other engines.
+     */
     const val MAINTAIN_PITCH = true
 
     /**
@@ -721,7 +724,7 @@ object CompositionBuilder {
         for (item in plan.items) {
             // Its length on the output, which for sped-up music is not the stretch of file it plays.
             val length = ExactLengthAudioProcessor(item.atUs, item.atUs + item.lengthUs)
-            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length, item.speed, item.effect))
+            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length, item.speed, item.effect, item.varispeed))
         }
         return builder.build()
     }
@@ -751,6 +754,9 @@ object CompositionBuilder {
      * `IllegalStateException` at `build()`), and [length] is one - it is what holds a pass to its
      * length on the sample, so a loop's seams join. Measured on the A13 on 2026-10-06.
      *
+     * A [varispeed] sound has the same processor in the same place, resampling instead of stretching
+     * ([timeStretch]), and is the same length on the output, so nothing after it can tell.
+     *
      * An [effect] comes next, after the stretch and ahead of [length] and the gain, so it treats the
      * sound as it plays and the level and the fades take down what it made ([SoundEffectProcessor]).
      */
@@ -762,6 +768,7 @@ object CompositionBuilder {
         length: ExactLengthAudioProcessor? = null,
         speed: Float = 1f,
         effect: SoundEffect? = null,
+        varispeed: Boolean = false,
     ): EditedMediaItem {
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(uri))
@@ -775,7 +782,7 @@ object CompositionBuilder {
             )
             .build()
         val processors: List<AudioProcessor> = listOfNotNull(
-            if (speed != 1f) timeStretch(speed) else null,
+            if (speed != 1f) timeStretch(speed, varispeed) else null,
             effect?.let { SoundEffectProcessor(it) },
             length,
             if (gain.isNoOp()) null else GainProcessor(gain),
@@ -789,8 +796,20 @@ object CompositionBuilder {
     /**
      * Sound played [speed] times as fast at its own pitch: Sonic with only its speed set, its pitch
      * left at 1. [MAINTAIN_PITCH] is the rule every engine keeps, and what a clip's `setSpeed` asks for.
+     *
+     * A [varispeed] sound ([Music.varispeed]) is played as a record plays it instead, its speed and
+     * its pitch set alike, which leaves Sonic nothing to do but resample. Media3 1.11.1's
+     * `Sonic.processStreamInput` (the sources jar, and `javap -c` on the class in the AAR) works out
+     * `s = speed / pitch` - an `fdiv` of two equal floats, so exactly 1 - and runs its pitch-period
+     * stretch, `changeSpeed`, only when `s` is off 1 by more than 0.00001: otherwise the input is
+     * copied straight through. Then `r = rate * pitch`, the rate being 1 with no output rate set, goes
+     * to `adjustRate`, which interpolates each new sample linearly between two old ones. At 0.5 that
+     * is twice the samples an octave down, and the processor reports the length onward by the speed,
+     * as it does a stretch's (`getPlayoutDuration`), so [ExactLengthAudioProcessor] holds the pass to
+     * the plan's length as it holds a stretched one.
      */
-    private fun timeStretch(speed: Float): SonicAudioProcessor {
+    private fun timeStretch(speed: Float, varispeed: Boolean): SonicAudioProcessor {
+        if (varispeed) return SonicAudioProcessor().apply { setSpeed(speed); setPitch(speed) }
         check(MAINTAIN_PITCH) { "music keeps its pitch only while clips do" }
         return SonicAudioProcessor().apply { setSpeed(speed) }
     }

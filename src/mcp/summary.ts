@@ -31,7 +31,7 @@ import {
   type EditZoom,
 } from '../editor/edit-manifest';
 import { clipDurationMs, musicSectionMs, musicSpeed, musicWindow, overlayEndMs, timelineSlots } from '../editor/edit-ops';
-import { soundEffectPreset } from '../editor/sound-effects';
+import { soundEffectPlaysSpeedAsRecord, soundEffectPreset, soundEffectSettings } from '../editor/sound-effects';
 import type { FilterOp } from '../video-composer/definitions';
 import { zoomOffered, type McpEditingOptions } from './ops';
 
@@ -299,9 +299,14 @@ function describeSound(music: EditMusic, totalMs: number): string {
   const section = music.outMs > 0 ? `${time(music.inMs)}..${time(music.outMs)}` : `from ${time(music.inMs)}`;
   const stop = music.endMs > 0 ? `, stopping at ${time(music.endMs)}` : '';
   const loop = music.loop ? ', looped' : '';
-  const speed = musicSpeed(music) !== 1 ? `, at ${round(musicSpeed(music))}x` : '';
+  const record = soundEffectPlaysSpeedAsRecord(music.effect) ? ' as a record plays it, lower as well as slower' : '';
+  const speed = musicSpeed(music) !== 1 ? `, at ${round(musicSpeed(music))}x${record}` : '';
   const effect = soundEffectPreset(music.effect);
-  const through = effect ? `, through the ${effect.label.toLowerCase()} (effect "${effect.id}")` : '';
+  // Every slider where it is, its default included, so an agent reads what it would patch.
+  const sliders = Object.entries(soundEffectSettings(music.effect, music.effectSettings))
+    .map(([key, value]) => `${key} ${value}`)
+    .join(', ');
+  const through = effect ? `, through the ${effect.label.toLowerCase()} (effect "${effect.id}"${sliders ? `; ${sliders}` : ''})` : '';
   const fadeIn = (music.fadeInMs ?? 0) > 0 ? `, fades in over ${time(music.fadeInMs ?? 0)}` : '';
   const fade = fadeIn + (music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '');
   return `${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${speed}${through}${loop}${fade}; ${heard(music, totalMs)}`;
