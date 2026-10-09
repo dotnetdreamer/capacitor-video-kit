@@ -104,36 +104,44 @@ into its place as it inserts it, under the `.spectral` pitch algorithm the music
 The web stretches each pass with the SOLA the clips use, together with the first moments of the pass
 after it, so a loop has no gap at its seams.
 
-**A sound's effect is a few plain steps, run the same way by every engine.** `ComposeMusic.effect`
-is not a name: the editor keeps the names (`SOUND_EFFECTS` in `src/editor/sound-effects.ts`) and
-sends what an effect is made of - cookbook biquads, a soft-clipping drive measured against the
-sound's own peak, a gain, a Freeverb-tuned reverb, and whether to fold the channels into one - with
-the arithmetic written down in `definitions.ts`. A new effect built from those steps needs no new
-engine, and neither does a slider: an effect's sliders (`EditMusic.effectSettings`, 0 to 100 each)
-only move the numbers in its steps, and at their defaults an effect is the one that shipped before
-it had sliders. Every engine runs the steps after a pass's speed change and before its volume and
-fades, from a state at 0 for each pass: Android as a `SoundEffectProcessor` after Sonic and ahead of
-the exact length and the gain, iOS as an `MTAudioProcessingTap` created pre-effects on the sound's
-own mix parameters, so it runs ahead of the volume ramps in both the export session and the reader,
-and the web on each pass's samples before they are added into the mix. A reverb's tail therefore
-starts again from silence at each pass of a loop on Android and the web, and rings on across the
-seam on iOS, whose tap keeps its state. The same golden fragments - the megaphone's and slow +
-reverb's - are asserted in all three engines' tests. The preview cannot put a filter on an `<audio>`
-element, so it plays a copy of the file made through the same TypeScript
-(`src/web-runtime/sound-copy.ts`): the whole file on its own timeline, so every position the player
-puts the element at is the same in the copy, at 22.05 kHz for an effect that passes nothing above a
-fifth of that. A slider let go has a new copy made once the edit is still for a quarter of a second,
-and the copy it had plays until the new one lands.
+**An audio effect is a layer over the finished mix.** `ComposeAudio.effects` is a list of windows
+of the output, one at a time, and each puts everything heard in it - every clip's own sound, every
+sound on every lane, every voiceover - through one effect together, and nothing outside it but the
+tail its steps leave ringing. That is the editor's audio effect layer (`EditManifest.audioEffects`):
+it belongs to the time it covers rather than to a sound, so many sounds go through one megaphone by
+being put under it. A window comes in and goes out over 30 ms, so neither edge clicks, and a window
+with a `speed` under 1 plays the mix from its start slower and lower, as a record, and goes back to
+where the timeline is at its end - slow + reverb's slowness. Every engine runs the windows on the mix
+after it is summed and held to -1..1: Android as one composition-level audio processor after Media3's
+mixer (`AudioEffectWindowsProcessor`), making a mono mix stereo first and, where nothing else runs to
+the end of the post, adding a silent sequence so a tail is heard past the last sound; iOS by reading
+the composition's whole mix once, running the windows over it into a 16-bit file in the job folder,
+and laying that file back in as the only audio track (`MixEffects`), so the writer and the preset
+fallback both encode a mix already through them; the web at the end of `mixdown`. The arithmetic is
+written down in `definitions.ts` and run line for line by `audio-effect-windows.ts`, Kotlin and
+Swift, and one golden fragment - slow + reverb at 0.8x, then the megaphone - is asserted in all three
+engines' tests.
 
-**A sound's speed can be a record's.** `ComposeMusic.varispeed` plays `speed` with the pitch going
-with it, which is what slow + reverb's slowness is: Android sets Sonic's speed and pitch alike, which
-leaves it only resampling; iOS scales the pass under `AVAudioTimePitchAlgorithm.varispeed`, set on
-the sound's own mix parameters, which win over the session's and the reader's `.spectral`; the web
-reads the file at the speed through a cubic interpolator; and the preview plays the element at the
-speed with `preservesPitch` off. A pass lasts what `speed` says either way, so nothing about where a
-sound is heard changes. The preview's copy of such a sound works its effect out at the file's rate
-times the speed - the rate it is heard at - so a reverb's delays and damping come out where the
-render, which treats the sound after slowing it, puts them.
+**An effect is a few plain steps, run the same way by every engine.** `ComposeSoundEffect` is not a
+name: the editor keeps the names (`SOUND_EFFECTS` in `src/editor/sound-effects.ts`) and sends what an
+effect is made of - cookbook biquads, a soft-clipping drive measured against the sound's own peak, a
+gain, a Freeverb-tuned reverb, and whether to fold the channels into one. A new effect built from
+those steps needs no new engine, and neither does a slider: a layer's sliders
+(`EditAudioEffect.effectSettings`, 0 to 100 each) only move the numbers in its steps. The same steps
+can still go on one sound, `ComposeMusic.effect`, run after the pass's speed change and before its
+volume and fades, with `ComposeMusic.varispeed` for a speed played as a record; the editor no longer
+sends either, and every engine still plays both.
+
+**The preview plays a copy in the layer's place.** An `<audio>` element plays a file and cannot be
+handed a filter, and the preview never adds its sounds together, so it plays a copy of the post's
+sound under each layer made by the same TypeScript (`src/web-runtime/effect-copy.ts`): the web
+render's mix over the window and as much of the tail as is heard, through the window, written as a
+32 kHz WAV on the post's timeline. While the playhead is inside a copy every sound it covers plays on
+muted, the clips' own included, so each is where the post is when the copy ends. Layers close enough
+for one to ring into the next share a copy. A slider let go has a new copy made once the edit is
+still for a quarter of a second, and the copy it had plays until the new one lands; an edit to what
+is under the layer takes its copy away at once, and the sounds play as they are until the new one
+is made.
 
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
 into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got

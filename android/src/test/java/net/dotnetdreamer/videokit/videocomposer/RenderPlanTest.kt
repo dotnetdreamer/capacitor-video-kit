@@ -1358,6 +1358,36 @@ class RenderPlanTest {
     }
 
     @Test
+    fun `audio effect windows are carried into the plan, but one that starts after the post has ended`() {
+        val gain = SoundEffect(false, listOf(SoundOp.Gain(-6.0)))
+        val windows = listOf(
+            AudioEffectWindow(100.0, 900.0, 1.0, gain),
+            AudioEffectWindow(1_999.5, 9_000.0, 0.8, null),
+            AudioEffectWindow(2_000.0, 3_000.0, 1.0, gain),
+        )
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a")), audio = Audio(false, 1f, null, emptyList(), effects = windows)),
+            mapOf("file:///a.mp4" to probe(2_000)),
+        )
+        assertEquals(windows.take(2), plan.audioEffects)
+        // The clip's own sound already runs to the end of the post: there is nothing to lay under it.
+        assertFalse(plan.silenceToEnd)
+        assertEquals(0, plan.extraAudioSequences)
+    }
+
+    @Test
+    fun `silence under windows is counted with the other audio sequences`() {
+        val music = Music("file:///m.m4a", 0, 0, 1_000, 1f, loop = false, fadeInMs = 0, fadeOutMs = 0)
+        val windows = listOf(AudioEffectWindow(1_500.0, 1_800.0, 0.8, null))
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", muted = true)), audio = Audio(false, 1f, music, emptyList(), effects = windows)),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///m.m4a" to probe(1_000)),
+        )
+        assertTrue(plan.silenceToEnd)
+        assertEquals(2, plan.extraAudioSequences)
+    }
+
+    @Test
     fun `reweight is monotone and exact at the ends`() {
         val plan = RenderPlan.build(
             spec(listOf(clip("a", outMs = 1_000), clip("b", outMs = 9_000))),

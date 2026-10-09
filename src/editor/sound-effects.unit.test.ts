@@ -11,7 +11,6 @@ import {
   normaliseSoundEffectId,
   normaliseSoundEffectSettings,
   sameSoundEffectSettings,
-  soundEffectPlaysSpeedAsRecord,
   soundEffectPreset,
   soundEffectSettings,
   soundEffectSteps,
@@ -180,10 +179,9 @@ describe('the settings', () => {
     expect(soundEffectSteps(undefined)).toBeNull();
   });
 
-  it('knows which effects play the sound’s speed as a record does', () => {
-    expect(soundEffectPlaysSpeedAsRecord('slowReverb')).toBe(true);
-    expect(soundEffectPlaysSpeedAsRecord('megaphone')).toBe(false);
-    expect(soundEffectPlaysSpeedAsRecord(undefined)).toBe(false);
+  it('knows which effects slow what their layer covers, and how far', () => {
+    expect(soundEffectPreset('slowReverb')!.speed).toMatchObject({ label: 'Slow', name: 'Slow speed', default: 0.8, min: 0.5, max: 1 });
+    expect(soundEffectPreset('megaphone')!.speed).toBeUndefined();
     const speed = soundEffectPreset('slowReverb')!.speed!;
     expect(speed.default).toBeGreaterThanOrEqual(speed.min);
     expect(speed.default).toBeLessThan(speed.max);
@@ -593,7 +591,7 @@ describe('the reverb', () => {
 describe('slow + reverb', () => {
   const at = (settings: Record<string, number>) => soundEffectSteps('slowReverb', settings)!;
 
-  it('is a room after the sound and nothing else, its slowing being the sound’s own speed', () => {
+  it('is a room and nothing else, its slowing being the layer’s own Slow', () => {
     expect(at({}).ops.map(step => step.op)).toEqual(['reverb']);
     expect(at({}).mono).toBeUndefined();
     expect(soundEffectPreset('slowReverb')!.speed).toMatchObject({ default: 0.8, min: 0.5, max: 1 });

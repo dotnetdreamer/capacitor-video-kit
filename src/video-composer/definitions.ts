@@ -819,7 +819,88 @@ export interface ComposeAudio {
   /** Additional audio lanes. Clip start/end times are absolute; lanes and legacy music may mix. */
   musicTracks?: ComposeMusic[][];
   voiceover: ComposeVoiceover[];
+  /**
+   * Effects over windows of the FINISHED mix: everything heard between a window's `startMs` and
+   * `endMs` - every clip's own sound, every sound on every lane, every voiceover - goes through it
+   * together, and nothing outside it does but the tail its steps leave ringing. The editor's audio
+   * effect layers ([EditAudioEffect]). Absent or empty is no window, which is every spec written
+   * before this key, and the builder never sends an empty list: an engine decides once, when it
+   * builds its plan, that it has none, and mixes exactly as it always has.
+   *
+   * Sorted by `startMs` and never overlapping, at most [MAX_AUDIO_EFFECTS]. See [ComposeAudioEffect].
+   */
+  effects?: ComposeAudioEffect[];
 }
+
+/**
+ * One window of [ComposeAudio.effects]: for `startMs`..`endMs` of the output the mix is played at
+ * [speed] from the window's start, as a record plays a speed, and put through [effect]'s steps.
+ *
+ * WHERE IT RUNS. On the mix after every sound is in it and it is held to -1..1, at the rate and the
+ * channels the engine mixes at (`fs`), each channel `c` on its own: Android on its mixer's output
+ * (16-bit, at the first sound's rate, and made stereo first where it is mono, so a room is as wide
+ * as on the others), iOS on the 48 kHz stereo mix its audio mix makes, the web on its 48 kHz stereo
+ * mix. Frame `n` is the output instant `n / fs`. Windows run one after another, in
+ * the order of the list, each on what the one before it left - so a tail ringing on into the next
+ * window goes through that window too. An engine whose mix would end before the post does keeps it
+ * running, silent, to the end of the post while there is a window, so a tail is heard past the last
+ * sound.
+ *
+ * THE ARITHMETIC, for a window with `S = round(startMs * fs / 1000)` and `E = round(endMs * fs / 1000)`
+ * (`round` is half up), its input `x` and its output `y`:
+ *   - The ramp, `R = min(round([AUDIO_EFFECT_RAMP_MS] * fs / 1000), floor((E - S) / 2))`, takes the
+ *     window in and out so neither edge clicks: `g(n) = clamp(min(n - S, E - n) / R, 0, 1)` inside
+ *     `S <= n < E`, 1 everywhere inside for `R = 0`, and 0 outside.
+ *   - The slowed mix: `w(n) = x(n)` at a [speed] of 1. Otherwise `p = S + (n - S) * speed`,
+ *     `k = floor(p)`, `t = p - k`, and the Catmull-Rom cubic through `x(k - 1)`, `x(k)`, `x(k + 1)`,
+ *     `x(k + 2)` that `varispeed` reads a sound with:
+ *       w = x1 + 0.5 * t * (x2 - x0 + t * (2 * x0 - 5 * x1 + 4 * x2 - x3 + t * (3 * (x1 - x2) + x3 - x0)))
+ *     where a frame after `n` reads `x(n)` - nothing reads ahead - and a frame before 0 reads `x(0)`.
+ *   - The steps run as [ComposeSoundEffect] says, from a state at 0 at `S`, on `u(n) = g(n) * w(n)`
+ *     for `S <= n < E` and on silence after it, for the TAIL: `round(tailMs * fs / 1000)` frames from
+ *     `E`, `tailMs` being twice the longest reverb step's `decayMs` - 120 dB down, past anything a
+ *     16-bit file carries - and never under [AUDIO_EFFECT_MIN_TAIL_MS] (`audioEffectTailMs`). Then
+ *     they stop. With no steps, what they make is `u` itself.
+ *   - `y(n) = held((1 - g(n)) * x(n) + steps(u)(n))` from `S` until the tail ends, held to -1..1, and
+ *     `y(n) = x(n)` everywhere else.
+ * So the window starts exactly where the mix is, comes in over the ramp, and goes back to the mix
+ * where the timeline has got to - a slowed window skips what it fell behind - while its steps ring on.
+ * An engine keeps what it has not yet read of `x`: a window slowed to `s` holds about
+ * `(E - S) * (1 - s)` frames of it by its end.
+ *
+ * Each parser refuses, with the path that broke, as a shape error: `effects` that is there and is not
+ * an array, more than [MAX_AUDIO_EFFECTS] windows, a window that is not an object, a `startMs` or an
+ * `endMs` that is missing or not finite, an `endMs` not after its `startMs`, a `speed` that is there
+ * and not finite, an [effect] its own rules refuse, a key nobody defined - the alphabetically first -
+ * and a window that starts before the one before it ends (named by its `startMs`). In that order, a
+ * window at a time. It CLAMPS `startMs` to 0 and up and [speed] to [MIN_AUDIO_EFFECT_SPEED]..1, and
+ * drops a window with no steps and a speed of 1, which would change nothing. `normaliseAudioEffectWindows`
+ * states these rules once for the web engine and the tests.
+ */
+export interface ComposeAudioEffect {
+  /** Output-timeline milliseconds. */
+  startMs: number;
+  endMs: number;
+  /**
+   * [MIN_AUDIO_EFFECT_SPEED]..1: the window plays the mix from its start at this speed, lower as well
+   * as slower. Absent is 1, and the builder never sends 1.
+   */
+  speed?: number;
+  /** The steps; absent is none, for a window that only slows. */
+  effect?: ComposeSoundEffect;
+}
+
+/** The most windows [ComposeAudio.effects] may carry. A spec with more is refused rather than cut short. */
+export const MAX_AUDIO_EFFECTS = 50;
+
+/** How long a window takes to come in and to go out; see [ComposeAudioEffect]. */
+export const AUDIO_EFFECT_RAMP_MS = 30;
+
+/** The least a window's steps run on after it, long enough for a filter to settle; see [ComposeAudioEffect]. */
+export const AUDIO_EFFECT_MIN_TAIL_MS = 500;
+
+/** The slowest a window plays the mix. Its lag is what an engine holds, so this is a memory bound too. */
+export const MIN_AUDIO_EFFECT_SPEED = 0.5;
 
 export interface ComposeSpec {
   /** Caller-generated; also the idempotency key - composing twice with one id starts one render. */

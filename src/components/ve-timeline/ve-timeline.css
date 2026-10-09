@@ -666,6 +666,27 @@
     0 0 0 2px #1c1c1e;
 }
 
+/*
+ * An audio effect layer, on the row over the sounds it changes: a button like a zoom bar, with no
+ * `touch-action` until selected, for the zoom bar's reason - a swipe that starts on it scrolls.
+ */
+.item--afx {
+  background: var(--ve-lane-audio-effect, #74dccf);
+  cursor: pointer;
+}
+
+.item--afx .item__kind {
+  background:
+    linear-gradient(var(--ve-lane-glyph, rgba(0, 0, 0, 0.16)), var(--ve-lane-glyph, rgba(0, 0, 0, 0.16))),
+    var(--ve-lane-audio-effect, #74dccf);
+}
+
+.item--afx:focus-visible {
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    0 0 0 2px #1c1c1e;
+}
+
 /* ----------------------------------------------------------------------------------- lanes */
 
 /*

@@ -1964,6 +1964,90 @@ describe('the zoom row', () => {
 });
 
 /*
+ * The audio effects' row: one bar per layer, over the sounds it changes, named with its effect and
+ * its state, selected by a tap and retimed by the same handles a zoom has. At 64 px a second.
+ */
+describe('the audio effects row', () => {
+  /** A megaphone from 1 s to 4 s, added and let go of. */
+  async function withLayer(): Promise<{ store: EditorStore; tl: HTMLElement; id: string }> {
+    const { store, tl } = await mount();
+    store.seek(1000);
+    const id = store.addAudioEffectAtPlayhead('megaphone')!;
+    store.setAudioEffectWindow(id, 1000, 4000);
+    store.select(null);
+    await until('the effects row', () => !!root(tl).querySelector('[data-row="afx"] .item--afx'));
+    return { store, tl, id };
+  }
+
+  function bar(tl: HTMLElement): HTMLElement {
+    return root(tl).querySelector<HTMLElement>('[data-row="afx"] .item--afx')!;
+  }
+
+  it('is not there without a layer', async () => {
+    const { tl } = await mount();
+    expect(root(tl).querySelector('[data-row="afx"]')).toBeNull();
+  });
+
+  it('draws the layer over its window, named with its effect and never aria-pressed', async () => {
+    const { tl } = await withLayer();
+    const el = bar(tl);
+    expect(el.getAttribute('aria-label')).toBe('Megaphone effect');
+    expect(el.hasAttribute('aria-pressed')).toBe(false);
+    expect(el.textContent).toContain('Megaphone');
+    // 3 s at 64 px a second.
+    expect(el.getBoundingClientRect().width).toBeCloseTo(192, 0);
+    // Not a video row, so a dropped segment never takes it for one.
+    expect(root(tl).querySelector('[data-row="afx"]')!.hasAttribute('data-vrow')).toBe(false);
+  });
+
+  it('selects the layer on a tap and names it selected, with its two handles, and lets it go on another', async () => {
+    const { store, tl, id } = await withLayer();
+    const at = centre(bar(tl));
+    pointer(bar(tl), 'pointerdown', at.x, at.y);
+    pointer(bar(tl), 'pointerup', at.x, at.y);
+    expect(store.selection.value).toEqual({ kind: 'audioEffect', id });
+    await until('the name to follow', () => bar(tl).getAttribute('aria-label') === 'Megaphone effect, selected');
+    expect(root(tl).querySelectorAll('[data-row="afx"] .handle').length).toBe(2);
+
+    pointer(bar(tl), 'pointerdown', at.x, at.y);
+    pointer(bar(tl), 'pointerup', at.x, at.y);
+    expect(store.selection.value).toBe(null);
+  });
+
+  it('retimes the end by its handle as one undo step', async () => {
+    const { store, tl, id } = await withLayer();
+    store.seek(3000);
+    await frames(3);
+    store.select({ kind: 'audioEffect', id });
+    await until('the handles', () => !!root(tl).querySelector('[data-row="afx"] .handle--out'));
+    const handle = root(tl).querySelector<HTMLElement>('[data-row="afx"] .handle--out')!;
+    const rect = handle.getBoundingClientRect();
+    const from = { x: rect.left + 20, y: rect.top + rect.height / 2 };
+    const scroller = root(tl).querySelector('.tl__scroller')!;
+    pointer(handle, 'pointerdown', from.x, from.y);
+    pointer(scroller, 'pointermove', from.x + 32, from.y);
+    await frames(3);
+    pointer(scroller, 'pointerup', from.x + 32, from.y);
+    await frames(2);
+
+    const layer = store.manifest.value.audioEffects![0]!;
+    expect(layer.startMs).toBe(1000);
+    expect(layer.endMs).toBeCloseTo(4500, -2);
+    store.undo();
+    expect(store.manifest.value.audioEffects![0]!.endMs).toBe(4000);
+  });
+
+  it('stays in the slim timeline while the Audio effects sheet is open', async () => {
+    const { store, tl, id } = await withLayer();
+    (tl as HTMLElement & { compact: boolean }).compact = true;
+    await until('the lanes to go', () => !root(tl).querySelector('[data-row="afx"]'));
+    store.select({ kind: 'audioEffect', id });
+    store.openPanel('audioEffects');
+    await until('the effects row', () => !!root(tl).querySelector('[data-row="afx"] .item--afx'));
+  });
+});
+
+/*
  * What kind of thing each lane is, read off the glyph at its head: the lanes used to be told apart
  * by colour alone, and a text lane and an effect lane are two shades of pink.
  */

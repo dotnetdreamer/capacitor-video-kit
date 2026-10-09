@@ -1,3 +1,4 @@
+import { AudioEffectRunner } from '../../editor/audio-effect-windows';
 import { SoundEffectRunner } from '../../editor/sound-effects';
 import { resolve } from '../../web-runtime/files';
 import type { ComposeSoundEffect } from '../definitions';
@@ -33,6 +34,11 @@ export const MIX_CHANNELS = 2;
 export interface MixedAudio {
   sampleRate: number;
   /**
+   * The output frame the first sample of each channel is: 0 for the whole post, and where it starts
+   * for a stretch of it ([mixWindow]).
+   */
+  offset: number;
+  /**
    * One array per channel, all the same length.
    *
    * Explicitly backed by an `ArrayBuffer` rather than by `ArrayBufferLike`: `copyToChannel` will
@@ -43,7 +49,7 @@ export interface MixedAudio {
 }
 
 /** A decoded source, cached for the life of one render. */
-interface DecodedSource {
+export interface DecodedSource {
   channels: Float32Array[];
   sampleRate: number;
   /**
@@ -56,21 +62,62 @@ interface DecodedSource {
 const EMPTY = new Float32Array(0);
 
 /**
+ * Where [mixInto] gets each source's samples: decoded at the mix's rate, a mono file as one channel.
+ * The render's own [SourceDecoder] lets each go after its last placement; the preview's keeps them for
+ * the next copy. `measure` is for the music, whose container's length is read as well ([soundLengthUs]).
+ */
+export interface AudioSourceReader {
+  get(uri: string, measure: boolean): Promise<DecodedSource | null>;
+  /** One counted ask for `uri` has been placed. */
+  done(uri: string): void;
+  close(): void;
+}
+
+/**
  * Everything audible in the post, or null when there is nothing at all - which is what lets the
- * renderer skip the AAC encoder and the audio track entirely rather than muxing silence.
+ * renderer skip the AAC encoder and the audio track entirely rather than muxing silence. Put through
+ * the post's audio effect windows last, on the mix held to -1..1, as both phones put theirs.
  */
 export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<MixedAudio | null> {
   if (!plan.hasAudio) return null;
 
   const length = Math.max(1, Math.ceil((plan.totalUs / 1_000_000) * MIX_SAMPLE_RATE));
   const channels = Array.from({ length: MIX_CHANNELS }, () => new Float32Array(length));
-  const mix: MixedAudio = { sampleRate: MIX_SAMPLE_RATE, channels, length };
-
+  const mix: MixedAudio = { sampleRate: MIX_SAMPLE_RATE, offset: 0, channels, length };
   const musicPlans = [...(plan.music ? [plan.music] : []), ...plan.musicTracks];
-  const decoder = new SourceDecoder(
-    sourceUses(plan),
-    musicPlans.map(music => music.uri),
-  );
+  const decoder = new SourceDecoder(sourceUses(plan), MIX_SAMPLE_RATE, musicPlans.map(music => music.uri));
+  if (!(await mixInto(plan, mix, decoder, signal))) return null;
+  if (plan.audioEffects.length > 0) new AudioEffectRunner(plan.audioEffects, MIX_SAMPLE_RATE).process(channels);
+  return mix;
+}
+
+/**
+ * The post's sound over output frames `from .. to` at `sampleRate`, held to -1..1 as [mixdown]'s is -
+ * the dry mix, with no window put through anything - or null when nothing is heard there. What the
+ * preview's copy of an audio effect layer is made from (`effect-copy.ts`), with the render's own
+ * arithmetic, so the layer heard in the editor is the layer posted. Only the sources heard in the
+ * stretch are read.
+ */
+export async function mixWindow(plan: RenderPlan, from: number, to: number, sampleRate: number, sources: AudioSourceReader, signal: AbortSignal): Promise<MixedAudio | null> {
+  if (!plan.hasAudio || to <= from) return null;
+  const length = to - from;
+  const channels = Array.from({ length: MIX_CHANNELS }, () => new Float32Array(length));
+  const mix: MixedAudio = { sampleRate, offset: from, channels, length };
+  return (await mixInto(plan, mix, sources, signal)) ? mix : null;
+}
+
+/** Whether output µs `startUs .. endUs` reaches into the frames `mix` holds. */
+function overlaps(mix: MixedAudio, startUs: number, endUs: number): boolean {
+  return samplesAt(endUs, mix.sampleRate) > mix.offset && samplesAt(startUs, mix.sampleRate) < mix.offset + mix.length;
+}
+
+/**
+ * Every sound of the plan into `mix`, held to -1..1 at the end. Whether anything was heard. Something
+ * wholly outside the frames `mix` holds is not read at all.
+ */
+async function mixInto(plan: RenderPlan, mix: MixedAudio, decoder: AudioSourceReader, signal: AbortSignal): Promise<boolean> {
+  const { channels } = mix;
+  const musicPlans = [...(plan.music ? [plan.music] : []), ...plan.musicTracks];
   let anything = false;
 
   // How long each base clip fades in for: the length of the transition bringing it in, if any.
@@ -86,7 +133,8 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
       const clip = plan.clips[i];
       if (!clip || clip.removeAudio) continue;
       const fadeIn = fadeInUs.get(i);
-      anything = (await placeClip(mix, clip, plan.prefixOutUs[i] ?? 0, decoder, fadeIn ? { fadeInUs: fadeIn } : undefined)) || anything;
+      const atUs = plan.prefixOutUs[i] ?? 0;
+      if (overlaps(mix, atUs, atUs + clip.outDurUs)) anything = (await placeClip(mix, clip, atUs, decoder, fadeIn ? { fadeInUs: fadeIn } : undefined)) || anything;
       decoder.done(clip.clip.uri);
     }
 
@@ -97,7 +145,9 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
     for (const transition of plan.transitions) {
       throwIfAborted(signal);
       if (transition.tail.removeAudio) continue;
-      anything = (await placeClip(mix, transition.tail, transition.startUs, decoder, { roomUs: transition.durUs, fadeOutWhole: true })) || anything;
+      if (overlaps(mix, transition.startUs, transition.startUs + transition.durUs)) {
+        anything = (await placeClip(mix, transition.tail, transition.startUs, decoder, { roomUs: transition.durUs, fadeOutWhole: true })) || anything;
+      }
       decoder.done(transition.tail.clip.uri);
     }
 
@@ -108,14 +158,18 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
         const clip = track.clips[i];
         const placement = track.placements[i];
         if (!clip || !placement || clip.removeAudio) continue;
-        anything = (await placeClip(mix, clip, placement.startUs, decoder)) || anything;
+        if (overlaps(mix, placement.startUs, placement.startUs + clip.outDurUs)) anything = (await placeClip(mix, clip, placement.startUs, decoder)) || anything;
         decoder.done(clip.clip.uri);
       }
     }
 
     for (const planned of musicPlans) {
       throwIfAborted(signal);
-      const source = await decoder.get(planned.uri);
+      if (!overlaps(mix, planned.startUs, planned.stopUs)) {
+        decoder.done(planned.uri);
+        continue;
+      }
+      const source = await decoder.get(planned.uri, true);
       // Laid again against the file's own length, which the web reads for itself: a spec asks for
       // "the end of the file" when the sound is not trimmed at its end. See [soundLengthUs].
       const music = source ? musicForSource(planned, soundLengthUs(source)) : null;
@@ -123,7 +177,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
         for (let i = 0; i < music.items.length; i++) {
           throwIfAborted(signal);
           const item = music.items[i];
-          if (item) anything = placeMusic(mix, source, item, music, music.items[i + 1]) || anything;
+          if (item && overlaps(mix, item.atUs, item.atUs + (item.lengthUs ?? item.outUs - item.inUs))) anything = placeMusic(mix, source, item, music, music.items[i + 1]) || anything;
         }
       }
       decoder.done(planned.uri);
@@ -131,7 +185,11 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
 
     for (const take of plan.voice) {
       throwIfAborted(signal);
-      const source = await decoder.get(take.uri);
+      if (!overlaps(mix, take.atUs, take.atUs + take.lengthUs)) {
+        decoder.done(take.uri);
+        continue;
+      }
+      const source = await decoder.get(take.uri, false);
       decoder.done(take.uri);
       if (!source) continue;
       anything = placeVoice(mix, source, take) || anything;
@@ -140,7 +198,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
     decoder.close();
   }
 
-  if (!anything) return null;
+  if (!anything) return false;
 
   // One clamp at the end rather than a limiter. Two full-level sources summed do clip, and so do
   // they on both native engines; a limiter here would quietly change the loudness of a post
@@ -152,7 +210,7 @@ export async function mixdown(plan: RenderPlan, signal: AbortSignal): Promise<Mi
       else if (value < -1) channel[i] = -1;
     }
   }
-  return mix;
+  return true;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -170,8 +228,8 @@ interface ClipFade {
   roomUs?: number;
 }
 
-async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decoder: SourceDecoder, fade?: ClipFade): Promise<boolean> {
-  const source = await decoder.get(clip.clip.uri);
+async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decoder: AudioSourceReader, fade?: ClipFade): Promise<boolean> {
+  const source = await decoder.get(clip.clip.uri, false);
   if (!source) return false;
 
   const from = samplesAt(clip.inUs, mix.sampleRate);
@@ -182,7 +240,7 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
   const room = samplesAt(Math.min(clip.outDurUs, fade?.roomUs ?? clip.outDurUs), mix.sampleRate);
   if (room <= 0 || to <= from) return false;
 
-  const at = samplesAt(atUs, mix.sampleRate);
+  const at = samplesAt(atUs, mix.sampleRate) - mix.offset;
   let wrote = false;
   for (let channel = 0; channel < MIX_CHANNELS; channel++) {
     const whole = channelOf(source, channel);
@@ -222,7 +280,9 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
 function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, music: MusicPlan, next?: MusicItem): boolean {
   const from = samplesAt(item.inUs, mix.sampleRate);
   const to = samplesAt(item.outUs, mix.sampleRate);
-  const at = samplesAt(item.atUs, mix.sampleRate);
+  const placedAt = samplesAt(item.atUs, mix.sampleRate);
+  // Where in `mix` the repetition starts: before its first sample, for a stretch that begins inside it.
+  const at = placedAt - mix.offset;
   const speed = music.speed ?? 1;
   const sped = speed !== 1 && item.lengthUs !== undefined;
   const count = Math.min(sped ? samplesAt(item.lengthUs ?? 0, mix.sampleRate) : to - from, mix.length - at);
@@ -231,7 +291,7 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, mus
   // Where this repetition's first sample falls in the window, and the fades in the window's terms.
   // The fade out's start is before the window's own when the fade is longer than the music.
   const start = samplesAt(music.startUs, mix.sampleRate);
-  const into = at - start;
+  const into = placedAt - start;
   const fadeIn = samplesAt(music.fadeInUs, mix.sampleRate);
   const fadeOut = samplesAt(music.fadeOutUs, mix.sampleRate);
   const fadeOutFrom = samplesAt(music.stopUs, mix.sampleRate) - start - fadeOut;
@@ -259,7 +319,7 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, mus
     const pass = passes[channel];
     if (!out || !pass) continue;
     const { input, offset } = pass;
-    for (let i = 0; i < count; i++) {
+    for (let i = Math.max(0, -at); i < count; i++) {
       const sample = input[offset + i];
       if (sample === undefined) break;
       out[at + i] = (out[at + i] ?? 0) + sample * fadeGain(music.volume, into + i, fadeIn, fadeOutFrom, fadeOut);
@@ -355,11 +415,12 @@ function fadeGain(gain: number, i: number, fadeIn: number, fadeOutFrom: number, 
 function addFaded(out: Float32Array | undefined, input: Float32Array, at: number, gain: number, count: number, fadeIn: number, fadeOutFrom: number, fadeOut: number): void {
   if (!out) return;
   const room = Math.min(count, input.length, out.length - at);
-  for (let i = 0; i < room; i++) out[at + i] = (out[at + i] ?? 0) + (input[i] ?? 0) * fadeGain(gain, i, fadeIn, fadeOutFrom, fadeOut);
+  // From where `out` begins, for a stream placed before it.
+  for (let i = Math.max(0, -at); i < room; i++) out[at + i] = (out[at + i] ?? 0) + (input[i] ?? 0) * fadeGain(gain, i, fadeIn, fadeOutFrom, fadeOut);
 }
 
 function placeVoice(mix: MixedAudio, source: DecodedSource, take: VoiceItem): boolean {
-  const at = samplesAt(take.atUs, mix.sampleRate);
+  const at = samplesAt(take.atUs, mix.sampleRate) - mix.offset;
   const count = Math.min(samplesAt(take.lengthUs, mix.sampleRate), mix.length - at);
   if (count <= 0) return false;
   for (let channel = 0; channel < MIX_CHANNELS; channel++) {
@@ -371,7 +432,8 @@ function placeVoice(mix: MixedAudio, source: DecodedSource, take: VoiceItem): bo
 function addInto(out: Float32Array | undefined, input: Float32Array, at: number, gain: number, count: number): void {
   if (!out) return;
   const room = Math.min(count, input.length, out.length - at);
-  for (let i = 0; i < room; i++) out[at + i] = (out[at + i] ?? 0) + (input[i] ?? 0) * gain;
+  // From where `out` begins, for a stream placed before it.
+  for (let i = Math.max(0, -at); i < room; i++) out[at + i] = (out[at + i] ?? 0) + (input[i] ?? 0) * gain;
 }
 
 /**
@@ -502,13 +564,14 @@ export function sourceUses(plan: RenderPlan): Map<string, number> {
  * are decoded ([presentedSoundUs]). By file rather than by ask, because the one decode is shared:
  * a music file that is also a clip or a take is measured whichever of them asks for it first.
  */
-class SourceDecoder {
+class SourceDecoder implements AudioSourceReader {
   private readonly cache = new Map<string, DecodedSource | null>();
   private context: BaseAudioContext | null = null;
   private readonly measured: ReadonlySet<string>;
 
   constructor(
     private readonly uses: Map<string, number>,
+    private readonly sampleRate: number,
     measured: Iterable<string> = [],
   ) {
     this.measured = new Set(measured);
@@ -517,7 +580,8 @@ class SourceDecoder {
   async get(uri: string): Promise<DecodedSource | null> {
     const cached = this.cache.get(uri);
     if (cached !== undefined) return cached;
-    const decoded = await this.decode(uri);
+    this.context ??= offlineContext(this.sampleRate);
+    const decoded = this.context ? await decodeSource(uri, this.context, this.sampleRate, this.measured.has(uri)) : null;
     this.cache.set(uri, decoded);
     return decoded;
   }
@@ -541,58 +605,61 @@ class SourceDecoder {
     this.context = null;
     this.cache.clear();
   }
+}
 
-  private async decode(uri: string): Promise<DecodedSource | null> {
-    const context = this.audioContext();
-    if (!context) return null;
-    let bytes: ArrayBuffer;
-    try {
-      bytes = await (await resolve(uri)).arrayBuffer();
-    } catch {
-      // The picture is already handled by the video decoder's own failure; a file that cannot be
-      // read for its sound simply contributes none.
-      return null;
-    }
-    // Before the decode, which detaches `bytes`.
-    const presentedUs = this.measured.has(uri) ? await presentedSoundUs(bytes) : null;
-    let buffer: AudioBuffer;
-    try {
-      buffer = await decodeAudioData(context, bytes);
-    } catch {
-      // A video with no audio track lands here on every browser, and it is not an error.
-      return null;
-    }
-
-    const channels: Float32Array[] = [];
-    for (let i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
-    if (channels.length === 0) return null;
-    // Belt and braces: every browser resamples to the context's rate on decode, and one that did
-    // not would put the whole post out of time rather than one clip out of tune.
-    if (buffer.sampleRate !== MIX_SAMPLE_RATE) {
-      return {
-        sampleRate: MIX_SAMPLE_RATE,
-        channels: channels.map(channel => resampleLinear(channel, buffer.sampleRate, MIX_SAMPLE_RATE)),
-        presentedUs,
-      };
-    }
-    return { sampleRate: buffer.sampleRate, channels, presentedUs };
+/**
+ * One file's sound decoded at `sampleRate` - `context`'s ([offlineContext]) - or null for a file with
+ * none, the normal case for a video with no audio track, and one that cannot be read. `measure` reads
+ * its container's length first ([presentedSoundUs]), which decoding would detach the bytes from under.
+ */
+export async function decodeSource(uri: string, context: BaseAudioContext, sampleRate: number, measure: boolean): Promise<DecodedSource | null> {
+  let bytes: ArrayBuffer;
+  try {
+    bytes = await (await resolve(uri)).arrayBuffer();
+  } catch {
+    // The picture is already handled by the video decoder's own failure; a file that cannot be
+    // read for its sound simply contributes none.
+    return null;
+  }
+  // Before the decode, which detaches `bytes`.
+  const presentedUs = measure ? await presentedSoundUs(bytes) : null;
+  let buffer: AudioBuffer;
+  try {
+    buffer = await decodeAudioData(context, bytes);
+  } catch {
+    // A video with no audio track lands here on every browser, and it is not an error.
+    return null;
   }
 
-  private audioContext(): BaseAudioContext | null {
-    if (this.context) return this.context;
-    const Offline =
-      typeof OfflineAudioContext !== 'undefined' ? OfflineAudioContext : (globalThis as { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
-    if (!Offline) return null;
-    try {
-      // One frame long: nothing is ever rendered through it, it is here only because
-      // `decodeAudioData` is a method of a context and because its rate is what decoding resamples
-      // to. An offline context needs no audio device and no user gesture, which an `AudioContext`
-      // on iOS very much does.
-      this.context = new Offline(MIX_CHANNELS, 1, MIX_SAMPLE_RATE);
-      return this.context;
-    } catch {
-      return null;
-    }
+  const channels: Float32Array[] = [];
+  for (let i = 0; i < buffer.numberOfChannels; i++) channels.push(buffer.getChannelData(i));
+  if (channels.length === 0) return null;
+  // Belt and braces: every browser resamples to the context's rate on decode, and one that did
+  // not would put the whole post out of time rather than one clip out of tune.
+  if (buffer.sampleRate !== sampleRate) {
+    return {
+      sampleRate,
+      channels: channels.map(channel => resampleLinear(channel, buffer.sampleRate, sampleRate)),
+      presentedUs,
+    };
+  }
+  return { sampleRate: buffer.sampleRate, channels, presentedUs };
+}
+
+/**
+ * An offline context at `sampleRate` to decode with, or null where the page has none or refuses the
+ * rate. One frame long: nothing is ever rendered through it, it is here only because
+ * `decodeAudioData` is a method of a context and because its rate is what decoding resamples to. An
+ * offline context needs no audio device and no user gesture, which an `AudioContext` on iOS very much
+ * does.
+ */
+export function offlineContext(sampleRate: number): BaseAudioContext | null {
+  const Offline = typeof OfflineAudioContext !== 'undefined' ? OfflineAudioContext : (globalThis as { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
+  if (!Offline) return null;
+  try {
+    return new Offline(MIX_CHANNELS, 1, sampleRate);
+  } catch {
+    return null;
   }
 }
 

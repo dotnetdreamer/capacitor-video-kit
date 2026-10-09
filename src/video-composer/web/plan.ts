@@ -2,6 +2,7 @@ import { normaliseCamera } from '../../editor/camera';
 import { normaliseRectMotion } from '../../editor/layout-motion';
 import { normaliseOverlayMotion } from '../../editor/motion';
 import type {
+  ComposeAudioEffect,
   ComposeCamera,
   ComposeClip,
   ComposeMusic,
@@ -273,6 +274,11 @@ export interface RenderPlan {
   /** Each extra music clip is mixed independently, allowing clips on different lanes to overlap. */
   musicTracks: MusicPlan[];
   voice: VoiceItem[];
+  /**
+   * The audio effect windows the finished mix goes through ([ComposeAudio.effects]), as the parser
+   * left them. Empty for a post with none, which then mixes exactly as it always did.
+   */
+  audioEffects: ComposeAudioEffect[];
   posterAtUs: number;
   output: ComposeOutput;
   /** False when every clip's sound is gone, on every layer, and there is no music or voiceover. */
@@ -358,6 +364,7 @@ export function buildPlan(spec: ComposeSpec, probes: ReadonlyMap<string, ProbedI
     music,
     musicTracks,
     voice,
+    audioEffects: spec.audio.effects ?? [],
     posterAtUs: Math.min(Math.round(spec.posterAtMs * 1000), Math.max(0, totalUs - 1)),
     output,
     hasAudio:

@@ -60,6 +60,13 @@ class RenderPlan private constructor(
      * layer, and the builder then adds nothing to any chain. See [CameraTrack].
      */
     val camera: CameraTrack? = null,
+    /**
+     * The audio effect layers ([Audio.effects]) there is a post to hear them in: every one that starts
+     * before it ends. EMPTY IS THE WHOLE OF THIS FAST PATH: the builder asks once and, finding nothing,
+     * hands Media3 no processor for the mix and no [silenceToEnd] - the composition it built before
+     * windows existed.
+     */
+    val audioEffects: List<AudioEffectWindow> = emptyList(),
 ) {
 
     data class PlannedClip(
@@ -393,9 +400,24 @@ class RenderPlan private constructor(
 
     data class VoicePlan(val items: List<VoiceItem>)
 
+    /**
+     * Whether the builder lays silence the length of the post under the mix, for [audioEffects] to ring
+     * on in. Media3's mix stops where its longest sound does, and a window near the end, or the tail of
+     * one past the last sound, would stop with it where the web and iOS play it out: their mix always
+     * spans the post. The base, every layer and the tails are padded to the post's length, so any of
+     * them that carries sound keeps the mix running already; music and voiceovers stop where they stop.
+     * Never for a post with no sound at all, which has nothing for a window to change and keeps the
+     * output with no audio track it always had.
+     */
+    val silenceToEnd: Boolean
+        get() = audioEffects.isNotEmpty() &&
+            (music != null || musicTracks.isNotEmpty() || voice != null) &&
+            !videoSeqHasAudio && tracks.none { it.hasAudio } && tails.all { it.clip.removeAudio }
+
     /** How many audio-only sequences this plan adds beside the video ones. */
     val extraAudioSequences: Int
-        get() = (if (music != null) 1 else 0) + musicTracks.size + (if (voice != null) 1 else 0)
+        get() = (if (music != null) 1 else 0) + musicTracks.size + (if (voice != null) 1 else 0) +
+            (if (silenceToEnd) 1 else 0)
 
     /**
      * Whether the composition is ONE sequence, which is the only case [reweight] can answer for. The
@@ -521,6 +543,9 @@ class RenderPlan private constructor(
                 voice = planVoice(spec.audio.voiceover, probes, totalUs),
                 posterAtUs = min(spec.posterAtMs * 1000L, max(0L, totalUs - 1L)),
                 camera = camera,
+                // One that starts after the post has ended is never heard - every sequence stops at the
+                // end - and is dropped here, as a layer that starts after the base is.
+                audioEffects = spec.audio.effects.filter { it.startMs * 1000.0 < totalUs },
             )
         }
 

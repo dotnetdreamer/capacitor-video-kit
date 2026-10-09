@@ -24,6 +24,7 @@ import {
   overlayAnimationSpans,
   overlayEndMs,
   overlayWireWindow,
+  soundEffectPreset,
   timelineSlots,
   totalDurationMs,
   trackIdOfClip,
@@ -37,11 +38,13 @@ import type { EditorIconName } from '../../icons/icons';
 import { computedWith } from '../../state/computed-with';
 import type { EditorStore } from '../../state/editor-store';
 import { clipWaveKey, type EditorSelection } from '../../state/editor.types';
+import { SOUND_EFFECT_ICONS } from '../ve-audio-effects-sheet/effect-icons';
 import {
   musicEndTrim,
   musicStartTrim,
   zoomDragWindow,
   type AudioDrag,
+  type AudioEffectDrag,
   type ClipReorderDrag,
   type DragBase,
   type EndDrag,
@@ -300,6 +303,19 @@ interface ZoomBarView {
   /** `2.0x`, on the bar. */
   text: string;
   /** `Zoom 2.0x`, or `Zoom 2.0x, selected`. */
+  label: string;
+}
+
+/** An audio effect layer's bar: where it is, and what it is called on the bar and to a screen reader. */
+interface AudioEffectBarView {
+  id: string;
+  x: number;
+  w: number;
+  selected: boolean;
+  icon: EditorIconName;
+  /** `Megaphone`, on the bar. */
+  text: string;
+  /** `Megaphone effect`, or `Megaphone effect, selected`. */
   label: string;
 }
 
@@ -1195,7 +1211,7 @@ export class VeTimeline {
     return any && (!this.compactSig.value || store.panel.value === 'voiceover');
   });
 
-  private readonly showLanes = computed(() => !this.compactSig.value || this.showVoiceLane.value);
+  private readonly showLanes = computed(() => !this.compactSig.value || this.showVoiceLane.value || this.showAfxRow.value);
 
   /**
    * The zooms' bars, from the slots the camera compiler plays, so the ramps drawn are the ramps
@@ -1238,6 +1254,53 @@ export class VeTimeline {
    * for it.
    */
   private readonly showZoomRow = computed(() => this.zoomBars.value.length > 0 && (!this.compactSig.value || this.ctx.store.panel.value === 'zoom'));
+
+  /**
+   * The audio effect layers' bars, one row of them, as a zoom's are: one effect at a time. Compared
+   * element by element, for the zoom bars' reason - a drag rewrites the layer on every frame.
+   */
+  private readonly afxBars = computedWith<AudioEffectBarView[]>(
+    () => {
+      const store = this.ctx.store;
+      const layers = store.audioEffects.value;
+      if (!layers.length) return [];
+      const pps = store.pps.value;
+      const pad = this.pad.value;
+      const total = store.totalMs.value;
+      const selection = store.selection.value;
+      return layers
+        .filter(layer => layer.startMs < total)
+        .map(layer => {
+          const preset = soundEffectPreset(layer.effect);
+          const text = preset?.label ?? layer.effect;
+          const selected = selection?.kind === 'audioEffect' && selection.id === layer.id;
+          const bar = zoomBar({ startMs: layer.startMs, endMs: Math.min(layer.endMs, total), rampInMs: 0, rampOutMs: 0 }, pps, pad);
+          return {
+            id: layer.id,
+            x: bar.x,
+            w: bar.w,
+            selected,
+            icon: SOUND_EFFECT_ICONS[layer.effect] ?? 'sparkles-outline',
+            text,
+            label: selected ? `${text} effect, selected` : `${text} effect`,
+          };
+        });
+    },
+    (a, b) => sameList(a, b, (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.selected === y.selected && x.text === y.text),
+  );
+
+  /** The selected audio effect layer's two edge handles. */
+  private readonly afxHandles = computed<TrimHandlesView | null>(() => {
+    const bar = this.afxBars.value.find(b => b.selected);
+    return bar ? { id: bar.id, ...edgeHandles(bar.x, bar.w) } : null;
+  });
+
+  /**
+   * The audio effects' row sits with the lanes, over the sounds it changes. In the slim timeline it
+   * stays while the Audio effects sheet is open, as the zoom row stays under the zoom sheet, so the
+   * layer being changed is on screen.
+   */
+  private readonly showAfxRow = computed(() => this.afxBars.value.length > 0 && (!this.compactSig.value || this.ctx.store.panel.value === 'audioEffects'));
 
   /**
    * The speaker's state on its own, rather than read off the manifest in the render. The render is
@@ -2076,6 +2139,10 @@ export class VeTimeline {
       if (id) this.startZoomDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), id, kind === 'zoom-start' ? 'start' : 'end');
       return;
     }
+    if (kind === 'afx-start' || kind === 'afx-end') {
+      if (id) this.startAudioEffectDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), id, kind === 'afx-start' ? 'start' : 'end');
+      return;
+    }
     if (kind === 'music-start' || kind === 'music-end') {
       this.startMusicDrag(this.dragBase(event.pointerId, event.clientX, event.clientY), kind === 'music-start' ? 'start' : 'end');
       return;
@@ -2217,6 +2284,9 @@ export class VeTimeline {
       case 'zoom':
         if (id) this.tapZoom(id);
         return;
+      case 'afx':
+        if (id) this.tapAudioEffect(id);
+        return;
       case 'transition':
         // A tap and only a tap: a swipe that began on the dot was the browser's scroll, which ended
         // the press with a pointercancel before it could get here. A finger HELD on the dot is not a
@@ -2295,6 +2365,28 @@ export class VeTimeline {
     if (id) this.tapZoom(id);
   };
 
+  /** An audio effect layer tapped is selected, as every bar here is, and the selected one let go. */
+  private tapAudioEffect(id: string): void {
+    this.toggleSelection({ kind: 'audioEffect', id });
+  }
+
+  /** Enter and Space on a focused audio effect bar; see [onDotKey], which this copies. */
+  private readonly onAfxKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+    const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
+    if (!id) return;
+    event.preventDefault();
+    this.pressEndedAt = performance.now();
+    if (!event.repeat) this.tapAudioEffect(id);
+  };
+
+  /** A bare click on an audio effect bar - a screen reader's, or switch access; see [onDotClick]. */
+  private readonly onAfxClick = (event: MouseEvent): void => {
+    if (performance.now() - this.pressEndedAt < CLICK_ECHO_MS) return;
+    const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
+    if (id) this.tapAudioEffect(id);
+  };
+
   /**
    * "Add sound" opens on its CLICK, where every other press on the timeline acts on the pointer's
    * way up, and the reason is what opens.
@@ -2362,6 +2454,8 @@ export class VeTimeline {
       // drag a sideways finger on it would be neither a scroll nor a move.
       case 'zoom':
         return !!press.id && store.isSelected({ kind: 'zoom', id: press.id });
+      case 'afx':
+        return !!press.id && store.isSelected({ kind: 'audioEffect', id: press.id });
       default:
         return false;
     }
@@ -2554,6 +2648,28 @@ export class VeTimeline {
     });
   }
 
+  /** An audio effect layer's window, moved or retimed: [startZoomDrag]'s drag, on the effects' row. */
+  private startAudioEffectDrag(base: DragBase, id: string, mode: AudioEffectDrag['mode']): void {
+    const store = this.ctx.store;
+    const layers = store.audioEffects.value;
+    const layer = layers.find(one => one.id === id);
+    if (!layer) return;
+    const total = store.totalMs.value;
+    const { lo, hi } = zoomNeighbours(layers, id, total);
+    this.beginDrag({
+      ...base,
+      kind: 'afx',
+      mode,
+      id,
+      start0: Math.min(layer.startMs, total),
+      end0: Math.min(layer.endMs, total),
+      lo,
+      hi,
+      coalesce: store.coalesceKey('audio-effect-window'),
+      targets: [...this.snapTargets(), ...zoomSnapTargets(layers, id)],
+    });
+  }
+
   private startMusicDrag(base: DragBase, mode: MusicDrag['mode']): void {
     const store = this.ctx.store;
     const music = store.manifest.value.music;
@@ -2577,6 +2693,8 @@ export class VeTimeline {
       this.startLayerDrag(base, press.id, 'move');
     } else if (press.kind === 'zoom' && press.id) {
       this.startZoomDrag(base, press.id, 'move');
+    } else if (press.kind === 'afx' && press.id) {
+      this.startAudioEffectDrag(base, press.id, 'move');
     } else if (press.kind === 'track-clip' && press.id) {
       this.startTrackDrag(base, press.id);
     } else if (press.kind === 'music') {
@@ -2794,6 +2912,7 @@ export class VeTimeline {
       case 'end':
       case 'layer':
       case 'zoom':
+      case 'afx':
       case 'music':
       case 'audio':
       case 'voice': {
@@ -2804,6 +2923,7 @@ export class VeTimeline {
         else if (drag.kind === 'end') this.applyEnd(drag);
         else if (drag.kind === 'layer') this.applyLayer(drag);
         else if (drag.kind === 'zoom') this.applyZoom(drag);
+        else if (drag.kind === 'afx') this.applyAudioEffect(drag);
         else if (drag.kind === 'music') this.applyMusic(drag);
         else if (drag.kind === 'audio') this.applyAudio(drag);
         else this.applyVoice(drag);
@@ -2953,8 +3073,20 @@ export class VeTimeline {
     }
   }
 
+  /** One frame of an audio effect layer's window, as a zoom's: see [applyZoom]. */
+  private applyAudioEffect(drag: AudioEffectDrag): void {
+    const next = this.dragWindow(drag, MIN_LAYER_MS);
+    this.ctx.store.setAudioEffectWindow(drag.id, next.startMs, next.endMs, { coalesce: drag.coalesce });
+  }
+
   /** One frame of a zoom's window: snapped like a layer's, then held between its neighbours. */
   private applyZoom(drag: ZoomDrag): void {
+    const next = this.dragWindow(drag, MIN_ZOOM_MS);
+    this.ctx.store.setZoomWindow(drag.id, next.startMs, next.endMs, { coalesce: drag.coalesce });
+  }
+
+  /** Where a zoom's or an audio effect layer's window goes this frame: snapped, then held between its neighbours. */
+  private dragWindow(drag: ZoomDrag | AudioEffectDrag, minMs: number): { startMs: number; endMs: number } {
     const pps = this.ctx.store.pps.value;
     const deltaMs = this.dragDeltaMs(drag, pps);
     const targets = [...drag.targets, this.centreMs(pps)];
@@ -2969,8 +3101,7 @@ export class VeTimeline {
       this.noteSnap(drag, hit?.target ?? null);
       edge = start;
     }
-    const next = zoomDragWindow(drag.mode, drag.start0, drag.end0, edge, drag.lo, drag.hi, MIN_ZOOM_MS);
-    this.ctx.store.setZoomWindow(drag.id, next.startMs, next.endMs, { coalesce: drag.coalesce });
+    return zoomDragWindow(drag.mode, drag.start0, drag.end0, edge, drag.lo, drag.hi, minMs);
   }
 
   private applyMusic(drag: MusicDrag): void {
@@ -3157,6 +3288,7 @@ export class VeTimeline {
           drag.kind === 'end' ||
           drag.kind === 'layer' ||
           drag.kind === 'zoom' ||
+          drag.kind === 'afx' ||
           drag.kind === 'music' ||
           drag.kind === 'audio' ||
           drag.kind === 'voice' ||
@@ -3218,6 +3350,7 @@ export class VeTimeline {
         } else store.endGesture(drag.mode === 'move' ? 'Move audio' : 'Trim audio');
         break;
       case 'zoom':
+      case 'afx':
         // Nothing to close: every frame was already a coalesced step (see [startZoomDrag]).
         break;
       case 'voice':
@@ -3309,6 +3442,8 @@ export class VeTimeline {
         return rows.querySelector<HTMLElement>('[data-row="voice"]');
       case 'zoom':
         return rows.querySelector<HTMLElement>('[data-row="zoom"]');
+      case 'audioEffect':
+        return rows.querySelector<HTMLElement>('[data-row="afx"]');
       case 'clip': {
         // The base track pans away with everything else, and a segment on it is selected from
         // outside the timeline too: by touching the video on the preview, or by Edit and Crop.
@@ -3537,6 +3672,45 @@ export class VeTimeline {
         </Host>
       );
     });
+  }
+
+  /**
+   * The audio effects' row: one bar per layer, its effect's sign and name on it, and the selected one's
+   * two handles. Buttons named with their state, never `aria-pressed`, for the reason the zoom bars
+   * give; no `touch-action` of their own until selected, so a swipe that starts on one scrolls.
+   */
+  private afxRow() {
+    const handles = this.afxHandles.value;
+    return (
+      <div class="lane" key="afx-row" data-row="afx">
+        {this.afxBars.value.map(bar => (
+          <button
+            type="button"
+            key={`afx-${bar.id}`}
+            class={{ 'item': true, 'item--afx': true, 'item--selected': bar.selected, 'item--glyph': bar.w < LANE_GLYPH_ONLY_PX }}
+            data-hit="afx"
+            data-id={bar.id}
+            aria-label={bar.label}
+            style={{ left: `${bar.x}px`, width: `${bar.w}px` }}
+            onKeyDown={this.onAfxKey}
+            onClick={this.onAfxClick}
+          >
+            <span class="item__label" aria-hidden="true">
+              {laneGlyph(bar.icon)}
+              <span class="item__text" key="text">
+                {bar.text}
+              </span>
+            </span>
+          </button>
+        ))}
+        {handles
+          ? [
+              <span class="handle handle--in" key="afx-in" data-hit="afx-start" data-id={handles.id} style={{ left: `${handles.inX}px` }}></span>,
+              <span class="handle handle--out" key="afx-out" data-hit="afx-end" data-id={handles.id} style={{ left: `${handles.outX}px` }}></span>,
+            ]
+          : null}
+      </div>
+    );
   }
 
   /**
@@ -3776,6 +3950,7 @@ export class VeTimeline {
               );
             })}
 
+        {this.showAfxRow.value ? this.afxRow() : null}
         {compact ? null : this.audioLanes.value.map((lane, i) => this.audioRow(lane, i))}
         {compact || (this.audioLanes.value.length && !this.ctx.store.manifest.value.music) ? null : this.musicRow(pad)}
         {this.showVoiceLane.value ? this.voiceRow() : null}
@@ -4116,7 +4291,7 @@ type DragCursor = 'move' | 'resize' | null;
 function dragCursor(drag: TimelineDrag): DragCursor {
   if (drag.kind === 'trim' || drag.kind === 'end') return 'resize';
   // A layer's and a sound's two edge modes trim; the third moves the whole window.
-  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'music' || drag.kind === 'audio') && (drag.mode === 'start' || drag.mode === 'end')) return 'resize';
+  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'afx' || drag.kind === 'music' || drag.kind === 'audio') && (drag.mode === 'start' || drag.mode === 'end')) return 'resize';
   return 'move';
 }
 

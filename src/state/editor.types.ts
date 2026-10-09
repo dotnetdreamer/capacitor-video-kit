@@ -1,4 +1,4 @@
-import { musicSpeed, normaliseSoundEffectId, normaliseSoundEffectSettings, soundEffectPlaysSpeedAsRecord, type EditMusic, type RasterisedOverlay } from '../editor';
+import type { RasterisedOverlay } from '../editor';
 
 /** What the customer has picked on the timeline or the preview. At most one thing at a time. */
 export type EditorSelection =
@@ -7,7 +7,8 @@ export type EditorSelection =
   | { kind: 'music' }
   | { kind: 'audio'; id: string }
   | { kind: 'voice'; id: string }
-  | { kind: 'zoom'; id: string };
+  | { kind: 'zoom'; id: string }
+  | { kind: 'audioEffect'; id: string };
 
 /**
  * The sheets that can slide up over the timeline and the toolbar. One at a time; opening one closes
@@ -49,10 +50,6 @@ export type VolumeTarget = { kind: 'clip'; id: string } | { kind: 'music' } | { 
 /** The sound the Sound sheet's next pick goes in place of, while a Replace tile has it open. */
 export type SoundReplaceTarget = { kind: 'music' } | { kind: 'audio'; id: string };
 
-/** The sound the Effects sheet puts through an effect: a sound on a lane, or an older edit's one sound. */
-export type SoundEffectTarget = { kind: 'music' } | { kind: 'audio'; id: string };
-
-/** Frames cut from one source clip for the filmstrip, one every `stepMs` of SOURCE time. */
 /**
  * What a video source's own sound is filed under in `store.waveforms`.
  *
@@ -64,43 +61,28 @@ export function clipWaveKey(sourceKey: string): string {
 }
 
 /**
- * What a sound's copy through its effect is filed under in `store.soundCopies`, or null for a sound
- * that has none: the effect and the file, since one file through two effects is two copies and two
- * sounds of one file through the same effect - the halves of a cut - are one. Sliders moved off their
- * defaults, and the speed of an effect that plays it as a record does ([soundCopyRate]), follow on a
- * line of their own, since each is another copy; a line break is the one thing no URI holds, so what
- * is before it is always [soundCopyFamily]'s.
+ * What the preview plays in the place of everything heard under audio effect layers: the post's sound
+ * over the layers' windows and the tail they ring on for, put through them by the render's own
+ * arithmetic, as a file this page made (`EditorMedia` makes them; [EditorStore.audioEffectCopies]).
  */
-export function soundCopyKey(sound: Pick<EditMusic, 'uri' | 'effect' | 'effectSettings' | 'speed'>): string | null {
-  const family = soundCopyFamily(sound);
-  if (!family) return null;
-  const settings = normaliseSoundEffectSettings(sound.effect, sound.effectSettings);
-  const rate = soundCopyRate(sound);
-  const variant = `${settings ? JSON.stringify(settings) : ''}${rate !== 1 ? `@${rate}` : ''}`;
-  return variant ? `${family}\n${variant}` : family;
+export interface AudioEffectCopy {
+  /** A `blob:` URL of the file. */
+  url: string;
+  /** Where on the post the file's first moment is heard: the first layer's start. */
+  startMs: number;
+  /** Where the file ends on the post: past the last layer, by as much of the tails as the preview plays. */
+  endMs: number;
+  /**
+   * Everything that went into the file but the layers' own effects, sliders and Slow: the sound under
+   * them, and where the layers are. A copy whose sound is what the post's is now is the one to play
+   * while a slider's new copy is made; one whose sound is not plays nowhere.
+   */
+  soundKey: string;
+  /** The effects, sliders and Slow it was made with. */
+  effectKey: string;
 }
 
-/**
- * What every copy of one file through one effect is filed under, whatever its sliders say: the part
- * of a [soundCopyKey] before its line break, or all of one with none. Any of them is the same sound on
- * the same timeline, near enough to play while the one a slider asked for is still being made.
- */
-export function soundCopyFamily(sound: Pick<EditMusic, 'uri' | 'effect'>): string | null {
-  const effect = normaliseSoundEffectId(sound.effect);
-  return effect ? `${effect}:${sound.uri}` : null;
-}
-
-/**
- * The rate a sound's copy is heard at, as a multiple of its file's own: the sound's speed when its
- * effect plays that speed as a record does, since the element plays the copy at it with the pitch let
- * go, and 1 for every other copy, which keeps its pitch whatever its speed. `sound-copy.ts` works the
- * effect out at that rate, so it comes out where the render, which treats the sound after slowing it,
- * puts it.
- */
-export function soundCopyRate(sound: Pick<EditMusic, 'effect' | 'speed'>): number {
-  return soundEffectPlaysSpeedAsRecord(sound.effect) ? musicSpeed(sound) : 1;
-}
-
+/** Frames cut from one source clip for the filmstrip, one every `stepMs` of SOURCE time. */
 export interface Filmstrip {
   stepMs: number;
   /** WebView-loadable URLs, index `i` being the frame at `i * stepMs`. */

@@ -65,12 +65,12 @@ export function createVideoKitMcpServer(options: VideoKitMcpServerOptions = {}):
       instructions:
         'This server builds and edits the video EditManifest that @capacitor-video-kit/core renders. A manifest ' +
         'is the whole of an edit: the clips and their trims, the video layers over them, the text, ' +
-        'stickers, photos and effects drawn on top, the music and voiceover, and the frame it all ' +
-        'renders at.\n\n' +
+        'stickers, photos and effects drawn on top, the sounds and voiceover and the audio effects they go ' +
+        'through, and the frame it all renders at.\n\n' +
         'Start with manifest_create, change it with manifest_edit, and read it back with ' +
         'manifest_inspect. Every tool returns a manifestId, so the manifest itself only has to be ' +
-        'passed when it came from somewhere else. catalog_list is where the filter, effect, layout and ' +
-        'text style ids come from, and where each edit op’s parameters are written down.\n\n' +
+        'passed when it came from somewhere else. catalog_list is where the filter, effect, audio effect, ' +
+        'layout and text style ids come from, and where each edit op’s parameters are written down.\n\n' +
         'This server does not render. Turning a manifest into a video needs a canvas - every text ' +
         'layer is measured with its real font and every layer is drawn to a PNG - so it happens on the ' +
         'device, in the app. What is produced here is handed to the editor component or straight to ' +

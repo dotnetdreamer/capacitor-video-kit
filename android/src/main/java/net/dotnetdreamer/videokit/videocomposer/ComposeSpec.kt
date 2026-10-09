@@ -369,6 +369,13 @@ data class Audio(
     val voiceover: List<Voiceover>,
     /** Additional lanes of independently mixed music clips. */
     val musicTracks: List<List<Music>> = emptyList(),
+    /**
+     * The audio effect layers over the FINISHED mix - see [AudioEffectWindow] - in the order they came,
+     * which the parser holds to sorted and never overlapping. Empty, which is every spec written before
+     * the key, is the mix as it always was, and [RenderPlan] decides that once. Last and defaulted, so
+     * every audio block built without one is built exactly as it was.
+     */
+    val effects: List<AudioEffectWindow> = emptyList(),
 )
 
 data class ComposeSpec(

@@ -62,13 +62,20 @@ import {
   reorderAudioClip,
   replaceAudioClip as replaceAudioClipOp,
   setAudioLoop,
-  setAudioEffect as setAudioEffectOp,
-  setAudioEffectSetting as setAudioEffectSettingOp,
   setAudioSpeed as setAudioSpeedOp,
-  setMusicEffect as setMusicEffectOp,
-  setMusicEffectSetting as setMusicEffectSettingOp,
   setMusicSpeed as setMusicSpeedOp,
   soundEffectPreset,
+  MAX_AUDIO_EFFECTS,
+  addAudioEffect as addAudioEffectOp,
+  audioEffectAt,
+  deleteAudioEffect as deleteAudioEffectOp,
+  duplicateAudioEffect as duplicateAudioEffectOp,
+  findAudioEffect,
+  setAudioEffectSetting as setAudioEffectSettingOp,
+  setAudioEffectWindow as setAudioEffectWindowOp,
+  splitAudioEffect as splitAudioEffectOp,
+  updateAudioEffect as updateAudioEffectOp,
+  type EditAudioEffect,
   removeOverlay,
   removeVideoTrack,
   removeVoiceover,
@@ -140,7 +147,7 @@ import {
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
-import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundEffectTarget, SoundReplaceTarget, ToolbarMode, VolumeTarget } from './editor.types';
+import type { AudioEffectCopy, EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, ToolbarMode, VolumeTarget } from './editor.types';
 import { sameUrl } from './same-url';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
@@ -298,16 +305,22 @@ export class EditorStore {
    */
   readonly previewUrls = signal<ReadonlyMap<string, string>>(new Map());
   /**
-   * The preview's copy of a sound through its effect, by `soundCopyKey`: a URL the preview plays in
-   * the sound's place - the same sound on the same timeline, through the effect - since an element
-   * plays a file and not an effect. See `sound-copy.ts` for why it is a file.
+   * The preview's copies of what is heard under the audio effect layers, by the ids of the layers each
+   * covers, joined by commas: a file the preview plays in the place of every sound those layers cover -
+   * the post's own sound through them, by the render's arithmetic - since an element plays a file and
+   * not an effect. See `effect-copy.ts` for why it is a file, and for why layers close together share one.
    *
-   * Filled in by `EditorMedia` for every sound the manifest puts through an effect, and played by the
-   * preview alone (`PreviewPlayer.soundCopy`), so no render, draft or result ever carries one. No
-   * entry is a copy still being made, and `null` one that could not be made; both play the file as it
-   * is, and the render has the effect either way.
+   * Filled in by `EditorMedia` and played by the preview alone (`PreviewPlayer`), so no render, draft or
+   * result ever carries one. A layer with no copy has one still being made: the preview plays the sounds
+   * under it as they are meanwhile, and the render has the effect either way.
    */
-  readonly soundCopies = signal<ReadonlyMap<string, string | null>>(new Map());
+  readonly audioEffectCopies = signal<ReadonlyMap<string, AudioEffectCopy>>(new Map());
+  /**
+   * Whether the preview is playing one of [audioEffectCopies] now, in the place of every sound it
+   * covers. Written by the preview's player as the playhead goes in and out of a copy, and read by what
+   * plays the clips' own sound (`soundHushed`), which then keeps quiet; nothing renders from it.
+   */
+  readonly soundUnderCopy = signal(false);
   /**
    * Peak amplitudes per audio URI - the music track and every voiceover take - as they are measured.
    *
@@ -927,6 +940,7 @@ export class EditorStore {
       (sel.kind === 'voice' && !!findVoiceover(m, sel.id)) ||
       (sel.kind === 'audio' && !!findAudioClip(m, sel.id)) ||
       (sel.kind === 'zoom' && !!findZoom(m, sel.id)) ||
+      (sel.kind === 'audioEffect' && !!findAudioEffect(m, sel.id)) ||
       (sel.kind === 'music' && !!m.music);
     if (!stillThere) this.select(null);
     if (this.historyGroup) this.historyGroup.entry = -1;
@@ -935,6 +949,8 @@ export class EditorStore {
     this.coalesced = null;
     // The zoom the sheet is on can be undone out of existence, like the transition sheet's boundary.
     if (this.panel.value === 'zoom' && !this.selectedZoom.value) this.closePanel();
+    // And so can the audio effect layer the Audio effects sheet is on.
+    if (this.panel.value === 'audioEffects' && !this.selectedAudioEffect.value) this.closePanel();
     // The boundary the transition sheet is on can be undone out of existence - an undo that takes
     // back the clip it was in front of.
     if (this.panel.value === 'transition' && !this.targetBoundary.value) this.closePanel();
@@ -954,6 +970,8 @@ export class EditorStore {
     const panel = this.panel.value;
     if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition' || panel === 'zoom' || panel === 'animation')
       this.closePanel();
+    // The Audio effects sheet is about a layer, and stays open only while one is what is selected.
+    if (panel === 'audioEffects' && selection?.kind !== 'audioEffect') this.closePanel();
   }
 
   isSelected(selection: EditorSelection): boolean {
@@ -2205,26 +2223,149 @@ export class EditorStore {
     else this.commit('Speed', m => setMusicSpeedOp(m, speed));
   }
 
+  /* ========================================================================================= */
+  /* Audio effect layers                                                                       */
+  /* ========================================================================================= */
+
+  /** Every audio effect layer, in time order. */
+  readonly audioEffects = computed(() => this.manifest.value.audioEffects ?? []);
+  readonly selectedAudioEffect = computed(() => {
+    const sel = this.selection.value;
+    return sel?.kind === 'audioEffect' ? findAudioEffect(this.manifest.value, sel.id) : null;
+  });
+
   /**
-   * A sound through an effect from [SOUND_EFFECTS], or through none for `null`, as one undo step named
-   * for what it did - "Undo: Megaphone", as Loop's is "Loop off" - with its sliders at their defaults.
-   * Slow + reverb slows the sound as it goes on and puts it back to 1x as it comes off, in the same
-   * step ([soundEffectPatch]); a slower sound that would run into the next one on its lane stops where
-   * that one begins, as the Speed sheet's does. Returns whether anything changed.
+   * The Sound menu's Audio effects: the sheet on the layer under the playhead when there is one, since
+   * the effect heard there is the one to change, and otherwise on no layer at all, where a tile adds
+   * one ([chooseAudioEffect]). Paused, so the sound is where the customer left it.
    */
-  setSoundEffect(target: SoundEffectTarget, effectId: string | null): boolean {
-    const preset = soundEffectPreset(effectId);
-    const label = preset ? preset.label : 'Effect off';
-    return this.commit(label, m => (target.kind === 'audio' ? setAudioEffectOp(m, target.id, preset?.id ?? null) : setMusicEffectOp(m, preset?.id ?? null)));
+  openAudioEffects(): void {
+    const layer = audioEffectAt(this.manifest.value, this.playheadMs.value);
+    this.pause();
+    this.select(layer ? { kind: 'audioEffect', id: layer.id } : null);
+    this.openPanel('audioEffects');
   }
 
   /**
-   * One of the sound's effect sliders at `value` on its 0..100 scale: live, inside the slider's
-   * gesture, which lands as one undo step named for the slider ("Undo: Megaphone tone"). A value
-   * changes no length, so it is never refused for a neighbour.
+   * A tile of the Audio effects sheet: the selected layer becomes `effectId` at its defaults, or -
+   * with none selected - the layer under the playhead does, or a new one is added there
+   * ([addAudioEffectAtPlayhead]). One undo step named for the effect ("Undo: Megaphone"). Returns
+   * whether anything changed.
    */
-  setSoundEffectSetting(target: SoundEffectTarget, key: string, value: number): void {
-    this.preview(m => (target.kind === 'audio' ? setAudioEffectSettingOp(m, target.id, key, value) : setMusicEffectSettingOp(m, key, value)));
+  chooseAudioEffect(effectId: string): boolean {
+    const preset = soundEffectPreset(effectId);
+    if (!preset) return false;
+    const layer = this.selectedAudioEffect.value ?? audioEffectAt(this.manifest.value, this.playheadMs.value);
+    if (!layer) return this.addAudioEffectAtPlayhead(preset.id) !== null;
+    if (!this.isSelected({ kind: 'audioEffect', id: layer.id })) this.select({ kind: 'audioEffect', id: layer.id });
+    return this.commit(preset.label, m => updateAudioEffectOp(m, layer.id, { effect: preset.id }));
+  }
+
+  /**
+   * A layer of `effectId` from the playhead to the end of the post - stopping short of the next layer,
+   * as one effect is heard at a time - selected, as one undo step named for the effect. Its id, or
+   * null with the customer told why: at the cap, or with no room at the playhead.
+   */
+  addAudioEffectAtPlayhead(effectId: string): string | null {
+    const preset = soundEffectPreset(effectId);
+    if (!preset) return null;
+    if (this.audioEffects.value.length >= MAX_AUDIO_EFFECTS) {
+      this.showToast(`You can add up to ${MAX_AUDIO_EFFECTS} audio effects`);
+      this.haptic('warning');
+      return null;
+    }
+    const total = this.totalMs.value;
+    // Starting at the very end would make a layer nobody hears; it starts at 0 instead, as a layer does.
+    const at = this.playheadMs.value >= total - MIN_LAYER_MS ? 0 : Math.round(this.playheadMs.value);
+    const id = this.newId('afx');
+    const layer: EditAudioEffect = { id, startMs: at, endMs: total, effect: preset.id };
+    if (!this.commit(preset.label, m => addAudioEffectOp(m, layer, total))) {
+      this.showToast('No room for an audio effect here');
+      this.haptic('warning');
+      return null;
+    }
+    this.select({ kind: 'audioEffect', id });
+    this.haptic('light');
+    return id;
+  }
+
+  /**
+   * One of a layer's sliders at `value` on its 0..100 scale: live, inside the slider's gesture, which
+   * lands as one undo step named for the slider ("Undo: Megaphone tone").
+   */
+  setAudioEffectSetting(id: string, key: string, value: number): void {
+    this.preview(m => setAudioEffectSettingOp(m, id, key, value));
+  }
+
+  /** A layer's Slow ([EditAudioEffect.speed]): live, inside its slider's gesture, as [setAudioEffectSetting]. */
+  setAudioEffectSpeed(id: string, speed: number): void {
+    this.preview(m => updateAudioEffectOp(m, id, { speed }));
+  }
+
+  /**
+   * Moves a layer's window, stopping at its neighbours and the end of the post and never shorter than
+   * [MIN_LAYER_MS]. One undo step labelled 'Audio effect'; the timeline's drags pass a `coalesce` key
+   * from [coalesceKey], and every call with it folds into that one step, as a zoom's drag does.
+   */
+  setAudioEffectWindow(id: string, startMs: number, endMs: number, opts?: { coalesce?: CoalesceKey }): void {
+    const total = this.totalMs.value;
+    this.commitCoalesced('Audio effect', m => setAudioEffectWindowOp(m, id, startMs, endMs, total), opts?.coalesce);
+  }
+
+  /**
+   * Start here and End here: the layer's edge to the playhead, as a picture layer's
+   * ([setSelectedOverlayEdge]) - or, with the playhead past its other edge, the whole layer moved
+   * there at its length. Its neighbours still stop it.
+   */
+  setAudioEffectEdge(id: string, edge: 'start' | 'end'): void {
+    const layer = findAudioEffect(this.manifest.value, id);
+    if (!layer) return;
+    const total = this.totalMs.value;
+    const at = Math.round(this.playheadMs.value);
+    const length = layer.endMs - layer.startMs;
+    const [s, e] =
+      edge === 'start'
+        ? at <= layer.endMs - MIN_LAYER_MS
+          ? [at, layer.endMs]
+          : [at, Math.min(total, at + length)]
+        : at >= layer.startMs + MIN_LAYER_MS
+          ? [layer.startMs, at]
+          : [Math.max(0, at - length), at];
+    if (this.commit(edge === 'start' ? 'Start here' : 'End here', m => setAudioEffectWindowOp(m, id, s, e, total))) return;
+    this.showToast('There is no room for that effect here');
+    this.haptic('warning');
+  }
+
+  /** A copy straight after the layer, selected. Says so when there is no room for one. */
+  duplicateAudioEffect(id: string): void {
+    const newId = this.newId('afx');
+    if (!this.commit('Duplicate', m => duplicateAudioEffectOp(m, id, newId, this.totalMs.value))) {
+      this.showToast('No room for a copy after this effect');
+      this.haptic('warning');
+      return;
+    }
+    this.select({ kind: 'audioEffect', id: newId });
+    this.haptic('light');
+  }
+
+  /** The layer in two at the playhead, the second half selected, so it can be given another effect. */
+  splitAudioEffectAtPlayhead(id: string): void {
+    const newId = this.newId('afx');
+    if (!this.commit('Cut', m => splitAudioEffectOp(m, id, this.playheadMs.value, newId))) {
+      this.showToast('Move the playhead inside the effect to cut it');
+      this.haptic('warning');
+      return;
+    }
+    this.select({ kind: 'audioEffect', id: newId });
+    this.haptic('light');
+  }
+
+  /** Deletes a layer; its sheet closes with it when it was the one open. */
+  deleteAudioEffect(id: string): void {
+    if (!this.commit('Delete', m => deleteAudioEffectOp(m, id))) return;
+    if (this.isSelected({ kind: 'audioEffect', id })) this.select(null);
+    if (this.panel.value === 'audioEffects') this.closePanel();
+    this.haptic('light');
   }
 
   /**

@@ -20,7 +20,7 @@ import {
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
-import { soundCopyFamily, soundCopyKey, type EditorPlayer } from '../../state/editor.types';
+import type { AudioEffectCopy, EditorPlayer } from '../../state/editor.types';
 import { sameUrl } from '../../state/same-url';
 import type { ClipMedia } from './clip-media';
 import { FollowerVideo, type FollowerMedia } from './follower-video';
@@ -42,9 +42,9 @@ import {
   passFollows,
   passMs,
   playedOut,
-  playsAsRecord,
   posterFor,
   previewSrc,
+  soundHushed,
   soundOffsetMs,
   soundPutMs,
   startPlayback,
@@ -355,13 +355,14 @@ interface LaneSlot {
   readonly own: HTMLAudioElement;
   element: HTMLAudioElement;
   uri: string | null;
-  /** The clip's copy through its effect when it plays from one ([PreviewPlayer.soundCopy]), else null. */
-  copy: string | null;
   clipId: string | null;
   /** That clip's speed, which can decide [element] as its file can; see [PreviewMixer.elementFor]. */
   rate: number;
-  /** Whether that speed is a record's, its pitch let go; see [SoundSpan.varispeed]. */
-  varispeed: boolean;
+  /**
+   * Whether the lane plays its uris as they are, which an audio effect layer's copy is - a `blob:` URL
+   * this page made - rather than through the host's `fileUrl`.
+   */
+  direct: boolean;
 }
 
 export interface PreviewMedia {
@@ -530,14 +531,16 @@ export class PreviewPlayer implements EditorPlayer {
   private tail: { fromMs: number; wallMs: number } | null = null;
 
   private musicUri: string | null = null;
-  /** The music's copy through its effect, when it plays from one: see [soundCopy]. */
-  private musicCopy: string | null = null;
   /** The music's speed as [setSource] last put it on [musicEl]; the takes are always at 1x. */
   private musicRate = 1;
-  /** Whether [musicRate] is a record's speed, its pitch let go; see [SoundSpan.varispeed]. */
-  private musicVarispeed = false;
-  /** Each sound's [soundCopyKey], by the manifest's own object for it, which is never changed in place. */
-  private readonly copyKeys = new WeakMap<EditMusic, string | null>();
+  /**
+   * Two elements for the audio effect layers' copies ([EditorStore.audioEffectCopies]), as a lane has
+   * two: one plays the copy heard now in the place of every sound it covers, the other holds the next
+   * one's file open and starts it, silent, a stall early. Made when a post first has a copy.
+   */
+  private effectLane: readonly [LaneSlot, LaneSlot] | null = null;
+  /** The copy heard now, by its key in [EditorStore.audioEffectCopies], or null; see [syncAudio]. */
+  private covering: string | null = null;
   private voiceUri: string | null = null;
   /** Audio elements started or seeked and not yet checked: where they were put (ms), and how often. */
   private readonly settling = new Map<HTMLAudioElement, { kind: AudioPut; putAtMs: number; leadMs: number; wallMs: number; learn: boolean }>();
@@ -1015,6 +1018,8 @@ export class PreviewPlayer implements EditorPlayer {
       el.load();
     }
     this.audioLanes.clear();
+    this.effectLane = null;
+    this.store.soundUnderCopy.value = false;
   }
 
   /* ========================================================================================= */
@@ -1914,7 +1919,8 @@ export class PreviewPlayer implements EditorPlayer {
    * through [PreviewMixer]; a clip's own sound is not put through it, for the reason written there.
    */
   private applyBaseAudio(clip: EditClip, window: TransitionWindow | null): void {
-    const silenced = clipsSilenced(this.store);
+    // Hushed too while an audio effect layer's copy plays in its place; see [syncAudio].
+    const silenced = soundHushed(this.store);
     const spare = this.spare;
     const tail = window && spare.role === 'tail' && spare.segmentId === window.from.id ? spare : null;
     if (!window || !tail) {
@@ -1943,20 +1949,29 @@ export class PreviewPlayer implements EditorPlayer {
     const total = this.store.totalMs.value;
     const live = playing && this.store.recordingFromMs.value === null;
     this.ensureAudioLanes();
+    // Under an audio effect layer's copy, the copy is what is heard: every other sound plays on
+    // without one, so it is where the post is when the copy ends.
+    const copies = this.store.audioEffectCopies.peek();
+    const cover = live ? coveringCopy(copies, ms) : null;
+    this.setCovering(cover);
+    const hushed = cover !== null;
 
     const music = manifest.music;
-    this.setSource('music', music?.uri ?? null, music ? musicSpeed(music) : 1, music ? this.soundCopy(music, this.musicCopy) : null, music ? playsAsRecord(music) : false);
+    this.setSource('music', music?.uri ?? null, music ? musicSpeed(music) : 1);
     // Sound that is about to be due is started NOW, a stall before it is needed: the position it is
     // put at is still counted from the playhead, so what comes out starts exactly on time - and the
     // first moment of a track or a take is heard rather than swallowed by the output starting up.
     if (music) this.syncMusicClip(music, this.musicEl, ms, total, live, running);
     else if (!this.musicEl.paused) this.musicEl.pause();
+    hush(this.musicEl, hushed);
 
     for (const track of manifest.audioTracks ?? []) {
       const lane = this.audioLanes.get(track.id);
       // The halves of a cut as the one sound they still are, which one element plays straight on
       // through: two would hand over at the cut, and no lead puts that on the sample.
-      if (lane) this.syncLane(joinContinuousAudio(track.clips), lane, ms, total, live, running);
+      if (!lane) continue;
+      this.syncLane(joinContinuousAudio(track.clips), lane, ms, total, live, running);
+      for (const slot of lane) hush(slot.element, hushed);
     }
 
     const voiceLead = live ? this.leadWindow(this.voiceEl) : 0;
@@ -1967,6 +1982,43 @@ export class PreviewPlayer implements EditorPlayer {
     } else if (!this.voiceEl.paused) {
       this.voiceEl.pause();
     }
+    hush(this.voiceEl, hushed);
+
+    this.syncCopies(copies, ms, total, live, running);
+  }
+
+  /**
+   * The audio effect layers' copies at `ms`, on their own two elements, laid as a lane's sounds are -
+   * the copy heard now, or the next, open and started a stall before it is due - and heard only while
+   * it covers the playhead ([setCovering]): the next one starts early in silence, and comes in exactly
+   * as the sounds it covers go quiet.
+   */
+  private syncCopies(copies: ReadonlyMap<string, AudioEffectCopy>, ms: number, total: number, live: boolean, running: boolean): void {
+    if (copies.size === 0 && !this.effectLane) return;
+    const lane = (this.effectLane ??= [this.copySlot(), this.copySlot()]);
+    const sounds = [...copies].map(([key, copy]) => copySound(key, copy)).sort((a, b) => a.startMs - b.startMs);
+    this.syncLane(sounds, lane, ms, total, live, running);
+    for (const slot of lane) hush(slot.element, slot.clipId === null || slot.clipId !== this.covering);
+  }
+
+  /** One of [effectLane]'s elements: never in the mixer's graph, as a copy is heard at its own level. */
+  private copySlot(): LaneSlot {
+    const own = this.makeAudio();
+    own.preload = 'auto';
+    return { own, element: own, uri: null, clipId: null, rate: 1, direct: true };
+  }
+
+  /**
+   * Notes which copy is heard now, and when that changes, hushes or frees the clips' own sound - the
+   * base's and every layer's, which [soundHushed] reads - at once rather than at the next cut.
+   */
+  private setCovering(cover: string | null): void {
+    if (cover === this.covering) return;
+    this.covering = cover;
+    this.store.soundUnderCopy.value = cover !== null;
+    const slot = this.currentSlot();
+    if (slot) this.applyVideoAudio(slot.clip);
+    this.syncFollower(this.isPlaying());
   }
 
   /**
@@ -2033,7 +2085,7 @@ export class PreviewPlayer implements EditorPlayer {
   private playAt(el: HTMLAudioElement, positionMs: number, volume: number, running: boolean, span: SoundSpan): void {
     this.mixer.setLevel(el, volume);
     // Before anything below starts it, so it never starts at the speed it had for another sound.
-    applySoundRate(el, span.rate, span.varispeed === true);
+    applySoundRate(el, span.rate);
     // Sound goes with a picture that is MOVING. Left to run through a clock that stood still, it ran
     // ahead of the picture by the length of the stall and was seeked back as soon as the picture
     // moved - a second of music heard twice on the first play of a template on the iOS simulator. The
@@ -2360,30 +2412,23 @@ export class PreviewPlayer implements EditorPlayer {
    * take. An element the sound moves off is stripped, as the preview strips every element it has
    * finished with, so it holds no decoder and has nothing to play. A new speed for the same file on
    * the same element is only a new rate, with nothing loaded again.
-   *
-   * `copy` is the music's copy through its effect, which it plays from in the file's place when there
-   * is one ([soundCopy]): the same uri, and another thing to load. `varispeed` lets its pitch go with
-   * `rate`, for a sound whose speed is a record's.
    */
-  private setSource(which: 'music' | 'voice', uri: string | null, rate = 1, copy: string | null = null, varispeed = false): void {
+  private setSource(which: 'music' | 'voice', uri: string | null, rate = 1): void {
     const current = which === 'music' ? this.musicUri : this.voiceUri;
-    const currentCopy = which === 'music' ? this.musicCopy : null;
-    if (current === uri && currentCopy === copy && (which === 'voice' || (this.musicRate === rate && this.musicVarispeed === varispeed))) return;
-    const url = copy ?? (uri ? this.store.host.platform.fileUrl(uri) : null);
+    if (current === uri && (which === 'voice' || this.musicRate === rate)) return;
+    const url = uri ? this.store.host.platform.fileUrl(uri) : null;
     const was = which === 'music' ? this.musicEl : this.voiceEl;
     const el = url ? this.mixer.elementFor(this.ownAudio[which], url, rate) : this.ownAudio[which];
     if (which === 'music') {
       this.musicUri = uri;
-      this.musicCopy = copy;
       this.musicRate = rate;
-      this.musicVarispeed = varispeed;
       this.musicEl = el;
     } else {
       this.voiceUri = uri;
       this.voiceEl = el;
     }
-    if (current === uri && currentCopy === copy && el === was) {
-      applySoundRate(el, rate, varispeed);
+    if (current === uri && el === was) {
+      applySoundRate(el, rate);
       return;
     }
     if (was !== el) {
@@ -2406,7 +2451,7 @@ export class PreviewPlayer implements EditorPlayer {
     }
     el.load();
     // After the load, which puts an element back to its default rate - set here as well.
-    applySoundRate(el, rate, varispeed);
+    applySoundRate(el, rate);
   }
 
   /** Makes two elements per audio lane, and releases a lane once the edit no longer has it. */
@@ -2416,7 +2461,7 @@ export class PreviewPlayer implements EditorPlayer {
       const own = this.makeAudio();
       own.preload = 'auto';
       this.mixer.add(own);
-      return { own, element: own, uri: null, copy: null, clipId: null, rate: 1, varispeed: false };
+      return { own, element: own, uri: null, clipId: null, rate: 1, direct: false };
     };
     for (const track of this.store.manifest.value.audioTracks ?? []) {
       wanted.add(track.id);
@@ -2437,27 +2482,24 @@ export class PreviewPlayer implements EditorPlayer {
     }
   }
 
-  /** Every audio lane's elements as they play now, stand-ins included. */
+  /** Every audio lane's elements as they play now, stand-ins included, and the copies' two. */
   private laneElements(): HTMLAudioElement[] {
-    return [...this.audioLanes.values()].flatMap(lane => lane.map(slot => slot.element));
+    return [...this.audioLanes.values(), ...(this.effectLane ? [this.effectLane] : [])].flatMap(lane => lane.map(slot => slot.element));
   }
 
   /**
    * Puts `clip` on one of a lane's slots. The same file stays loaded on the same element - for the next
    * clip along that uses it, or for a new speed of the same clip - unless that speed moves the sound
-   * between the mixer's element and its stand-in; see [PreviewMixer.elementFor]. A clip through an
-   * effect plays from its copy ([soundCopy]), which is another file to the element.
+   * between the mixer's element and its stand-in; see [PreviewMixer.elementFor].
    */
   private setLaneSource(lane: LaneSlot, clip?: EditAudioClip): void {
     const uri = clip?.uri ?? null;
-    const copy = clip ? this.soundCopy(clip, lane.copy) : null;
     const id = clip?.id ?? null;
     const rate = clip ? musicSpeed(clip) : 1;
-    const varispeed = clip ? playsAsRecord(clip) : false;
-    if (lane.uri === uri && lane.copy === copy && lane.clipId === id && lane.rate === rate && lane.varispeed === varispeed) return;
-    const url = copy ?? (uri ? this.store.host.platform.fileUrl(uri) : null);
-    const wanted = url ? this.mixer.elementFor(lane.own, url, rate) : lane.own;
-    if (lane.uri === uri && lane.copy === copy && wanted === lane.element) {
+    if (lane.uri === uri && lane.clipId === id && lane.rate === rate) return;
+    const url = uri && !lane.direct ? this.store.host.platform.fileUrl(uri) : uri;
+    const wanted = url && !lane.direct ? this.mixer.elementFor(lane.own, url, rate) : lane.own;
+    if (lane.uri === uri && wanted === lane.element) {
       if (lane.clipId !== id) {
         // Two consecutive clips can use the same file. Their windows are still separate playback
         // decisions, including when the first was already marked as finishing at its out point.
@@ -2466,19 +2508,17 @@ export class PreviewPlayer implements EditorPlayer {
         this.audioFinishing.delete(lane.element);
       }
     } else {
-      lane.element = this.changeAudioSource(lane.own, lane.element, url, rate);
+      lane.element = this.changeAudioSource(lane.own, lane.element, url, rate, lane.direct);
     }
-    applySoundRate(lane.element, rate, varispeed);
+    applySoundRate(lane.element, rate);
     lane.uri = uri;
-    lane.copy = copy;
     lane.clipId = id;
     lane.rate = rate;
-    lane.varispeed = varispeed;
   }
 
-  /** Chooses the routed element or its stand-in and forgets the old file's timing. */
-  private changeAudioSource(own: HTMLAudioElement, was: HTMLAudioElement, url: string | null, rate = 1): HTMLAudioElement {
-    const el = url ? this.mixer.elementFor(own, url, rate) : own;
+  /** Chooses the routed element or its stand-in - none for a `direct` one - and forgets the old file's timing. */
+  private changeAudioSource(own: HTMLAudioElement, was: HTMLAudioElement, url: string | null, rate = 1, direct = false): HTMLAudioElement {
+    const el = url && !direct ? this.mixer.elementFor(own, url, rate) : own;
     if (was !== el) {
       was.pause();
       was.removeAttribute('src');
@@ -2520,44 +2560,9 @@ export class PreviewPlayer implements EditorPlayer {
   private startMixer(): void {
     if (volumeIsWritable() || this.store.recordingFromMs.value !== null) return;
     const manifest = this.store.manifest.value;
-    // What the elements will play: a sound's copy through its effect, which is this page's own, or its file.
     const sounds = [...(manifest.music ? [manifest.music] : []), ...(manifest.audioTracks ?? []).flatMap(track => track.clips)];
-    const urls = [
-      ...sounds.map(sound => this.soundCopy(sound) ?? this.store.host.platform.fileUrl(sound.uri)),
-      ...manifest.voiceovers.map(take => this.store.host.platform.fileUrl(take.uri)),
-    ];
+    const urls = [...sounds.map(sound => this.store.host.platform.fileUrl(sound.uri)), ...manifest.voiceovers.map(take => this.store.host.platform.fileUrl(take.uri))];
     this.mixer.start(urls.every(url => playableHere(url)) && levelsInUse(manifest));
-  }
-
-  /**
-   * The copy a sound plays from in its file's place: for a sound put through an effect, that file
-   * through the effect at the sound's settings, once `EditorMedia` has made it
-   * ([EditorStore.soundCopies]). The copy is the same sound on the same timeline, so every position the
-   * player puts an element at means the same in either. Null for a sound with no effect, and until the
-   * first copy lands or for a sound no copy could be made of, which plays its file as it is: the effect
-   * is heard from the moment there is something to hear it on, and the render has it either way.
-   *
-   * `playing` is the copy the sound's element has now. While the copy a slider has just asked for is
-   * still being made, the one playing goes on when it is the same file through the same effect at
-   * other settings ([soundCopyFamily]) - the sound the customer had a moment ago, rather than the dry
-   * file for a second or two in between.
-   *
-   * A lookup and no more, because it is asked on every frame of a playing sound: the key is worked out
-   * once for each version of the sound, and the URL only when this or the file has changed.
-   */
-  private soundCopy(sound: EditMusic, playing: string | null = null): string | null {
-    let key = this.copyKeys.get(sound);
-    if (key === undefined) {
-      key = soundCopyKey(sound);
-      this.copyKeys.set(sound, key);
-    }
-    if (!key) return null;
-    const copies = this.store.soundCopies.peek();
-    const made = copies.get(key);
-    if (made !== undefined || !playing) return made ?? null;
-    const family = soundCopyFamily(sound);
-    for (const [other, url] of copies) if (url === playing && (other === family || other.startsWith(`${family}\n`))) return playing;
-    return null;
   }
 
   /* ========================================================================================= */
@@ -2654,4 +2659,24 @@ function setSound(video: ClipMedia, muted: boolean, volume: number): void {
   if (video.muted !== muted) video.muted = muted;
   const level = clamp(Number.isFinite(volume) ? volume : 0, 0, 1);
   if (video.volume !== level) video.volume = level;
+}
+
+/** The copy whose stretch of the post holds `ms`, by its key, or null. Copies never overlap ([copyGroups]). */
+function coveringCopy(copies: ReadonlyMap<string, AudioEffectCopy>, ms: number): string | null {
+  for (const [key, copy] of copies) if (ms >= copy.startMs && ms < copy.endMs) return key;
+  return null;
+}
+
+/**
+ * A copy as a lane's sound, so [PreviewPlayer.syncLane] lays it as it lays any other: its file from the
+ * start, on the post from where the copy begins to where it ends, at its own level and speed.
+ */
+function copySound(key: string, copy: AudioEffectCopy): EditAudioClip {
+  const length = copy.endMs - copy.startMs;
+  return { id: key, uri: copy.url, fileName: '', sourceDurationMs: length, inMs: 0, outMs: length, startMs: copy.startMs, endMs: copy.endMs, volume: 1, loop: false, fadeOutMs: 0 };
+}
+
+/** Silences an element, or lets it be heard again: written only to change it, as every level here is. */
+function hush(el: HTMLMediaElement, quiet: boolean): void {
+  if (el.muted !== quiet) el.muted = quiet;
 }

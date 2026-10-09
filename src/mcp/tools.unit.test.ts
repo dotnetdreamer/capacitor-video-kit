@@ -851,7 +851,7 @@ describe('the summary an agent reads instead of the JSON', () => {
   it('keeps "Zooms: none" exactly where it was with Zoom on', () => {
     const manifest = threeClips();
     const summary = summariseManifest(manifest);
-    expect(summary).toMatch(/\nVoiceover: none\n\nZooms: none\n\nLook: /);
+    expect(summary).toMatch(/\nVoiceover: none\nAudio effects: none\n\nZooms: none\n\nLook: /);
     for (const editing of [undefined, {}, { zoom: true }, { pictures: true, zoom: true }]) {
       expect(summariseManifest(manifest, { editing })).toBe(summary);
     }
@@ -867,7 +867,7 @@ describe('the summary an agent reads instead of the JSON', () => {
     const summary = summariseManifest(manifest, { editing: { zoom: false } });
     expect(summary).not.toMatch(/zoom/i);
     expect(summary).toBe(summariseManifest(manifest).replace('\n\nZooms: none', ''));
-    expect(summary).toMatch(/\nVoiceover: none\n\nLook: /);
+    expect(summary).toMatch(/\nAudio effects: none\n\nLook: /);
     for (const text of answers({ zoom: false })) expect(text).not.toMatch(/zoom/i);
   });
 

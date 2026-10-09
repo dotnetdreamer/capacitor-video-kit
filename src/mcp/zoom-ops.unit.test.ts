@@ -280,6 +280,23 @@ describe('no op makes a zoom on a post that has none', () => {
     patchVoiceover: [{ op: 'patchVoiceover', id: 'vo', volume: 0.5 }],
     moveVoiceover: [{ op: 'moveVoiceover', id: 'vo', startMs: 500 }],
     removeVoiceover: [{ op: 'removeVoiceover', id: 'vo' }],
+    addAudioEffect: [{ op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 }],
+    patchAudioEffect: [
+      { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
+      { op: 'patchAudioEffect', id: 'afx', patch: { effect: 'slowReverb', startMs: 2000 } },
+    ],
+    splitAudioEffect: [
+      { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
+      { op: 'splitAudioEffect', id: 'afx', atMs: 2000, newId: 'afx2' },
+    ],
+    duplicateAudioEffect: [
+      { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
+      { op: 'duplicateAudioEffect', id: 'afx', newId: 'afx2' },
+    ],
+    removeAudioEffect: [
+      { op: 'addAudioEffect', id: 'afx', effect: 'megaphone', startMs: 1000, endMs: 3000 },
+      { op: 'removeAudioEffect', id: 'afx' },
+    ],
     setFilter: [{ op: 'setFilter', filterId: FILTER_PRESETS[1]!.id }],
     setAdjust: [{ op: 'setAdjust', patch: { brightness: 0.2 } }],
     setFit: [{ op: 'setFit', fit: 'contain' }],

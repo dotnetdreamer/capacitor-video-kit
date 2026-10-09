@@ -4,7 +4,7 @@ import type { EditorSource } from '../../host/host.types';
 import type { EditorStore, PreviewVideoLayer } from '../../state/editor-store';
 import { sameUrl } from '../../state/same-url';
 import type { ClipMedia } from './clip-media';
-import { BLANK_POSTER, SEEK_EPSILON_S, applyClipAudio, applyPitch, clipsSilenced, posterFor, previewSrc, startPlayback } from './preview-media';
+import { BLANK_POSTER, SEEK_EPSILON_S, applyClipAudio, applyPitch, clipsSilenced, posterFor, previewSrc, soundHushed, startPlayback } from './preview-media';
 
 /**
  * How far out of step with the base the second element is left alone, in OUTPUT milliseconds.
@@ -246,8 +246,10 @@ export class FollowerVideo {
     // source change. On only where the layer's sound is heard; see [applyPitch].
     applyPitch(video, clip, silenced || this.sound !== null);
     if (video.playbackRate !== speed) video.playbackRate = speed;
-    // With a sound element of its own, the picture plays silent: see [sound].
-    applyClipAudio(video, clip, silenced || this.sound !== null);
+    // With a sound element of its own, the picture plays silent: see [sound]. And so does it while an
+    // audio effect layer's copy is heard in its place.
+    const hushed = soundHushed(this.store);
+    applyClipAudio(video, clip, hushed || this.sound !== null);
 
     // Running, the element carries itself between playhead writes and only a drift worth a stall is
     // corrected; stopped, nothing else moves it, so it goes exactly where it is wanted. The source
@@ -297,6 +299,10 @@ export class FollowerVideo {
     const speed = clip.speed || 1;
     applyPitch(sound, clip, silenced);
     if (sound.playbackRate !== speed) sound.playbackRate = speed;
+    // Under an audio effect layer's copy it plays on without a sound, so it is where the post is when
+    // the copy ends and it is heard again.
+    const quiet = this.store.soundUnderCopy.peek();
+    if (sound.muted !== quiet) sound.muted = quiet;
     // Stopped, it simply stops: nothing is heard, so nothing is put anywhere until it starts again.
     if (!this.playing) {
       if (!sound.paused) sound.pause();

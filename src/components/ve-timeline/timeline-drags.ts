@@ -47,7 +47,11 @@ export type HitKind =
    */
   | 'zoom'
   | 'zoom-start'
-  | 'zoom-end';
+  | 'zoom-end'
+  /** An audio effect layer's bar on its row, and the two handles that retime the selected one. */
+  | 'afx'
+  | 'afx-start'
+  | 'afx-end';
 
 /** A finger that is down but not yet a drag: it may still become a tap, a long press or a scroll. */
 export interface Press {
@@ -193,6 +197,14 @@ export interface ZoomDrag extends DragBase {
   targets: number[];
 }
 
+/**
+ * An audio effect layer's window being moved or retimed: a zoom's drag on the effects' row, which is
+ * one effect at a time as the zooms are one camera, so it stops at its neighbours as a zoom does.
+ */
+export interface AudioEffectDrag extends Omit<ZoomDrag, 'kind'> {
+  kind: 'afx';
+}
+
 export interface MusicDrag extends DragBase {
   kind: 'music';
   mode: 'start' | 'end' | 'move';
@@ -302,6 +314,7 @@ export type TimelineDrag =
   | LayerDrag
   | AudioDrag
   | ZoomDrag
+  | AudioEffectDrag
   | MusicDrag
   | VoiceDrag
   | ClipReorderDrag

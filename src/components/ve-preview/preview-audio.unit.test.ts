@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyManifest, type EditAudioTrack, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore } from '../../state/editor-store';
+import type { AudioEffectCopy } from '../../state/editor.types';
 import type { ClipMedia } from './clip-media';
 import type { PreviewPlayer } from './preview-player';
 
@@ -462,6 +463,8 @@ interface Rig {
   music: FakeMedia;
   voice: FakeMedia;
   lanes: FakeMedia[];
+  /** The base track's first element, which the post starts on. */
+  video: FakeMedia;
 }
 
 const players: PreviewPlayer[] = [];
@@ -552,7 +555,12 @@ async function rig(engine: Engine, music: EditMusic | null, { take, audioTracks 
 
   const store = new EditorStore(resolveEditorHost({}));
   store.load(SOURCES, new Map([['a', CLIP_MS]]), { ...emptyManifest(), clips: [clip()], music, audioTracks, voiceovers: take ? [take.take] : [] });
-  const deck = (): ClipMedia => new ClipMedia(new FakeMedia(CLIP_MS / 1000, engine) as unknown as HTMLVideoElement);
+  const decks: FakeMedia[] = [];
+  const deck = (): ClipMedia => {
+    const media = new FakeMedia(CLIP_MS / 1000, engine);
+    decks.push(media);
+    return new ClipMedia(media as unknown as HTMLVideoElement);
+  };
   const stall = stallMs ?? (engine === 'webkit' ? 100 : 30);
   const musicEl = new FakeMedia(TRACK_S, engine, stall);
   musicEl.playhead = () => store.playheadMs.value;
@@ -578,7 +586,7 @@ async function rig(engine: Engine, music: EditMusic | null, { take, audioTracks 
   players.push(player);
   player.start();
   await run(0);
-  return { store, player, music: musicEl, voice: voiceEl, lanes };
+  return { store, player, music: musicEl, voice: voiceEl, lanes, video: decks[0]! };
 }
 
 /** Turns the clock `ms` on, a display frame at a time, with everything that falls due on the way. */
@@ -830,104 +838,98 @@ describe('a sound at a speed', () => {
 });
 
 /*
- * A sound put through an effect plays from its copy through the effect ([EditorStore.soundCopies]),
- * which is the file on the same timeline: the player only puts its element on another URL, and puts it
- * exactly where it would have put the file.
+ * Under an audio effect layer the preview plays the layer's copy ([EditorStore.audioEffectCopies]) - the
+ * post's sound through the layer, made by the render's arithmetic - in the place of every sound it
+ * covers: those play on without a sound, so each is where the post is when the copy ends.
  */
-describe('a sound through an effect', () => {
-  const word = { ...LOOPED, id: 'word', uri: 'blob:capacitor://localhost/word', loop: false, effect: 'megaphone' };
-  const copyKey = 'megaphone:blob:capacitor://localhost/word';
-  const copy = 'blob:capacitor://localhost/word-through-megaphone';
+describe('an audio effect layer', () => {
+  const lane: EditAudioTrack[] = [{ id: 'lane', clips: [{ ...LOOPED, id: 'song', uri: 'blob:capacitor://localhost/song' }] }];
+  const copy = (startMs: number, endMs: number, url = 'blob:capacitor://localhost/copy'): AudioEffectCopy => ({ url, startMs, endMs, soundKey: 'sound', effectKey: 'effect' });
+  /** The element playing the copy, of the two made for the copies after the lane's own two. */
+  const copyEl = (r: Rig): FakeMedia | undefined => r.lanes.slice(2).find(el => el.src.startsWith('blob:capacitor://localhost/copy'));
 
-  it('plays its file until its copy is made, and then the copy, in step with the playhead', async () => {
-    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
-    const [el] = r.lanes;
+  it('plays the sounds as they are until its copy is made, and then the copy in their place, in step', async () => {
+    const r = await rig('chromium', null, { audioTracks: lane });
+    const [song] = r.lanes;
     await playFrom(r, 0);
-    await playTo(r, 1000);
-    expect(el.src).toBe(word.uri);
+    await playTo(r, 500);
+    r.store.audioEffectCopies.value = new Map([['afx', copy(1000, 3000)]]);
+    await playTo(r, 900);
+    // Before it: the song is heard, and the copy is already open, silent, for the moment it is due.
+    expect(song!.muted).toBe(false);
+    expect(r.store.soundUnderCopy.value).toBe(false);
 
-    r.store.soundCopies.value = new Map([[copyKey, copy]]);
-    await playTo(r, 2500);
-    expect(el.src).toBe(copy);
+    await playTo(r, 2000);
+    const el = copyEl(r)!;
+    expect(el.muted).toBe(false);
     expect(el.paused).toBe(false);
-    expect(Math.abs(el.currentTime * 1000 - r.store.playheadMs.value)).toBeLessThan(200);
+    expect(Math.abs(el.currentTime * 1000 - (r.store.playheadMs.value - 1000))).toBeLessThan(200);
+    // Everything it covers plays on without a sound: the song, and the clip's own.
+    expect(song!.muted).toBe(true);
+    expect(song!.paused).toBe(false);
+    expect(r.video.muted).toBe(true);
+    expect(r.store.soundUnderCopy.value).toBe(true);
+
+    await playTo(r, 3300);
+    expect(song!.muted).toBe(false);
+    expect(r.video.muted).toBe(false);
+    expect(r.store.soundUnderCopy.value).toBe(false);
+    expect(el.paused || el.muted).toBe(true);
   });
 
-  it('plays its file where no copy could be made, and its file again once the effect is taken off', async () => {
-    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
-    const [el] = r.lanes;
-    r.store.soundCopies.value = new Map<string, string | null>([[copyKey, null]]);
+  it('hushes the music and a voiceover under it as well', async () => {
+    const r = await rig('chromium', LOOPED, { take: { take: { id: 'take', uri: 'blob:capacitor://localhost/take', startMs: 800, durationMs: 2000, volume: 1 }, fileS: 2 } });
+    r.store.audioEffectCopies.value = new Map([['afx', copy(500, 2500)]]);
     await playFrom(r, 0);
-    await playTo(r, 500);
-    expect(el.src).toBe(word.uri);
-
-    r.store.soundCopies.value = new Map([[copyKey, copy]]);
-    await playTo(r, 1000);
-    expect(el.src).toBe(copy);
-    r.store.setSoundEffect({ kind: 'audio', id: 'word' }, null);
-    await playTo(r, 1500);
-    expect(el.src).toBe(word.uri);
+    await playTo(r, 1200);
+    expect(r.music.muted).toBe(true);
+    expect(r.voice.muted).toBe(true);
+    await playTo(r, 2700);
+    expect(r.music.muted).toBe(false);
   });
 
-  it('keeps playing the copy it has while the one a slider asked for is made, and then that one', async () => {
-    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
-    const [el] = r.lanes;
-    r.store.soundCopies.value = new Map([[copyKey, copy]]);
+  it('gives the clips their sound back when the post stops, and plays no copy then', async () => {
+    const r = await rig('chromium', null, { audioTracks: lane });
+    r.store.audioEffectCopies.value = new Map([['afx', copy(0, 5000)]]);
     await playFrom(r, 0);
-    await playTo(r, 500);
-    expect(el.src).toBe(copy);
-
-    // A harder megaphone: another copy, still being made - the sound goes on as it was meanwhile.
-    r.store.setSoundEffectSetting({ kind: 'audio', id: 'word' }, 'intensity', 90);
     await playTo(r, 1000);
-    expect(el.src).toBe(copy);
-    const harder = 'blob:capacitor://localhost/word-through-a-harder-megaphone';
-    r.store.soundCopies.value = new Map([
-      [copyKey, copy],
-      [`${copyKey}\n{"intensity":90}`, harder],
+    expect(r.store.soundUnderCopy.value).toBe(true);
+    r.player.pause();
+    await run(50);
+    expect(r.store.soundUnderCopy.value).toBe(false);
+    expect(r.video.muted).toBe(false);
+    expect(copyEl(r)!.paused).toBe(true);
+  });
+
+  it('plays the sounds as they are again the moment its copy is taken away', async () => {
+    const r = await rig('chromium', null, { audioTracks: lane });
+    const [song] = r.lanes;
+    r.store.audioEffectCopies.value = new Map([['afx', copy(0, 5000)]]);
+    await playFrom(r, 0);
+    await playTo(r, 1000);
+    expect(song!.muted).toBe(true);
+    // A sound under it moved: the copy is no longer the post's sound, and goes at once.
+    r.store.audioEffectCopies.value = new Map();
+    await playTo(r, 1100);
+    expect(song!.muted).toBe(false);
+    expect(r.store.soundUnderCopy.value).toBe(false);
+  });
+
+  it('hands over from one copy to the next, each heard only over its own stretch', async () => {
+    const r = await rig('chromium', null, { audioTracks: lane });
+    r.store.audioEffectCopies.value = new Map([
+      ['a', copy(0, 1000, 'blob:capacitor://localhost/copy-a')],
+      ['b', copy(1500, 2500, 'blob:capacitor://localhost/copy-b')],
     ]);
-    await playTo(r, 1500);
-    expect(el.src).toBe(harder);
-    expect(Math.abs(el.currentTime * 1000 - r.store.playheadMs.value)).toBeLessThan(200);
-  });
-
-  it('plays the file, not another effect’s copy, while a new effect’s copy is made', async () => {
-    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
-    const [el] = r.lanes;
-    r.store.soundCopies.value = new Map([[copyKey, copy]]);
     await playFrom(r, 0);
     await playTo(r, 500);
-    // Through a room now: the megaphone's copy is the same file on the same timeline, and the wrong sound.
-    r.store.setSoundEffect({ kind: 'audio', id: 'word' }, 'slowReverb');
-    await playTo(r, 1000);
-    expect(el.src).toBe(word.uri);
-  });
-
-  it('plays slow + reverb’s speed as a record does, lower as well as slower', async () => {
-    const slowed = { ...word, effect: 'slowReverb', speed: 0.8 };
-    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [slowed] }] });
-    const [el] = r.lanes;
-    await playFrom(r, 0);
-    await playTo(r, 500);
-    expect(el.playbackRate).toBe(0.8);
-    expect(el.preservesPitch).toBe(false);
-    // Taken off, it is back at its own pitch - and, having been the effect's slowness, at 1x.
-    r.store.setSoundEffect({ kind: 'audio', id: 'word' }, null);
-    await playTo(r, 1000);
-    expect(el.playbackRate).toBe(1);
-    // And the same speed kept on the Speed sheet keeps its pitch.
-    r.store.setAudioSpeed('word', 0.8);
-    await playTo(r, 1500);
-    expect(el.playbackRate).toBe(0.8);
-    expect(el.preservesPitch).toBe(true);
-  });
-
-  it('puts the post’s one music on its copy too', async () => {
-    const r = await rig('chromium', { ...LOOPED, uri: word.uri, effect: 'megaphone' });
-    r.store.soundCopies.value = new Map([[copyKey, copy]]);
-    await playFrom(r, 0);
-    await playTo(r, 500);
-    expect(r.music.src).toBe(copy);
+    const heard = () => r.lanes.slice(2).filter(el => !el.muted && !el.paused).map(el => el.src);
+    expect(heard()).toEqual(['blob:capacitor://localhost/copy-a']);
+    await playTo(r, 1200);
+    expect(heard()).toEqual([]);
+    expect(r.store.soundUnderCopy.value).toBe(false);
+    await playTo(r, 2000);
+    expect(heard()).toEqual(['blob:capacitor://localhost/copy-b']);
   });
 });
 

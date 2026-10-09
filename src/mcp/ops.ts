@@ -58,6 +58,7 @@ import {
   totalDurationMs,
   type EditAdjust,
   type EditAudioClip,
+  type EditAudioEffect,
   type EditClip,
   type EditFit,
   type EditManifest,
@@ -73,17 +74,19 @@ import {
   type TextEffect,
 } from '../editor/edit-manifest';
 import { OVERLAY_ANIMATIONS, normaliseOverlayAnimation } from '../editor/motion';
-import {
-  SOUND_EFFECTS,
-  SOUND_EFFECT_SETTING_MAX,
-  normaliseSoundEffectId,
-  normaliseSoundEffectSettings,
-  sameSoundEffectSettings,
-  soundEffectPreset,
-} from '../editor/sound-effects';
+import { SOUND_EFFECTS, SOUND_EFFECT_SETTING_MAX, soundEffectPreset, type SoundEffectPreset } from '../editor/sound-effects';
 import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
+import { MAX_AUDIO_EFFECTS } from '../video-composer/definitions';
 import {
   addAudioClip,
+  addAudioEffect,
+  deleteAudioEffect,
+  duplicateAudioEffect,
+  findAudioEffect,
+  setAudioEffectWindow,
+  splitAudioEffect,
+  updateAudioEffect,
+  type AudioEffectPatch,
   addOverlay,
   addVideoTrack,
   addVoiceover,
@@ -112,7 +115,6 @@ import {
   patchClip,
   patchMusic,
   patchOverlay,
-  soundEffectPatch,
   patchVoiceover,
   removeClip,
   removeOverlay,
@@ -461,7 +463,14 @@ const ASPECTS: readonly OutputAspect[] = ['9:16', '16:9'];
 const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs', 'phaseMs'] as const satisfies readonly (keyof EditMusic)[];
 const MUSIC_FADES = ['fadeInMs', 'fadeOutMs'] as const satisfies readonly (keyof EditMusic)[];
 /** Every field a sound has, in the order the editor writes them - what a refusal lists. */
-const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed', 'effect', 'effectSettings'] as const satisfies readonly (keyof EditMusic)[];
+const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed'] as const satisfies readonly (keyof EditMusic)[];
+
+/*
+ * What a sound had before version 18 put its effect on a layer of its own ([EditAudioEffect]).
+ * Refused by name rather than as a misspelling, so an agent that learned the old fields hears where
+ * they went.
+ */
+const SOUND_EFFECT_FIELDS: readonly string[] = ['effect', 'effectSettings'];
 
 /*
  * And every one of them, held by the compiler. [musicFields] refuses any key not on the list, so a
@@ -513,19 +522,12 @@ function musicFields(raw: Record<string, unknown>, path: string): Partial<EditMu
       if (typeof value !== 'number' || !(value >= MIN_SPEED && value <= MAX_SPEED)) {
         throw new Error(`${name} must be a number from ${MIN_SPEED} to ${MAX_SPEED} - 1 is the sound at its own speed`);
       }
-    } else if (key === 'effect') {
-      // An effect this version plays, or "none" - refused otherwise rather than dropped, as the
-      // manifest's reader would drop it: an agent asking for an echo has to hear there is none.
-      if (typeof value !== 'string' || (value !== 'none' && !soundEffectPreset(value))) {
-        throw new Error(`${name} must be ${SOUND_EFFECTS.map(preset => `"${preset.id}"`).join(', ')} or "none" - the sound as it is`);
-      }
-    } else if (key === 'effectSettings') {
-      // Its shape here; whether each is a slider of the sound's effect is [effectSettingsRefusal]'s, once
-      // the effect it will have is known.
-      const numbers = typeof value === 'object' && value !== null && !Array.isArray(value) ? Object.values(value) : null;
-      if (!numbers || !numbers.every(one => typeof one === 'number' && one >= 0 && one <= SOUND_EFFECT_SETTING_MAX)) {
-        throw new Error(`${name} must be an object of the effect's sliders, each a number from 0 to ${SOUND_EFFECT_SETTING_MAX}`);
-      }
+    } else if (SOUND_EFFECT_FIELDS.includes(key)) {
+      // "none" and null too: there is no effect on a sound for them to take off either.
+      throw new Error(
+        `${name} is not a sound field any more: a sound has no effect of its own. An audio effect layer over it ` +
+          '(addAudioEffect) puts everything it covers through one - this sound and whatever else is heard there',
+      );
     } else if ((MUSIC_FADES as readonly string[]).includes(key)) {
       if (typeof value !== 'number' || !(value >= 0 && value <= MAX_MUSIC_FADE_MS)) {
         throw new Error(`${name} must be a length in milliseconds from 0 (no fade) to ${MAX_MUSIC_FADE_MS}, the longest the volume sheet sets`);
@@ -571,34 +573,6 @@ function musicRefusal(music: Pick<EditMusic, 'inMs' | 'outMs' | 'startMs' | 'end
 }
 
 /**
- * Why a sound through `effectId` cannot have `settings`, or null when it can: every key one of that
- * effect's sliders, named in the refusal with the ones it has - refused rather than dropped, as the
- * manifest's reader would drop them, because an agent turning up a reverb the megaphone has not got
- * has to hear that it has not.
- */
-function effectSettingsRefusal(effectId: unknown, settings: Record<string, number> | undefined, path: string): string | null {
-  const keys = Object.keys(settings ?? {});
-  if (keys.length === 0) return null;
-  const preset = soundEffectPreset(effectId);
-  if (!preset) return `"${path}.effectSettings" needs an effect to be the settings of - the sound has none`;
-  const known = preset.controls.map(control => control.key);
-  const stray = keys.find(key => !known.includes(key));
-  if (stray === undefined) return null;
-  return `"${path}.effectSettings.${stray}" is not a slider of "${preset.id}" - its sliders are ${known.map(key => `"${key}"`).join(', ')}`;
-}
-
-/**
- * The fields putting an effect on a sound brings with it, as the editor's sheet puts one on
- * ([soundEffectPatch]) - its sliders at their defaults, and slow + reverb's slower speed - for each
- * the patch does not set itself. Nothing for a patch that leaves the effect as it is.
- */
-function withEffectOn(sound: EditMusic, patch: Partial<EditMusic>): void {
-  if (patch.effect === undefined) return;
-  const comes = soundEffectPatch(sound, patch.effect);
-  for (const [key, value] of Object.entries(comes ?? {})) if (!(key in patch)) (patch as Record<string, unknown>)[key] = value;
-}
-
-/**
  * A whole sound out of an op's object - `setMusic`'s `music`, `addAudio`'s `sound` - with the defaults
  * and the refusals both share; `path` names it in a message.
  *
@@ -612,13 +586,6 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
   const given = musicFields(Object.fromEntries(Object.entries(raw).filter(([key, value]) => value !== null || !(MUSIC_FIELDS as readonly string[]).includes(key))), path);
   if (given.uri === undefined) throw new Error(`"${path}.uri" must be a non-empty string`);
   const fadeInMs = given.fadeInMs ?? 0;
-  const effect = normaliseSoundEffectId(given.effect);
-  const settingsRefused = effectSettingsRefusal(effect, given.effectSettings, path);
-  if (settingsRefused) throw new Error(settingsRefused);
-  const effectSettings = normaliseSoundEffectSettings(effect, given.effectSettings);
-  // Slow + reverb is a slower sound as well as a room, as the editor's sheet makes it: its own speed
-  // unless the sound says another.
-  const speed = given.speed ?? soundEffectPreset(effect)?.speed?.default;
   const music: EditMusic = {
     uri: given.uri,
     fileName: given.fileName ?? '',
@@ -635,10 +602,7 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
     ...(fadeInMs > 0 ? { fadeInMs } : {}),
     fadeOutMs: given.fadeOutMs ?? 0,
     // The same for the speed, stored as the Speed sheet stores one and never as 1x.
-    ...(speed !== undefined && normaliseSpeed(speed) !== 1 ? { speed: normaliseSpeed(speed) } : {}),
-    // And for an effect, which "none" leaves off, and its sliders, which their defaults leave off.
-    ...(effect ? { effect } : {}),
-    ...(effectSettings ? { effectSettings } : {}),
+    ...(given.speed !== undefined && normaliseSpeed(given.speed) !== 1 ? { speed: normaliseSpeed(given.speed) } : {}),
   };
   const refusal = musicRefusal(music);
   if (refusal) throw new Error(refusal);
@@ -656,16 +620,145 @@ function asksForChange(music: EditMusic, patch: Partial<EditMusic>): boolean {
     if (key === 'phaseMs' && typeof value === 'number') return Math.round(value) !== Math.round(typeof was === 'number' ? was : 0);
     // A sound with no speed is at 1x, and a speed is kept to the hundredth.
     if (key === 'speed' && typeof value === 'number') return normaliseSpeed(value) !== musicSpeed(music);
-    // "none" is what a sound with no effect already has.
-    if (key === 'effect') return (normaliseSoundEffectId(value) ?? null) !== (music.effect ?? null);
-    // Sliders as they are stored, against the effect the patch leaves the sound with.
-    if (key === 'effectSettings') {
-      const effect = patch.effect !== undefined ? normaliseSoundEffectId(patch.effect) : music.effect;
-      return !sameSoundEffectSettings(normaliseSoundEffectSettings(effect, value), normaliseSoundEffectSettings(effect, music.effectSettings));
-    }
     const isTime = (MUSIC_TIMES as readonly string[]).includes(key) || (MUSIC_FADES as readonly string[]).includes(key);
     return isTime && typeof value === 'number' && typeof was === 'number' ? Math.round(value) !== Math.round(was) : value !== was;
   });
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* The audio effect layers                                                                        */
+/* -------------------------------------------------------------------------------------------- */
+
+function requireAudioEffect(manifest: EditManifest, id: string): EditAudioEffect {
+  const layer = findAudioEffect(manifest, id);
+  const ids = (manifest.audioEffects ?? []).map(one => one.id);
+  if (!layer) throw new Error(`no audio effect "${id}" - audio effects on this post: ${ids.join(', ') || 'none'}`);
+  return layer;
+}
+
+function requireFreeAudioEffectId(manifest: EditManifest, id: string): void {
+  if (findAudioEffect(manifest, id)) throw new Error(`audio effect id "${id}" is already on this post`);
+}
+
+/** What [addAudioEffect], [duplicateAudioEffect] and [splitAudioEffect] answer `null` with at the cap, said before they are called. */
+function requireAudioEffectRoom(manifest: EditManifest): void {
+  if ((manifest.audioEffects ?? []).length >= MAX_AUDIO_EFFECTS) throw new Error(`this post already has the maximum of ${MAX_AUDIO_EFFECTS} audio effects`);
+}
+
+/** What `patchAudioEffect` takes, in the order the op reference names them. */
+const AUDIO_EFFECT_PATCH_FIELDS: readonly string[] = ['effect', 'effectSettings', 'speed', 'startMs', 'endMs'];
+
+/** `"patch.speed"` for a field of an op's `patch`, `"speed"` for one of the op itself. */
+function fieldName(path: string, key: string): string {
+  return `"${path ? `${path}.` : ''}${key}"`;
+}
+
+/**
+ * The effect `raw.effect` names, REFUSED when this version has none by that name: the manifest's
+ * reader drops a layer whose effect it does not know, which is right for a draft from a later
+ * version and wrong for an agent that asked for an echo.
+ */
+function audioEffectPresetOf(raw: Record<string, unknown>, path: string): SoundEffectPreset {
+  const preset = soundEffectPreset(raw['effect']);
+  if (!preset) throw new Error(`${fieldName(path, 'effect')} must be one of ${SOUND_EFFECTS.map(one => one.id).join(', ')}`);
+  return preset;
+}
+
+/**
+ * The sliders `raw.effectSettings` moves, for `preset`. A key that is not one of its sliders is
+ * refused with the ones it has, where the manifest's reader would drop it: an agent turning up a
+ * reverb the megaphone has not got has to hear that it has not. A value off the 0..100 scale is
+ * refused rather than held, as the sheet's slider goes no further.
+ */
+function effectSettingsOf(raw: Record<string, unknown>, path: string, preset: SoundEffectPreset): Record<string, number> {
+  const value = raw['effectSettings'];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${fieldName(path, 'effectSettings')} must be an object of the effect's sliders, each a number from 0 to ${SOUND_EFFECT_SETTING_MAX}`);
+  }
+  const known = preset.controls.map(control => control.key);
+  const settings: Record<string, number> = {};
+  for (const [key, setting] of Object.entries(value)) {
+    const name = fieldName(path, `effectSettings.${key}`);
+    if (!known.includes(key)) throw new Error(`${name} is not a slider of "${preset.id}" - its sliders are ${known.map(one => `"${one}"`).join(', ')}`);
+    if (typeof setting !== 'number' || !(setting >= 0 && setting <= SOUND_EFFECT_SETTING_MAX)) throw new Error(`${name} must be a number from 0 to ${SOUND_EFFECT_SETTING_MAX}`);
+    settings[key] = setting;
+  }
+  return settings;
+}
+
+/**
+ * How slow `preset` plays what its layer covers ([EditAudioEffect.speed]): only for an effect that
+ * slows, and refused off its Slow slider's range rather than held to it, as a sound's speed is off
+ * the Speed sheet's.
+ */
+function slowOf(raw: Record<string, unknown>, path: string, preset: SoundEffectPreset): number {
+  const name = fieldName(path, 'speed');
+  const slow = preset.speed;
+  if (!slow) {
+    const slowing = SOUND_EFFECTS.filter(one => one.speed).map(one => `"${one.id}"`);
+    throw new Error(`${name} is only for an effect that slows what it covers (${slowing.join(', ')}), and "${preset.id}" does not`);
+  }
+  const value = raw['speed'];
+  if (typeof value !== 'number' || !(value >= slow.min && value <= slow.max)) {
+    throw new Error(`${name} must be a number from ${slow.min} to ${slow.max} - how slow "${preset.id}" plays what it covers, ${slow.default} by default`);
+  }
+  return value;
+}
+
+/**
+ * A layer's time on the post, refused before 0 rather than handed on: the editor's add holds the
+ * start at 0 and keeps the length, so -500..2000 would come back as 0..2500.
+ */
+function layerTimeOf(raw: Record<string, unknown>, path: string, key: string): number {
+  const value = raw[key];
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error(`${fieldName(path, key)} must be a number of milliseconds, 0 or more`);
+  return value;
+}
+
+/**
+ * Why no layer fits at `atMs`, naming what is in the way: [audioEffectRoomAt]'s rule, said rather than
+ * made - the layer it would start inside, the next one, or the end of the post.
+ */
+function audioEffectBlocker(manifest: EditManifest, atMs: number, totalMs: number): string {
+  const at = Math.max(0, Math.round(atMs));
+  const layers = manifest.audioEffects ?? [];
+  const inside = layers.find(layer => at >= layer.startMs && at < layer.endMs);
+  if (inside) return `"${inside.id}" runs ${inside.startMs}ms..${inside.endMs}ms there, and one audio effect is heard at a time`;
+  const next = layers.filter(layer => layer.startMs >= at).sort((a, b) => a.startMs - b.startMs)[0];
+  return `${next && next.startMs < totalMs ? `"${next.id}" starts at ${next.startMs}ms` : `the post ends at ${totalMs}ms`}, and a layer runs at least ${MIN_LAYER_MS}ms`;
+}
+
+/**
+ * A layer moved or trimmed to the window a patch asks for, by the timeline's own drag
+ * ([setAudioEffectWindow]), and refused wherever that drag would put it somewhere else: into or past
+ * the layer either side, where it stops; under [MIN_LAYER_MS], which it stretches; or so late that
+ * the post hears less than that. Past the end of the post it ends there, as the drag and an add end
+ * it. The neighbours are the drag's, found from where the layer IS - which is why a window beyond the
+ * next layer is refused rather than reached: no drag gets there.
+ */
+function audioEffectWindowed(manifest: EditManifest, layer: EditAudioEffect, patch: Record<string, unknown>): EditManifest {
+  const totalMs = totalDurationMs(manifest);
+  const id = layer.id;
+  const start = Math.round(patch['startMs'] !== undefined ? layerTimeOf(patch, 'patch', 'startMs') : layer.startMs);
+  const end = Math.min(Math.round(patch['endMs'] !== undefined ? layerTimeOf(patch, 'patch', 'endMs') : layer.endMs), totalMs);
+  if (end - start < MIN_LAYER_MS) {
+    throw new Error(
+      start > totalMs - MIN_LAYER_MS
+        ? `"${id}" cannot start at ${start}ms - the post ends at ${totalMs}ms, and a layer runs at least ${MIN_LAYER_MS}ms`
+        : `"${id}" would run ${start}ms..${end}ms, and a layer runs at least ${MIN_LAYER_MS}ms`,
+    );
+  }
+  const others = (manifest.audioEffects ?? []).filter(other => other.id !== id);
+  const before = others.filter(other => other.endMs <= layer.startMs).sort((a, b) => b.endMs - a.endMs)[0];
+  const after = others.filter(other => other.startMs >= layer.endMs).sort((a, b) => a.startMs - b.startMs)[0];
+  const blocked = (other: EditAudioEffect, past: boolean, edge: string): string =>
+    past
+      ? `"${id}" cannot move past "${other.id}" (${other.startMs}ms..${other.endMs}ms) - a layer moves only between the layers either side of it, ` +
+        'as on the timeline; remove it and add it again there instead'
+      : `"${id}" cannot ${edge} - "${other.id}" runs ${other.startMs}ms..${other.endMs}ms, and one audio effect is heard at a time`;
+  if (before && start < before.endMs) throw new Error(blocked(before, end <= before.startMs, `start at ${start}ms`));
+  if (after && end > after.startMs) throw new Error(blocked(after, start >= after.endMs, `end at ${end}ms`));
+  return setAudioEffectWindow(manifest, id, start, end, totalMs);
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1029,22 +1122,14 @@ const OPS: Record<string, Apply> = {
    * A patch the editor hands back unchanged although it asks for something the sound does not have
    * is a refusal, and is said as one ([musicRefusal]). One asking for nothing new - a volume the
    * sound already has - is the success it looks like.
-   *
-   * A new `effect` comes on as the editor's Audio effects sheet puts one on ([withEffectOn]): its
-   * sliders at their defaults, and slow + reverb's slower speed, each unless the patch sets it - and
-   * taking slow + reverb off puts the speed back to 1x. `effectSettings` are refused for a slider
-   * the effect has not got ([effectSettingsRefusal]).
    */
   patchMusic: (manifest, op) => {
     const music = manifest.music;
     if (!music) throw new Error('this post has no music to patch - use setMusic first');
     const patch = musicFields(object(op, 'patch'), 'patch');
-    const settingsRefused = effectSettingsRefusal(patch.effect !== undefined ? normaliseSoundEffectId(patch.effect) : music.effect, patch.effectSettings, 'patch');
-    if (settingsRefused) throw new Error(settingsRefused);
     if (patch.startMs !== undefined && patch.endMs === undefined && music.endMs > 0) {
       Object.assign(patch, musicMovedTo(music, patch.startMs, totalDurationMs(manifest)));
     }
-    withEffectOn(music, patch);
     const next = patchMusic(manifest, patch);
     if (next === manifest && asksForChange(music, patch)) {
       const reason = musicRefusal({ ...music, ...patch });
@@ -1081,21 +1166,16 @@ const OPS: Record<string, Apply> = {
   /*
    * [patchMusic]'s rules, for one sound on the lanes, and refused when it would meet its neighbour -
    * except for a slower `speed` on its own, which stops the sound where the next one on its lane begins,
-   * as the editor's Speed sheet does ([audioSpeedPatch]), and the same for the slower speed slow +
-   * reverb brings with it. Sent with a `startMs` or an `endMs` as well, the speed is taken as it is,
-   * and a sound that would then meet its neighbour is refused.
+   * as the editor's Speed sheet does ([audioSpeedPatch]). Sent with a `startMs` or an `endMs` as well,
+   * the speed is taken as it is, and a sound that would then meet its neighbour is refused.
    */
   patchAudio: (manifest, op) => {
     const id = str(op, 'id');
     const clip = requireAudio(manifest, id);
     const patch = musicFields(object(op, 'patch'), 'patch');
-    const settingsRefused = effectSettingsRefusal(patch.effect !== undefined ? normaliseSoundEffectId(patch.effect) : clip.effect, patch.effectSettings, 'patch');
-    if (settingsRefused) throw new Error(settingsRefused);
     if (patch.startMs !== undefined && patch.endMs === undefined && clip.endMs > 0) {
       Object.assign(patch, musicMovedTo(clip, patch.startMs, totalDurationMs(manifest)));
     }
-    // Before the speed below, so slow + reverb's slower speed stops where the next sound begins as well.
-    withEffectOn(clip, patch);
     if (patch.speed !== undefined && patch.startMs === undefined && patch.endMs === undefined) {
       Object.assign(patch, audioSpeedPatch(manifest, id, patch.speed));
     }
@@ -1192,6 +1272,100 @@ const OPS: Record<string, Apply> = {
     const id = str(op, 'id');
     requireVoiceover(manifest, id);
     return removeVoiceover(manifest, id);
+  },
+
+  /* ---- audio effects ---- */
+
+  /*
+   * The Audio effects sheet's tile, which adds a layer at the playhead running to the end of the post:
+   * here from `startMs`, and to `endMs` when the op gives one. SHORTENED to the room before the next
+   * layer and the end of the post, as the editor's add is and as `addZoom` is, and refused, naming
+   * what is in the way, when less than [MIN_LAYER_MS] fits at `startMs`. A window the op gives under
+   * [MIN_LAYER_MS] is refused rather than stretched: `endMs` 0 is not "until the end" here.
+   */
+  addAudioEffect: (manifest, op) => {
+    const id = str(op, 'id');
+    requireFreeAudioEffectId(manifest, id);
+    requireAudioEffectRoom(manifest);
+    const preset = audioEffectPresetOf(op, '');
+    const given = (key: string) => op[key] !== undefined && op[key] !== null;
+    const totalMs = totalDurationMs(manifest);
+    const startMs = layerTimeOf(op, '', 'startMs');
+    const endMs = given('endMs') ? layerTimeOf(op, '', 'endMs') : totalMs;
+    if (given('endMs') && Math.round(endMs - startMs) < MIN_LAYER_MS) {
+      throw new Error(`"endMs" must be at least ${MIN_LAYER_MS}ms after "startMs", which is ${startMs} - leave it out to run the layer to the end of the post`);
+    }
+    const layer: EditAudioEffect = {
+      id,
+      startMs,
+      endMs,
+      effect: preset.id,
+      ...(given('effectSettings') ? { effectSettings: effectSettingsOf(op, '', preset) } : {}),
+      ...(given('speed') ? { speed: slowOf(op, '', preset) } : {}),
+    };
+    const next = addAudioEffect(manifest, layer, totalMs);
+    if (!next) throw new Error(`there is no room for an audio effect at ${Math.round(startMs)}ms - ${audioEffectBlocker(manifest, startMs, totalMs)}`);
+    return next;
+  },
+
+  /*
+   * The sheet and the timeline's drag on one layer. Another `effect` comes on at its defaults, sliders
+   * and Slow alike, unless the patch sets them ([updateAudioEffect]); `effectSettings` moves the
+   * sliders it names and leaves the rest where they are, as the sheet's sliders do
+   * ([setAudioEffectSetting]); the window is [audioEffectWindowed]'s. Any other field is refused, and
+   * so is null, as `patchMusic` refuses them.
+   */
+  patchAudioEffect: (manifest, op) => {
+    const id = str(op, 'id');
+    const layer = requireAudioEffect(manifest, id);
+    const patch = object(op, 'patch');
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      if (key === 'id') throw new Error('an audio effect’s "id" cannot be patched');
+      if (!AUDIO_EFFECT_PATCH_FIELDS.includes(key)) throw new Error(`"patch.${key}" is not an audio effect field - the fields are ${AUDIO_EFFECT_PATCH_FIELDS.join(', ')}`);
+    }
+    const has = (key: string) => patch[key] !== undefined;
+    // Only a manifest that never went through the normaliser can hold an effect this version lacks.
+    const preset = has('effect') ? audioEffectPresetOf(patch, 'patch') : soundEffectPreset(layer.effect);
+    if (!preset) throw new Error(`audio effect "${id}" is "${layer.effect}", which this version does not have - give it another with "effect"`);
+    const another = preset.id !== layer.effect;
+    const look: AudioEffectPatch = {};
+    if (another) look.effect = preset.id;
+    if (has('effectSettings')) look.effectSettings = { ...(another ? {} : layer.effectSettings), ...effectSettingsOf(patch, 'patch', preset) };
+    if (has('speed')) look.speed = slowOf(patch, 'patch', preset);
+    const next = updateAudioEffect(manifest, id, look);
+    return has('startMs') || has('endMs') ? audioEffectWindowed(next, findAudioEffect(next, id)!, patch) : next;
+  },
+
+  /* The layer's Cut and Duplicate, by the very functions its buttons call. */
+  splitAudioEffect: (manifest, op) => {
+    const id = str(op, 'id');
+    const layer = requireAudioEffect(manifest, id);
+    const newId = str(op, 'newId');
+    requireFreeAudioEffectId(manifest, newId);
+    requireAudioEffectRoom(manifest);
+    const atMs = num(op, 'atMs');
+    const next = splitAudioEffect(manifest, id, atMs, newId);
+    if (!next) throw new Error(`"${id}" cannot be cut at ${atMs}ms - it runs ${layer.startMs}ms..${layer.endMs}ms, and both halves need to be at least ${MIN_LAYER_MS}ms`);
+    return next;
+  },
+
+  duplicateAudioEffect: (manifest, op) => {
+    const id = str(op, 'id');
+    const layer = requireAudioEffect(manifest, id);
+    const newId = str(op, 'newId');
+    requireFreeAudioEffectId(manifest, newId);
+    requireAudioEffectRoom(manifest);
+    const totalMs = totalDurationMs(manifest);
+    const next = duplicateAudioEffect(manifest, id, newId, totalMs);
+    if (!next) throw new Error(`there is no room for a copy right after audio effect "${id}", at ${layer.endMs}ms - ${audioEffectBlocker(manifest, layer.endMs, totalMs)}`);
+    return next;
+  },
+
+  removeAudioEffect: (manifest, op) => {
+    const id = str(op, 'id');
+    requireAudioEffect(manifest, id);
+    return deleteAudioEffect(manifest, id);
   },
 
   /* ---- zooms ---- */

@@ -1,4 +1,5 @@
 import type {
+  ComposeAudioEffect,
   ComposeCamera,
   ComposeFit,
   ComposeMusic,
@@ -20,6 +21,7 @@ import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } fro
 import { normaliseCamera } from '../../editor/camera';
 import { RectMotionError, normaliseRectMotion } from '../../editor/layout-motion';
 import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
+import { AudioEffectWindowError, normaliseAudioEffectWindows } from '../../editor/audio-effect-windows';
 import { SoundEffectError, normaliseSoundEffect } from '../../editor/sound-effects';
 import { batchIdRefusal } from '../batch-id';
 
@@ -271,6 +273,9 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
         durationMs: Math.max(0, finite(take?.durationMs, 0)),
         volume: clamp(finite(take?.volume, 1), 0, 1),
       })),
+      // Last of the audio's keys, so a spec broken somewhere else reports the same first failure; and
+      // left off for none, the spec every post without a layer has always been.
+      ...audioEffectsOf((audio as unknown as Record<string, unknown>)['effects']),
     },
     posterAtMs: Math.max(0, finite(spec.posterAtMs, 0)),
   };
@@ -316,6 +321,22 @@ function readSoundEffect(value: unknown, path: string): ComposeSoundEffect | nul
   } catch (error) {
     if (!(error instanceof SoundEffectError)) throw error;
     const at = error.field ? `${path}.${error.field}` : path;
+    throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
+  }
+}
+
+/**
+ * The audio effect windows, checked and clamped by `normaliseAudioEffectWindows`'s rules - shared with
+ * the editor and the tests for the reason [readOverlayMotion] gives - with a refusal as a [SpecError]
+ * naming the path that broke, `audio.effects[1].effect.ops[0].db`. No key for no window.
+ */
+function audioEffectsOf(value: unknown): { effects?: ComposeAudioEffect[] } {
+  try {
+    const effects = normaliseAudioEffectWindows(value);
+    return effects.length > 0 ? { effects } : {};
+  } catch (error) {
+    if (!(error instanceof AudioEffectWindowError)) throw error;
+    const at = `audio.effects${error.field}`;
     throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
   }
 }

@@ -1,7 +1,7 @@
-import type { FilterOp } from '../video-composer/definitions';
+import { MAX_AUDIO_EFFECTS, type FilterOp } from '../video-composer/definitions';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
-import { normaliseSoundEffectId, normaliseSoundEffectSettings } from './sound-effects';
+import { normaliseSoundEffectSettings, soundEffectPreset } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -18,7 +18,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 17;
+export const MANIFEST_VERSION = 18;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -354,28 +354,39 @@ export interface EditMusic {
    * [normaliseManifest] and `patchMusic` take the key off instead.
    */
   speed?: number;
+}
+
+/**
+ * An audio effect layer: for `startMs`..`endMs` of the post, everything heard - every clip's own
+ * sound, every sound on every lane, every voiceover - goes through [effect] together, and nothing
+ * outside it does but the tail its steps leave ringing ([ComposeAudioEffect]). It is a layer like the
+ * picture's effects: it belongs to the time it covers, not to a sound, so many sounds are mixed
+ * through one megaphone by being put under it, and one is kept out of it by moving or shortening it.
+ *
+ * On the OUTPUT timeline, like the zooms: no clip or sound op moves one, and only cutting the post
+ * shortens one. One effect at a time: [EditManifest.audioEffects] is sorted by `startMs` and never
+ * overlaps, though two layers may touch.
+ */
+export interface EditAudioEffect {
+  id: string;
+  startMs: number;
+  /** Where it ends, at least [MIN_LAYER_MS] after `startMs`. Never "until the end": a layer has a length. */
+  endMs: number;
+  /** An id from [SOUND_EFFECTS]. A layer whose id this version does not know is dropped when read. */
+  effect: string;
   /**
-   * What the sound is put through, an id from [SOUND_EFFECTS]: a megaphone, say. Absent is the sound
-   * as it is, which is every sound of every manifest written before version 16, and absent is what
-   * [toComposeSpec] turns into a sound with no `effect` on the wire. Never stored for none, and an id
-   * this version does not know is dropped when it is read ([normaliseSoundEffectId]).
-   *
-   * It belongs to the sound, not to the post: a Cut leaves it on both halves and a Duplicate on the
-   * copy, which is what lets a customer cut one word out of a line and give only that word a megaphone.
-   *
-   * An effect that plays the speed as a record does - slow + reverb - also makes [speed] a lower
-   * sound as well as a slower one ([SoundEffectSpeed]); the speed itself is still this sound's own.
-   */
-  effect?: string;
-  /**
-   * Where the customer left [effect]'s sliders, by [SoundEffectControl.key] on its 0..100 scale: a
-   * harder megaphone, a bigger room. Only a slider moved off its default has a value, and a sound with
-   * none has no key at all - every sound of every manifest written before version 17, which plays
-   * exactly as it did, since an effect at its defaults is the effect that shipped. Never stored without
-   * an [effect], and a value its effect has no slider for is dropped when it is read
-   * ([normaliseSoundEffectSettings]). A Cut and a Duplicate keep it with the effect.
+   * Where the customer left the effect's sliders, by [SoundEffectControl.key] on its 0..100 scale: a
+   * harder megaphone, a bigger room. Only a slider moved off its default has a value, and a layer with
+   * none has no key; a value its effect has no slider for is dropped when it is read
+   * ([normaliseSoundEffectSettings]).
    */
   effectSettings?: Record<string, number>;
+  /**
+   * How slow an effect that slows ([SoundEffectPreset.speed], slow + reverb) plays what it covers:
+   * from the layer's start, lower as well as slower, as a record does. Absent is the effect's own
+   * default; never stored for an effect that does not slow, nor at its default.
+   */
+  speed?: number;
 }
 
 /** One independently placed sound on an audio lane. Its timing is on the output timeline. */
@@ -606,6 +617,13 @@ export interface EditManifest {
   music: EditMusic | null;
   /** Absent in older drafts, which continue to use the single `music` field. */
   audioTracks?: EditAudioTrack[];
+  /**
+   * The audio effect layers, sorted by `startMs` and never overlapping. Absent is none, which is every
+   * manifest written before version 18 and every post nobody has put one on, and what [toComposeSpec]
+   * turns into no `effects` on the wire. Like [audioTracks], optional so a post without any is stored
+   * exactly as before.
+   */
+  audioEffects?: EditAudioEffect[];
   /** Sorted by `startMs`, never overlapping. */
   voiceovers: EditVoiceover[];
   /**
@@ -1784,16 +1802,24 @@ export function emptyManifest(): EditManifest {
  * byte for byte the spec version 14 produced. Bumped because an older build reading a version-15 draft
  * plays a sped-up sound at 1x, and runs a slowed one over whatever follows it on its lane.
  *
- * Version 15 to version 16 adds a sound's [EditMusic.effect], and nothing is written into an older
+ * Version 15 to version 16 adds a sound's `effect`, and nothing is written into an older
  * manifest: a version-15 sound has no `effect`, which is the sound as it is, and [toComposeSpec] sends
  * it with none - byte for byte the spec version 15 produced. Bumped because an older build reading a
  * version-16 draft plays a megaphone's word in the speaker's own voice.
  *
- * Version 16 to version 17 adds a sound's [EditMusic.effectSettings] and the slow + reverb effect,
+ * Version 16 to version 17 adds a sound's `effectSettings` and the slow + reverb effect,
  * and nothing is written into an older manifest: a version-16 sound has no settings, which is its
  * effect at its defaults, and [toComposeSpec] sends exactly the steps version 16 sent. Bumped because
  * an older build reading a version-17 draft plays a slowed + reverb song at its slow speed with its
  * pitch kept and no room, and a megaphone at whatever its sliders were as one at their middles.
+ *
+ * Version 17 to version 18 moves the effects off the sounds and onto layers of their own
+ * ([EditManifest.audioEffects]), which put everything heard in their window through them. A sound
+ * saved with an `effect` is read as a layer over where it was heard, with its sliders; a slow +
+ * reverb sound goes back to 1x and its speed becomes the layer's Slow, so the layer plays all of it
+ * from its start as the sound played before ([soundEffectLayers]). What else is under such a layer
+ * now goes through it too, which is the point of a layer. Bumped because an older build reading a
+ * version-18 draft drops every layer.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1905,13 +1931,13 @@ export function normaliseManifest(input: unknown): EditManifest {
    * stop, and "until the end" is where every sound stopped before there were stops.
    */
   const endAfter = (startMs: number, endMs: number): number => (endMs > 0 && Math.round(endMs) - Math.round(startMs) < MIN_LAYER_MS ? 0 : endMs);
+  // A version-16 or 17 sound's own effect, which becomes a layer once the post's length is known.
+  const soundEffects: { heard: EditMusic; effect: string; effectSettings?: Record<string, number> }[] = [];
   const readMusic = (m: any): EditMusic => {
     const musicInMs = Math.max(0, num(m.inMs, 0));
     const musicStartMs = Math.max(0, num(m.startMs, 0));
     const speed = normaliseSpeed(num(m.speed, 1));
-    const effect = normaliseSoundEffectId(m.effect);
-    const effectSettings = normaliseSoundEffectSettings(effect, m.effectSettings);
-    return {
+    const sound: EditMusic = {
       uri: String(m.uri),
       fileName: String(m.fileName ?? 'Music'),
       sourceDurationMs: Math.max(0, num(m.sourceDurationMs, 0)),
@@ -1927,10 +1953,15 @@ export function normaliseManifest(input: unknown): EditManifest {
       fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
       // The same rule, for a sound played at its own speed.
       ...(speed !== 1 ? { speed } : {}),
-      // And for a sound played as it is, or through an effect whose sliders were never moved.
-      ...(effect ? { effect } : {}),
-      ...(effectSettings ? { effectSettings } : {}),
     };
+    const effect = soundEffectPreset(m.effect);
+    if (!effect) return sound;
+    soundEffects.push({ heard: sound, effect: effect.id, effectSettings: normaliseSoundEffectSettings(effect.id, m.effectSettings) });
+    // Slow + reverb's slowness was the sound's speed played as a record. The layer takes it over and
+    // plays from the sound's start for as long as it was heard, so the sound goes back to 1x.
+    if (!effect.speed) return sound;
+    const { speed: _slowness, ...atItsOwnSpeed } = sound;
+    return atItsOwnSpeed;
   };
   const music: EditMusic | null = raw['music'] ? readMusic(raw['music']) : null;
 
@@ -1978,6 +2009,11 @@ export function normaliseManifest(input: unknown): EditManifest {
     }
   }
 
+  const audioEffects = normaliseAudioEffectLayers([
+    ...(Array.isArray(raw['audioEffects']) ? raw['audioEffects'] : []),
+    ...soundEffectLayers(soundEffects, totalDurationMs({ clips, videoTracks, durationMs: Math.max(0, num(raw['durationMs'], 0)) })),
+  ]);
+
   return {
     version: MANIFEST_VERSION,
     clips,
@@ -2001,6 +2037,7 @@ export function normaliseManifest(input: unknown): EditManifest {
     overlays,
     music,
     ...(audioTracks.length > 0 ? { audioTracks } : {}),
+    ...(audioEffects.length > 0 ? { audioEffects } : {}),
     voiceovers: voiceovers.sort((a, b) => a.startMs - b.startMs),
     zooms: normaliseZooms(raw['zooms']),
     // Absent is [DEFAULT_OUTPUT], which is the frame every manifest written before version 7 was
@@ -2177,6 +2214,8 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   // never lost by posting the file as it is - and one parked past the end costs no re-encode.
   const totalMs = totalDurationMs(manifest);
   if ((manifest.zooms ?? []).some(zoom => zoomWindow(zoom, totalMs))) return false;
+  // A layer over the clip's own sound changes it, as a zoom changes its picture.
+  if ((manifest.audioEffects ?? []).some(layer => audioEffectWindow(layer, totalMs))) return false;
   return manifest.clips.every(clip => {
     const source = durations.get(clip.clipKey) ?? 0;
     const untrimmed = clip.inMs === 0 && (source === 0 || Math.abs(clip.outMs - source) <= 100);
@@ -2282,6 +2321,123 @@ function normaliseZooms(value: unknown): EditZoom[] {
     if (out.length === MAX_ZOOMS) break;
   }
   return out;
+}
+
+/**
+ * One audio effect layer as a manifest keeps it, or null for one it cannot keep: an effect this
+ * version does not know (dropped, as a transition it does not know is: no engine could play it), or a
+ * window under [MIN_LAYER_MS]. Times in whole milliseconds, the sliders and the Slow as each is
+ * stored. Where it may sit among the others is [normaliseAudioEffectLayers]'s, which knows them.
+ */
+export function normaliseAudioEffect(value: unknown, fallbackId: string): EditAudioEffect | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const preset = soundEffectPreset(raw['effect']);
+  if (!preset) return null;
+  const startMs = Math.max(0, Math.round(num(raw['startMs'], 0)));
+  const endMs = Math.round(num(raw['endMs'], 0));
+  if (endMs - startMs < MIN_LAYER_MS) return null;
+  const effectSettings = normaliseSoundEffectSettings(preset.id, raw['effectSettings']);
+  const speed = normaliseAudioEffectSpeed(preset.id, raw['speed']);
+  return {
+    id: typeof raw['id'] === 'string' && raw['id'] ? raw['id'] : fallbackId,
+    startMs,
+    endMs,
+    effect: preset.id,
+    ...(effectSettings ? { effectSettings } : {}),
+    ...(speed !== undefined ? { speed } : {}),
+  };
+}
+
+/**
+ * A layer's Slow as a manifest keeps it ([EditAudioEffect.speed]): held to its effect's range, in
+ * hundredths as the slider moves it, or `undefined` - the absent key - at the effect's default, for a
+ * value that is not a number, and for an effect that does not slow.
+ */
+export function normaliseAudioEffectSpeed(effectId: unknown, value: unknown): number | undefined {
+  const slow = soundEffectPreset(effectId)?.speed;
+  if (!slow || typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const speed = Math.round(clamp(value, slow.min, slow.max) * 100) / 100;
+  return speed === slow.default ? undefined : speed;
+}
+
+/** How slow a layer plays what it covers: its own Slow, its effect's default, or 1 for one that does not slow. */
+export function audioEffectSpeed(layer: Pick<EditAudioEffect, 'effect' | 'speed'>): number {
+  const slow = soundEffectPreset(layer.effect)?.speed;
+  return slow ? (normaliseAudioEffectSpeed(layer.effect, layer.speed) ?? slow.default) : 1;
+}
+
+/**
+ * Stored layers made into the list [EditManifest.audioEffects] promises: sorted, one effect at a time,
+ * at most [MAX_AUDIO_EFFECTS]. Ids are made unique (the clip `~` idiom), and an overlap is resolved by
+ * starting the later layer where the earlier one ends - dropping it if what is left is under
+ * [MIN_LAYER_MS]. Not cut to the post's length, for the zooms' reason: a layer past the end is not
+ * heard ([audioEffectWindow]) and comes back when the end does.
+ */
+export function normaliseAudioEffectLayers(value: readonly unknown[]): EditAudioEffect[] {
+  const used = new Set<string>();
+  const read: EditAudioEffect[] = [];
+  value.forEach((raw, i) => {
+    const layer = normaliseAudioEffect(raw, `afx-${i}`);
+    if (!layer) return;
+    let id = layer.id;
+    while (used.has(id)) id = `${id}~`;
+    used.add(id);
+    read.push(id === layer.id ? layer : { ...layer, id });
+  });
+  read.sort((a, b) => a.startMs - b.startMs);
+  const out: EditAudioEffect[] = [];
+  for (const layer of read) {
+    const prev = out[out.length - 1];
+    const startMs = prev ? Math.max(layer.startMs, prev.endMs) : layer.startMs;
+    if (layer.endMs - startMs < MIN_LAYER_MS) continue;
+    out.push(startMs === layer.startMs ? layer : { ...layer, startMs });
+    if (out.length === MAX_AUDIO_EFFECTS) break;
+  }
+  return out;
+}
+
+/**
+ * The part of a layer the post plays, or `null` when none of it does - one past the end, kept and not
+ * heard, as a zoom is ([zoomWindow]). The one test [isUntouched] and the wire both make.
+ */
+export function audioEffectWindow(layer: Pick<EditAudioEffect, 'startMs' | 'endMs'>, totalMs: number): { startMs: number; endMs: number } | null {
+  const startMs = Math.max(0, layer.startMs);
+  const endMs = Math.min(layer.endMs, totalMs);
+  if (!(startMs < totalMs - 1) || !(endMs > startMs)) return null;
+  return { startMs, endMs };
+}
+
+/**
+ * Version 17's effects on sounds as layers of their own: each over where its sound was heard, with
+ * its sliders, and slow + reverb with the sound's speed as its Slow - [normaliseManifest] puts the
+ * sound back to 1x, and the layer playing from its start at that speed for that long plays all of it,
+ * as the sound played before. What else is under the layer now goes through it too.
+ */
+function soundEffectLayers(sounds: readonly { heard: EditMusic; effect: string; effectSettings?: Record<string, number> }[], totalMs: number): EditAudioEffect[] {
+  return sounds.map(({ heard, effect, effectSettings }, i) => {
+    const { startMs, endMs } = heardWindow(heard, totalMs);
+    const speed = soundEffectPreset(effect)?.speed ? normaliseAudioEffectSpeed(effect, heard.speed ?? 1) : undefined;
+    return {
+      id: `afx-sound-${i}`,
+      startMs,
+      endMs,
+      effect,
+      ...(effectSettings ? { effectSettings } : {}),
+      ...(speed !== undefined ? { speed } : {}),
+    };
+  });
+}
+
+/** Where a sound is heard on the post: `musicWindow`'s rule, which this module cannot import from the ops. */
+function heardWindow(sound: EditMusic, totalMs: number): { startMs: number; endMs: number } {
+  const out = sound.outMs > 0 ? sound.outMs : sound.sourceDurationMs;
+  const section = out > 0 ? Math.max(0, out - sound.inMs) : 0;
+  const phase = section > 0 ? ((Math.round(sound.phaseMs ?? 0) % section) + section) % section : 0;
+  const startMs = Math.min(sound.startMs, totalMs);
+  const stopMs = sound.endMs > 0 ? Math.min(sound.endMs, totalMs) : totalMs;
+  const endMs = sound.loop || section === 0 ? stopMs : Math.min(stopMs, sound.startMs + (section - phase) / (sound.speed ?? 1));
+  return { startMs, endMs: Math.max(startMs, endMs) };
 }
 
 /** A stored fit, or `undefined` for anything else - including the absence that means "the post's". */

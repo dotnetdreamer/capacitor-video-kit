@@ -44,9 +44,10 @@ import kotlin.math.max
  * The shape is one video sequence per layer - every extra layer's clips, top layer first, then the
  * base track's - then, when the post has transitions, one more holding the outgoing tail of every
  * one of them under the base, plus an audio-only sequence for each music clip and one for
- * voiceovers. Concurrent sequences are how Media3 mixes and how it composites, so neither
- * "background music over the clips' own sound" nor "a second video over the first" needs a mixer
- * of ours. Why the base comes after the layers rather than first is written out in
+ * voiceovers, and one of silence when audio effect windows would outlast the sound
+ * ([RenderPlan.silenceToEnd]). Concurrent sequences are how Media3 mixes and how it composites,
+ * so neither "background music over the clips' own sound" nor "a second video over the first"
+ * needs a mixer of ours. Why the base comes after the layers rather than first is written out in
  * [toComposition], where the order is decided.
  *
  * Nothing here is written for a particular NUMBER of layers: the list the plan hands over is what
@@ -190,6 +191,9 @@ object CompositionBuilder {
         plan.music?.let { sequences += musicSequence(it) }
         for (clip in plan.musicTracks) sequences += musicSequence(clip)
         plan.voice?.let { sequences += voiceSequence(it) }
+        // After every sound, so silence never sets the mix's format: Media3 takes it from the first
+        // sequence with an audio track (`getIndexForPrimarySequence` in TransformerInternal).
+        if (plan.silenceToEnd) sequences += silenceSequence(plan.totalUs)
 
         val compositionEffects = ArrayList<Effect>()
         // A no-op when every item already arrives at the output size, and a safety net when one
@@ -213,8 +217,16 @@ object CompositionBuilder {
             compositionEffects += OverlayEffect(ImmutableList.copyOf(chunk))
         }
 
+        // The audio effect layers work on the FINISHED mix, so they are the composition's and no item's
+        // (see [AudioEffectWindowsProcessor]); a new one for every call, as a relaxed retry builds the
+        // composition again. None without a window, which is the composition Media3 was always handed.
+        val audioProcessors: List<AudioProcessor> = if (plan.audioEffects.isEmpty()) {
+            ImmutableList.of()
+        } else {
+            ImmutableList.of(AudioEffectWindowsProcessor(plan.audioEffects))
+        }
         val builder = Composition.Builder(sequences)
-            .setEffects(Effects(/* audioProcessors= */ ImmutableList.of(), compositionEffects))
+            .setEffects(Effects(audioProcessors, compositionEffects))
         // Asked once, here, and never per frame: a spec with no extra layers and no transitions gets
         // no compositor settings object at all, which is the composition Media3 has been handed all
         // along. The compositor is given the layers in REGISTRATION order, because the input id it
@@ -728,6 +740,16 @@ object CompositionBuilder {
         }
         return builder.build()
     }
+
+    /**
+     * Silence the length of the post, under a mix whose sound would stop before its audio effect
+     * windows have done ([RenderPlan.silenceToEnd]): one gap on a sequence that declares audio, which
+     * Media3 serves as silence generated from 0 (`AudioGraphInput` starts a silent item at 0), as it
+     * serves a music sequence's lead. The mixer ends at the end of its longest input, so this one
+     * carries the mix, and the windows on it, to the end of the post.
+     */
+    private fun silenceSequence(totalUs: Long): EditedMediaItemSequence =
+        EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO)).addGap(totalUs).build()
 
     private fun voiceSequence(plan: RenderPlan.VoicePlan): EditedMediaItemSequence {
         val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))

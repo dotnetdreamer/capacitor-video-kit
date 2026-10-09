@@ -12,11 +12,11 @@
 ## The MCP server
 
 An agent that can call these tools can build a post: lay out the base track, trim and split it, put
-a second video over it, add text, stickers, photos and effects, place sounds and voiceover, choose
-the frame. What it produces is an `EditManifest`, the same document the editor's own UI produces,
-because the tools call the same functions the UI's buttons call. Hand the result to `<ve-editor>`
-through its `manifest` property, or straight to `toComposeSpec`, and it renders exactly as an edit
-made by dragging.
+a second video over it, add text, stickers, photos and effects, place sounds and voiceover and put
+them through audio effects, choose the frame. What it produces is an `EditManifest`, the same
+document the editor's own UI produces, because the tools call the same functions the UI's buttons
+call. Hand the result to `<ve-editor>` through its `manifest` property, or straight to
+`toComposeSpec`, and it renders exactly as an edit made by dragging.
 
 It is **off unless it is asked for**, and the section below on leaving it out is the important half
 of this one if you are shipping an app.
@@ -29,7 +29,7 @@ of this one if you are shipping an app.
 | `manifest_edit` | Applies a list of edit ops in order, all or nothing |
 | `manifest_inspect` | Reads a post back: durations, rows, layers, sound, and the colour ops the render will actually apply |
 | `manifest_validate` | Runs a manifest through the editor's own normaliser and says what had to change |
-| `catalog_list` | The filter, effect, layout and text style ids, the frames on offer, every edit op's parameters, and the limits |
+| `catalog_list` | The filter, effect, audio effect, layout and text style ids, the frames on offer, every edit op's parameters, and the limits |
 
 Three of the five change nothing and say so through MCP's `readOnlyHint`.
 
@@ -54,14 +54,8 @@ not keep - a section or a stop under 100 ms - is refused the same way, with the 
 with only a `startMs` moves the stop along with the sound, as the editor's Move does; both fades
 run from 0 to 10000 ms; and a sound's `speed` runs from 0.25 to 4, as a clip's does, a slower one
 sent to `patchAudio` on its own stopping where the next sound on its lane begins, as the editor's
-Speed sheet does; a sound's `effect` is `"megaphone"`, `"slowReverb"` or `"none"`, anything else
-refused with the list, and one word of a line gets it by being cut out with `splitAudio` and patched
-on its own. `effectSettings` moves an effect's sliders, 0 to 100 each - the megaphone's `intensity`
-and `tone`, slow + reverb's `reverb` and `room` - and a slider the effect has not got is refused with
-the ones it has. An effect put on through a patch comes on as the editor's sheet puts it on: its
-sliders at their defaults unless the patch sets them, and slow + reverb's slower speed (0.8x, played
-as a record plays it, lower as well as slower) unless the patch sends a speed; taking it off puts
-the speed back to 1x.
+Speed sheet does. A sound has no effect of its own: a sound op that sends `effect` or
+`effectSettings` is refused, and the refusal says where effects went.
 Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
 one lane play one after another and lanes play together, so a sound that would overlap another goes
 on a lane of its own, and one the agent puts on a named lane where it does not fit is refused. A
@@ -70,6 +64,26 @@ editor. `splitAudio` cuts a sound in two on its lane and `duplicateAudio` puts a
 it, as the audio row's Cut and Duplicate do; a cut that leaves a half under 100 ms is refused.
 `reorderAudio` carries a sound to another place in its lane's order, as holding it on the timeline
 does: the sounds it passes close up behind it, each keeping its length and settings.
+
+Audio effects are layers over the post's time, as they are in the editor: from a layer's `startMs`
+to its `endMs`, everything heard - every clip's own sound, every sound on every lane, every
+voiceover - goes through its effect, one effect at a time. `addAudioEffect` puts one down with its
+`effect`, `"megaphone"` or `"slowReverb"`, anything else refused with the list, running to the end
+of the post unless it is given an `endMs`. Like `addZoom`, it is shortened to the room before the
+next layer and the end of the post, and refused, naming what is in the way, when less than 100 ms
+fits where it starts. One word of a line gets a megaphone from a layer over just that word.
+`effectSettings` moves the effect's sliders, 0 to 100 each - the megaphone's `intensity` and `tone`,
+slow + reverb's `reverb` and `room` - and a slider the effect has not got is refused with the ones it
+has. `speed` is slow + reverb's Slow, 0.5 to 1 and 0.8 unless it is set: what the layer covers plays
+from its start that much slower, and lower, as a record does, and at the layer's end the sound
+jumps to where the post is, skipping what the slowing left unplayed. Any other effect refuses a
+`speed`. `patchAudioEffect` changes a layer as the sheet does - another effect comes on at its
+defaults, and the sliders it names move while the rest stay where they are - and moves or trims its
+window between the layers either side, as a drag on the timeline does: a window that would overlap
+or pass another layer is refused naming it, and one running past the end of the post ends there.
+`splitAudioEffect` cuts a layer in two, `duplicateAudioEffect` puts a copy straight after it and
+`removeAudioEffect` takes it away. A draft saved when effects were a sound's own opens with each one
+as a layer over where its sound was heard.
 
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different

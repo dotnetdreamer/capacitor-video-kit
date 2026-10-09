@@ -1,37 +1,51 @@
 import { describe, expect, it } from 'vitest';
 
-import { toComposeSpec } from './compose';
-import { MANIFEST_VERSION, defaultClipEdit, emptyManifest, normaliseManifest, type EditAudioClip, type EditManifest } from './edit-manifest';
+import { toComposeSoundSpec, toComposeSpec } from './compose';
+import {
+  MANIFEST_VERSION,
+  MIN_LAYER_MS,
+  audioEffectSpeed,
+  defaultClipEdit,
+  emptyManifest,
+  isUntouched,
+  normaliseManifest,
+  type EditAudioClip,
+  type EditAudioEffect,
+  type EditManifest,
+} from './edit-manifest';
 import {
   addAudioClip,
-  duplicateAudioClip,
+  addAudioEffect,
+  audioEffectAt,
+  cutPostTo,
+  deleteAudioEffect,
+  duplicateAudioEffect,
   findAudioClip,
-  joinContinuousAudio,
-  musicAsAudioLane,
-  musicSpeed,
-  patchAudioClip,
-  patchMusic,
-  replaceAudioClip,
-  setAudioEffect,
   setAudioEffectSetting,
-  setAudioSpeed,
-  setMusicEffect,
-  setMusicEffectSetting,
-  splitAudioClipAt,
+  setAudioEffectWindow,
+  splitAudioEffect,
+  updateAudioEffect,
 } from './edit-ops';
 import type { RasterContext } from './raster-context';
 import { soundEffectPreset, soundEffectSteps } from './sound-effects';
 
 /*
- * A sound's effect in the edit: an id on the sound and nothing else, kept by every op that keeps the
- * sound, and turned into the effect's steps on the wire. The steps themselves are
- * `sound-effects.unit.test.ts`'s.
+ * The audio effect layers in the edit: windows of the post with an effect id, its sliders and, for an
+ * effect that slows, its Slow - kept one at a time on one row, moved and cut like a zoom, and turned
+ * into windows of steps on the wire. The steps are `sound-effects.unit.test.ts`'s and the arithmetic
+ * over the mix `audio-effect-windows.unit.test.ts`'s.
  */
+
+const TOTAL = 20_000;
 
 const post = (): EditManifest => ({
   ...emptyManifest(),
-  clips: [defaultClipEdit('video', 20_000, 'seg-1')],
+  clips: [defaultClipEdit('video', TOTAL, 'seg-1')],
 });
+
+const layer = (id: string, startMs: number, endMs: number, over: Partial<EditAudioEffect> = {}): EditAudioEffect => ({ id, startMs, endMs, effect: 'megaphone', ...over });
+
+const withLayers = (...layers: EditAudioEffect[]): EditManifest => ({ ...post(), audioEffects: layers });
 
 const sound = (id: string, startMs: number, over: Partial<EditAudioClip> = {}): EditAudioClip => ({
   id,
@@ -48,228 +62,240 @@ const sound = (id: string, startMs: number, over: Partial<EditAudioClip> = {}): 
   ...over,
 });
 
-/** One five-second sound `a` at 1 s, alone on lane `at-1`. */
-const withSound = (over: Partial<EditAudioClip> = {}): EditManifest => addAudioClip(post(), sound('a', 1000, over), 'at-1')!;
-
-describe('a sound’s effect in the manifest', () => {
-  it('is read back as it was saved, sliders and all, and is version 17', () => {
-    const saved = { ...withSound({ effect: 'megaphone', effectSettings: { intensity: 80 } }), music: sound('m', 0, { effect: 'megaphone' }) };
+describe('an audio effect layer in the manifest', () => {
+  it('is read back as it was saved, sliders and Slow and all, and is version 18', () => {
+    const saved = withLayers(layer('a', 1000, 4000, { effectSettings: { intensity: 80 } }), layer('b', 5000, 9000, { effect: 'slowReverb', speed: 0.6, effectSettings: { room: 90 } }));
     const read = normaliseManifest(JSON.parse(JSON.stringify(saved)));
-    expect(MANIFEST_VERSION).toBe(17);
-    expect(read.music?.effect).toBe('megaphone');
-    expect('effectSettings' in read.music!).toBe(false);
-    expect(findAudioClip(read, 'a')).toMatchObject({ effect: 'megaphone', effectSettings: { intensity: 80 } });
+    expect(MANIFEST_VERSION).toBe(18);
+    expect(read.audioEffects).toEqual(saved.audioEffects);
   });
 
-  it('keeps only the sliders the effect has, moved off their defaults, and none without an effect', () => {
-    const odd = withSound({ effect: 'megaphone', effectSettings: { intensity: 50, tone: 130, room: 9 } });
-    expect(findAudioClip(normaliseManifest(JSON.parse(JSON.stringify(odd))), 'a')?.effectSettings).toEqual({ tone: 100 });
-    const stray = withSound({ effectSettings: { intensity: 80 } });
-    expect('effectSettings' in findAudioClip(normaliseManifest(JSON.parse(JSON.stringify(stray))), 'a')!).toBe(false);
+  it('is no key at all for a post with none, so it is stored as it always was', () => {
+    expect('audioEffects' in normaliseManifest(JSON.parse(JSON.stringify(post())))).toBe(false);
+    expect('audioEffects' in normaliseManifest({ ...post(), audioEffects: [] })).toBe(false);
   });
 
-  it('is no key at all for none, so a sound with none reads back as it always did', () => {
-    const read = normaliseManifest(JSON.parse(JSON.stringify(withSound())));
-    expect('effect' in findAudioClip(read, 'a')!).toBe(false);
+  it('keeps only sliders moved off their defaults, and a Slow only for an effect that slows, off its own', () => {
+    const read = normaliseManifest(
+      withLayers(
+        layer('a', 0, 1000, { effectSettings: { intensity: 50, tone: 120, stray: 3 } }),
+        layer('b', 1000, 2000, { speed: 0.6 }),
+        layer('c', 2000, 3000, { effect: 'slowReverb', speed: 0.8 }),
+        layer('d', 3000, 4000, { effect: 'slowReverb', speed: 0.2 }),
+        layer('e', 4000, 5000, { effect: 'slowReverb', speed: 0.734 }),
+      ),
+    );
+    const [a, b, c, d, e] = read.audioEffects!;
+    expect(a!.effectSettings).toEqual({ tone: 100 });
+    expect('speed' in b!).toBe(false);
+    expect('speed' in c!).toBe(false);
+    expect(d!.speed).toBe(0.5);
+    expect(e!.speed).toBe(0.73);
   });
 
-  it('drops an effect this version cannot play rather than keep a sound it would play differently', () => {
-    const read = normaliseManifest(JSON.parse(JSON.stringify(withSound({ effect: 'echo', effectSettings: { feedback: 70 } }))));
-    expect('effect' in findAudioClip(read, 'a')!).toBe(false);
-    expect('effectSettings' in findAudioClip(read, 'a')!).toBe(false);
+  it('drops a layer whose effect this version cannot play, and one too short to hear', () => {
+    const read = normaliseManifest(withLayers(layer('a', 0, 1000, { effect: 'robot' }), layer('b', 2000, 2000 + MIN_LAYER_MS - 1), layer('c', 3000, 4000)));
+    expect(read.audioEffects!.map(one => one.id)).toEqual(['c']);
+  });
+
+  it('keeps one effect at a time: sorted, a later layer starting where the one before it ends', () => {
+    const read = normaliseManifest(withLayers(layer('late', 6000, 9000), layer('early', 1000, 7000), layer('inside', 2000, 6500), layer('dup', 9500, 9900), layer('dup', 9900, 12_000)));
+    expect(read.audioEffects!.map(({ id, startMs, endMs }) => [id, startMs, endMs])).toEqual([
+      ['early', 1000, 7000],
+      ['late', 7000, 9000],
+      ['dup', 9500, 9900],
+      ['dup~', 9900, 12_000],
+    ]);
+  });
+
+  it('keeps a layer past the end of the post, which is not heard and comes back when the end does', () => {
+    const read = normaliseManifest(withLayers(layer('a', 25_000, 30_000)));
+    expect(read.audioEffects).toHaveLength(1);
+  });
+
+  it('counts as an edit, so a clip with a layer over it is rendered rather than posted as it is', () => {
+    const untouched = (m: EditManifest) => isUntouched(m, new Map([['video', TOTAL]]), m.output.width / m.output.height);
+    expect(untouched(post())).toBe(true);
+    expect(untouched(withLayers(layer('a', 1000, 4000)))).toBe(false);
+    // A layer the post no longer reaches changes nothing.
+    expect(untouched(withLayers(layer('a', 25_000, 30_000)))).toBe(true);
   });
 });
 
-describe('putting a sound through an effect', () => {
-  it('sets the effect on that sound alone, and takes it off again', () => {
-    const two = addAudioClip(withSound(), sound('b', 8000), 'at-1', 'at-1')!;
-    const on = setAudioEffect(two, 'a', 'megaphone');
-    expect(findAudioClip(on, 'a')?.effect).toBe('megaphone');
-    expect(findAudioClip(on, 'b')?.effect).toBeUndefined();
-    const off = setAudioEffect(on, 'a', null);
-    expect('effect' in findAudioClip(off, 'a')!).toBe(false);
+describe('a version 17 draft, whose effects were on its sounds', () => {
+  const v17 = (manifest: EditManifest, sounds: Record<string, unknown>[], music: Record<string, unknown> | null = null): unknown => ({
+    ...JSON.parse(JSON.stringify(manifest)),
+    version: 17,
+    music,
+    audioTracks: [{ id: 'at-1', clips: sounds }],
   });
 
-  it('changes nothing else about the sound', () => {
-    const before = withSound({ speed: 1.5, fadeInMs: 200, loop: true, endMs: 6000 });
-    const after = setAudioEffect(before, 'a', 'megaphone');
-    const { effect, ...rest } = findAudioClip(after, 'a')!;
-    expect(effect).toBe('megaphone');
-    expect(rest).toEqual(findAudioClip(before, 'a'));
+  it('reads a megaphone on a sound as a layer over where the sound is heard', () => {
+    const read = normaliseManifest(v17(post(), [{ ...sound('a', 1000), effect: 'megaphone', effectSettings: { intensity: 80 } }]));
+    expect(findAudioClip(read, 'a')).not.toHaveProperty('effect');
+    expect(findAudioClip(read, 'a')).not.toHaveProperty('effectSettings');
+    expect(read.audioEffects).toEqual([{ id: 'afx-sound-0', startMs: 1000, endMs: 6000, effect: 'megaphone', effectSettings: { intensity: 80 } }]);
+  });
+
+  it('puts a slow + reverb sound back to 1x and makes its slowness the layer’s, over the time it was heard', () => {
+    const read = normaliseManifest(v17(post(), [{ ...sound('a', 1000, { speed: 0.5 }), effect: 'slowReverb' }]));
+    expect(findAudioClip(read, 'a')).not.toHaveProperty('speed');
+    // Five seconds of sound slowed to half was heard for ten, which the layer plays from its start.
+    expect(read.audioEffects).toEqual([{ id: 'afx-sound-0', startMs: 1000, endMs: 11_000, effect: 'slowReverb', speed: 0.5 }]);
+  });
+
+  it('keeps a sound’s own speed under a megaphone, which was never the effect’s', () => {
+    const read = normaliseManifest(v17(post(), [{ ...sound('a', 1000, { speed: 2 }), effect: 'megaphone' }]));
+    expect(findAudioClip(read, 'a')!.speed).toBe(2);
+    expect(read.audioEffects![0]).toMatchObject({ startMs: 1000, endMs: 3500 });
+  });
+
+  it('reads the post’s one music the same way, and keeps the layers of two sounds apart', () => {
+    const read = normaliseManifest(v17(post(), [{ ...sound('a', 2000, { loop: true, endMs: 8000 }), effect: 'megaphone' }], { ...sound('m', 0, { speed: 0.8 }), effect: 'slowReverb' }));
+    expect(read.music).not.toHaveProperty('effect');
+    expect(read.audioEffects!.map(({ startMs, endMs, effect }) => [startMs, endMs, effect])).toEqual([
+      [0, 6250, 'slowReverb'],
+      [6250, 8000, 'megaphone'],
+    ]);
+  });
+});
+
+describe('the layers as the editor changes them', () => {
+  it('adds a layer shortened to the room before the next one and the end of the post', () => {
+    const one = addAudioEffect(withLayers(layer('b', 8000, 9000)), layer('a', 2000, 20_000), TOTAL)!;
+    expect(one.audioEffects!.map(({ id, startMs, endMs }) => [id, startMs, endMs])).toEqual([
+      ['a', 2000, 8000],
+      ['b', 8000, 9000],
+    ]);
+    expect(addAudioEffect(post(), layer('a', 18_000, 40_000), TOTAL)!.audioEffects![0]!.endMs).toBe(TOTAL);
+  });
+
+  it('refuses a layer with no room, one inside another, a taken id and an effect this version has not got', () => {
+    const edit = withLayers(layer('b', 8000, 9000));
+    expect(addAudioEffect(edit, layer('a', 8500, 12_000), TOTAL)).toBeNull();
+    expect(addAudioEffect(edit, layer('a', 8000 - MIN_LAYER_MS + 1, 12_000), TOTAL)).toBeNull();
+    expect(addAudioEffect(edit, layer('b', 1000, 2000), TOTAL)).toBeNull();
+    expect(addAudioEffect(edit, layer('a', 1000, 2000, { effect: 'robot' }), TOTAL)).toBeNull();
+  });
+
+  it('finds the layer under a moment, its end not included', () => {
+    const edit = withLayers(layer('a', 1000, 2000), layer('b', 2000, 3000));
+    expect(audioEffectAt(edit, 1000)?.id).toBe('a');
+    expect(audioEffectAt(edit, 2000)?.id).toBe('b');
+    expect(audioEffectAt(edit, 3000)).toBeNull();
+  });
+
+  it('starts another effect at its defaults, sliders and Slow alike', () => {
+    const edit = withLayers(layer('a', 1000, 4000, { effect: 'slowReverb', speed: 0.6, effectSettings: { room: 90 } }));
+    expect(updateAudioEffect(edit, 'a', { effect: 'megaphone' }).audioEffects![0]).toEqual(layer('a', 1000, 4000));
+    expect(audioEffectSpeed(updateAudioEffect(withLayers(layer('a', 0, 1000)), 'a', { effect: 'slowReverb' }).audioEffects![0]!)).toBe(0.8);
+  });
+
+  it('moves a slider, storing nothing for one back at its default, and nothing for one the effect has not got', () => {
+    const edit = withLayers(layer('a', 1000, 4000));
+    const harder = setAudioEffectSetting(edit, 'a', 'intensity', 90);
+    expect(harder.audioEffects![0]!.effectSettings).toEqual({ intensity: 90 });
+    expect(setAudioEffectSetting(harder, 'a', 'intensity', 50).audioEffects![0]).not.toHaveProperty('effectSettings');
+    expect(setAudioEffectSetting(edit, 'a', 'room', 90)).toBe(edit);
   });
 
   it('hands back the same edit when nothing changes, so no empty undo step is made', () => {
-    const on = setAudioEffect(withSound(), 'a', 'megaphone');
-    expect(setAudioEffect(on, 'a', 'megaphone')).toBe(on);
-    const plain = withSound();
-    expect(setAudioEffect(plain, 'a', null)).toBe(plain);
-    expect(setAudioEffect(plain, 'a', 'echo')).toBe(plain);
-    expect(setAudioEffect(plain, 'missing', 'megaphone')).toBe(plain);
+    const edit = withLayers(layer('a', 1000, 4000, { effect: 'slowReverb', speed: 0.6 }));
+    expect(updateAudioEffect(edit, 'a', { effect: 'slowReverb' })).toBe(edit);
+    expect(updateAudioEffect(edit, 'a', { speed: 0.6 })).toBe(edit);
+    expect(updateAudioEffect(edit, 'nope', { speed: 0.7 })).toBe(edit);
+    expect(updateAudioEffect(edit, 'a', { speed: 0.7 }).audioEffects![0]!.speed).toBe(0.7);
   });
 
-  it('works on the post’s one music too, and through a plain patch', () => {
-    const music = { ...post(), music: sound('m', 0) };
-    expect(setMusicEffect(music, 'megaphone').music?.effect).toBe('megaphone');
-    expect('effect' in setMusicEffect(setMusicEffect(music, 'megaphone'), null).music!).toBe(false);
-    expect('effect' in patchMusic(music, { effect: 'none' }).music!).toBe(false);
-    expect(patchAudioClip(withSound(), 'a', { effect: 'megaphone' })).not.toBe(withSound());
-  });
-});
-
-describe('an effect’s sliders', () => {
-  it('moves one slider on one sound, and stores nothing for a slider back at its default', () => {
-    const on = setAudioEffect(withSound(), 'a', 'megaphone');
-    const harder = setAudioEffectSetting(on, 'a', 'intensity', 80);
-    expect(findAudioClip(harder, 'a')?.effectSettings).toEqual({ intensity: 80 });
-    const both = setAudioEffectSetting(harder, 'a', 'tone', 20);
-    expect(findAudioClip(both, 'a')?.effectSettings).toEqual({ intensity: 80, tone: 20 });
-    const back = setAudioEffectSetting(setAudioEffectSetting(both, 'a', 'intensity', 50), 'a', 'tone', 50);
-    expect('effectSettings' in findAudioClip(back, 'a')!).toBe(false);
+  it('moves and retimes a layer between its neighbours, a whole one keeping its length', () => {
+    const edit = withLayers(layer('a', 1000, 3000), layer('b', 5000, 7000), layer('c', 9000, 10_000));
+    const window = (m: EditManifest) => m.audioEffects!.find(one => one.id === 'b')!;
+    expect(window(setAudioEffectWindow(edit, 'b', 4000, 8000, TOTAL))).toMatchObject({ startMs: 4000, endMs: 8000 });
+    expect(window(setAudioEffectWindow(edit, 'b', 2000, 7000, TOTAL))).toMatchObject({ startMs: 3000, endMs: 7000 });
+    expect(window(setAudioEffectWindow(edit, 'b', 5000, 12_000, TOTAL))).toMatchObject({ startMs: 5000, endMs: 9000 });
+    expect(window(setAudioEffectWindow(edit, 'b', 8000, 10_000, TOTAL))).toMatchObject({ startMs: 7000, endMs: 9000 });
+    expect(window(setAudioEffectWindow(edit, 'b', 5000, 5010, TOTAL))).toMatchObject({ startMs: 5000, endMs: 5000 + MIN_LAYER_MS });
   });
 
-  it('hands back the same edit for a slider the effect has not got, or one left where it was', () => {
-    const on = setAudioEffectSetting(setAudioEffect(withSound(), 'a', 'megaphone'), 'a', 'intensity', 80);
-    expect(setAudioEffectSetting(on, 'a', 'intensity', 80)).toBe(on);
-    expect(setAudioEffectSetting(on, 'a', 'intensity', 80.2)).toBe(on);
-    expect(setAudioEffectSetting(on, 'a', 'room', 10)).toBe(on);
-    const plain = withSound();
-    expect(setAudioEffectSetting(plain, 'a', 'intensity', 80)).toBe(plain);
-    expect(setAudioEffectSetting(plain, 'missing', 'intensity', 80)).toBe(plain);
+  it('puts a copy straight after a layer, shortened to the room there is, and none where there is no room', () => {
+    const edit = withLayers(layer('a', 1000, 3000), layer('c', 4000, 5000));
+    expect(duplicateAudioEffect(edit, 'a', 'b', TOTAL)!.audioEffects!.map(({ id, startMs, endMs }) => [id, startMs, endMs])).toEqual([
+      ['a', 1000, 3000],
+      ['b', 3000, 4000],
+      ['c', 4000, 5000],
+    ]);
+    expect(duplicateAudioEffect(withLayers(layer('a', 1000, 3000), layer('c', 3000, 5000)), 'a', 'b', TOTAL)).toBeNull();
   });
 
-  it('is still the same edit after a patch of something else, so no empty undo step is made', () => {
-    const on = setAudioEffectSetting(setAudioEffect(withSound(), 'a', 'megaphone'), 'a', 'tone', 10);
-    expect(patchAudioClip(on, 'a', { volume: 0.8 })).toBe(on);
-    expect(patchAudioClip(on, 'a', { effectSettings: { tone: 10 } })).toBe(on);
+  it('cuts a layer in two, both halves the same effect, and refuses a cut that leaves a sliver', () => {
+    const edit = withLayers(layer('a', 1000, 3000, { effectSettings: { tone: 70 } }));
+    expect(splitAudioEffect(edit, 'a', 2000, 'b')!.audioEffects).toEqual([layer('a', 1000, 2000, { effectSettings: { tone: 70 } }), layer('b', 2000, 3000, { effectSettings: { tone: 70 } })]);
+    expect(splitAudioEffect(edit, 'a', 1050, 'b')).toBeNull();
+    expect(splitAudioEffect(edit, 'a', 3500, 'b')).toBeNull();
   });
 
-  it('starts every effect at its defaults, the sliders of the one before going with it', () => {
-    const tuned = setAudioEffectSetting(setAudioEffect(withSound(), 'a', 'megaphone'), 'a', 'intensity', 90);
-    expect('effectSettings' in findAudioClip(setAudioEffect(tuned, 'a', 'slowReverb'), 'a')!).toBe(false);
-    expect('effectSettings' in findAudioClip(setAudioEffect(tuned, 'a', null), 'a')!).toBe(false);
+  it('deletes a layer, and the key with the last one', () => {
+    const edit = withLayers(layer('a', 1000, 3000), layer('b', 4000, 5000));
+    expect(deleteAudioEffect(edit, 'a').audioEffects!.map(one => one.id)).toEqual(['b']);
+    expect('audioEffects' in deleteAudioEffect(deleteAudioEffect(edit, 'a'), 'b')).toBe(false);
+    expect(deleteAudioEffect(edit, 'nope')).toBe(edit);
   });
 
-  it('works on the post’s one music too', () => {
-    const music = setMusicEffect({ ...post(), music: sound('m', 0) }, 'slowReverb');
-    expect(setMusicEffectSetting(music, 'room', 80).music?.effectSettings).toEqual({ room: 80 });
-    expect(setMusicEffectSetting({ ...post(), music: null }, 'room', 80).music).toBeNull();
+  it('is cut with the post, as a zoom is', () => {
+    const edit = { ...withLayers(layer('a', 1000, 6000), layer('b', 8000, 9000)), clips: [defaultClipEdit('video', TOTAL, 'seg-1')] };
+    expect(cutPostTo(edit, 7000).audioEffects).toEqual([layer('a', 1000, 6000)]);
+    expect(cutPostTo(edit, 4000).audioEffects).toEqual([layer('a', 1000, 4000)]);
+  });
+
+  it('is moved by no clip or sound op: it belongs to the post’s time', () => {
+    const edit = addAudioClip(withLayers(layer('a', 1000, 3000)), sound('s', 2000), 'at-1')!;
+    expect(edit.audioEffects).toEqual([layer('a', 1000, 3000)]);
   });
 });
 
-describe('slow + reverb and the sound’s speed', () => {
-  it('slows the sound to its own speed as it goes on, and puts it back to 1x as it comes off', () => {
-    const slowed = setAudioEffect(withSound(), 'a', 'slowReverb');
-    expect(findAudioClip(slowed, 'a')).toMatchObject({ effect: 'slowReverb', speed: 0.8 });
-    expect('speed' in findAudioClip(setAudioEffect(slowed, 'a', null), 'a')!).toBe(false);
-    // Another effect in its place is the slowness coming off as well.
-    expect(findAudioClip(setAudioEffect(slowed, 'a', 'megaphone'), 'a')).not.toHaveProperty('speed');
-  });
-
-  it('leaves a sound already slower than 1x at its own speed, and slows down one sped up', () => {
-    expect(musicSpeed(findAudioClip(setAudioEffect(withSound({ speed: 0.6 }), 'a', 'slowReverb'), 'a')!)).toBe(0.6);
-    expect(musicSpeed(findAudioClip(setAudioEffect(withSound({ speed: 1.5 }), 'a', 'slowReverb'), 'a')!)).toBe(0.8);
-  });
-
-  it('leaves the speed of a sound alone for an effect that does not hold it', () => {
-    const fast = withSound({ speed: 1.5 });
-    expect(musicSpeed(findAudioClip(setAudioEffect(fast, 'a', 'megaphone'), 'a')!)).toBe(1.5);
-    expect(musicSpeed(findAudioClip(setAudioEffect(setAudioEffect(fast, 'a', 'megaphone'), 'a', null), 'a')!)).toBe(1.5);
-  });
-
-  it('stops a slowed sound where the next one on its lane begins, as a slower speed does', () => {
-    // Five seconds at 1 s, and the next at 6.5 s: at 0.8 it would run on to 7.25 s.
-    const two = addAudioClip(withSound(), sound('b', 6500), 'at-1', 'at-1')!;
-    const slowed = setAudioEffect(two, 'a', 'slowReverb');
-    expect(findAudioClip(slowed, 'a')).toMatchObject({ speed: 0.8, endMs: 6500 });
-  });
-
-  it('works on the post’s one music too', () => {
-    const music = setMusicEffect({ ...post(), music: sound('m', 0) }, 'slowReverb');
-    expect(music.music).toMatchObject({ effect: 'slowReverb', speed: 0.8 });
-    expect(setMusicEffect(music, null).music).not.toHaveProperty('speed');
-  });
-});
-
-describe('the effect goes where the sound goes', () => {
-  it('stays on both halves of a cut, sliders and all, which is how one word of a line gets it', () => {
-    const tuned = setAudioEffectSetting(setAudioEffect(withSound(), 'a', 'megaphone'), 'a', 'tone', 20);
-    const cut = splitAudioClipAt(tuned, 'a', 3000, 'a2')!;
-    expect(findAudioClip(cut, 'a')).toMatchObject({ effect: 'megaphone', effectSettings: { tone: 20 } });
-    expect(findAudioClip(cut, 'a2')).toMatchObject({ effect: 'megaphone', effectSettings: { tone: 20 } });
-  });
-
-  it('goes with a copy, onto the lane with the music, and under another file', () => {
-    const on = setAudioEffect(withSound(), 'a', 'megaphone');
-    expect(findAudioClip(duplicateAudioClip(on, 'a', 'copy', 'at-2')!, 'copy')?.effect).toBe('megaphone');
-    const music = musicAsAudioLane({ ...post(), music: sound('m', 0, { effect: 'megaphone' }) }, 'm1', 'at-9')!;
-    expect(findAudioClip(music, 'm1')?.effect).toBe('megaphone');
-    const replaced = replaceAudioClip(on, 'a', { uri: 'file:///other.m4a', fileName: 'other.m4a', sourceDurationMs: 4000 })!;
-    expect(findAudioClip(replaced, 'a')?.effect).toBe('megaphone');
-  });
-
-  it('keeps a word cut out for a megaphone apart from the line either side of it', () => {
-    // A line cut in three, nothing done to it since: played as the one sound it still is.
-    const line = withSound({ outMs: 5000 });
-    const three = splitAudioClipAt(splitAudioClipAt(line, 'a', 2000, 'word')!, 'word', 3000, 'rest')!;
-    const lane = three.audioTracks![0]!.clips;
-    expect(joinContinuousAudio(lane)).toHaveLength(1);
-    // The middle through the megaphone: three sounds, each heard as what it is.
-    const word = setAudioEffect(three, 'word', 'megaphone').audioTracks![0]!.clips;
-    expect(joinContinuousAudio(word).map(one => one.effect ?? null)).toEqual([null, 'megaphone', null]);
-    // Both halves through it: one sound again, and through it.
-    const both = setAudioEffect(setAudioEffect(three, 'word', 'megaphone'), 'rest', 'megaphone');
-    expect(joinContinuousAudio(both.audioTracks![0]!.clips).map(one => one.effect ?? null)).toEqual([null, 'megaphone']);
-    // Unless one of them is driven harder: the same megaphone, and a different sound.
-    const harder = setAudioEffectSetting(both, 'rest', 'intensity', 90).audioTracks![0]!.clips;
-    expect(joinContinuousAudio(harder).map(one => one.effectSettings ?? null)).toEqual([null, null, { intensity: 90 }]);
-  });
-});
-
-describe('a sound’s effect on the wire', () => {
+describe('the layers on the wire', () => {
   const raster = {} as RasterContext;
   const files = new Map([['video', 'file:///video.mp4']]);
   const spec = (manifest: EditManifest) => toComposeSpec(manifest, files, { jobId: 'j', batchId: 'b' }, raster);
 
-  it('is sent as the steps its id stands for, for the music and for every lane', async () => {
-    const edit = setMusicEffect(setAudioEffect({ ...withSound(), music: sound('m', 0) }, 'a', 'megaphone'), 'megaphone');
-    const sent = await spec(edit);
-    const steps = soundEffectPreset('megaphone')!.effect;
-    expect(sent.audio.music?.effect).toEqual(steps);
-    expect(sent.audio.musicTracks?.flat()[0]?.effect).toEqual(steps);
+  it('sends each layer as a window of its effect’s steps at its sliders, and Slow + reverb’s Slow', async () => {
+    const sent = await spec(withLayers(layer('a', 1000, 3000, { effectSettings: { intensity: 90 } }), layer('b', 4000, 9000, { effect: 'slowReverb' }), layer('c', 9000, 10_000, { effect: 'slowReverb', speed: 0.6 })));
+    expect(sent.audio.effects).toEqual([
+      { startMs: 1000, endMs: 3000, effect: soundEffectSteps('megaphone', { intensity: 90 }) },
+      { startMs: 4000, endMs: 9000, speed: 0.8, effect: soundEffectPreset('slowReverb')!.effect },
+      { startMs: 9000, endMs: 10_000, speed: 0.6, effect: soundEffectPreset('slowReverb')!.effect },
+    ]);
   });
 
-  it('is not sent at all for a sound with none, which is the spec every older edit made', async () => {
-    const sent = await spec({ ...withSound(), music: sound('m', 0) });
-    expect('effect' in sent.audio.music!).toBe(false);
-    expect(sent.audio.musicTracks?.flat().every(one => !('effect' in one))).toBe(true);
+  it('sends no key for a post with no layer, which is the spec every older edit made', async () => {
+    expect('effects' in (await spec(post())).audio).toBe(false);
   });
 
-  it('is sent as the steps of the effect at the sound’s own settings', async () => {
-    const edit = setAudioEffectSetting(setAudioEffect(withSound(), 'a', 'megaphone'), 'a', 'intensity', 90);
-    const sent = await spec(edit);
-    expect(sent.audio.musicTracks![0]![0]!.effect).toEqual(soundEffectSteps('megaphone', { intensity: 90 }));
+  it('cuts a layer at the end of the post, and leaves out one the post never reaches', async () => {
+    const sent = await spec(withLayers(layer('a', 18_000, 25_000), layer('b', 25_000, 30_000)));
+    expect(sent.audio.effects).toEqual([{ startMs: 18_000, endMs: TOTAL, effect: soundEffectPreset('megaphone')!.effect }]);
   });
 
-  it('plays slow + reverb’s speed as a record does, and every other speed at its own pitch', async () => {
-    const slowed = await spec(setAudioEffect(withSound(), 'a', 'slowReverb'));
-    expect(slowed.audio.musicTracks![0]![0]).toMatchObject({ speed: 0.8, varispeed: true, effect: soundEffectPreset('slowReverb')!.effect });
-    const fast = await spec(setAudioEffect(withSound({ speed: 1.5 }), 'a', 'megaphone'));
-    expect(fast.audio.musicTracks![0]![0]!.speed).toBe(1.5);
-    expect('varispeed' in fast.audio.musicTracks![0]![0]!).toBe(false);
+  it('puts no effect and no record speed on a sound any more: the layer is what changes it', async () => {
+    const edit = addAudioClip(withLayers(layer('a', 0, 5000, { effect: 'slowReverb' })), sound('s', 0, { speed: 0.8 }), 'at-1')!;
+    const wire = (await spec(edit)).audio.musicTracks![0]![0]!;
+    expect(wire.speed).toBe(0.8);
+    expect('effect' in wire).toBe(false);
+    expect('varispeed' in wire).toBe(false);
   });
 
-  it('sends no varispeed for slow + reverb put back at 1x, where it would change nothing', async () => {
-    const level = setAudioSpeed(setAudioEffect(withSound(), 'a', 'slowReverb'), 'a', 1);
-    const sent = (await spec(level)).audio.musicTracks![0]![0]!;
-    expect('speed' in sent).toBe(false);
-    expect('varispeed' in sent).toBe(false);
-    expect(sent.effect).toEqual(soundEffectPreset('slowReverb')!.effect);
-  });
-
-  it('is a copy of the catalogue’s steps, which nothing holding the spec can change', async () => {
-    const sent = await spec(setAudioEffect(withSound(), 'a', 'megaphone'));
-    const step = sent.audio.musicTracks![0]![0]!.effect!.ops[0] as { hz: number };
-    step.hz = 20;
+  it('sends copies of the catalogue’s steps, which nothing holding the spec can change', async () => {
+    const sent = await spec(withLayers(layer('a', 1000, 3000)));
+    (sent.audio.effects![0]!.effect!.ops[0] as { hz: number }).hz = 20;
     expect((soundEffectPreset('megaphone')!.effect.ops[0] as { hz: number }).hz).toBe(600);
+  });
+
+  it('is the same in the sound-only spec the preview plans its copies from', async () => {
+    const edit = addAudioClip(withLayers(layer('a', 1000, 3000), layer('b', 4000, 9000, { effect: 'slowReverb' })), sound('s', 0), 'at-1')!;
+    const full = await spec(edit);
+    const heard = toComposeSoundSpec(edit, files);
+    expect(heard.audio).toEqual(full.audio);
+    expect(heard.clips).toEqual(full.clips);
+    expect(heard.overlays).toEqual([]);
   });
 });

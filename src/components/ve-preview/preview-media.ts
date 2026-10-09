@@ -1,4 +1,4 @@
-import { clamp, musicSectionMs, musicSpeed, soundEffectPlaysSpeedAsRecord, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
+import { clamp, musicSectionMs, musicSpeed, type EditClip, type EditMusic, type EditVoiceover } from '../../editor';
 import { debugWarn } from '../../host/debug';
 import type { EditorSource } from '../../host/host.types';
 import type { EditorStore } from '../../state/editor-store';
@@ -68,6 +68,15 @@ export function posterFor(store: EditorStore, source: EditorSource, sourceMs: nu
     recorded, when the phone's speaker would be recorded along with the customer's voice. */
 export function clipsSilenced(store: EditorStore): boolean {
   return store.manifest.value.originalMuted || store.recordingFromMs.value !== null;
+}
+
+/**
+ * Whether the clips' own sound keeps quiet now: [clipsSilenced], or an audio effect layer's copy being
+ * played in its place ([EditorStore.soundUnderCopy]). Only for whether a clip is HEARD - pitch
+ * correction goes by [clipsSilenced] alone, so a layer coming and going never changes a clip's rate.
+ */
+export function soundHushed(store: EditorStore): boolean {
+  return clipsSilenced(store) || store.soundUnderCopy.peek();
 }
 
 /** A clip's own sound on the element playing it. A second layer's clips get theirs the same way. */
@@ -266,31 +275,13 @@ export interface SoundSpan {
    * file, and is turned into the file's terms with it before it meets a position.
    */
   rate: number;
-  /**
-   * There, and true, for a sound whose speed is a record's - slower is lower ([ComposeMusic.varispeed]):
-   * its element plays at [rate] with its pitch let go, as the render plays it. Absent for every sound
-   * that keeps its pitch, which is every sound at 1x.
-   */
-  varispeed?: true;
 }
 
 /** The music's section, heard for `leftMs` more of the post; see [musicSectionMs]. */
 export function musicSpan(music: EditMusic, leftMs: number): SoundSpan {
   const section = musicSectionMs(music);
   const rate = musicSpeed(music);
-  return {
-    inMs: music.inMs,
-    outMs: section > 0 ? music.inMs + section : Infinity,
-    loop: music.loop && section > 0,
-    leftMs: leftMs * rate,
-    rate,
-    ...(playsAsRecord(music) ? { varispeed: true as const } : {}),
-  };
-}
-
-/** Whether a sound's element lets its pitch go with its speed; see [SoundSpan.varispeed]. */
-export function playsAsRecord(music: Pick<EditMusic, 'speed' | 'effect'>): boolean {
-  return musicSpeed(music) !== 1 && soundEffectPlaysSpeedAsRecord(music.effect);
+  return { inMs: music.inMs, outMs: section > 0 ? music.inMs + section : Infinity, loop: music.loop && section > 0, leftMs: leftMs * rate, rate };
 }
 
 /** A voiceover take, from its first moment to its last, with the playhead at `outputMs`. */
@@ -299,28 +290,18 @@ export function takeSpan(take: EditVoiceover, outputMs: number): SoundSpan {
 }
 
 /**
- * A sound's element at the speed its sound plays at, its pitch kept as the render keeps it - or let
- * go with the speed, `varispeed`, for a sound whose speed is a record's, as the render plays that one.
- * The DEFAULT rate as well as the rate, because `load()` puts an element back to its default: an
- * element given a sped-up sound's file is at that sound's speed from the moment the file is on it, and
- * the mixer reads the default to keep such an element out of its graph; see [PreviewMixer.elementFor].
+ * A sound's element at the speed its sound plays at, its pitch kept as the render keeps it. The
+ * DEFAULT rate as well as the rate, because `load()` puts an element back to its default: an element
+ * given a sped-up sound's file is at that sound's speed from the moment the file is on it, and the
+ * mixer reads the default to keep such an element out of its graph; see [PreviewMixer.elementFor].
  *
  * Written only when it differs, as every level in the preview is: each write is a message to the
  * media process, and this is asked on every check of a playing sound.
  */
-export function applySoundRate(el: HTMLMediaElement, rate: number, varispeed = false): void {
-  if (rate !== 1) keepPitch(el, !varispeed);
+export function applySoundRate(el: HTMLMediaElement, rate: number): void {
+  if (rate !== 1 && el.preservesPitch === false) el.preservesPitch = true;
   if (el.defaultPlaybackRate !== rate) el.defaultPlaybackRate = rate;
   if (el.playbackRate !== rate) el.playbackRate = rate;
-}
-
-/**
- * Whether `el` keeps its pitch at a rate other than 1x: on, every element's default, for a sound that
- * keeps it, and off for a record's speed - which WebKit then plays without the time-pitch algorithm
- * at all (see [applyPitch]). Written only to change it, as it always was.
- */
-function keepPitch(el: HTMLMediaElement, keep: boolean): void {
-  if (keep ? el.preservesPitch === false : el.preservesPitch !== false) el.preservesPitch = keep;
 }
 
 /** How long one pass of the span is; 0 when the file's length is not known. */

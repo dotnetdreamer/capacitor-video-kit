@@ -1085,6 +1085,157 @@ class ComposeSpecParserTest {
         assertNull(parsed.from.transitionIn)
     }
 
+    /* ------------------------------------------------------------------------------------- */
+    /* Audio effect windows: `normaliseAudioEffectWindows`'s cases, at their paths here         */
+    /* ------------------------------------------------------------------------------------- */
+
+    /** A window's steps: any will do for the parser, which only checks them. */
+    private val steps = """{"mono":true,"ops":[{"op":"gain","db":-4}]}"""
+    private val stepsRead = SoundEffect(true, listOf(SoundOp.Gain(-4.0)))
+
+    private fun effectsOf(effects: Any): List<AudioEffectWindow> =
+        ComposeSpecParser.parse(minimalJson().apply { getJSONObject("audio").put("effects", effects) }).audio.effects
+
+    private fun expectInvalidEffects(path: String, effects: Any) =
+        expectInvalid(path) { getJSONObject("audio").put("effects", effects) }
+
+    @Test
+    fun `no audio effect windows is none, as every spec before them said`() {
+        assertTrue(ComposeSpecParser.parse(minimalJson()).audio.effects.isEmpty())
+        assertTrue(effectsOf(JSONObject.NULL).isEmpty())
+        assertTrue(effectsOf(JSONArray()).isEmpty())
+    }
+
+    @Test
+    fun `an audio effect window is kept as it came, a speed under 1 and its steps checked`() {
+        assertEquals(
+            listOf(AudioEffectWindow(100.0, 900.0, 1.0, stepsRead)),
+            effectsOf(JSONArray("""[{"startMs":100,"endMs":900,"effect":$steps}]""")),
+        )
+        assertEquals(
+            listOf(AudioEffectWindow(0.0, 900.0, 0.8, stepsRead)),
+            effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"speed":0.8,"effect":$steps}]""")),
+        )
+        assertEquals(
+            listOf(AudioEffectWindow(0.0, 900.0, 0.7, null)),
+            effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"speed":0.7}]""")),
+        )
+        // A window is placed on the frame, so a fraction of a millisecond is kept.
+        assertEquals(
+            listOf(AudioEffectWindow(25.5, 125.25, 0.8, null)),
+            effectsOf(JSONArray("""[{"startMs":25.5,"endMs":125.25,"speed":0.8}]""")),
+        )
+    }
+
+    @Test
+    fun `an audio effect window's start is held to 0 and its speed to its range`() {
+        assertEquals(
+            listOf(AudioEffectWindow(0.0, 900.0, 1.0, stepsRead)),
+            effectsOf(JSONArray("""[{"startMs":-50,"endMs":900,"effect":$steps}]""")),
+        )
+        assertEquals(0.5, effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"speed":0.1,"effect":$steps}]"""))[0].speed, 0.0)
+        assertEquals(1.0, effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"speed":3,"effect":$steps}]"""))[0].speed, 0.0)
+    }
+
+    @Test
+    fun `an audio effect window that would change nothing is left out`() {
+        assertTrue(effectsOf(JSONArray("""[{"startMs":0,"endMs":900}]""")).isEmpty())
+        assertTrue(effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"speed":1,"effect":{"ops":[]}}]""")).isEmpty())
+        assertTrue(effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"effect":null}]""")).isEmpty())
+    }
+
+    @Test
+    fun `audio effect windows no engine could play are refused with the path that broke`() {
+        expectInvalidEffects("audio.effects", JSONObject())
+        expectInvalidEffects("audio.effects", "windows")
+        val many = (0..AudioEffectWindow.MAX_WINDOWS).joinToString(",", "[", "]") {
+            """{"startMs":${it * 10},"endMs":${it * 10 + 5},"effect":$steps}"""
+        }
+        try {
+            ComposeSpecParser.parse(minimalJson().apply { getJSONObject("audio").put("effects", JSONArray(many)) })
+            fail("expected invalid_spec:audio.effects")
+        } catch (e: SpecException) {
+            assertEquals("audio.effects", e.path)
+            assertEquals("invalid_spec:audio.effects at most 50 windows", e.message)
+        }
+        expectInvalidEffects("audio.effects[0]", JSONArray("[null]"))
+        expectInvalidEffects("audio.effects[0]", JSONArray("[[1,2]]"))
+        expectInvalidEffects("audio.effects[0].startMs", JSONArray("""[{"endMs":900,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].startMs", JSONArray("""[{"startMs":"0","endMs":900,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].startMs", JSONArray("""[{"startMs":-1e400,"endMs":900,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].endMs", JSONArray("""[{"startMs":0,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].endMs", JSONArray("""[{"startMs":0,"endMs":1e400,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].endMs", JSONArray("""[{"startMs":500,"endMs":500,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].endMs", JSONArray("""[{"startMs":500,"endMs":400,"effect":$steps}]"""))
+        // Held to 0 first, so a window from before the start to 0 has no length.
+        expectInvalidEffects("audio.effects[0].endMs", JSONArray("""[{"startMs":-500,"endMs":0,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].speed", JSONArray("""[{"startMs":0,"endMs":900,"speed":"slow","effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].speed", JSONArray("""[{"startMs":0,"endMs":900,"speed":1e400,"effect":$steps}]"""))
+        expectInvalidEffects("audio.effects[0].effect", JSONArray("""[{"startMs":0,"endMs":900,"effect":"megaphone"}]"""))
+        expectInvalidEffects(
+            "audio.effects[0].effect.ops[0].db",
+            JSONArray("""[{"startMs":0,"endMs":900,"effect":{"ops":[{"op":"gain","db":"loud"}]}}]"""),
+        )
+        val tooMany = (0..SoundEffect.MAX_OPS).joinToString(",", "[", "]") { """{"op":"gain","db":1}""" }
+        try {
+            ComposeSpecParser.parse(
+                minimalJson().apply {
+                    getJSONObject("audio").put("effects", JSONArray("""[{"startMs":0,"endMs":900,"effect":{"ops":$tooMany}}]"""))
+                },
+            )
+            fail("expected invalid_spec:audio.effects[0].effect.ops")
+        } catch (e: SpecException) {
+            assertEquals("audio.effects[0].effect.ops", e.path)
+            assertEquals("invalid_spec:audio.effects[0].effect.ops at most 16 steps", e.message)
+        }
+        expectInvalidEffects(
+            "audio.effects[0].layer",
+            JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps,"volume":1,"layer":2}]"""),
+        )
+    }
+
+    @Test
+    fun `an audio effect window is checked field by field, in the order every engine checks it`() {
+        expectInvalidEffects("audio.effects[0].startMs", JSONArray("""[{"startMs":"a","endMs":"b","speed":"c","effect":"d","zz":1}]"""))
+        expectInvalidEffects("audio.effects[0].endMs", JSONArray("""[{"startMs":0,"endMs":"b","speed":"c","effect":"d","zz":1}]"""))
+        expectInvalidEffects("audio.effects[0].speed", JSONArray("""[{"startMs":0,"endMs":9,"speed":"c","effect":"d","zz":1}]"""))
+        expectInvalidEffects("audio.effects[0].effect", JSONArray("""[{"startMs":0,"endMs":9,"effect":"d","zz":1}]"""))
+        expectInvalidEffects("audio.effects[0].zz", JSONArray("""[{"startMs":0,"endMs":9,"effect":$steps,"zz":1}]"""))
+        // A window's own fields come before where it sits, and the first window that breaks is the one named.
+        expectInvalidEffects(
+            "audio.effects[1].endMs",
+            JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps},{"startMs":800,"endMs":"b","effect":$steps}]"""),
+        )
+        expectInvalidEffects(
+            "audio.effects[1].startMs",
+            JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps},{"startMs":800,"endMs":1000,"effect":$steps}]"""),
+        )
+        expectInvalidEffects("audio.effects[0].startMs", JSONArray("""[{"startMs":"a"},{"startMs":"b"}]"""))
+    }
+
+    @Test
+    fun `audio effect windows may meet but not overlap, and one left out still holds its place`() {
+        val met = effectsOf(JSONArray("""[{"startMs":0,"endMs":900,"effect":$steps},{"startMs":900,"endMs":1000,"effect":$steps}]"""))
+        assertEquals(2, met.size)
+        expectInvalidEffects(
+            "audio.effects[1].startMs",
+            JSONArray("""[{"startMs":0,"endMs":900},{"startMs":800,"endMs":1000,"effect":$steps}]"""),
+        )
+    }
+
+    @Test
+    fun `audio effect windows are read after everything else in the audio block`() {
+        // A spec broken somewhere else reports the same first failure it did before the key existed.
+        expectInvalid("audio.voiceover[0].uri") {
+            getJSONObject("audio").put("voiceover", JSONArray("""[{"durationMs":1000}]""")).put("effects", "windows")
+        }
+        expectInvalid("audio.musicTracks[0][0].outMs") {
+            getJSONObject("audio")
+                .put("musicTracks", JSONArray("""[[{"uri":"file:///m.m4a","inMs":500,"outMs":100}]]"""))
+                .put("effects", JSONArray("""[{"startMs":"a"}]"""))
+        }
+    }
+
     @Test
     fun `a music trim that ends before it starts is rejected`() {
         expectInvalid("audio.music.outMs") {

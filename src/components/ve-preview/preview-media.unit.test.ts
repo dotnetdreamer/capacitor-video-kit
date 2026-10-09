@@ -51,7 +51,7 @@ describe('applySoundRate', () => {
   function audio(preservesPitch: boolean | undefined = true) {
     return Object.assign(element(preservesPitch), { defaultPlaybackRate: 1, playbackRate: 1 });
   }
-  const apply = (el: ReturnType<typeof audio>, rate: number, varispeed?: boolean) => applySoundRate(el as unknown as HTMLMediaElement, rate, varispeed);
+  const apply = (el: ReturnType<typeof audio>, rate: number) => applySoundRate(el as unknown as HTMLMediaElement, rate);
 
   it('plays a sound at its speed at its own pitch, writing nothing it does not change', () => {
     const el = audio();
@@ -65,19 +65,9 @@ describe('applySoundRate', () => {
     expect(el.preservesPitch).toBe(true);
   });
 
-  it('lets the pitch go with a record’s speed, once', () => {
-    const el = audio();
-    apply(el, 0.8, true);
-    apply(el, 0.8, true);
-    expect(el).toMatchObject({ playbackRate: 0.8, preservesPitch: false, writes: 1 });
-    // And takes it back for the same element given a sound that keeps its pitch.
-    apply(el, 0.8);
-    expect(el.preservesPitch).toBe(true);
-  });
-
   it('leaves the correction alone at 1x, where it does nothing', () => {
     const el = audio(false);
-    apply(el, 1, true);
+    apply(el, 1);
     apply(el, 1);
     expect(el).toMatchObject({ playbackRate: 1, preservesPitch: false, writes: 0 });
   });
@@ -159,13 +149,6 @@ describe('the spans the music and a take are played on', () => {
     // Five seconds of the post at 2x is ten seconds of the track still to play.
     expect(musicSpan({ ...music, speed: 2 }, 5000)).toEqual({ inMs: 0, outMs: 11_975, loop: true, leftMs: 10_000, rate: 2 });
     expect(musicSpan({ ...music, speed: 0.5 }, 5000)).toMatchObject({ leftMs: 2500, rate: 0.5 });
-  });
-
-  it('lets the pitch go with the speed only for a sound whose effect plays it as a record does', () => {
-    expect(musicSpan({ ...music, speed: 0.8, effect: 'slowReverb' }, 5000)).toEqual({ inMs: 0, outMs: 11_975, loop: true, leftMs: 4000, rate: 0.8, varispeed: true });
-    expect(musicSpan({ ...music, speed: 0.8, effect: 'megaphone' }, 5000)).not.toHaveProperty('varispeed');
-    // At 1x there is no speed for the pitch to go with.
-    expect(musicSpan({ ...music, effect: 'slowReverb' }, 5000)).not.toHaveProperty('varispeed');
   });
 
   it('is a take from its first moment to its last', () => {

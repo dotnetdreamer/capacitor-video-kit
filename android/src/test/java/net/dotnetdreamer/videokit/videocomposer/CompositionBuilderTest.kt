@@ -224,6 +224,85 @@ class CompositionBuilderTest {
         assertEquals(1_000.0, frequencyOf(out, 48_000), 20.0)
     }
 
+    /* ------------------------------------------------------------------------------------- */
+    /* Audio effect windows                                                                    */
+    /* ------------------------------------------------------------------------------------- */
+
+    private val window = AudioEffectWindow(1_500.0, 1_800.0, 1.0, SoundEffect(false, listOf(SoundOp.Gain(-6.0))))
+
+    /**
+     * Two seconds of video and a 1.2 s sound on a lane, with [effects]: the clip's own sound kept when
+     * [clipSound], and no lane at all without [lane].
+     */
+    private fun windowsPlan(effects: List<AudioEffectWindow>, clipSound: Boolean = false, lane: Boolean = true): RenderPlan {
+        val sound = Music("file:///m.m4a", 0, 0, 1_200, 1f, loop = false, fadeInMs = 0, fadeOutMs = 0)
+        val audio = Audio(
+            originalMuted = !clipSound,
+            originalVolume = 1f,
+            music = null,
+            voiceover = emptyList(),
+            musicTracks = if (lane) listOf(listOf(sound)) else emptyList(),
+            effects = effects,
+        )
+        return RenderPlan.build(
+            spec(listOf(clip("a"))).copy(audio = audio),
+            mapOf("file:///a.mp4" to probe(2_000), "file:///m.m4a" to probe(1_200)),
+        )
+    }
+
+    @Test
+    fun `a spec with no audio effect windows is built exactly as it was`() {
+        val composition = CompositionBuilder.toComposition(windowsPlan(emptyList()), emptyList(), null)
+        assertTrue(composition.effects.audioProcessors.isEmpty())
+        // The base, then the lane, and nothing else.
+        assertEquals(2, composition.sequences.size)
+    }
+
+    @Test
+    fun `audio effect windows run on the finished mix, in one processor of the composition's`() {
+        val plan = windowsPlan(listOf(window), clipSound = true)
+        val composition = CompositionBuilder.toComposition(plan, emptyList(), null)
+        val processor = composition.effects.audioProcessors.single()
+        assertTrue(processor is AudioEffectWindowsProcessor)
+        // No item's own processors change: the clip at full volume still has none.
+        assertTrue(composition.sequences[0].editedMediaItems.single().effects.audioProcessors.isEmpty())
+        // A new one for every composition, as the relaxed retry builds a second.
+        assertNotSame(processor, CompositionBuilder.toComposition(plan, emptyList(), null).effects.audioProcessors.single())
+    }
+
+    /*
+     * Media3 ends the mix where its longest input ends, and a lane that stops at 1.2 s would stop the
+     * window at 1.5 s from being heard at all. The web and iOS mix the whole post, so this one is kept
+     * running with silence to the end - after the lane, which then still decides the mix's format.
+     */
+    @Test
+    fun `a mix that would stop before the post runs on, silent, to the post's end`() {
+        val plan = windowsPlan(listOf(window))
+        val sequences = CompositionBuilder.toComposition(plan, emptyList(), null).sequences
+        assertEquals(3, sequences.size)
+        // The base carries no sound of its own, as it never did.
+        assertEquals(setOf(C.TRACK_TYPE_VIDEO), sequences[0].trackTypes)
+        assertFalse(isGap(sequences[1].editedMediaItems.single()))
+        val silence = sequences[2]
+        assertEquals(setOf(C.TRACK_TYPE_AUDIO), silence.trackTypes)
+        val gap = silence.editedMediaItems.single()
+        assertTrue(isGap(gap))
+        assertEquals(plan.totalUs, gap.durationUs)
+    }
+
+    @Test
+    fun `a mix that already runs to the post's end, or has no sound at all, gets no silence`() {
+        // The clips' own sound spans the post with the base.
+        val kept = CompositionBuilder.toComposition(windowsPlan(listOf(window), clipSound = true), emptyList(), null).sequences
+        assertEquals(2, kept.size)
+        assertEquals(setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO), kept[0].trackTypes)
+        // Nothing to hear anywhere: no audio track, as before.
+        val silent = CompositionBuilder.toComposition(windowsPlan(listOf(window), lane = false), emptyList(), null).sequences
+        assertEquals(1, silent.size)
+        // And a lane with no window under it stops where it stops, as it always did.
+        assertEquals(2, CompositionBuilder.toComposition(windowsPlan(emptyList()), emptyList(), null).sequences.size)
+    }
+
     @Test
     fun `a clip is handed to media3 at the plan's own microsecond`() {
         val plan = cutLayerPlan()
@@ -412,6 +491,7 @@ class CompositionBuilderTest {
         // and no audio processor - the composition Media3 was handed before transitions existed.
         assertEquals(1, composition.sequences.size)
         assertSame(VideoCompositorSettings.DEFAULT, composition.videoCompositorSettings)
+        assertTrue(composition.effects.audioProcessors.isEmpty())
         for (item in composition.sequences[0].editedMediaItems) {
             assertEquals(1, item.effects.videoEffects.size)
             assertTrue(item.effects.videoEffects[0] is Presentation)

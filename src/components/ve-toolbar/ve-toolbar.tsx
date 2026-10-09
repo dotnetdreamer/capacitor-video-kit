@@ -8,7 +8,7 @@ import type { EditorIconName } from '../../icons/icons';
 import type { EditorPanel } from '../../state/editor.types';
 
 /** Which set of tools the bottom row is showing. */
-export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'zoom' | 'music' | 'audio' | 'voice';
+export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'zoom' | 'music' | 'audio' | 'voice' | 'audioEffect';
 
 /** One tile in the row. Built fresh whenever what the row depends on changes. */
 export interface ToolTile {
@@ -105,6 +105,8 @@ export class VeToolbar {
    * every frame, and a row that read the object would be rebuilt sixty times a second for it.
    */
   private readonly zoomSelected = computed(() => !!this.ctx.store.selectedZoom.value);
+  /** A boolean for the reason [zoomSelected] is one: a drag of the layer rewrites it every frame. */
+  private readonly audioEffectSelected = computed(() => !!this.ctx.store.selectedAudioEffect.value);
   private readonly lastClip = computed(() => this.ctx.store.manifest.value.clips.length <= 1);
   /** The SELECTED segment's fit, or the post's when nothing is selected - what a tap will change. */
   private readonly fitContain = computed(() => this.ctx.store.clipFit(this.ctx.store.selectedClip.value) === 'contain');
@@ -126,6 +128,7 @@ export class VeToolbar {
     if (this.clipSelected.value) return 'clip';
     if (this.layerKind.value) return 'layer';
     if (this.zoomSelected.value) return 'zoom';
+    if (this.audioEffectSelected.value) return 'audioEffect';
     if (this.ctx.store.musicSelected.value) return 'music';
     if (this.audioSelected.value) return 'audio';
     if (this.voiceSelected.value) return 'voice';
@@ -317,6 +320,11 @@ export class VeToolbar {
     this.ctx.store.haptic('light');
   };
 
+  /** The Audio effects sheet, on the layer under the playhead or ready to add one; opening it closes the menu. */
+  private readonly audioEffects = () => {
+    this.ctx.store.openAudioEffects();
+  };
+
   private readonly voiceover = () => {
     // Opening a panel closes the menu as well.
     this.ctx.store.openPanel('voiceover');
@@ -391,6 +399,8 @@ export class VeToolbar {
         return this.audioRow();
       case 'voice':
         return this.voiceRow();
+      case 'audioEffect':
+        return this.audioEffectRow();
     }
   }
 
@@ -552,16 +562,6 @@ export class VeToolbar {
   private speedTile(): ToolTile {
     const store = this.ctx.store;
     return { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') };
-  }
-
-  /**
-   * The Audio effects sheet for the selected sound, on both sound rows beside Speed. Named Effects, as
-   * the root row's tile for the picture's effects is: on a sound's row there is only one kind to mean.
-   * The sheet reads its target off the selection, as Speed's does.
-   */
-  private effectsTile(): ToolTile {
-    const store = this.ctx.store;
-    return { id: 'effects', label: 'Effects', icon: 'sparkles-outline', run: () => store.openPanel('audioEffects') };
   }
 
   /** The selected segment's own volume. On both clip rows, and on neither for a picture. */
@@ -800,7 +800,6 @@ export class VeToolbar {
           run: () => store.openVolume({ kind: 'music' }),
         },
         this.speedTile(),
-        this.effectsTile(),
         {
           id: 'loop',
           label: 'Loop',
@@ -845,7 +844,6 @@ export class VeToolbar {
           },
         },
         this.speedTile(),
-        this.effectsTile(),
         {
           id: 'loop',
           label: 'Loop',
@@ -876,6 +874,33 @@ export class VeToolbar {
           },
         },
         { id: 'delete', label: 'Delete', icon: 'trash-outline', run: () => store.removeSelectedAudio() },
+      ],
+    };
+  }
+
+  /**
+   * The tools for a selected audio effect layer, a picture layer's in time: Effects opens the sheet on
+   * it, and the rest place it - cut, copied, an edge to the playhead - or take it away. Where it starts
+   * and ends is also dragged on its row of the timeline. The layer's id is read at tap time, as a
+   * zoom's is, for the reason [zoomSelected] gives.
+   */
+  private audioEffectRow(): ToolRow {
+    const store = this.ctx.store;
+    const withLayer = (act: (id: string) => void) => () => {
+      const layer = store.selectedAudioEffect.value;
+      if (layer) act(layer.id);
+    };
+    return {
+      kind: 'audioEffect',
+      label: 'Audio effect tools',
+      collapse: this.deselect('Close audio effect tools'),
+      tiles: [
+        { id: 'effects', label: 'Effects', icon: 'sparkles-outline', run: () => store.openPanel('audioEffects') },
+        { id: 'split', label: 'Cut', icon: 'cut-outline', run: withLayer(id => store.splitAudioEffectAtPlayhead(id)) },
+        { id: 'duplicate', label: 'Duplicate', icon: 'duplicate-outline', run: withLayer(id => store.duplicateAudioEffect(id)) },
+        { id: 'start-here', label: 'Start here', icon: 'play-skip-back-outline', run: withLayer(id => store.setAudioEffectEdge(id, 'start')) },
+        { id: 'end-here', label: 'End here', icon: 'play-skip-forward-outline', run: withLayer(id => store.setAudioEffectEdge(id, 'end')) },
+        { id: 'delete', label: 'Delete', icon: 'trash-outline', run: withLayer(id => store.deleteAudioEffect(id)) },
       ],
     };
   }
@@ -1030,6 +1055,10 @@ export class VeToolbar {
               <button type="button" role="menuitem" class="tb__menu-item" onClick={this.addSound}>
                 <ve-icon name="musical-note-outline"></ve-icon>
                 <span>Add sound</span>
+              </button>
+              <button type="button" role="menuitem" class="tb__menu-item" onClick={this.audioEffects}>
+                <ve-icon name="sparkles-outline"></ve-icon>
+                <span>Audio effects</span>
               </button>
               <button type="button" role="menuitem" class="tb__menu-item" aria-label="Sound effect, coming soon" onClick={this.soundEffect}>
                 <ve-icon name="musical-notes-outline"></ve-icon>

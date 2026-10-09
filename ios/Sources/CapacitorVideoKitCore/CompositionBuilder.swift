@@ -711,11 +711,13 @@ enum CompositionBuilder {
             throw BuildError.internalFailure(problem)
         }
 
-        return BuiltComposition(composition: comp,
-                                videoComposition: vc,
-                                audioMix: audioMix,
-                                totalMs: totalMs,
-                                plan: plan)
+        // Last, over the mix exactly as it stands: the audio effect layers act on everything heard.
+        return try await MixEffects.apply(BuiltComposition(composition: comp,
+                                                           videoComposition: vc,
+                                                           audioMix: audioMix,
+                                                           totalMs: totalMs,
+                                                           plan: plan),
+                                          spec: spec)
     }
 
     /// The `SlowClip` of a clip laid as `inserted` of its source and placed on `placed`, or nil when the clip is

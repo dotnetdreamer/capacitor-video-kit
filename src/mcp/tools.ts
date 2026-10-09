@@ -108,9 +108,10 @@ import { EFFECT_CATEGORIES, EFFECT_PRESETS } from '../editor/effects';
 import { DEFAULT_LAYOUT_ANIMATION_MS, LAYOUT_ANIMATIONS, MAX_LAYOUT_ANIMATION_MS, MIN_LAYOUT_ANIMATION_MS } from '../editor/layout-animation';
 import { layoutPresets } from '../editor/layout-presets';
 import { MAX_OVERLAY_LOOP_MS, MAX_OVERLAY_MOVE_MS, MIN_OVERLAY_LOOP_MS, MIN_OVERLAY_MOVE_MS, OVERLAY_ANIMATIONS } from '../editor/motion';
-import { SOUND_EFFECTS, SOUND_EFFECT_SETTING_MAX, soundEffectPreset } from '../editor/sound-effects';
+import { SOUND_EFFECTS, SOUND_EFFECT_SETTING_MAX } from '../editor/sound-effects';
 import { DEFAULT_TRANSITION_MS, MAX_TRANSITION_MS, MIN_TRANSITION_MS, TRANSITIONS, TRANSITION_CATEGORIES } from '../editor/transitions';
 import { DEFAULT_TEXT_STYLE_ID, TEXT_STYLES, TEXT_STYLE_CATEGORIES } from '../data/text-styles';
+import { MAX_AUDIO_EFFECTS } from '../video-composer/definitions';
 import { applyEditOps, opNamesFor, zoomOffered, type EditOp, type McpEditingOptions } from './ops';
 import { summariseManifest } from './summary';
 
@@ -354,6 +355,11 @@ function resolve(store: ManifestStore, editing: McpEditingOptions, args: Record<
 /* The op reference                                                                               */
 /* -------------------------------------------------------------------------------------------- */
 
+/** Every audio effect's sliders with their defaults, from the editor's own list, as the audio effect ops take them. */
+const AUDIO_EFFECT_SLIDERS = SOUND_EFFECTS.map(preset => `${preset.id} {${preset.controls.map(control => `${control.key} (default ${control.default})`).join(', ')}}`).join(', ');
+/** And the speed of each one that slows. */
+const AUDIO_EFFECT_SPEEDS = SOUND_EFFECTS.flatMap(({ id, speed }) => (speed ? [`${id} ${speed.min}..${speed.max}, default ${speed.default}`] : [])).join('; ');
+
 /**
  * What each op reads, one line each.
  *
@@ -426,7 +432,7 @@ export const OP_REFERENCE: Record<string, string> = {
 
   /* sound */
   setMusic:
-    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?, speed?, effect?, effectSettings?}) or null to take it away. ' +
+    'music ({uri, fileName?, sourceDurationMs?, inMs?, outMs?, startMs?, endMs?, phaseMs?, volume?, loop?, fadeInMs?, fadeOutMs?, speed?}) or null to take it away. ' +
     'inMs..outMs is the section of the track (outMs 0: to the end of the track), startMs where it starts on the post, and endMs where it ' +
     'stops (0, the default: until the end); a looping section repeats until endMs, or until the video ends. phaseMs offsets ' +
     'the first pass within the section and wraps at its end; it may be negative, and later passes use the full section. An outMs or endMs that is ' +
@@ -435,18 +441,9 @@ export const OP_REFERENCE: Record<string, string> = {
     `the default) to ${MAX_MUSIC_FADE_MS}ms. Times are in milliseconds; all but phaseMs are nonnegative. sourceDurationMs is the track's ` +
     'length: without it or an outMs, where a sound played once ends is not known until it plays. speed (0.25..4, default 1) plays ' +
     'the section faster or slower at its own pitch: inMs, outMs and phaseMs stay places in the track, so one pass lasts ' +
-    '(outMs - inMs) / speed on the post, while startMs, endMs and the fades stay places on the post. effect puts the sound through ' +
-    `one of ${SOUND_EFFECTS.map(preset => `"${preset.id}"`).join(', ')}, or "none" (the default) for the sound as it is: "megaphone" is a ` +
-    'voice through a small horn speaker driven hard - the middle of the voice, buzzing, a little louder - which is how one word of a ' +
-    'line is made to stand out: cut the word out with splitAudio and patch that piece alone. "slowReverb" is the slowed and reverberant ' +
-    'edit of a song: it plays the sound’s speed as a record does, lower as well as slower, in a big soft room. Putting it on slows the ' +
-    `sound to ${soundEffectPreset('slowReverb')?.speed?.default}x unless the op sends a speed (a sound already slower keeps its own), and taking it off ` +
-    'puts the speed back to 1; set how slow with speed, as for any sound. effectSettings moves the effect’s sliders, each a whole ' +
-    `number from 0 to ${SOUND_EFFECT_SETTING_MAX}: ${SOUND_EFFECTS.map(preset => `${preset.id} {${preset.controls.map(control => `${control.key} (default ${control.default})`).join(', ')}}`).join(', ')}. ` +
-    'The megaphone’s intensity is how hard it is driven, and its tone the size of the horn, dull at 0 and tinny at 100; ' +
-    'slowReverb’s reverb is how much of the room is heard, and its room how long and dark the room is. A new effect starts at its ' +
-    'defaults unless the op sends effectSettings, and a slider the effect has not got is refused. Any other field is refused; a field ' +
-    'sent as null takes its default.',
+    '(outMs - inMs) / speed on the post, while startMs, endMs and the fades stay places on the post. A sound has no effect of its own: ' +
+    'effect and effectSettings are refused, and an audio effect layer over it (addAudioEffect) puts it through one, with whatever else ' +
+    'is heard there. Any other field is refused; a field sent as null takes its default.',
   patchMusic:
     'patch - any of the fields setMusic takes, checked the same way; any other field is refused, and so is null - send 0 for no stop, ' +
     'no trim at the end or no fade. A startMs without an endMs MOVES the sound, as the editor’s Move does: a stop it has goes with ' +
@@ -482,6 +479,36 @@ export const OP_REFERENCE: Record<string, string> = {
   moveVoiceover: 'id, startMs - held clear of the takes either side.',
   removeVoiceover: 'id.',
 
+  /* audio effects */
+  addAudioEffect:
+    'id, effect, startMs, endMs? (default: the end of the post), effectSettings?, speed? - an audio effect layer: from startMs to endMs, ' +
+    'everything heard - every clip’s own sound, every sound on every lane, every voiceover - goes through effect, one of ' +
+    `${SOUND_EFFECTS.map(preset => `"${preset.id}"`).join(', ')} (see the "audioEffects" section). "megaphone" is a voice through a small horn ` +
+    'speaker driven hard - the middle of the voice, buzzing, a little louder - which is how one word of a line is made to stand out: put ' +
+    'a layer over just that word. "slowReverb" is the slowed and reverberant edit of a song, in a big soft room: what it covers plays ' +
+    'from the layer’s start at speed, lower as well as slower as a record does, so a layer at 0.8 plays the first 80% of what is under ' +
+    'it and the post picks up where it has got to at the layer’s end. One effect is heard at a time, so layers never overlap: a new ' +
+    `one is shortened to the room before the next layer and the end of the post, and refused when less than ${MIN_LAYER_MS}ms fits at ` +
+    `startMs; an endMs under ${MIN_LAYER_MS}ms after startMs is refused. effectSettings moves the effect’s sliders, each ` +
+    `0..${SOUND_EFFECT_SETTING_MAX}, the rest staying at their defaults: ${AUDIO_EFFECT_SLIDERS}. The megaphone’s intensity is how hard it ` +
+    'is driven and its tone the size of the horn, dull at 0 and tinny at 100; slowReverb’s reverb is how much of the room is heard and ' +
+    `its room how long and dark the room is. A slider the effect has not got is refused. speed is for an effect that slows - ` +
+    `${AUDIO_EFFECT_SPEEDS} - and refused for any other, or outside its range.`,
+  patchAudioEffect:
+    'id, patch {effect?, effectSettings?, speed?, startMs?, endMs?} - what the audio effects sheet and a drag on the timeline change. ' +
+    'Another effect comes on at its defaults, sliders and speed alike, unless the patch sets them; effectSettings moves the sliders it ' +
+    'names and leaves the rest where they are; speed as addAudioEffect takes it. startMs and endMs move or trim the layer between the ' +
+    'layers either side: a window that would overlap one or pass it is refused naming it (to put a layer past another, remove it and ' +
+    `add it again there), and so is one under ${MIN_LAYER_MS}ms or starting too late for the post to hear that much of it; one running ` +
+    'past the end of the post ends there. Any other field is refused, and so is null.',
+  splitAudioEffect:
+    'id, atMs, newId - the layer in two at atMs on the post, both halves its effect, sliders and speed, the second one newId, so one ' +
+    `half can be given another effect. Each half is at least ${MIN_LAYER_MS}ms, or the op is refused.`,
+  duplicateAudioEffect:
+    'id, newId - a copy straight after the layer, as long as it where there is room and shortened where there is less; refused when ' +
+    `less than ${MIN_LAYER_MS}ms fits before the next layer and the end of the post.`,
+  removeAudioEffect: 'id.',
+
   /* zooms */
   addZoom:
     'id, startMs, endMs? (default startMs + 3000), cx?, cy? (centre of the area, 0..1 of the frame), scale? (1.1..4, default 2), ' +
@@ -512,7 +539,20 @@ function opReferenceFor(opNames: readonly string[]): Record<string, string> {
 /* The tools                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
 
-const CATALOG_SECTIONS = ['filters', 'effects', 'transitions', 'animations', 'layouts', 'layoutAnimations', 'backgrounds', 'textStyles', 'output', 'ops', 'limits'] as const;
+const CATALOG_SECTIONS = [
+  'filters',
+  'effects',
+  'audioEffects',
+  'transitions',
+  'animations',
+  'layouts',
+  'layoutAnimations',
+  'backgrounds',
+  'textStyles',
+  'output',
+  'ops',
+  'limits',
+] as const;
 type CatalogSection = (typeof CATALOG_SECTIONS)[number];
 
 /*
@@ -677,7 +717,7 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
       title: 'Read a post',
       description:
         'Reads a manifest back: how long the post runs, what is on the base track and on each video ' +
-        'layer over it, every layer with its id and time window, the music and voiceover, and the ' +
+        'layer over it, every layer with its id and time window, the sounds, voiceover and audio effects, and the ' +
         'colour operations the render will actually apply once the filter, its intensity and the ' +
         'Adjust sliders are folded together.',
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -738,7 +778,7 @@ export function createTools(options: VideoKitToolsOptions = {}): ToolDefinition[
       name: 'catalog_list',
       title: 'List what a post can be made of',
       description:
-        'The fixed lists an edit draws on: the filter presets, the full-frame effects, the transitions, ' +
+        'The fixed lists an edit draws on: the filter presets, the full-frame effects, the audio effects and their sliders, the transitions, ' +
         'the moves a layer can make, the layout presets for arranging a second video over the first, the text styles, the output frames on ' +
         'offer, what every edit op reads, and the limits a post is held to. Ask for one section or ' +
         'leave it out for all of them.',
@@ -822,6 +862,26 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
       return {
         data: { categories: copy(EFFECT_CATEGORIES), presets: data },
         lines: `Full-frame effects (addEffect effectId):\n${byCategory(data)}`,
+      };
+    }
+    case 'audioEffects': {
+      // Built afresh rather than handed out: the editor's list is frozen, and a host's answer is its own.
+      const effects = SOUND_EFFECTS.map(preset => ({
+        id: preset.id,
+        label: preset.label,
+        sliders: preset.controls.map(control => ({ key: control.key, label: control.label, default: control.default, min: 0, max: SOUND_EFFECT_SETTING_MAX })),
+        ...(preset.speed ? { speed: { label: preset.speed.label, default: preset.speed.default, min: preset.speed.min, max: preset.speed.max } } : {}),
+      }));
+      const takes = (effect: (typeof effects)[number]): string => {
+        const sliders = `sliders (effectSettings) ${effect.sliders.map(slider => `${slider.key} 0..${slider.max}, default ${slider.default}`).join('; ')}`;
+        return effect.speed ? `speed (the sheet's ${effect.speed.label}) ${effect.speed.min}..${effect.speed.max}, default ${effect.speed.default}; ${sliders}` : sliders;
+      };
+      return {
+        data: { maxPerPost: MAX_AUDIO_EFFECTS, minMs: MIN_LAYER_MS, effects },
+        lines:
+          'Audio effects (addAudioEffect effect), each a layer over a window of the post that puts everything heard inside it through the effect, ' +
+          `one at a time - at most ${MAX_AUDIO_EFFECTS} on a post, each at least ${MIN_LAYER_MS}ms:\n` +
+          effects.map(effect => `  ${effect.id} (${effect.label}) - ${takes(effect)}`).join('\n'),
       };
     }
     case 'transitions': {
@@ -936,6 +996,7 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
         clipSpeed: { min: 0.25, max: 4 },
         transitionMs: { min: MIN_TRANSITION_MS, max: MAX_TRANSITION_MS },
         musicFadeMs: { min: 0, max: MAX_MUSIC_FADE_MS },
+        maxAudioEffects: MAX_AUDIO_EFFECTS,
         ...(editing.zoom
           ? {
               maxZooms: MAX_ZOOMS,
@@ -961,6 +1022,7 @@ function catalogSection(section: CatalogSection, editing: McpEditingOptions, opN
           '  clip speed is 0.25x to 4x, with pitch preserved\n' +
           `  a transition runs ${MIN_TRANSITION_MS}ms to ${MAX_TRANSITION_MS}ms, and at most half of either clip it joins\n` +
           `  the music's section and its stop leave at least ${MIN_LAYER_MS}ms of sound; its fade in and fade out run 0 (none) to ${MAX_MUSIC_FADE_MS}ms each\n` +
+          `  at most ${MAX_AUDIO_EFFECTS} audio effects, one heard at a time, each at least ${MIN_LAYER_MS}ms\n` +
           zooms,
       };
     }

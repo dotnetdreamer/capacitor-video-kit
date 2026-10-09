@@ -424,6 +424,10 @@ struct ComposeAudio: Sendable {
     let music: ComposeMusic?
     let voiceover: [ComposeVoiceover]
     let musicTracks: [[ComposeMusic]]
+    /// The audio effect layers: windows of the finished mix, in order, never overlapping - see
+    /// `AudioEffectWindow` and `MixEffects`. Empty, which is every spec written before the key, is the
+    /// mix exactly as it always was. Defaulted for `ComposeMusic.speed`'s reason.
+    var effects: [AudioEffectWindow] = []
 }
 
 /// One key of a camera track, as the parser leaves it: ALREADY CLAMPED, `scale` to

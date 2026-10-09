@@ -1,15 +1,15 @@
-import { MAX_SOUND_OPS, type ComposeSoundEffect, type SoundOp } from '../video-composer/definitions';
+import { MAX_SOUND_OPS, MIN_AUDIO_EFFECT_SPEED, type ComposeSoundEffect, type SoundOp } from '../video-composer/definitions';
 
 /**
- * What a sound can be put through - a megaphone, a slowed and reverberant edit - and how far.
+ * What the sound of a post can be put through - a megaphone, a slowed and reverberant edit - and how far.
  *
- * A sound in the manifest names its effect by id ([EditMusic.effect]) and keeps where the customer
- * left its sliders ([EditMusic.effectSettings]), the way a post names its filter and keeps its
+ * An audio effect layer names its effect by id ([EditAudioEffect.effect]) and keeps where the customer
+ * left its sliders ([EditAudioEffect.effectSettings]), the way a post names its filter and keeps its
  * strength. What the effect IS at those settings - the filters, the drive, the reverb, the level - is
- * here, and goes on the wire as plain steps ([ComposeSoundEffect]) for the engines to run. So the
- * sound of an effect is decided in one place: a new one built from the same steps needs no new
- * engine, a slider moves numbers in steps every engine already runs, and the preview, the web render
- * and both phones hear the same arithmetic.
+ * here, and goes on the wire as plain steps ([ComposeSoundEffect]) for the engines to run over the
+ * layer's window of the mix ([ComposeAudioEffect]). So the sound of an effect is decided in one place:
+ * a new one built from the same steps needs no new engine, a slider moves numbers in steps every
+ * engine already runs, and the preview, the web render and both phones hear the same arithmetic.
  */
 
 /**
@@ -17,32 +17,32 @@ import { MAX_SOUND_OPS, type ComposeSoundEffect, type SoundOp } from '../video-c
  * [SOUND_EFFECT_SETTING_MAX], which the effect turns into the numbers of its steps.
  */
 export interface SoundEffectControl {
-  /** Stored in a manifest ([EditMusic.effectSettings]), so permanent: renaming one is a migration. */
+  /** Stored in a manifest ([EditAudioEffect.effectSettings]), so permanent: renaming one is a migration. */
   key: string;
   /** The word beside the slider. */
   label: string;
   /** The slider's name to a screen reader, and the undo step a drag of it is: "Undo: Megaphone tone". */
   name: string;
-  /** Where the slider is for a sound just put through the effect, and what a sound with no value has. */
+  /** Where the slider is on a layer just made, and what a layer with no value has. */
   default: number;
 }
 
 /** The top of every [SoundEffectControl]'s scale; the bottom is 0. */
 export const SOUND_EFFECT_SETTING_MAX = 100;
 
-/** A sound's settings for its effect, by [SoundEffectControl.key]. */
+/** A layer's settings for its effect, by [SoundEffectControl.key]. */
 export type SoundEffectSettings = Readonly<Record<string, number>>;
 
 /**
- * An effect that plays the sound's speed as a record plays one, slower being lower
- * ([ComposeMusic.varispeed]), and offers that speed as one of its sliders. The slider sets the
- * sound's own [EditMusic.speed] - the one the Speed sheet shows - because a sound has one speed:
- * putting the effect on slows the sound to [default], and taking it off puts it back to 1x.
+ * An effect that slows what its layer covers, as a record played under its speed is slowed - lower as
+ * well as slower - and offers that speed as its first slider, Slow ([EditAudioEffect.speed]). The
+ * layer plays the mix from its own start at that speed ([ComposeAudioEffect.speed]) and goes back to
+ * where the timeline is at its end, so nothing outside it moves.
  */
 export interface SoundEffectSpeed {
   label: string;
   name: string;
-  /** What a sound is slowed to when the effect is put on it. */
+  /** How slow a layer just made plays, and what a layer with no value plays at. */
   default: number;
   /** The slider's range, as speeds. */
   min: number;
@@ -56,7 +56,7 @@ export interface SoundEffectPreset {
   label: string;
   /** Its sliders, in the order the sheet shows them under [speed]'s. */
   controls: readonly SoundEffectControl[];
-  /** Its hold on the sound's speed, for an effect that has one; see [SoundEffectSpeed]. */
+  /** How slow it plays what it covers, for an effect that slows; see [SoundEffectSpeed]. */
   speed?: SoundEffectSpeed;
   /** What it is made of at its default settings, exactly as it goes on the wire. */
   effect: ComposeSoundEffect;
@@ -119,8 +119,8 @@ const MEGAPHONE_LEVEL_PER_DB = 0.15;
 
 /**
  * SLOW + REVERB is the slowed and reverberant edit of a song: slower and lower together, as a record
- * played under its speed is ([SoundEffectSpeed]), in a big, soft room. The slowing is the sound's own
- * speed, so all this has to make is the room:
+ * played under its speed is ([SoundEffectSpeed]), in a big, soft room. The slowing is the layer's own
+ * Slow, so all the steps have to make is the room:
  *  - REVERB is how much of the room is heard: the tail comes up from nothing to as loud as the sound,
  *    and the sound itself goes down to 0.6 of what it was;
  *  - ROOM is how big it is: the tail takes from 1 to 6 seconds to fall 60 dB, and a bigger room is a
@@ -163,8 +163,7 @@ export const SOUND_EFFECTS: readonly SoundEffectPreset[] = freezeAll(
     {
       id: 'slowReverb',
       label: 'Slow + reverb',
-      // Named Speed to a screen reader and in the undo toast, as the Speed sheet's slider is: it is that speed.
-      speed: { label: 'Slow', name: 'Speed', default: 0.8, min: 0.5, max: 1 },
+      speed: { label: 'Slow', name: 'Slow speed', default: 0.8, min: MIN_AUDIO_EFFECT_SPEED, max: 1 },
       controls: [
         { key: 'reverb', label: 'Reverb', name: 'Reverb amount', default: 50 },
         { key: 'room', label: 'Room', name: 'Room size', default: 50 },
@@ -190,11 +189,11 @@ export function normaliseSoundEffectId(value: unknown): string | undefined {
 }
 
 /**
- * A sound's settings as a manifest keeps them, for the effect `effectId`: a value for each of that
+ * A layer's settings as a manifest keeps them, for the effect `effectId`: a value for each of that
  * effect's sliders that is not at its default, held to the scale and to whole steps, in the order the
- * effect lists them - or `undefined`, the absent key, when there is none, so a sound whose sliders
- * were never moved is stored exactly as one put through the effect before it had any. A key the effect
- * has no slider for is dropped, a later version's included, as an id this version does not know is.
+ * effect lists them - or `undefined`, the absent key, when there is none, so a layer whose sliders were
+ * never moved stores none. A key the effect has no slider for is dropped, a later version's included,
+ * as an id this version does not know is.
  */
 export function normaliseSoundEffectSettings(effectId: unknown, value: unknown): Record<string, number> | undefined {
   const preset = soundEffectPreset(effectId);
@@ -216,7 +215,7 @@ export function soundEffectSettings(effectId: unknown, settings: unknown): Recor
   return { ...defaultsOf(preset.controls), ...(normaliseSoundEffectSettings(preset.id, settings) ?? {}) };
 }
 
-/** Whether two sounds' stored settings are the same, a missing value being the default either way. */
+/** Whether two layers' stored settings are the same, a missing value being the default either way. */
 export function sameSoundEffectSettings(a: SoundEffectSettings | undefined, b: SoundEffectSettings | undefined): boolean {
   const x = a ?? {};
   const y = b ?? {};
@@ -233,11 +232,6 @@ export function sameSoundEffectSettings(a: SoundEffectSettings | undefined, b: S
 export function soundEffectSteps(effectId: unknown, settings?: unknown): ComposeSoundEffect | null {
   const preset = soundEffectPreset(effectId);
   return preset ? preset.steps(soundEffectSettings(preset.id, settings)) : null;
-}
-
-/** Whether `effectId` plays the sound's speed as a record does; see [SoundEffectSpeed]. */
-export function soundEffectPlaysSpeedAsRecord(effectId: unknown): boolean {
-  return soundEffectPreset(effectId)?.speed !== undefined;
 }
 
 function defaultsOf(controls: readonly SoundEffectControl[]): Record<string, number> {

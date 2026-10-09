@@ -19,11 +19,14 @@
 import {
   FILTER_PRESETS,
   aspectOf,
+  audioEffectSpeed,
+  audioEffectWindow,
   clipsDurationMs,
   qualityOf,
   resolveFilterOps,
   totalDurationMs,
   type EditAdjust,
+  type EditAudioEffect,
   type EditClip,
   type EditManifest,
   type EditMusic,
@@ -31,7 +34,7 @@ import {
   type EditZoom,
 } from '../editor/edit-manifest';
 import { clipDurationMs, musicSectionMs, musicSpeed, musicWindow, overlayEndMs, timelineSlots } from '../editor/edit-ops';
-import { soundEffectPlaysSpeedAsRecord, soundEffectPreset, soundEffectSettings } from '../editor/sound-effects';
+import { soundEffectPreset, soundEffectSettings } from '../editor/sound-effects';
 import type { FilterOp } from '../video-composer/definitions';
 import { zoomOffered, type McpEditingOptions } from './ops';
 
@@ -130,6 +133,14 @@ export function summariseManifest(manifest: EditManifest, options: SummaryOption
     for (const take of manifest.voiceovers) {
       sound.push(`  "${take.id}" ${time(take.startMs)}..${time(take.startMs + take.durationMs)}, ${percent(take.volume)}`);
     }
+  }
+  // Last, because a layer is not a sound: it is a window that everything above goes through.
+  const effects = [...(manifest.audioEffects ?? [])].sort((a, b) => a.startMs - b.startMs);
+  if (effects.length === 0) {
+    sound.push('Audio effects: none');
+  } else {
+    sound.push(`Audio effects: ${count(effects.length, 'layer')} (everything heard inside one goes through its effect - clips, lanes and voiceover alike; one at a time)`);
+    for (const layer of effects) sound.push(`  ${describeAudioEffect(layer, totalMs)}`);
   }
   lines.push(...sound);
 
@@ -299,17 +310,10 @@ function describeSound(music: EditMusic, totalMs: number): string {
   const section = music.outMs > 0 ? `${time(music.inMs)}..${time(music.outMs)}` : `from ${time(music.inMs)}`;
   const stop = music.endMs > 0 ? `, stopping at ${time(music.endMs)}` : '';
   const loop = music.loop ? ', looped' : '';
-  const record = soundEffectPlaysSpeedAsRecord(music.effect) ? ' as a record plays it, lower as well as slower' : '';
-  const speed = musicSpeed(music) !== 1 ? `, at ${round(musicSpeed(music))}x${record}` : '';
-  const effect = soundEffectPreset(music.effect);
-  // Every slider where it is, its default included, so an agent reads what it would patch.
-  const sliders = Object.entries(soundEffectSettings(music.effect, music.effectSettings))
-    .map(([key, value]) => `${key} ${value}`)
-    .join(', ');
-  const through = effect ? `, through the ${effect.label.toLowerCase()} (effect "${effect.id}"${sliders ? `; ${sliders}` : ''})` : '';
+  const speed = musicSpeed(music) !== 1 ? `, at ${round(musicSpeed(music))}x` : '';
   const fadeIn = (music.fadeInMs ?? 0) > 0 ? `, fades in over ${time(music.fadeInMs ?? 0)}` : '';
   const fade = fadeIn + (music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '');
-  return `${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${speed}${through}${loop}${fade}; ${heard(music, totalMs)}`;
+  return `${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${speed}${loop}${fade}; ${heard(music, totalMs)}`;
 }
 
 function heard(music: EditMusic, totalMs: number): string {
@@ -321,6 +325,24 @@ function heard(music: EditMusic, totalMs: number): string {
     return `heard from ${time(startMs)} until the track ends, ${time(endMs)} at most - its length is unknown (send sourceDurationMs or outMs to know)`;
   }
   return `heard ${time(startMs)}..${time(endMs)}`;
+}
+
+/**
+ * One audio effect layer: its window, its effect with every slider where it is - its default
+ * included, so an agent reads what it would patch - and, for an effect that slows, its speed. Then
+ * how much of it the post plays when that is not all of it: a layer is kept past the end of a post
+ * that got shorter, and is not heard there ([audioEffectWindow]), which its own fields do not say.
+ */
+function describeAudioEffect(layer: EditAudioEffect, totalMs: number): string {
+  const preset = soundEffectPreset(layer.effect);
+  const slow = preset?.speed ? round(audioEffectSpeed(layer)) : null;
+  const sliders = Object.entries(soundEffectSettings(layer.effect, layer.effectSettings)).map(([key, value]) => `${key} ${value}`);
+  const settings = [...(slow ? [`speed ${slow}`] : []), ...sliders].join(', ');
+  const record = slow ? `, playing what it covers at ${slow}x as a record plays it, lower as well as slower` : '';
+  const played = audioEffectWindow(layer, totalMs);
+  const cut = !played ? '; never heard: it starts at or after the end of the post' : played.endMs < layer.endMs ? `; heard only to ${time(played.endMs)}, where the post ends` : '';
+  const label = preset?.label.toLowerCase() ?? layer.effect;
+  return `"${layer.id}" ${time(layer.startMs)}..${time(layer.endMs)}, ${label} (effect "${layer.effect}"${settings ? `; ${settings}` : ''})${record}${cut}`;
 }
 
 /** `4500ms (0:04.5)`, and a plain `0ms` for the start, where a clock adds nothing. */

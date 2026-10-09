@@ -40,6 +40,7 @@
    * @prop --ve-lane-effect: The timeline lane colour for an effect layer
    * @prop --ve-lane-music: The timeline lane colour for music
    * @prop --ve-lane-voice: The timeline lane colour for a voiceover
+   * @prop --ve-lane-audio-effect: The timeline lane colour for an audio effect
    * @prop --ve-clip-wave: The waveform drawn on a video clip that has sound
    * @prop --ve-lane-music-wave: The waveform drawn on the music lane
    * @prop --ve-lane-voice-wave: The waveform drawn on a voiceover lane
@@ -97,6 +98,8 @@
   --ve-lane-effect: #b99bff;
   --ve-lane-music: #0b8e87;
   --ve-lane-voice: #ff9f5a;
+  /* A pale cousin of the music's teal: it changes the sound under it, and is no sound itself. */
+  --ve-lane-audio-effect: #74dccf;
   /*
    * The sound drawn on those two lanes. Translucent rather than a third and fourth colour, so a
    * host that restyles a lane gets a wave that still reads on it without restyling this as well.

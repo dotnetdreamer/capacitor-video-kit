@@ -1,8 +1,10 @@
-import type { ComposeClip, ComposeOverlay, ComposeOverlayMotion, ComposePlacement, ComposeRect, ComposeSoundEffect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
+import type { ComposeAudio, ComposeAudioEffect, ComposeClip, ComposeOverlay, ComposeOverlayMotion, ComposePlacement, ComposeRect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
 
 import {
   MAX_SPEED,
   MIN_LAYER_MS,
+  audioEffectSpeed,
+  audioEffectWindow,
   backgroundRgb,
   byteCeiling,
   clamp,
@@ -14,6 +16,7 @@ import {
   clipsDurationMs,
   totalDurationMs,
   videoBitrateFor,
+  type EditAudioEffect,
   type EditClip,
   type EditFit,
   type EditManifest,
@@ -27,7 +30,7 @@ import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
-import { soundEffectPlaysSpeedAsRecord, soundEffectSteps } from './sound-effects';
+import { soundEffectSteps } from './sound-effects';
 import { compileTransition, transitionSpans } from './transitions';
 import { compileCamera } from './zoom';
 
@@ -162,7 +165,6 @@ export async function toComposeSpec(
     overlays.push(wire);
   }
 
-  const music = manifest.music;
   const maxBytes = byteCeiling(limits.maxBytes);
 
   const spec: ComposeSpec = {
@@ -177,61 +179,7 @@ export async function toComposeSpec(
     },
     filter: resolveFilterOps(manifest),
     overlays,
-    audio: {
-      originalMuted: manifest.originalMuted,
-      originalVolume: 1,
-      music: music
-        ? {
-            uri: music.uri,
-            startMs: Math.max(0, Math.round(music.startMs)),
-            ...(music.phaseMs ? { phaseMs: Math.round(music.phaseMs) } : {}),
-            inMs: Math.max(0, Math.round(music.inMs)),
-            // A trim the customer made, or "to the end of the file" - never the page's own measure of
-            // that end. WebKit reads a 12 s m4a as 11975 ms, which AVFoundation and Chromium read as
-            // 12000, and sending that clipped the last 25 ms off every pass on iOS: a click at every
-            // loop seam, and a sliver of a last pass. Each engine reads the file's real length.
-            outMs: Math.round(music.outMs > 0 ? music.outMs : UNKNOWN_TRACK_END_MS),
-            // Only a stop that cuts the music short, for the reason `tracks` is left off: music that
-            // plays to the end is the spec this package has always produced, byte for byte.
-            ...(music.endMs > 0 && music.endMs < totalMs ? { endMs: Math.round(music.endMs) } : {}),
-            volume: music.volume,
-            loop: music.loop,
-            fadeInMs: Math.max(0, Math.round(music.fadeInMs ?? 0)),
-            fadeOutMs: Math.max(0, Math.round(music.fadeOutMs)),
-            ...wireSpeed(music),
-            ...wireEffect(music),
-          }
-        : null,
-      voiceover: [...manifest.voiceovers]
-        .sort((a, b) => a.startMs - b.startMs)
-        .map(take => ({
-          uri: take.uri,
-          startMs: Math.max(0, Math.round(take.startMs)),
-          durationMs: Math.max(0, Math.round(take.durationMs)),
-          volume: take.volume,
-        })),
-      ...(manifest.audioTracks?.length
-        ? {
-            // The halves of a cut go as the one sound they still are, so no engine has a seam to close.
-            musicTracks: manifest.audioTracks.map(track =>
-              joinContinuousAudio(track.clips).map(sound => ({
-                uri: sound.uri,
-                startMs: Math.max(0, Math.round(sound.startMs)),
-                ...(sound.phaseMs ? { phaseMs: Math.round(sound.phaseMs) } : {}),
-                inMs: Math.max(0, Math.round(sound.inMs)),
-                outMs: Math.round(sound.outMs > 0 ? sound.outMs : UNKNOWN_TRACK_END_MS),
-                ...(sound.endMs > 0 && sound.endMs < totalMs ? { endMs: Math.round(sound.endMs) } : {}),
-                volume: sound.volume,
-                loop: sound.loop,
-                fadeInMs: Math.max(0, Math.round(sound.fadeInMs ?? 0)),
-                fadeOutMs: Math.max(0, Math.round(sound.fadeOutMs)),
-                ...wireSpeed(sound),
-                ...wireEffect(sound),
-              })),
-            ),
-          }
-        : {}),
-    },
+    audio: wireAudio(manifest, totalMs),
     // A little way in, so the poster is a frame of the video rather than a fade from black.
     posterAtMs: Math.min(500, Math.max(0, totalMs - 1)),
   };
@@ -262,6 +210,108 @@ export async function toComposeSpec(
   const background = normaliseBackground(manifest.background);
   if (background) spec.background = backgroundRgb(background);
 
+  // Only the layers the post plays, and the key only when there is one, for the reason `tracks` is
+  // left off: a post with no layer is the spec this package has always produced, byte for byte.
+  const effects = wireAudioEffects(manifest.audioEffects ?? [], totalMs);
+  if (effects.length > 0) spec.audio.effects = effects;
+
+  return spec;
+}
+
+/**
+ * Every sound of the post as the wire carries it: the clips' own (muted or not), the music, every
+ * lane and every voiceover - and none of the audio effect layers, which [toComposeSpec] adds after it
+ * when there are any, for the reason it leaves `tracks` off.
+ */
+function wireAudio(manifest: EditManifest, totalMs: number): ComposeAudio {
+  const music = manifest.music;
+  return {
+    originalMuted: manifest.originalMuted,
+    originalVolume: 1,
+    music: music
+      ? {
+          uri: music.uri,
+          startMs: Math.max(0, Math.round(music.startMs)),
+          ...(music.phaseMs ? { phaseMs: Math.round(music.phaseMs) } : {}),
+          inMs: Math.max(0, Math.round(music.inMs)),
+          // A trim the customer made, or "to the end of the file" - never the page's own measure of
+          // that end. WebKit reads a 12 s m4a as 11975 ms, which AVFoundation and Chromium read as
+          // 12000, and sending that clipped the last 25 ms off every pass on iOS: a click at every
+          // loop seam, and a sliver of a last pass. Each engine reads the file's real length.
+          outMs: Math.round(music.outMs > 0 ? music.outMs : UNKNOWN_TRACK_END_MS),
+          // Only a stop that cuts the music short, for the reason `tracks` is left off: music that
+          // plays to the end is the spec this package has always produced, byte for byte.
+          ...(music.endMs > 0 && music.endMs < totalMs ? { endMs: Math.round(music.endMs) } : {}),
+          volume: music.volume,
+          loop: music.loop,
+          fadeInMs: Math.max(0, Math.round(music.fadeInMs ?? 0)),
+          fadeOutMs: Math.max(0, Math.round(music.fadeOutMs)),
+          ...wireSpeed(music),
+        }
+      : null,
+    voiceover: [...manifest.voiceovers]
+      .sort((a, b) => a.startMs - b.startMs)
+      .map(take => ({
+        uri: take.uri,
+        startMs: Math.max(0, Math.round(take.startMs)),
+        durationMs: Math.max(0, Math.round(take.durationMs)),
+        volume: take.volume,
+      })),
+    ...(manifest.audioTracks?.length
+      ? {
+          // The halves of a cut go as the one sound they still are, so no engine has a seam to close.
+          musicTracks: manifest.audioTracks.map(track =>
+            joinContinuousAudio(track.clips).map(sound => ({
+              uri: sound.uri,
+              startMs: Math.max(0, Math.round(sound.startMs)),
+              ...(sound.phaseMs ? { phaseMs: Math.round(sound.phaseMs) } : {}),
+              inMs: Math.max(0, Math.round(sound.inMs)),
+              outMs: Math.round(sound.outMs > 0 ? sound.outMs : UNKNOWN_TRACK_END_MS),
+              ...(sound.endMs > 0 && sound.endMs < totalMs ? { endMs: Math.round(sound.endMs) } : {}),
+              volume: sound.volume,
+              loop: sound.loop,
+              fadeInMs: Math.max(0, Math.round(sound.fadeInMs ?? 0)),
+              fadeOutMs: Math.max(0, Math.round(sound.fadeOutMs)),
+              ...wireSpeed(sound),
+            })),
+          ),
+        }
+      : {}),
+  };
+}
+
+/**
+ * What the post SOUNDS like, as the wire carries it: its clips, its layers' clips, its sounds, its
+ * voiceovers and its audio effect layers, with no picture - nothing is drawn, the frame is a
+ * placeholder and there are no overlays. What the preview's copy of an audio effect layer is planned
+ * from (`effect-copy.ts`), with uris the page itself can read, so the copy is laid by the render's own
+ * arithmetic. Synchronous, as nothing is drawn. Throws [MissingClipError] as [toComposeSpec] does.
+ */
+export function toComposeSoundSpec(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>): ComposeSpec {
+  const totalMs = Math.round(totalDurationMs(manifest));
+  const layout = compileLayoutMotions(manifest);
+  const spec: ComposeSpec = {
+    jobId: 'sound',
+    batchId: 'sound',
+    clips: baseClips(manifest, uriByKey, layout),
+    output: { width: 2, height: 2, fps: 30, videoBitrate: 0, audioBitrate: 0 },
+    filter: [],
+    overlays: [],
+    audio: wireAudio(manifest, totalMs),
+    posterAtMs: 0,
+  };
+  if (manifest.videoTracks.length > 0) {
+    spec.tracks = manifest.videoTracks.map(track => ({
+      id: track.id,
+      clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout)),
+      startMs: Math.max(0, Math.round(track.startMs)),
+      z: track.z,
+      opacity: clamp(track.opacity, 0, 1),
+    }));
+  }
+  if (totalMs > Math.round(clipsDurationMs(manifest.clips))) spec.durationMs = totalMs;
+  const effects = wireAudioEffects(manifest.audioEffects ?? [], totalMs);
+  if (effects.length > 0) spec.audio.effects = effects;
   return spec;
 }
 
@@ -269,24 +319,27 @@ export async function toComposeSpec(
  * A sound's speed as the wire carries it: only when it is not 1x, so a sound nobody sped up is the
  * music this package has always sent, byte for byte, and every engine keeps the path it takes for it.
  */
-function wireSpeed(music: EditMusic): { speed?: number; varispeed?: true } {
+function wireSpeed(music: EditMusic): { speed?: number } {
   const speed = musicSpeed(music);
-  if (speed === 1) return {};
-  // Slow + reverb's slowness is a record's, lower as well as slower; every other speed keeps its pitch.
-  return soundEffectPlaysSpeedAsRecord(music.effect) ? { speed, varispeed: true } : { speed };
+  return speed === 1 ? {} : { speed };
 }
 
 /**
- * A sound's effect as the wire carries it: the steps its id stands for at the sound's own settings,
- * and no key at all for none or for an id this version does not know, so a sound nobody put through
- * anything is the music this package has always sent - and a megaphone whose sliders were never
- * moved is the one it sent before there were sliders. The steps are made afresh for every spec
- * rather than handed over from the frozen catalogue, so nothing that holds the spec can change an
- * effect for every post after it.
+ * The audio effect layers as the wire carries them ([ComposeAudioEffect]): each one the post plays,
+ * cut to the post's end ([audioEffectWindow]), with the steps its effect stands for at its sliders and
+ * its Slow where it slows. The steps are made afresh for every spec rather than handed over from the
+ * frozen catalogue, so nothing that holds the spec can change an effect for every post after it.
  */
-function wireEffect(music: EditMusic): { effect?: ComposeSoundEffect } {
-  const effect = soundEffectSteps(music.effect, music.effectSettings);
-  return effect ? { effect } : {};
+export function wireAudioEffects(layers: readonly EditAudioEffect[], totalMs: number): ComposeAudioEffect[] {
+  const wire: ComposeAudioEffect[] = [];
+  for (const layer of layers) {
+    const window = audioEffectWindow(layer, totalMs);
+    const effect = soundEffectSteps(layer.effect, layer.effectSettings);
+    if (!window || !effect) continue;
+    const speed = audioEffectSpeed(layer);
+    wire.push({ startMs: Math.round(window.startMs), endMs: Math.round(window.endMs), ...(speed !== 1 ? { speed } : {}), effect });
+  }
+  return wire;
 }
 
 /**

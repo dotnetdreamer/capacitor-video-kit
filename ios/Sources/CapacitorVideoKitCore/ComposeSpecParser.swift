@@ -166,7 +166,8 @@ enum ComposeSpecParser {
                                  originalVolume: clamp01(d.audio.originalVolume),
                                  music: music,
                                  voiceover: voiceover,
-                                 musicTracks: musicTracks)
+                                 musicTracks: musicTracks,
+                                 effects: d.audio.effects)
 
         return ComposeSpec(jobId: d.jobId,
                            batchId: d.batchId,
@@ -1541,7 +1542,8 @@ private struct MusicDTO: Decodable {
 private struct SoundEffectDTO: Decodable {
     let effect: SoundEffect?
 
-    private static let path = "audio.music.effect"
+    /// Where its refusals are written; a window of `audio.effects` moves them under itself.
+    static let path = "audio.music.effect"
 
     /// Each step's numbers in the contract's order, and the ranges they are held to: `OP_FIELDS` in
     /// sound-effects.ts.
@@ -1641,17 +1643,19 @@ private struct AudioDTO: Decodable {
     let music: MusicDTO?
     let musicTracks: [[MusicDTO]]
     let voiceover: [VoiceDTO]
+    let effects: [AudioEffectWindow]
 
-    static let empty = AudioDTO(originalMuted: false, originalVolume: 1, music: nil, musicTracks: [], voiceover: [])
+    static let empty = AudioDTO(originalMuted: false, originalVolume: 1, music: nil, musicTracks: [], voiceover: [], effects: [])
 
-    private enum K: String, CodingKey { case originalMuted, originalVolume, music, musicTracks, voiceover }
+    private enum K: String, CodingKey { case originalMuted, originalVolume, music, musicTracks, voiceover, effects }
 
-    private init(originalMuted: Bool, originalVolume: Double, music: MusicDTO?, musicTracks: [[MusicDTO]], voiceover: [VoiceDTO]) {
+    private init(originalMuted: Bool, originalVolume: Double, music: MusicDTO?, musicTracks: [[MusicDTO]], voiceover: [VoiceDTO], effects: [AudioEffectWindow]) {
         self.originalMuted = originalMuted
         self.originalVolume = originalVolume
         self.music = music
         self.musicTracks = musicTracks
         self.voiceover = voiceover
+        self.effects = effects
     }
 
     init(from decoder: Decoder) throws {
@@ -1716,6 +1720,64 @@ private struct AudioDTO: Decodable {
 
         originalMuted = c.flag(.originalMuted, false)
         originalVolume = c.double(.originalVolume, 1)
+
+        // Last of the audio's keys, so a spec broken anywhere else reports the same first failure.
+        var windows: [AudioEffectWindow] = []
+        if c.contains(.effects) && (try? c.decodeNil(forKey: .effects)) == false {
+            var list: UnkeyedDecodingContainer
+            do {
+                list = try c.nestedUnkeyedContainer(forKey: .effects)
+            } catch {
+                throw SpecError("audio.effects")
+            }
+            if (list.count ?? 0) > AudioEffectWindow.maxCount {
+                throw SpecError("audio.effects", "invalid_spec:audio.effects at most \(AudioEffectWindow.maxCount) windows")
+            }
+            var previousEndMs = -Double.infinity
+            while !list.isAtEnd {
+                let path = "audio.effects[\(list.currentIndex)]"
+                guard let w = try? list.nestedContainer(keyedBy: AnyKey.self) else { throw SpecError(path) }
+                let window = try Self.window(w, path)
+                if window.start < previousEndMs { throw SpecError("\(path).startMs") }
+                previousEndMs = window.end
+                // One that would change nothing is left off, as the web's parser leaves it.
+                if window.effect == nil && window.speed == 1 { continue }
+                windows.append(AudioEffectWindow(startMs: window.start, endMs: window.end, speed: window.speed, effect: window.effect))
+            }
+        }
+        effects = windows
+    }
+
+    /// One window's own fields, in the contract's order: `startMs`, `endMs`, `speed`, `effect`, then a
+    /// key that is none of these. Where it sits among the others is the caller's to check.
+    private static func window(_ w: KeyedDecodingContainer<AnyKey>, _ path: String) throws -> (start: Double, end: Double, speed: Double, effect: SoundEffect?) {
+        func number(_ name: String) -> Double? {
+            guard let key = AnyKey(stringValue: name), w.has(key), let value = try? w.decode(Double.self, forKey: key), value.isFinite else { return nil }
+            return value
+        }
+        guard let startMs = number("startMs") else { throw SpecError("\(path).startMs") }
+        guard let endMs = number("endMs") else { throw SpecError("\(path).endMs") }
+        let start = max(0, startMs)
+        guard endMs > start else { throw SpecError("\(path).endMs") }
+        var speed = 1.0
+        if let key = AnyKey(stringValue: "speed"), w.has(key) {
+            guard let value = number("speed") else { throw SpecError("\(path).speed") }
+            speed = min(1, max(AudioEffectWindow.minSpeed, value))
+        }
+        var effect: SoundEffect?
+        if let key = AnyKey(stringValue: "effect"), w.has(key) {
+            do {
+                effect = try w.decode(SoundEffectDTO.self, forKey: key).effect
+            } catch let e as SpecError where e.path.hasPrefix(SoundEffectDTO.path) {
+                // The effect's own paths are written under the music; they move to this window.
+                let moved = "\(path).effect\(e.path.dropFirst(SoundEffectDTO.path.count))"
+                throw SpecError(moved, e.message.replacingOccurrences(of: e.path, with: moved))
+            } catch {
+                throw SpecError("\(path).effect")
+            }
+        }
+        if let unknown = firstUnknownKey(w, known: ["effect", "endMs", "speed", "startMs"]) { throw SpecError("\(path).\(unknown)") }
+        return (start, endMs, speed, effect)
     }
 }
 

@@ -1,3 +1,5 @@
+import { MAX_AUDIO_EFFECTS } from '../video-composer/definitions';
+
 import {
   MAX_LAYERS,
   MAX_POST_MS,
@@ -15,6 +17,7 @@ import {
   contentDurationMs,
   defaultPictureEdit,
   isFullFrameRect,
+  normaliseAudioEffect,
   normaliseBackground,
   normalisePlacement,
   normaliseSpeed,
@@ -23,6 +26,7 @@ import {
   sameRect,
   totalDurationMs,
   withoutLeadingTransition,
+  type EditAudioEffect,
   type EditClip,
   type EditAudioClip,
   type EditAudioTrack,
@@ -40,7 +44,7 @@ import {
 } from './edit-manifest';
 import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
-import { normaliseSoundEffectId, normaliseSoundEffectSettings, sameSoundEffectSettings, soundEffectPreset } from './sound-effects';
+import { sameSoundEffectSettings } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -604,7 +608,14 @@ export function cutPostTo(manifest: EditManifest, durationMs: number): EditManif
       : {}),
     voiceovers,
     zooms: cutZooms(manifest.zooms, end),
+    ...(manifest.audioEffects ? { audioEffects: cutAudioEffects(manifest.audioEffects, end) } : {}),
   };
+}
+
+/** The audio effect layers cut at `end`: one starting after it goes, one running past it ends there. */
+function cutAudioEffects(layers: EditAudioEffect[], end: number): EditAudioEffect[] {
+  const cut = layers.filter(layer => end - layer.startMs >= MIN_LAYER_MS).map(layer => (layer.endMs > end ? { ...layer, endMs: end } : layer));
+  return cut.length === layers.length && cut.every((layer, i) => layer === layers[i]) ? layers : cut;
 }
 
 function cutZooms(zooms: EditZoom[], end: number): EditZoom[] {
@@ -1214,6 +1225,145 @@ function sortedZooms(zooms: EditZoom[]): EditZoom[] {
   return [...zooms].sort((a, b) => a.startMs - b.startMs);
 }
 
+/*
+ * Audio effect layers are one row with one effect at a time, so these keep the list the way
+ * [EditManifest.audioEffects] promises it - sorted, never overlapping - as the zooms' ops keep theirs:
+ * two windows that overlapped would put a moment through two effects in an order nothing chose. They
+ * sit on the OUTPUT timeline, like the zooms: no clip or sound op moves them, and only [cutPostTo]
+ * cuts them.
+ */
+
+export function findAudioEffect(manifest: EditManifest, id: string): EditAudioEffect | null {
+  return manifest.audioEffects?.find(layer => layer.id === id) ?? null;
+}
+
+/** The layer whose window holds `outputMs` - there is at most one. */
+export function audioEffectAt(manifest: EditManifest, outputMs: number): EditAudioEffect | null {
+  return manifest.audioEffects?.find(layer => outputMs >= layer.startMs && outputMs < layer.endMs) ?? null;
+}
+
+/**
+ * How long a layer starting at `startMs` may run before it would reach the next layer or the end of the
+ * post. 0 when `startMs` is inside a layer. The [zoomRoomAt] rule, for the same one-row reason.
+ */
+export function audioEffectRoomAt(manifest: EditManifest, startMs: number, totalMs: number, ignoreId?: string): number {
+  const layers = (manifest.audioEffects ?? []).filter(layer => layer.id !== ignoreId);
+  if (layers.some(layer => startMs >= layer.startMs && startMs < layer.endMs)) return 0;
+  const next = layers.filter(layer => layer.startMs >= startMs).sort((a, b) => a.startMs - b.startMs)[0];
+  return Math.max(0, Math.min(next ? next.startMs : totalMs, totalMs) - startMs);
+}
+
+/**
+ * Adds a layer, SHORTENED to the room it has before the next layer and the end of the post, as
+ * [addZoom] does. Null at [MAX_AUDIO_EFFECTS], for an id already in use, for an effect this version does
+ * not know, and when less than [MIN_LAYER_MS] fits.
+ */
+export function addAudioEffect(manifest: EditManifest, layer: EditAudioEffect, totalMs: number): EditManifest | null {
+  const layers = manifest.audioEffects ?? [];
+  if (layers.length >= MAX_AUDIO_EFFECTS || findAudioEffect(manifest, layer.id)) return null;
+  const startMs = Math.max(0, Math.round(layer.startMs));
+  const room = audioEffectRoomAt(manifest, startMs, totalMs);
+  if (room < MIN_LAYER_MS) return null;
+  const length = clamp(Math.round(layer.endMs - layer.startMs), MIN_LAYER_MS, room);
+  const placed = normaliseAudioEffect({ ...layer, startMs, endMs: startMs + length }, layer.id);
+  if (!placed) return null;
+  return { ...manifest, audioEffects: sortedAudioEffects([...layers, placed]) };
+}
+
+/** What a layer is, apart from where it is: [setAudioEffectWindow] owns the timing. */
+export type AudioEffectPatch = Partial<Pick<EditAudioEffect, 'effect' | 'effectSettings' | 'speed'>>;
+
+/**
+ * Changes a layer's effect, its sliders or its Slow, held to what each effect offers
+ * ([normaliseAudioEffect]). Another effect comes on at its defaults - sliders and Slow alike - unless
+ * the patch says otherwise, as a filter does: one effect's room size means nothing to another. The
+ * same manifest when nothing changed (an id this version does not know, a value where it already is),
+ * so a slider let go where it started records no undo step.
+ */
+export function updateAudioEffect(manifest: EditManifest, id: string, patch: AudioEffectPatch): EditManifest {
+  const current = findAudioEffect(manifest, id);
+  if (!current) return manifest;
+  const effect = patch.effect ?? current.effect;
+  const another = effect !== current.effect;
+  const next = normaliseAudioEffect(
+    {
+      ...current,
+      effect,
+      effectSettings: patch.effectSettings ?? (another ? undefined : current.effectSettings),
+      speed: patch.speed ?? (another ? undefined : current.speed),
+    },
+    id,
+  );
+  if (!next || sameAudioEffect(current, next)) return manifest;
+  return { ...manifest, audioEffects: manifest.audioEffects!.map(layer => (layer.id === id ? next : layer)) };
+}
+
+/** One of a layer's sliders moved to `value` on its 0..100 scale. The same edit back for a slider its effect has not got. */
+export function setAudioEffectSetting(manifest: EditManifest, id: string, key: string, value: number): EditManifest {
+  const layer = findAudioEffect(manifest, id);
+  return layer ? updateAudioEffect(manifest, id, { effectSettings: { ...layer.effectSettings, [key]: value } }) : manifest;
+}
+
+/**
+ * Sets when a layer runs, keeping it at least [MIN_LAYER_MS] long and between its neighbours and the
+ * end of the post: [setZoomWindow]'s rules, neighbours found from where the layer IS so a drag stops at
+ * the next one instead of jumping it, a window dragged whole keeping its length.
+ */
+export function setAudioEffectWindow(manifest: EditManifest, id: string, startMs: number, endMs: number, totalMs: number): EditManifest {
+  const layer = findAudioEffect(manifest, id);
+  if (!layer) return manifest;
+  const others = manifest.audioEffects!.filter(other => other.id !== id);
+  const before = others.filter(other => other.endMs <= layer.startMs).sort((a, b) => b.endMs - a.endMs)[0];
+  const after = others.filter(other => other.startMs >= layer.endMs).sort((a, b) => a.startMs - b.startMs)[0];
+  const lo = before ? before.endMs : 0;
+  const hi = after ? after.startMs : Math.max(totalMs, lo);
+  if (hi - lo < MIN_LAYER_MS) return manifest;
+  const [start, end] = clampSpan(startMs, endMs, lo, hi, layer.startMs, layer.endMs, MIN_LAYER_MS);
+  if (start === layer.startMs && end === layer.endMs) return manifest;
+  return { ...manifest, audioEffects: sortedAudioEffects(manifest.audioEffects!.map(other => (other.id === id ? { ...layer, startMs: start, endMs: end } : other))) };
+}
+
+/**
+ * A copy placed straight after the original, as long as it where there is room and shortened where
+ * there is less ([duplicateZoom]). Null when less than [MIN_LAYER_MS] fits there, or at the cap.
+ */
+export function duplicateAudioEffect(manifest: EditManifest, id: string, newId: string, totalMs: number): EditManifest | null {
+  const layer = findAudioEffect(manifest, id);
+  if (!layer) return null;
+  return addAudioEffect(manifest, { ...layer, id: newId, startMs: layer.endMs, endMs: layer.endMs + (layer.endMs - layer.startMs) }, totalMs);
+}
+
+/**
+ * A layer cut in two at `atMs`, the second half `newId`, both the effect the layer was - so one half
+ * can be given another. Null when either half would be under [MIN_LAYER_MS], at the cap, or for an id
+ * already in use.
+ */
+export function splitAudioEffect(manifest: EditManifest, id: string, atMs: number, newId: string): EditManifest | null {
+  const layer = findAudioEffect(manifest, id);
+  const layers = manifest.audioEffects ?? [];
+  if (!layer || layers.length >= MAX_AUDIO_EFFECTS || findAudioEffect(manifest, newId)) return null;
+  const cut = Math.round(atMs);
+  if (cut - layer.startMs < MIN_LAYER_MS || layer.endMs - cut < MIN_LAYER_MS) return null;
+  return { ...manifest, audioEffects: sortedAudioEffects([...layers.filter(one => one.id !== id), { ...layer, endMs: cut }, { ...layer, id: newId, startMs: cut }]) };
+}
+
+export function deleteAudioEffect(manifest: EditManifest, id: string): EditManifest {
+  if (!findAudioEffect(manifest, id)) return manifest;
+  const audioEffects = manifest.audioEffects!.filter(layer => layer.id !== id);
+  // The key goes with the last layer, so a post that had one and lost it is stored as one that never did.
+  if (audioEffects.length > 0) return { ...manifest, audioEffects };
+  const { audioEffects: _gone, ...rest } = manifest;
+  return rest;
+}
+
+function sortedAudioEffects(layers: EditAudioEffect[]): EditAudioEffect[] {
+  return [...layers].sort((a, b) => a.startMs - b.startMs);
+}
+
+function sameAudioEffect(a: EditAudioEffect, b: EditAudioEffect): boolean {
+  return a.effect === b.effect && a.speed === b.speed && a.startMs === b.startMs && a.endMs === b.endMs && sameSoundEffectSettings(a.effectSettings, b.effectSettings);
+}
+
 /**
  * [clampWindow] between `lo` and `hi` instead of the whole post, and with its own floor: the edge
  * that moved gives way, and a window dragged whole stops at the bounds with its length intact.
@@ -1357,17 +1507,6 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
     next.speed = normaliseSpeed(next.speed);
     if (next.speed === 1) delete next.speed;
   }
-  // An effect only by an id this version can play, and no key at all for none.
-  const effect = normaliseSoundEffectId(next.effect);
-  if (effect) next.effect = effect;
-  else delete next.effect;
-  // Its sliders by the same rule, against the effect the sound has now - only those moved off their
-  // defaults - and the very object it had when they have not moved, so that a patch of anything else
-  // is still no change ([sameFields] compares by identity).
-  const settings = normaliseSoundEffectSettings(effect, next.effectSettings);
-  const had = manifest.music.effectSettings;
-  if (!settings) delete next.effectSettings;
-  else next.effectSettings = had && sameSoundEffectSettings(settings, had) ? had : settings;
   if (next.outMs > 0 && next.outMs - next.inMs < MIN_LAYER_MS) return manifest;
   if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;
@@ -1565,59 +1704,6 @@ export function setMusicSpeed(manifest: EditManifest, speed: number): EditManife
 }
 
 /**
- * What putting `sound` through `effectId` - or through none, for `null` - patches it with, or null
- * when that is the effect it already has. The effect, its sliders back at their defaults, and the
- * speed only where an effect holds it ([SoundEffectSpeed]): slowed to the effect's own when it takes
- * the speed over, unless the sound is slower already, and back to 1x when the effect that held it
- * comes off, since that slowness was the effect's. An id this version does not know is none.
- */
-export function soundEffectPatch(sound: EditMusic, effectId: string | null): Partial<EditMusic> | null {
-  const next = soundEffectPreset(effectId);
-  const was = soundEffectPreset(sound.effect);
-  if ((next?.id ?? null) === (was?.id ?? null)) return null;
-  const patch: Partial<EditMusic> = { effect: next?.id, effectSettings: undefined };
-  if (next?.speed) {
-    if (musicSpeed(sound) >= 1) patch.speed = next.speed.default;
-  } else if (was?.speed) {
-    patch.speed = 1;
-  }
-  return patch;
-}
-
-/**
- * One sound on the lanes through an effect from [SOUND_EFFECTS], or through none for `null`; see
- * [soundEffectPatch] for what comes with it. An effect alone never makes a sound longer, but one that
- * slows it may run it into the next sound on its lane, which stops it there as the Speed sheet's
- * slower speed would ([audioSpeedPatch]).
- */
-export function setAudioEffect(manifest: EditManifest, id: string, effectId: string | null): EditManifest {
-  const clip = findAudioClip(manifest, id);
-  const patch = clip ? soundEffectPatch(clip, effectId) : null;
-  if (!patch) return manifest;
-  return patchAudioClip(manifest, id, patch.speed !== undefined ? { ...patch, ...audioSpeedPatch(manifest, id, patch.speed) } : patch);
-}
-
-/** The post's music through an effect, or through none; see [setAudioEffect]. Nothing shares its row. */
-export function setMusicEffect(manifest: EditManifest, effectId: string | null): EditManifest {
-  const patch = manifest.music ? soundEffectPatch(manifest.music, effectId) : null;
-  return patch ? patchMusic(manifest, patch) : manifest;
-}
-
-/**
- * One of a sound's effect sliders moved to `value` on its 0..100 scale ([EditMusic.effectSettings]).
- * The same edit back for a sound whose effect has no such slider, or for where it already is.
- */
-export function setAudioEffectSetting(manifest: EditManifest, id: string, key: string, value: number): EditManifest {
-  const clip = findAudioClip(manifest, id);
-  return clip ? patchAudioClip(manifest, id, { effectSettings: { ...clip.effectSettings, [key]: value } }) : manifest;
-}
-
-/** The post's music's effect slider moved; see [setAudioEffectSetting]. */
-export function setMusicEffectSetting(manifest: EditManifest, key: string, value: number): EditManifest {
-  return manifest.music ? patchMusic(manifest, { effectSettings: { ...manifest.music.effectSettings, [key]: value } }) : manifest;
-}
-
-/**
  * Another file under a placed sound, which is what Replace is for: trying a different song in the same
  * place. Where it starts, its lane, its level, its fades and its loop are the customer's and stay; the
  * trim was cut from the old file and goes. A sound that ran on with no stop is stopped where the next
@@ -1812,7 +1898,7 @@ export function splitAudioClipAt(manifest: EditManifest, id: string, atMs: numbe
 /**
  * A lane's sounds with every run that plays on unbroken as the one sound it is: the halves of a cut
  * that nothing has been done to since, which are the same stretch of the same file, at the same
- * speed, level and effect, with no fade where they meet. What goes to the engines and to the preview, so a cut
+ * speed and level, with no fade where they meet. What goes to the engines and to the preview, so a cut
  * is heard as nothing at all - two items of one file meet with a seam the engines cannot close
  * ([splitAudioClipAt]; Media3 starts a sound inside its file on a codec frame, without the frame
  * before it). Each run keeps its first sound's id; a sound alone is returned as it was.
@@ -1833,18 +1919,14 @@ export function joinContinuousAudio(clips: readonly EditAudioClip[]): EditAudioC
 }
 
 /**
- * Whether `next` carries `sound` on unbroken: the same file at the same speed, level and effect -
- * the effect's sliders included -
- * nothing fading where they meet, and `next` starting where `sound` stops - on the post and in the file, to
+ * Whether `next` carries `sound` on unbroken: the same file at the same speed and level, nothing
+ * fading where they meet, and `next` starting where `sound` stops - on the post and in the file, to
  * within the millisecond a cut rounds a sped-up sound by. A loop goes on in the same section, its
  * repeats where the earlier one's had got to; a sound played once ends on its section, which the
  * next one starts its own on.
  */
 function playsOn(sound: EditAudioClip, next: EditAudioClip): boolean {
   if (next.uri !== sound.uri || musicSpeed(next) !== musicSpeed(sound) || next.volume !== sound.volume || next.loop !== sound.loop) return false;
-  // A word cut out of a line for a megaphone is a different sound from the line either side of it, and
-  // so is one put through the same megaphone driven harder.
-  if (next.effect !== sound.effect || !sameSoundEffectSettings(next.effectSettings, sound.effectSettings)) return false;
   if (sound.fadeOutMs > 0 || (next.fadeInMs ?? 0) > 0) return false;
   const speed = musicSpeed(sound);
   if (sound.loop) {
@@ -1861,7 +1943,7 @@ function playsOn(sound: EditAudioClip, next: EditAudioClip): boolean {
  * else on the first lane it fits on, else on a new lane `newTrackId` under its own. A sound heard to the
  * end of the post has no after, so its copy goes where it is, on another lane, as a layer's copy goes
  * over the layer ([duplicateOverlay]). The copy is the sound's in everything else - its trim, level,
- * fades, loop, speed and effect - and a stop the sound has moves with it ([musicMovedTo]).
+ * fades, loop and speed - and a stop the sound has moves with it ([musicMovedTo]).
  *
  * Null when the copy could not be heard anywhere, or when either id is taken.
  */

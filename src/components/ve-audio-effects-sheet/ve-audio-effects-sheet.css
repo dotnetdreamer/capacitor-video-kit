@@ -1,10 +1,10 @@
 /*
  * The Audio effects sheet: a row of effect tiles under the frame's head, and the sliders of the
- * effect the sound has under them.
+ * selected layer's effect under them.
  *
  * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
  * component includes ahead of this file. The tiles are the Filters sheet's thumbnails with a sign
- * where the picture would be, and the sliders its strength row, so choosing a sound's effect and how
+ * where the picture would be, and the sliders its strength row, so choosing an audio effect and how
  * far looks like choosing the post's look and how strong.
  */
 
@@ -104,9 +104,10 @@
   font-weight: 700;
 }
 
-.afx__empty {
+/* Under the tiles while they add a layer, where the sliders go once one is chosen. */
+.afx__hint {
   margin: 0;
-  align-items: center;
+  padding: 8px 16px 8px 20px;
   color: var(--ve-dim, rgba(255, 255, 255, 0.6));
   font-size: 14px;
 }

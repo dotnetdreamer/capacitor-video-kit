@@ -551,7 +551,10 @@ final class JobRegistry: @unchecked Sendable {
             let most = Double(maxBytes) * 1.2 + Double(slackBytes)
             if most < Double(estimateBytes) { estimateBytes = Int64(most) }
         }
-        return estimateBytes + 20 * 1024 * 1024
+        // The audio effect layers' mix is written to a file before the encode reads it back
+        // (`MixEffects`): 16-bit stereo at 48 kHz for the whole post.
+        let mixBytes = spec.audio.effects.isEmpty ? 0 : Int64(totalSeconds * Double(WriterEngine.audioSampleRate * WriterEngine.audioChannels * 2))
+        return estimateBytes + mixBytes + 20 * 1024 * 1024
     }
 
     // MARK: - State transitions

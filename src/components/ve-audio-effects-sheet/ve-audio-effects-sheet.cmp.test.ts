@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { SOUND_EFFECTS, emptyManifest, findAudioClip, type EditAudioClip, type EditManifest } from '../../editor';
+import { SOUND_EFFECTS, emptyManifest, findAudioClip, type EditAudioClip, type EditAudioEffect, type EditManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
-import type { EditorSelection } from '../../state/editor.types';
 
 import { SOUND_EFFECT_ICONS } from './effect-icons';
 
 /*
- * The Audio effects sheet in a browser: the tiles a finger taps, the head's "none", and what each
- * leaves in the manifest and the history. What the effect does to the sound is
- * `sound-effects.unit.test.ts`'s; this is the sheet a customer chooses it on.
+ * The Audio effects sheet in a browser: the tiles a finger taps, the head's "none", the sliders, and
+ * what each leaves in the manifest and the history - a layer added, changed, taken away. What the
+ * effect does to the sound is `audio-effect-windows.unit.test.ts`'s; this is the sheet a customer
+ * chooses it on.
  */
 
 const mounted: { store: EditorStore; column: HTMLElement }[] = [];
@@ -20,8 +20,8 @@ const mounted: { store: EditorStore; column: HTMLElement }[] = [];
 /** What the lazy build gives every element of its own, and the only honest wait for a first paint. */
 type StencilElement = HTMLElement & { componentOnReady?: () => Promise<unknown> };
 
-/** A twenty-second post with an older edit's one sound and two sounds on a lane. */
-function withSounds(): EditManifest {
+/** A twenty-second post with two sounds on a lane, and `layers` over them. */
+function withSounds(layers: EditAudioEffect[] = []): EditManifest {
   const sound = (id: string, startMs: number): EditAudioClip => ({
     id,
     uri: `file:///${id}.m4a`,
@@ -39,20 +39,20 @@ function withSounds(): EditManifest {
     ...emptyManifest(),
     clips: [{ id: 'seg-0', clipKey: 'clip-a', inMs: 0, outMs: 5000, speed: 1, volume: 1, muted: false }],
     durationMs: 20_000,
-    music: sound('old', 0),
     audioTracks: [{ id: 'lane', clips: [sound('line', 0), sound('next', 9000)] }],
+    ...(layers.length ? { audioEffects: layers } : {}),
   };
 }
 
-/** The sheet with `selection` selected, as the sound rows' Effects tile leaves it. */
-async function mount(selection: EditorSelection | null): Promise<{ store: EditorStore; sheet: HTMLElement }> {
+/** The sheet over a post with `layers`, the one `selected` selected and the playhead at `atMs`. */
+async function mount(layers: EditAudioEffect[] = [], selected: string | null = null, atMs = 0): Promise<{ store: EditorStore; sheet: HTMLElement }> {
   const host = resolveEditorHost({});
   const store = new EditorStore(host);
   const ctx: EditorContext = { store, media: new EditorMedia(store, host) };
-  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), withSounds());
-  // Selected first: `select` closes an open panel, because a sheet about the old sound says nothing
-  // about the new one.
-  if (selection) store.select(selection);
+  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 5000]]), withSounds(layers));
+  store.playheadMs.value = atMs;
+  // Selected first: `select` closes the sheet unless a layer is what is selected.
+  if (selected) store.select({ kind: 'audioEffect', id: selected });
   store.openPanel('audioEffects');
 
   const column = document.createElement('div');
@@ -142,133 +142,116 @@ afterEach(() => {
 });
 
 describe('ve-audio-effects-sheet', () => {
-  const lineOf = (store: EditorStore) => findAudioClip(store.manifest.value, 'line');
+  const layersOf = (store: EditorStore) => store.manifest.value.audioEffects ?? [];
+  const megaphone = (over: Partial<EditAudioEffect> = {}): EditAudioEffect => ({ id: 'afx', startMs: 1000, endMs: 6000, effect: 'megaphone', ...over });
 
-  it('offers every effect as a tile with a sign of its own', async () => {
-    const { sheet } = await mount({ kind: 'audio', id: 'line' });
+  it('offers every effect as a tile with a sign of its own, and says what one does', async () => {
+    const { sheet } = await mount();
     expect(head(sheet, '.sheet__title')?.textContent).toBe('Audio effects');
     expect(tiles(sheet).map(button => button.textContent)).toEqual(SOUND_EFFECTS.map(preset => preset.label));
     for (const preset of SOUND_EFFECTS) expect(SOUND_EFFECT_ICONS[preset.id]).toBeDefined();
     expect(tiles(sheet).every(button => button.getAttribute('aria-pressed') === 'false')).toBe(true);
+    expect(sheet.shadowRoot?.querySelector('.afx__hint')?.textContent).toBe('An effect changes every sound it covers');
+    // Nothing to take away yet.
+    expect(head(sheet, '[aria-label="No effect"]')).toBe(null);
   });
 
-  it('puts the selected sound through the effect tapped, in one undo step named for it', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-
+  it('adds a layer from the playhead to the end with the tile tapped, selected, in one step named for it', async () => {
+    const { store, sheet } = await mount([], null, 2000);
     tile(sheet, 'Megaphone').click();
-    expect(lineOf(store)?.effect).toBe('megaphone');
-    // That sound alone, and still selected.
-    expect(findAudioClip(store.manifest.value, 'next')).not.toHaveProperty('effect');
-    expect(store.manifest.value.music).not.toHaveProperty('effect');
-    expect(store.selection.value).toEqual({ kind: 'audio', id: 'line' });
+    const [layer] = layersOf(store);
+    expect(layer).toMatchObject({ startMs: 2000, endMs: 20_000, effect: 'megaphone' });
+    expect(store.selection.value).toEqual({ kind: 'audioEffect', id: layer!.id });
+    // Still open, now on the layer: its sliders come under the tiles.
+    expect(store.panel.value).toBe('audioEffects');
     await until('the tile to show it', () => tile(sheet, 'Megaphone').getAttribute('aria-pressed') === 'true');
+    await until('its sliders', () => controls(sheet).labels.length === 2);
 
     store.undo();
     expect(store.toast.value?.text).toBe('Undo: Megaphone');
-    expect(lineOf(store)).not.toHaveProperty('effect');
+    expect(layersOf(store)).toEqual([]);
   });
 
-  it('takes the effect off with the head’s none, named as Loop off is', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-    tile(sheet, 'Megaphone').click();
+  it('stops a new layer short of the next one', async () => {
+    const { store, sheet } = await mount([megaphone({ id: 'later', startMs: 8000, endMs: 9000 })], null, 2000);
+    tile(sheet, 'Slow + reverb').click();
+    expect(layersOf(store).map(({ startMs, endMs, effect }) => [startMs, endMs, effect])).toEqual([
+      [2000, 8000, 'slowReverb'],
+      [8000, 9000, 'megaphone'],
+    ]);
+  });
 
+  it('changes the effect of the layer under the playhead when none is selected', async () => {
+    const { store, sheet } = await mount([megaphone()], null, 3000);
+    tile(sheet, 'Slow + reverb').click();
+    expect(layersOf(store)).toEqual([megaphone({ effect: 'slowReverb' })]);
+    expect(store.selection.value).toEqual({ kind: 'audioEffect', id: 'afx' });
+  });
+
+  it('gives the selected layer another effect at its defaults, sliders and Slow alike', async () => {
+    const { store, sheet } = await mount([megaphone({ effect: 'slowReverb', speed: 0.6, effectSettings: { room: 90 } })], 'afx');
+    tile(sheet, 'Megaphone').click();
+    expect(layersOf(store)).toEqual([megaphone()]);
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Megaphone');
+  });
+
+  it('takes the layer away with the head’s none, and the sheet with it', async () => {
+    const { store, sheet } = await mount([megaphone()], 'afx');
     const none = head(sheet, '[aria-label="No effect"]');
     expect(none).not.toBe(null);
     none!.click();
-    expect(lineOf(store)).not.toHaveProperty('effect');
-    await until('the tile to let go', () => tile(sheet, 'Megaphone').getAttribute('aria-pressed') === 'false');
-
+    expect(layersOf(store)).toEqual([]);
+    expect(store.selection.value).toBe(null);
+    expect(store.panel.value).toBe(null);
     store.undo();
-    expect(store.toast.value?.text).toBe('Undo: Effect off');
-    expect(lineOf(store)?.effect).toBe('megaphone');
+    expect(store.toast.value?.text).toBe('Undo: Delete');
+    expect(layersOf(store)).toEqual([megaphone()]);
   });
 
-  it('records nothing for the effect the sound already has, or for none on a sound with none', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-    head(sheet, '[aria-label="No effect"]')!.click();
-    expect(store.canUndo.value).toBe(false);
-
+  it('records nothing for the effect the layer already has', async () => {
+    const { store, sheet } = await mount([megaphone()], 'afx');
     tile(sheet, 'Megaphone').click();
-    tile(sheet, 'Megaphone').click();
-    store.undo();
     expect(store.canUndo.value).toBe(false);
   });
 
-  it('works on an older edit’s one sound too', async () => {
-    const { store, sheet } = await mount({ kind: 'music' });
-    tile(sheet, 'Megaphone').click();
-    expect(store.manifest.value.music?.effect).toBe('megaphone');
-    expect(lineOf(store)).not.toHaveProperty('effect');
-  });
-
-  it('shows the sliders of the effect the sound has, and none for a sound with none', async () => {
-    const { sheet } = await mount({ kind: 'audio', id: 'line' });
-    expect(controls(sheet).labels).toEqual([]);
-
-    tile(sheet, 'Megaphone').click();
+  it('shows the sliders of the selected layer’s effect, each named for what it changes', async () => {
+    const { store, sheet } = await mount([megaphone()], 'afx');
     await until('the megaphone’s sliders', () => controls(sheet).labels.length === 2);
     expect(controls(sheet)).toEqual({ labels: ['Intensity', 'Tone'], values: ['50', '50'] });
 
     tile(sheet, 'Slow + reverb').click();
+    expect(layersOf(store)[0]?.effect).toBe('slowReverb');
     await until('slow + reverb’s sliders', () => controls(sheet).labels.length === 3);
     expect(controls(sheet)).toEqual({ labels: ['Slow', 'Reverb', 'Room'], values: ['0.8x', '50', '50'] });
-    // Each named for what it changes, as a screen reader and the undo toast will say it.
     expect(sliderFor(sheet, 'Room').getAttribute('aria-label')).toBe('Room size');
-    expect(sliderFor(sheet, 'Slow').getAttribute('aria-label')).toBe('Speed');
+    expect(sliderFor(sheet, 'Slow').getAttribute('aria-label')).toBe('Slow speed');
   });
 
   it('moves a slider as one undo step named for it', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-    tile(sheet, 'Megaphone').click();
+    const { store, sheet } = await mount([megaphone()], 'afx');
     await until('the sliders', () => controls(sheet).labels.length === 2);
 
     await drag(sheet, 'Intensity', 50, 80);
-    expect(lineOf(store)?.effectSettings).toEqual({ intensity: 80 });
+    expect(layersOf(store)[0]?.effectSettings).toEqual({ intensity: 80 });
     await until('the readout', () => controls(sheet).values[0] === '80');
 
     store.undo();
     expect(store.toast.value?.text).toBe('Undo: Megaphone intensity');
-    expect(lineOf(store)).not.toHaveProperty('effectSettings');
-    expect(lineOf(store)?.effect).toBe('megaphone');
+    expect(layersOf(store)).toEqual([megaphone()]);
   });
 
-  it('slows the sound as slow + reverb goes on, in the same step, and sets its speed with Slow', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-    tile(sheet, 'Slow + reverb').click();
-    expect(lineOf(store)).toMatchObject({ effect: 'slowReverb', speed: 0.8 });
+  it('sets the layer’s Slow, and leaves every sound at its own speed', async () => {
+    const { store, sheet } = await mount([megaphone({ effect: 'slowReverb' })], 'afx');
     await until('the sliders', () => controls(sheet).labels.length === 3);
 
     await drag(sheet, 'Slow', 80, 60);
-    expect(lineOf(store)?.speed).toBe(0.6);
+    expect(layersOf(store)[0]?.speed).toBe(0.6);
+    expect(findAudioClip(store.manifest.value, 'line')).not.toHaveProperty('speed');
     await until('the readout', () => controls(sheet).values[0] === '0.6x');
 
     store.undo();
-    expect(store.toast.value?.text).toBe('Undo: Speed');
-    expect(lineOf(store)?.speed).toBe(0.8);
-    store.undo();
-    expect(store.toast.value?.text).toBe('Undo: Slow + reverb');
-    expect(lineOf(store)).not.toHaveProperty('speed');
-    expect(lineOf(store)).not.toHaveProperty('effect');
-  });
-
-  it('puts the sound back at 1x when slow + reverb comes off', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-    tile(sheet, 'Slow + reverb').click();
-    head(sheet, '[aria-label="No effect"]')!.click();
-    expect(lineOf(store)).not.toHaveProperty('speed');
-    expect(lineOf(store)).not.toHaveProperty('effect');
-  });
-
-  it('asks for a sound rather than offering effects for nothing', async () => {
-    const { sheet } = await mount(null);
-    expect(sheet.shadowRoot?.querySelector('.afx__empty')?.textContent).toBe('Select a sound first');
-    expect(tiles(sheet)).toHaveLength(0);
-    expect(head(sheet, '[aria-label="No effect"]')).toBe(null);
-  });
-
-  it('closes the panel on the frame’s tick', async () => {
-    const { store, sheet } = await mount({ kind: 'audio', id: 'line' });
-    head(sheet, '[aria-label="Done"]')!.click();
-    expect(store.panel.value).toBe(null);
+    expect(store.toast.value?.text).toBe('Undo: Slow speed');
+    expect(layersOf(store)[0]).not.toHaveProperty('speed');
   });
 });

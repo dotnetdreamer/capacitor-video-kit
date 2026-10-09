@@ -9,21 +9,26 @@ import {
   defaultClipEdit,
   defaultPictureEdit,
   insertClip,
-  soundEffectSteps,
   musicSpeed,
   musicWindow,
   replaceClipSource,
+  toComposeSoundSpec,
+  totalDurationMs,
   uniqueClipKeys,
-  type ComposeSoundEffect,
+  wireAudioEffects,
+  type ComposeAudioEffect,
+  type ComposeSpec,
+  type EditManifest,
 } from '../editor';
 
 import { debugWarn } from '../host/debug';
 import type { CatalogueSound, EditorSource, PickedAudio, ResolvedEditorHost, SavedSound, SoundCategory } from '../host/host.types';
 import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
-import { makeSoundCopy } from '../web-runtime/sound-copy';
+import { CopySources, copyGroups, copySoundKey, makeEffectCopy } from '../web-runtime/effect-copy';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
-import { clipWaveKey, soundCopyKey, soundCopyRate, type Filmstrip, type SoundReplaceTarget } from './editor.types';
+import { buildPlan, type RenderPlan } from '../video-composer/web/plan';
+import { clipWaveKey, type AudioEffectCopy, type Filmstrip, type SoundReplaceTarget } from './editor.types';
 
 /** One filmstrip frame per second of source, the TikTok density at the default zoom. */
 const FILMSTRIP_STEP_MS = 1000;
@@ -59,30 +64,32 @@ const PRECISE_FILMSTRIP_MAX_FRAMES = 6;
 const WAVEFORM_TIMEOUT_MS = 60_000;
 
 /**
- * How many copies through an effect are kept for sounds the post no longer puts through one, for an
- * undo to bring back without making them again, and how many bytes of them at most: a megaphone's is
- * a few megabytes of mono at 22 kHz, but a room is stereo at 44.1 and some 30 MB a three-minute song,
- * and a customer trying one setting after another leaves one behind each time. A copy the post still
- * uses is never let go.
- */
-const SPARE_SOUND_COPIES = 3;
-const SPARE_SOUND_COPY_BYTES = 40 * 1024 * 1024;
-
-/**
  * How long the post has to stay as it is before the copies it wants are asked for. A slider being
- * dragged changes the post on every frame, and every frame's copy would be the whole sound decoded
- * and put through the effect for a moment nobody hears; this is long enough to let the finger go and
+ * dragged changes the post on every frame, and every frame's copy would be the sound under the layer
+ * decoded and put through it for a moment nobody hears; this is long enough to let the finger go and
  * short enough that the copy it settled on is on its way at once.
  */
-const SOUND_COPY_SETTLE_MS = 250;
+const EFFECT_COPY_SETTLE_MS = 250;
 
-/** One copy through an effect as [EditorMedia] asks for it: the file, the steps, and the rate they are heard at. */
-interface SoundCopyAsk {
-  uri: string;
-  effect: ComposeSoundEffect;
-  durationMs: number;
-  /** The rate the copy is heard at, as a multiple of its file's; see `soundCopyRate`. */
-  rateScale: number;
+/**
+ * How long a copy that has been replaced is kept before its file is let go: the preview may still be
+ * reading it until its next look at the playhead, a frame or two later.
+ */
+const EFFECT_COPY_RELEASE_MS = 5000;
+
+/**
+ * Past six minutes a source is not decoded for a copy. Decoding is all or nothing, at 32 kHz stereo
+ * that is some 90 MB for one file, and Chromium holds it at the file's own rate on the way there. The
+ * preview then plays the sounds under the layer as they are; the render has the layer either way.
+ */
+const MAX_COPY_SOURCE_MS = 6 * 60 * 1000;
+
+/** One copy as [EditorMedia] asks for it: the post's sound as the render plans it, and the layers' windows. */
+interface EffectCopyAsk {
+  plan: RenderPlan;
+  windows: ComposeAudioEffect[];
+  soundKey: string;
+  effectKey: string;
 }
 
 /**
@@ -189,12 +196,17 @@ export class EditorMedia {
    */
   private waveformQueue: Promise<void> = Promise.resolve();
   private readonly waveformsPending = new Map<string, Promise<void>>();
-  /** The copies through an effect being made now, by `soundCopyKey`; see [watchForSoundCopies]. */
-  private readonly soundCopiesPending = new Set<string>();
-  /** How big each copy in `store.soundCopies` is, for [SPARE_SOUND_COPY_BYTES]. */
-  private readonly soundCopyBytes = new Map<string, number>();
-  /** The wait before the copies are asked for; see [SOUND_COPY_SETTLE_MS]. */
-  private soundCopyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The layer copies being made now, by layer and keys; see [watchForEffectCopies]. */
+  private readonly effectCopiesPending = new Set<string>();
+  /** The wait before the copies are asked for; see [EFFECT_COPY_SETTLE_MS]. */
+  private effectCopyTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The sources the layer copies are mixed from, kept from one copy to the next. Made at the first
+   * copy, so an editor whose post has no layer never builds a context to decode with.
+   */
+  private copySourcesMade: CopySources | null = null;
+  /** How long each source a copy may read runs, by the URL it is read at; see [MAX_COPY_SOURCE_MS]. */
+  private copySourceMs = new Map<string, number>();
   private stopWatchingAudio: (() => void) | null = null;
   private stopWatchingEffects: (() => void) | null = null;
   /** See [watchForCopies]: the sources a copy has been asked for. */
@@ -263,7 +275,7 @@ export class EditorMedia {
     });
 
     this.watchForCopies();
-    this.watchForSoundCopies();
+    this.watchForEffectCopies();
   }
 
   /** Called by the shell when the editor leaves the document. */
@@ -273,11 +285,12 @@ export class EditorMedia {
     this.stopWatchingAudio = null;
     this.stopWatchingEffects?.();
     this.stopWatchingEffects = null;
-    if (this.soundCopyTimer !== null) clearTimeout(this.soundCopyTimer);
-    this.soundCopyTimer = null;
+    if (this.effectCopyTimer !== null) clearTimeout(this.effectCopyTimer);
+    this.effectCopyTimer = null;
     // The copies are this editor's alone: nothing else holds their URLs.
-    for (const url of this.store.soundCopies.peek().values()) if (url) URL.revokeObjectURL(url);
-    this.store.soundCopies.value = new Map();
+    for (const copy of this.store.audioEffectCopies.peek().values()) URL.revokeObjectURL(copy.url);
+    this.store.audioEffectCopies.value = new Map();
+    this.copySourcesMade?.clear();
     this.stopWatchingCopies?.();
     this.stopWatchingCopies = null;
     // Wakes every [whenCopied] still waiting, which resolves on finding this destroyed.
@@ -486,119 +499,173 @@ export class EditorMedia {
   }
 
   /* ========================================================================================= */
-  /* Copies through an effect                                                                  */
+  /* Copies of the audio effect layers                                                         */
   /* ========================================================================================= */
 
   /**
-   * Makes a copy of every sound the post puts through an effect, for the preview to play
-   * ([EditorStore.soundCopies]), and lets go of the ones it no longer needs.
+   * Makes the preview's copy of what each audio effect layer makes of the post's sound
+   * ([EditorStore.audioEffectCopies], `effect-copy.ts`), and lets go of the ones it no longer needs.
    *
-   * It follows the MANIFEST, as the waveforms do, so a sound given an effect, a draft reopened with
-   * one and an undo that brings one back are all the same case. Unlike the waveforms it does not wait
-   * for anything on screen to want it: the preview is always there to play the sound. A copy is made
-   * once per file, effect and settings ([soundCopyKey]), so a cut, a trim or a speed change makes
-   * nothing new - but a slider moved does, once the post has stopped changing ([SOUND_COPY_SETTLE_MS]).
+   * It follows the MANIFEST, as the waveforms do, so a layer added, a draft reopened with one and an
+   * undo that brings one back are all the same case. On every change a copy whose sound is no longer
+   * the post's ([AudioEffectCopy.soundKey]) - a sound under its layer moved, the layer moved - is taken
+   * away AT ONCE, so the preview plays the sounds as they are rather than a layer over sound that is
+   * not there; one that differs only in the layer's effect, sliders or Slow plays on until its new
+   * copy lands. New copies are asked for once the post has stayed still ([EFFECT_COPY_SETTLE_MS]).
    */
-  private watchForSoundCopies(): void {
+  private watchForEffectCopies(): void {
     this.stopWatchingEffects = effect(() => {
-      // Read so that a change to either wakes this - a copy landing too, which then finds it has
-      // nothing more to ask for, as a waveform's does - and answered a moment later.
-      void this.store.manifest.value;
-      void this.store.soundCopies.value;
+      const manifest = this.store.manifest.value;
+      // The sources' files, which a copy reads: one arriving or moving is a new plan.
+      void this.store.clips.value;
       untracked(() => {
-        if (this.soundCopyTimer !== null) clearTimeout(this.soundCopyTimer);
-        this.soundCopyTimer = setTimeout(() => {
-          this.soundCopyTimer = null;
+        const wanted = this.wantedEffectCopies(manifest);
+        this.dropStaleEffectCopies(wanted);
+        if (this.effectCopyTimer !== null) clearTimeout(this.effectCopyTimer);
+        this.effectCopyTimer = null;
+        if (wanted.size === 0) return;
+        this.effectCopyTimer = setTimeout(() => {
+          this.effectCopyTimer = null;
           if (this.destroyed) return;
-          const wanted = this.wantedSoundCopies();
-          const known = this.store.soundCopies.peek();
-          for (const [key, ask] of wanted) if (!known.has(key)) this.loadSoundCopy(key, ask);
-          this.dropSpareSoundCopies(new Set(wanted.keys()));
-        }, SOUND_COPY_SETTLE_MS);
+          const copies = this.store.audioEffectCopies.peek();
+          for (const [id, ask] of this.wantedEffectCopies(this.store.manifest.peek())) {
+            const made = copies.get(id);
+            if (!made || made.soundKey !== ask.soundKey || made.effectKey !== ask.effectKey) this.loadEffectCopy(id, ask);
+          }
+        }, EFFECT_COPY_SETTLE_MS);
       });
     });
   }
 
-  /** Each copy the post plays now, by `soundCopyKey`, with what it takes to make it. */
-  private wantedSoundCopies(): Map<string, SoundCopyAsk> {
-    const manifest = this.store.manifest.peek();
-    const wanted = new Map<string, SoundCopyAsk>();
-    const sounds = [...(manifest.music ? [manifest.music] : []), ...(manifest.audioTracks ?? []).flatMap(track => track.clips)];
-    for (const sound of sounds) {
-      const key = soundCopyKey(sound);
-      const steps = soundEffectSteps(sound.effect, sound.effectSettings);
-      if (!key || !steps) continue;
-      wanted.set(key, { uri: sound.uri, effect: steps, durationMs: sound.sourceDurationMs, rateScale: soundCopyRate(sound) });
+  /**
+   * The copies the layers the post plays want now - one for each run of layers close enough to share
+   * one ([copyGroups]) - by their layers' ids, with what it takes to make each. Empty for a post with no
+   * layer, which costs nothing more, and for one whose sound cannot be laid out here (a clip whose file
+   * is gone), which then plays as it is.
+   */
+  private wantedEffectCopies(manifest: EditManifest): Map<string, EffectCopyAsk> {
+    const wanted = new Map<string, EffectCopyAsk>();
+    const layers = manifest.audioEffects ?? [];
+    if (layers.length === 0) return wanted;
+    let plan: RenderPlan;
+    try {
+      plan = buildPlan(this.readableSoundSpec(manifest), new Map());
+    } catch (error) {
+      debugWarn('[EditorMedia] the sound under the audio effects could not be laid out', error);
+      return wanted;
+    }
+    const totalMs = totalDurationMs(manifest);
+    const played = layers.flatMap(layer => wireAudioEffects([layer], totalMs).map(window => ({ id: layer.id, window })));
+    for (const group of copyGroups(played.map(({ id, window }) => ({ ...window, id })))) {
+      const windows = group.map(({ id: _id, ...window }) => window);
+      wanted.set(group.map(one => one.id).join(','), {
+        plan,
+        windows,
+        soundKey: copySoundKey(plan, windows),
+        effectKey: JSON.stringify(windows.map(window => [window.speed ?? 1, window.effect ?? null])),
+      });
     }
     return wanted;
   }
 
   /**
-   * Makes one copy into `store.soundCopies`, queued behind every decode already waiting. Asking for a
-   * copy already on its way joins it, and one the post has moved on from by the time its turn comes -
-   * a slider let go and taken up again - is not made at all, nor recorded, so the post coming back to
-   * it asks again. `null` is recorded for a copy that could not be made, so it is not tried again on
-   * every edit - the reason [cutWaveform] records one.
+   * The post's sound as the wire carries it, every file at a URL this page can read - a clip at the
+   * one the preview plays, a sound and a take through the host's `fileUrl`, as the waveforms read them
+   * - with how long each runs noted for [MAX_COPY_SOURCE_MS].
    */
-  private loadSoundCopy(key: string, ask: SoundCopyAsk): void {
-    if (this.soundCopiesPending.has(key)) return;
-    this.soundCopiesPending.add(key);
-    const job = this.waveformQueue
-      .then(async () => {
-        if (this.destroyed || !this.wantedSoundCopies().has(key)) return;
-        let url: string | null = null;
-        let bytes = 0;
-        try {
-          // Raced against the waveform's clock, for its reason: everything else waits behind this.
-          const copy = await Promise.race([
-            makeSoundCopy(this.host.platform.fileUrl(ask.uri), ask.effect, ask.durationMs, ask.rateScale),
-            new Promise<null>(done => setTimeout(() => done(null), WAVEFORM_TIMEOUT_MS)),
-          ]);
-          if (copy) {
-            url = URL.createObjectURL(copy);
-            bytes = copy.size;
-          } else debugWarn('[EditorMedia] no copy through the effect for', ask.uri);
-        } catch (error) {
-          debugWarn('[EditorMedia] the copy through the effect failed', ask.uri, error);
-        }
-        if (this.destroyed) {
-          if (url) URL.revokeObjectURL(url);
-          return;
-        }
-        this.soundCopyBytes.set(key, bytes);
-        this.store.soundCopies.value = new Map(this.store.soundCopies.value).set(key, url);
-      })
-      .catch((error: unknown) => {
-        debugWarn('[EditorMedia] the copy through the effect failed', ask.uri, error);
-      })
-      .finally(() => this.soundCopiesPending.delete(key));
-    this.waveformQueue = job;
+  private readableSoundSpec(manifest: EditManifest): ComposeSpec {
+    const uriByKey = new Map<string, string>();
+    const lengths = new Map<string, number>();
+    for (const source of this.store.clips.peek()) {
+      const url = source.playbackUrl || (source.sourcePath ? this.host.platform.fileUrl(source.sourcePath) : '');
+      if (!url) continue;
+      uriByKey.set(source.key, url);
+      lengths.set(url, this.store.sourceDurationMs(source.key));
+    }
+    const spec = toComposeSoundSpec(manifest, uriByKey);
+    const readable = (uri: string, durationMs: number): string => {
+      const url = this.host.platform.fileUrl(uri);
+      lengths.set(url, Math.max(lengths.get(url) ?? 0, durationMs));
+      return url;
+    };
+    const sounds = [...(manifest.music ? [manifest.music] : []), ...(manifest.audioTracks ?? []).flatMap(track => track.clips)];
+    const soundMs = new Map(sounds.map(sound => [sound.uri, sound.sourceDurationMs]));
+    const audio = spec.audio;
+    if (audio.music) audio.music = { ...audio.music, uri: readable(audio.music.uri, soundMs.get(audio.music.uri) ?? 0) };
+    if (audio.musicTracks) audio.musicTracks = audio.musicTracks.map(track => track.map(sound => ({ ...sound, uri: readable(sound.uri, soundMs.get(sound.uri) ?? 0) })));
+    audio.voiceover = audio.voiceover.map(take => ({ ...take, uri: readable(take.uri, take.durationMs) }));
+    this.copySourceMs = lengths;
+    return spec;
   }
 
   /**
-   * Lets go of the copies the post no longer plays, keeping the latest of them for an undo: no more
-   * than [SPARE_SOUND_COPIES], and no more than [SPARE_SOUND_COPY_BYTES] between them. A map keeps the
-   * order its keys went in, so the first unwanted ones are the oldest.
+   * Takes away every copy no longer to be played: one for a layer the post has not got, or no longer
+   * plays, and one made from other sound than the post's now. Its file is let go a moment later
+   * ([EFFECT_COPY_RELEASE_MS]).
    */
-  private dropSpareSoundCopies(wanted: ReadonlySet<string>): void {
-    const copies = this.store.soundCopies.value;
-    const spare = [...copies.keys()].filter(key => !wanted.has(key));
-    let kept = 0;
-    let bytes = 0;
-    const drop = new Set<string>();
-    for (const key of spare.reverse()) {
-      bytes += this.soundCopyBytes.get(key) ?? 0;
-      if (++kept > SPARE_SOUND_COPIES || bytes > SPARE_SOUND_COPY_BYTES) drop.add(key);
-    }
-    if (drop.size === 0) return;
+  private dropStaleEffectCopies(wanted: ReadonlyMap<string, EffectCopyAsk>): void {
+    const copies = this.store.audioEffectCopies.peek();
+    const stale = [...copies].filter(([id, copy]) => wanted.get(id)?.soundKey !== copy.soundKey);
+    if (stale.length === 0) return;
     const next = new Map(copies);
-    for (const key of drop) {
-      const url = next.get(key);
-      if (url) URL.revokeObjectURL(url);
-      next.delete(key);
-      this.soundCopyBytes.delete(key);
+    for (const [id, copy] of stale) {
+      next.delete(id);
+      this.releaseCopyLater(copy);
     }
-    this.store.soundCopies.value = next;
+    this.store.audioEffectCopies.value = next;
+  }
+
+  /**
+   * Makes one copy into `store.audioEffectCopies`, queued behind every decode already waiting. Asking
+   * for one already on its way joins it, and one the post has moved on from by the time its turn comes
+   * is not made at all. A copy that could not be made leaves the layer's sounds playing as they are.
+   */
+  private loadEffectCopy(id: string, ask: EffectCopyAsk): void {
+    const key = `${id}\n${ask.soundKey}\n${ask.effectKey}`;
+    if (this.effectCopiesPending.has(key)) return;
+    this.effectCopiesPending.add(key);
+    const still = (): boolean => {
+      const now = this.wantedEffectCopies(this.store.manifest.peek()).get(id);
+      return !!now && now.soundKey === ask.soundKey && now.effectKey === ask.effectKey;
+    };
+    const job = this.waveformQueue
+      .then(async () => {
+        if (this.destroyed || !still()) return;
+        this.copySources.begin();
+        const abort = new AbortController();
+        // Raced against the waveform's clock, for its reason: everything else waits behind this.
+        const timer = setTimeout(() => abort.abort(), WAVEFORM_TIMEOUT_MS);
+        let made: Awaited<ReturnType<typeof makeEffectCopy>> = null;
+        try {
+          made = await makeEffectCopy(ask.plan, ask.windows, this.copySources, abort.signal);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!made) {
+          debugWarn('[EditorMedia] no copy of the audio effect', id);
+          return;
+        }
+        if (this.destroyed || !still()) return;
+        const copy: AudioEffectCopy = { url: URL.createObjectURL(made.blob), startMs: made.startMs, endMs: made.endMs, soundKey: ask.soundKey, effectKey: ask.effectKey };
+        const copies = this.store.audioEffectCopies.peek();
+        const was = copies.get(id);
+        if (was) this.releaseCopyLater(was);
+        this.store.audioEffectCopies.value = new Map(copies).set(id, copy);
+      })
+      .catch((error: unknown) => {
+        debugWarn('[EditorMedia] the copy of the audio effect failed', id, error);
+      })
+      .finally(() => this.effectCopiesPending.delete(key));
+    this.waveformQueue = job;
+  }
+
+  private get copySources(): CopySources {
+    return (this.copySourcesMade ??= new CopySources(uri => (this.copySourceMs.get(uri) ?? 0) > MAX_COPY_SOURCE_MS));
+  }
+
+  /** Lets go of a copy's file once nothing can still be reading it; see [EFFECT_COPY_RELEASE_MS]. */
+  private releaseCopyLater(copy: AudioEffectCopy): void {
+    setTimeout(() => URL.revokeObjectURL(copy.url), EFFECT_COPY_RELEASE_MS);
   }
 
   /**

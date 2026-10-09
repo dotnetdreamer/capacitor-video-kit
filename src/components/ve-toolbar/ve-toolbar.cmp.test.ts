@@ -275,22 +275,29 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'music' });
     await until('the sound row', () => label(bar) === 'Sound tools');
-    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'effects', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
+    // No Effects: an audio effect is a layer of its own now, over every sound under it.
+    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
 
     const audio = store.addAudioClip({ ...store.manifest.value.music!, startMs: 0 })!;
     await until('the audio row', () => label(bar) === 'Audio tools');
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
-    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'effects', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
     // Speed opens the sheet on the sound, which stays selected: the sheet reads it off the selection.
     tile(bar, 'speed').click();
     expect(store.panel.value).toBe('speed');
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
     store.closePanel();
-    // And Effects the sound's own effects, which are not the root row's effects for the picture.
+
+    // An audio effect layer: its sheet, and where it is on the post.
+    const layer = store.addAudioEffectAtPlayhead('megaphone')!;
+    await until('the audio effect row', () => label(bar) === 'Audio effect tools');
+    expect(ids(bar)).toEqual(['effects', 'split', 'duplicate', 'start-here', 'end-here', 'delete']);
     tile(bar, 'effects').click();
     expect(store.panel.value).toBe('audioEffects');
-    expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
+    expect(store.selection.value).toEqual({ kind: 'audioEffect', id: layer });
     store.closePanel();
+    tile(bar, 'delete').click();
+    expect(store.manifest.value.audioEffects).toBeUndefined();
 
     store.select({ kind: 'voice', id: 'vo-1' });
     await until('the voiceover row', () => label(bar) === 'Voiceover tools');
@@ -552,8 +559,8 @@ describe('ve-toolbar', () => {
     expect(sound.getAttribute('aria-expanded')).toBe('false');
 
     sound.click();
-    await until('the menu', () => menuItems(bar).length === 3);
-    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Add sound', 'Sound effect', 'Voiceover']);
+    await until('the menu', () => menuItems(bar).length === 4);
+    expect(menuItems(bar).map(item => item.textContent!.trim())).toEqual(['Add sound', 'Audio effects', 'Sound effect', 'Voiceover']);
     expect(tile(bar, 'sound').getAttribute('aria-expanded')).toBe('true');
     // A tap opened it, so the focus stays on the row: taking it would show a focus ring nobody
     // asked for, and the arrow keys are for the customer who did.
@@ -567,11 +574,31 @@ describe('ve-toolbar', () => {
     await until('the menu to close', () => menuItems(bar).length === 0);
 
     sound.click();
-    await until('the menu', () => menuItems(bar).length === 3);
+    await until('the menu', () => menuItems(bar).length === 4);
     press(root(bar).querySelector('.tb__menu')!, 'Escape');
     await until('the menu to close', () => menuItems(bar).length === 0);
     expect(store.soundMenuOpen.value).toBe(false);
     expect(root(bar).activeElement).toBe(tile(bar, 'sound'));
+  });
+
+  it('opens the Audio effects sheet from the Sound menu, on the layer under the playhead when there is one', async () => {
+    const { store, bar } = await mount();
+    const open = async () => {
+      tile(bar, 'sound').click();
+      await until('the menu', () => menuItems(bar).length === 4);
+      menuItems(bar)[1]!.click();
+    };
+    await open();
+    expect(store.panel.value).toBe('audioEffects');
+    expect(store.soundMenuOpen.value).toBe(false);
+    expect(store.selection.value).toBe(null);
+    store.closePanel();
+
+    const layer = store.addAudioEffectAtPlayhead('megaphone')!;
+    store.select(null);
+    await open();
+    expect(store.panel.value).toBe('audioEffects');
+    expect(store.selection.value).toEqual({ kind: 'audioEffect', id: layer });
   });
 
   it('walks the row with the arrow keys', async () => {

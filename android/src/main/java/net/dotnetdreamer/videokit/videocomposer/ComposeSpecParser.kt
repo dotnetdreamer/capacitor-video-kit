@@ -3,6 +3,7 @@ package net.dotnetdreamer.videokit.videocomposer
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.floor
+import kotlin.math.max
 
 /**
  * `JSONObject` -> [ComposeSpec]. Takes `org.json` rather than Capacitor's `JSObject` (which extends
@@ -768,13 +769,64 @@ object ComposeSpecParser {
                 volume = v.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
             )
         }
+        // Last of the block, so a spec broken anywhere else in it reports the same first failure it
+        // always did.
+        val effects = parseAudioEffects(o.opt("effects"))
         return Audio(
             originalMuted = o.optBoolean("originalMuted", false),
             originalVolume = o.optDouble("originalVolume", 1.0).toFloat().coerceIn(0f, 1f),
             music = music,
             voiceover = voiceover,
             musicTracks = musicTracks,
+            effects = effects,
         )
+    }
+
+    /**
+     * The audio effect layers, by the rules `normaliseAudioEffectWindows` in
+     * `src/editor/audio-effect-windows.ts` states for every engine and in its order, a window at a time,
+     * so the web export, iOS and this one play the same windows or refuse the same spec with the same path.
+     *
+     * REFUSED, as shape errors: `effects` that is there and is not an array, more than
+     * [AudioEffectWindow.MAX_WINDOWS] windows, and then each window's own: not an object, a `startMs` or
+     * an `endMs` that is missing or not a finite JSON number, an `endMs` not after the start, a `speed`
+     * that is there and not finite, an `effect` [parseSoundEffect] refuses, a key nobody defined (the
+     * alphabetically first), and a start before the end of the window before it. CLAMPED: the start to
+     * 0 and up - before `endMs` is checked against it - and the speed to
+     * [AudioEffectWindow.MIN_SPEED]..1. Left OUT: a window with no steps and a speed of 1, which would
+     * change nothing - but it still holds its place, and the next window may not start inside it.
+     */
+    private fun parseAudioEffects(value: Any?): List<AudioEffectWindow> {
+        if (value == null || value == JSONObject.NULL) return emptyList()
+        val list = value as? JSONArray ?: throw SpecException("audio.effects")
+        if (list.length() > AudioEffectWindow.MAX_WINDOWS) {
+            throw SpecException(
+                "audio.effects",
+                "invalid_spec:audio.effects at most ${AudioEffectWindow.MAX_WINDOWS} windows",
+            )
+        }
+        val kept = ArrayList<AudioEffectWindow>(list.length())
+        var previousEndMs = Double.NEGATIVE_INFINITY
+        for (i in 0 until list.length()) {
+            val path = "audio.effects[$i]"
+            val o = list.opt(i) as? JSONObject ?: throw SpecException(path)
+            val startMs = finiteNumber(o.opt("startMs")) ?: throw SpecException("$path.startMs")
+            val endMs = finiteNumber(o.opt("endMs")) ?: throw SpecException("$path.endMs")
+            val start = max(0.0, startMs)
+            if (endMs <= start) throw SpecException("$path.endMs")
+            val speed = when (val raw = o.opt("speed")) {
+                null, JSONObject.NULL -> 1.0
+                else -> (finiteNumber(raw) ?: throw SpecException("$path.speed"))
+                    .coerceIn(AudioEffectWindow.MIN_SPEED, 1.0)
+            }
+            val effect = parseSoundEffect(o.opt("effect"), "$path.effect")
+            firstUnknownKey(o, AUDIO_EFFECT_KEYS)?.let { throw SpecException("$path.$it") }
+            if (start < previousEndMs) throw SpecException("$path.startMs")
+            previousEndMs = endMs
+            if (effect == null && speed == 1.0) continue
+            kept += AudioEffectWindow(start, endMs, speed, effect)
+        }
+        return kept
     }
 
     private fun parseMusic(o: JSONObject, path: String): Music {
@@ -942,6 +994,8 @@ object ComposeSpecParser {
     private class SoundOpField(val name: String, val min: Double, val max: Double, val optional: Boolean = false)
 
     private val SOUND_EFFECT_KEYS = setOf("mono", "ops")
+
+    private val AUDIO_EFFECT_KEYS = setOf("effect", "endMs", "speed", "startMs")
 
     /**
      * Each step's numbers in the contract's order, which is also the order they are read and refused
