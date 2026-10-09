@@ -57,8 +57,8 @@ import `../editor` relatively, which is what folding the two repositories into o
 ## The editor as web components
 
 The editor screen packaged so it can be dropped into a React, Vue or Angular application without
-carrying Angular, Ionic or Capacitor with it. Twenty four custom elements, of which a host uses
-exactly one: `<ve-editor>` is the screen, and the other twenty three are what it is made of.
+carrying Angular, Ionic or Capacitor with it. Twenty nine custom elements, of which a host uses
+exactly one: `<ve-editor>` is the screen, and the other twenty eight are what it is made of.
 
 | Import | What it is |
 |---|---|
@@ -211,7 +211,7 @@ document.getElementById('stage').replaceChildren(editor);
 `showResult` puts the manifest on the page and takes the editor off it, because one of those two
 events is the end of the screen and an editor left mounted is a video left playing.
 
-`defineVideoEditor()` is the only registration on the page and it defines all twenty four tags, for
+`defineVideoEditor()` is the only registration on the page and it defines all twenty nine tags, for
 the reason in [conventions](editor-customization.md#conventions-every-component-holds-to). The page prints how many it
 found along the bottom, so that claim is checked rather than asserted.
 
@@ -289,7 +289,7 @@ export function EditorScreen({ onDone }: { onDone: (result: VideoEditorResult) =
 
 Nothing registers a custom element here, in any of the three frameworks. The generated wrapper holds
 the component's own `defineCustomElement` and calls it as the module is imported, and that one call
-defines the other twenty three tags. An event is a prop named `on` plus the event, capitalised, and
+defines the other twenty eight tags. An event is a prop named `on` plus the event, capitalised, and
 what the handler is given is the `CustomEvent` itself, so **the result is `event.detail`**.
 
 ### Vue

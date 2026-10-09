@@ -104,6 +104,21 @@ into its place as it inserts it, under the `.spectral` pitch algorithm the music
 The web stretches each pass with the SOLA the clips use, together with the first moments of the pass
 after it, so a loop has no gap at its seams.
 
+**A sound's effect is a few plain steps, run the same way by every engine.** `ComposeMusic.effect`
+is not a name: the editor keeps the names (`SOUND_EFFECTS` in `src/editor/sound-effects.ts`) and
+sends what an effect is made of - cookbook biquads, a soft-clipping drive measured against the
+sound's own peak, a gain, and whether to fold the channels into one - with the arithmetic written down
+in `definitions.ts`. A new effect built from those steps needs no new engine. Every engine runs them
+after a pass's speed change and before its volume and fades, from a state at 0 for each pass: Android
+as a `SoundEffectProcessor` after Sonic and ahead of the exact length and the gain, iOS as an
+`MTAudioProcessingTap` created pre-effects on the sound's own mix parameters, so it runs ahead of the
+volume ramps in both the export session and the reader, and the web on each pass's samples before
+they are added into the mix. The same golden fragment is asserted in all three engines' tests. The
+preview cannot put a filter on an `<audio>` element, so it plays a copy of the file made through the
+same TypeScript (`src/web-runtime/sound-copy.ts`): the whole file on its own timeline, so every
+position the player puts the element at is the same in the copy, at 22.05 kHz for an effect that
+passes nothing above a fifth of that.
+
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
 into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got
 it. Only `cleanup` deletes a job folder.

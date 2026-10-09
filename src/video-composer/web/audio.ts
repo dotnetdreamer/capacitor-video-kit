@@ -1,4 +1,6 @@
+import { SoundEffectRunner } from '../../editor/sound-effects';
 import { resolve } from '../../web-runtime/files';
+import type { ComposeSoundEffect } from '../definitions';
 
 import { musicForSource, type MusicItem, type MusicPlan, type PlannedClip, type RenderPlan, type VoiceItem } from './plan';
 import { timeStretch } from './time-stretch';
@@ -212,7 +214,8 @@ async function placeClip(mix: MixedAudio, clip: PlannedClip, atUs: number, decod
  * silence exactly where the music stops ([MusicPlan]).
  *
  * A repetition of music played at another speed is stretched first, at its own pitch, and laid at the
- * length the plan gave it on the output; see [stretchedPass] for what `next` is for.
+ * length the plan gave it on the output; see [stretchedPass] for what `next` is for. Music with an
+ * effect is put through it next ([treatedPass]), and only then given its level and fades.
  */
 function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, music: MusicPlan, next?: MusicItem): boolean {
   const from = samplesAt(item.inUs, mix.sampleRate);
@@ -231,19 +234,27 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, mus
   const fadeOut = samplesAt(music.fadeOutUs, mix.sampleRate);
   const fadeOutFrom = samplesAt(music.stopUs, mix.sampleRate) - start - fadeOut;
 
-  // A mono file is both channels; it is stretched once, not once for each.
+  // Each channel's samples for this repetition and where they start. A mono file is both channels;
+  // it is stretched once, not once for each.
   const stretched = new Map<Float32Array, Float32Array>();
+  let passes: Pass[] = [];
   for (let channel = 0; channel < MIX_CHANNELS; channel++) {
     const whole = channelOf(source, channel);
-    const out = mix.channels[channel];
-    if (!out) continue;
-    let input = whole;
-    let offset = from;
-    if (sped) {
-      input = stretched.get(whole) ?? stretchedPass(whole, from, to, next, speed, mix.sampleRate);
-      stretched.set(whole, input);
-      offset = 0;
+    if (!sped) {
+      passes.push({ input: whole, offset: from });
+      continue;
     }
+    const input = stretched.get(whole) ?? stretchedPass(whole, from, to, next, speed, mix.sampleRate);
+    stretched.set(whole, input);
+    passes.push({ input, offset: 0 });
+  }
+  if (music.effect) passes = treatedPass(passes, count, music.effect, mix.sampleRate);
+
+  for (let channel = 0; channel < MIX_CHANNELS; channel++) {
+    const out = mix.channels[channel];
+    const pass = passes[channel];
+    if (!out || !pass) continue;
+    const { input, offset } = pass;
     for (let i = 0; i < count; i++) {
       const sample = input[offset + i];
       if (sample === undefined) break;
@@ -251,6 +262,25 @@ function placeMusic(mix: MixedAudio, source: DecodedSource, item: MusicItem, mus
     }
   }
   return true;
+}
+
+/** One channel of a repetition: the samples it plays and where in them it starts. */
+interface Pass {
+  input: Float32Array;
+  offset: number;
+}
+
+/**
+ * One repetition's channels put through the music's effect, from a state of their own, as both native
+ * engines start one with every pass: a copy of the `count` samples each channel plays, run together -
+ * a megaphone folds them into one - and handed back in place of the originals, which the next
+ * repetition still reads. Cut where the shortest channel runs out, as the copy loop would have been.
+ */
+function treatedPass(passes: readonly Pass[], count: number, effect: ComposeSoundEffect, sampleRate: number): Pass[] {
+  const length = Math.max(0, Math.min(count, ...passes.map(pass => pass.input.length - pass.offset)));
+  const copies = passes.map(pass => pass.input.slice(pass.offset, pass.offset + length));
+  new SoundEffectRunner(effect, sampleRate).process(copies);
+  return copies.map(input => ({ input, offset: 0 }));
 }
 
 /** How much of what follows a sped-up repetition is stretched along with it, in seconds of the file. */

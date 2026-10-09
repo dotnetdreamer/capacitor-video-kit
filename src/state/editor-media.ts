@@ -9,6 +9,7 @@ import {
   defaultClipEdit,
   defaultPictureEdit,
   insertClip,
+  soundEffectPreset,
   musicSpeed,
   musicWindow,
   replaceClipSource,
@@ -18,9 +19,10 @@ import {
 import { debugWarn } from '../host/debug';
 import type { CatalogueSound, EditorSource, PickedAudio, ResolvedEditorHost, SavedSound, SoundCategory } from '../host/host.types';
 import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
+import { makeSoundCopy } from '../web-runtime/sound-copy';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
-import { clipWaveKey, type Filmstrip, type SoundReplaceTarget } from './editor.types';
+import { clipWaveKey, soundCopyKey, type Filmstrip, type SoundReplaceTarget } from './editor.types';
 
 /** One filmstrip frame per second of source, the TikTok density at the default zoom. */
 const FILMSTRIP_STEP_MS = 1000;
@@ -54,6 +56,13 @@ const PRECISE_FILMSTRIP_MAX_FRAMES = 6;
 
 /** How long one file may hold the waveform queue before it is given up on. */
 const WAVEFORM_TIMEOUT_MS = 60_000;
+
+/**
+ * How many copies through an effect are kept for sounds the post no longer puts through one, for an
+ * undo to bring back without making them again. Each is a few megabytes of WAV at most, and a copy
+ * the post still uses is never let go.
+ */
+const SPARE_SOUND_COPIES = 3;
 
 /**
  * How a picture on the timeline is read: whether it decodes at all, and a small frame of it for the
@@ -152,10 +161,17 @@ export class EditorMedia {
   private readonly filmstripsPending = new Map<string, Promise<void>>();
   /** The clips whose strip in the store was cut on exact frames; see [refineFilmstrip]. */
   private readonly exactStrips = new Set<string>();
-  /** Waveforms too, and for the same reason: decoding a track is a decoder the preview wants back. */
+  /**
+   * Waveforms too, and for the same reason: decoding a track is a decoder the preview wants back. The
+   * copies through an effect wait in the same queue, since each one decodes a whole sound as well, and
+   * two at once would be twice the largest allocation the editor makes.
+   */
   private waveformQueue: Promise<void> = Promise.resolve();
   private readonly waveformsPending = new Map<string, Promise<void>>();
+  /** The copies through an effect being made now, by `soundCopyKey`; see [watchForSoundCopies]. */
+  private readonly soundCopiesPending = new Set<string>();
   private stopWatchingAudio: (() => void) | null = null;
+  private stopWatchingEffects: (() => void) | null = null;
   /** See [watchForCopies]: the sources a copy has been asked for. */
   private stopWatchingCopies: (() => void) | null = null;
   private readonly copiesAsked = new Set<string>();
@@ -222,6 +238,7 @@ export class EditorMedia {
     });
 
     this.watchForCopies();
+    this.watchForSoundCopies();
   }
 
   /** Called by the shell when the editor leaves the document. */
@@ -229,6 +246,11 @@ export class EditorMedia {
     this.destroyed = true;
     this.stopWatchingAudio?.();
     this.stopWatchingAudio = null;
+    this.stopWatchingEffects?.();
+    this.stopWatchingEffects = null;
+    // The copies are this editor's alone: nothing else holds their URLs.
+    for (const url of this.store.soundCopies.peek().values()) if (url) URL.revokeObjectURL(url);
+    this.store.soundCopies.value = new Map();
     this.stopWatchingCopies?.();
     this.stopWatchingCopies = null;
     // Wakes every [whenCopied] still waiting, which resolves on finding this destroyed.
@@ -434,6 +456,93 @@ export class EditorMedia {
       .catch((error: unknown) => {
         debugWarn('[EditorMedia] exact filmstrip failed', source.key, error);
       });
+  }
+
+  /* ========================================================================================= */
+  /* Copies through an effect                                                                  */
+  /* ========================================================================================= */
+
+  /**
+   * Makes a copy of every sound the post puts through an effect, for the preview to play
+   * ([EditorStore.soundCopies]), and lets go of the ones it no longer needs.
+   *
+   * It follows the MANIFEST, as the waveforms do, so a sound given an effect, a draft reopened with
+   * one and an undo that brings one back are all the same case. Unlike the waveforms it does not wait
+   * for anything on screen to want it: the preview is always there to play the sound. A copy is made
+   * once per file and effect, so a cut, a trim or a speed change makes nothing new.
+   */
+  private watchForSoundCopies(): void {
+    this.stopWatchingEffects = effect(() => {
+      const manifest = this.store.manifest.value;
+      // Each wanted copy with what it takes to make it. Read inside the effect so a copy landing
+      // wakes this again and the copy it recorded is then skipped, as a waveform's is.
+      const known = this.store.soundCopies.value;
+      const wanted = new Map<string, { uri: string; effectId: string; durationMs: number }>();
+      const sounds = [...(manifest.music ? [manifest.music] : []), ...(manifest.audioTracks ?? []).flatMap(track => track.clips)];
+      for (const sound of sounds) {
+        if (!sound.effect) continue;
+        wanted.set(soundCopyKey(sound.uri, sound.effect), { uri: sound.uri, effectId: sound.effect, durationMs: sound.sourceDurationMs });
+      }
+      untracked(() => {
+        for (const [key, ask] of wanted) if (!known.has(key)) this.loadSoundCopy(key, ask.uri, ask.effectId, ask.durationMs);
+        this.dropSpareSoundCopies(new Set(wanted.keys()));
+      });
+    });
+  }
+
+  /**
+   * Makes one copy into `store.soundCopies`, queued behind every decode already waiting. Asking for a
+   * copy already on its way joins it. `null` is recorded for a copy that could not be made, so it is
+   * not tried again on every edit - the reason [cutWaveform] records one.
+   */
+  private loadSoundCopy(key: string, uri: string, effectId: string, sourceDurationMs: number): void {
+    if (this.soundCopiesPending.has(key)) return;
+    const preset = soundEffectPreset(effectId);
+    if (!preset) return;
+    this.soundCopiesPending.add(key);
+    const job = this.waveformQueue
+      .then(async () => {
+        if (this.destroyed) return;
+        let url: string | null = null;
+        try {
+          // Raced against the waveform's clock, for its reason: everything else waits behind this.
+          const copy = await Promise.race([
+            makeSoundCopy(this.host.platform.fileUrl(uri), preset.effect, sourceDurationMs),
+            new Promise<null>(done => setTimeout(() => done(null), WAVEFORM_TIMEOUT_MS)),
+          ]);
+          if (copy) url = URL.createObjectURL(copy);
+          else debugWarn('[EditorMedia] no copy through the effect for', uri);
+        } catch (error) {
+          debugWarn('[EditorMedia] the copy through the effect failed', uri, error);
+        }
+        if (this.destroyed) {
+          if (url) URL.revokeObjectURL(url);
+          return;
+        }
+        this.store.soundCopies.value = new Map(this.store.soundCopies.value).set(key, url);
+      })
+      .catch((error: unknown) => {
+        debugWarn('[EditorMedia] the copy through the effect failed', uri, error);
+      })
+      .finally(() => this.soundCopiesPending.delete(key));
+    this.waveformQueue = job;
+  }
+
+  /**
+   * Lets go of the copies the post no longer plays, keeping the latest [SPARE_SOUND_COPIES] of them
+   * for an undo. A map keeps the order its keys went in, so the first unwanted ones are the oldest.
+   */
+  private dropSpareSoundCopies(wanted: ReadonlySet<string>): void {
+    const copies = this.store.soundCopies.value;
+    const spare = [...copies.keys()].filter(key => !wanted.has(key));
+    if (spare.length <= SPARE_SOUND_COPIES) return;
+    const next = new Map(copies);
+    for (const key of spare.slice(0, spare.length - SPARE_SOUND_COPIES)) {
+      const url = next.get(key);
+      if (url) URL.revokeObjectURL(url);
+      next.delete(key);
+    }
+    this.store.soundCopies.value = next;
   }
 
   /**

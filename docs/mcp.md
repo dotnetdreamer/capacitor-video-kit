@@ -54,7 +54,9 @@ not keep - a section or a stop under 100 ms - is refused the same way, with the 
 with only a `startMs` moves the stop along with the sound, as the editor's Move does; both fades
 run from 0 to 10000 ms; and a sound's `speed` runs from 0.25 to 4, as a clip's does, a slower one
 sent to `patchAudio` on its own stopping where the next sound on its lane begins, as the editor's
-Speed sheet does. Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
+Speed sheet does; a sound's `effect` is `"megaphone"` or `"none"`, anything else refused with the
+list, and one word of a line gets it by being cut out with `splitAudio` and patched on its own.
+Sounds sit on audio lanes: `addAudio` places one at its `startMs`, sounds on
 one lane play one after another and lanes play together, so a sound that would overlap another goes
 on a lane of its own, and one the agent puts on a named lane where it does not fit is refused. A
 post's single `music` joins the lanes as their first sound on the first `addAudio`, as it does in the

@@ -73,6 +73,7 @@ import {
   type TextEffect,
 } from '../editor/edit-manifest';
 import { OVERLAY_ANIMATIONS, normaliseOverlayAnimation } from '../editor/motion';
+import { SOUND_EFFECTS, normaliseSoundEffectId, soundEffectPreset } from '../editor/sound-effects';
 import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
 import {
   addAudioClip,
@@ -452,7 +453,7 @@ const ASPECTS: readonly OutputAspect[] = ['9:16', '16:9'];
 const MUSIC_TIMES = ['sourceDurationMs', 'inMs', 'outMs', 'startMs', 'endMs', 'phaseMs'] as const satisfies readonly (keyof EditMusic)[];
 const MUSIC_FADES = ['fadeInMs', 'fadeOutMs'] as const satisfies readonly (keyof EditMusic)[];
 /** Every field a sound has, in the order the editor writes them - what a refusal lists. */
-const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed'] as const satisfies readonly (keyof EditMusic)[];
+const MUSIC_FIELDS = ['uri', 'fileName', ...MUSIC_TIMES, 'volume', 'loop', ...MUSIC_FADES, 'speed', 'effect'] as const satisfies readonly (keyof EditMusic)[];
 
 /*
  * And every one of them, held by the compiler. [musicFields] refuses any key not on the list, so a
@@ -503,6 +504,12 @@ function musicFields(raw: Record<string, unknown>, path: string): Partial<EditMu
       // Refused out of range rather than held to it, as the volume is: the Speed sheet goes no further.
       if (typeof value !== 'number' || !(value >= MIN_SPEED && value <= MAX_SPEED)) {
         throw new Error(`${name} must be a number from ${MIN_SPEED} to ${MAX_SPEED} - 1 is the sound at its own speed`);
+      }
+    } else if (key === 'effect') {
+      // An effect this version plays, or "none" - refused otherwise rather than dropped, as the
+      // manifest's reader would drop it: an agent asking for an echo has to hear there is none.
+      if (typeof value !== 'string' || (value !== 'none' && !soundEffectPreset(value))) {
+        throw new Error(`${name} must be ${SOUND_EFFECTS.map(preset => `"${preset.id}"`).join(', ')} or "none" - the sound as it is`);
       }
     } else if ((MUSIC_FADES as readonly string[]).includes(key)) {
       if (typeof value !== 'number' || !(value >= 0 && value <= MAX_MUSIC_FADE_MS)) {
@@ -562,6 +569,7 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
   const given = musicFields(Object.fromEntries(Object.entries(raw).filter(([key, value]) => value !== null || !(MUSIC_FIELDS as readonly string[]).includes(key))), path);
   if (given.uri === undefined) throw new Error(`"${path}.uri" must be a non-empty string`);
   const fadeInMs = given.fadeInMs ?? 0;
+  const effect = normaliseSoundEffectId(given.effect);
   const music: EditMusic = {
     uri: given.uri,
     fileName: given.fileName ?? '',
@@ -579,6 +587,8 @@ function soundOf(raw: Record<string, unknown>, path: string): EditMusic {
     fadeOutMs: given.fadeOutMs ?? 0,
     // The same for the speed, stored as the Speed sheet stores one and never as 1x.
     ...(given.speed !== undefined && normaliseSpeed(given.speed) !== 1 ? { speed: normaliseSpeed(given.speed) } : {}),
+    // And for an effect, which "none" leaves off.
+    ...(effect ? { effect } : {}),
   };
   const refusal = musicRefusal(music);
   if (refusal) throw new Error(refusal);
@@ -596,6 +606,8 @@ function asksForChange(music: EditMusic, patch: Partial<EditMusic>): boolean {
     if (key === 'phaseMs' && typeof value === 'number') return Math.round(value) !== Math.round(typeof was === 'number' ? was : 0);
     // A sound with no speed is at 1x, and a speed is kept to the hundredth.
     if (key === 'speed' && typeof value === 'number') return normaliseSpeed(value) !== musicSpeed(music);
+    // "none" is what a sound with no effect already has.
+    if (key === 'effect') return (normaliseSoundEffectId(value) ?? null) !== (music.effect ?? null);
     const isTime = (MUSIC_TIMES as readonly string[]).includes(key) || (MUSIC_FADES as readonly string[]).includes(key);
     return isTime && typeof value === 'number' && typeof was === 'number' ? Math.round(value) !== Math.round(was) : value !== was;
   });

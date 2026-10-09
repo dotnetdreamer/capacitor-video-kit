@@ -11,7 +11,7 @@
  * import { installEditorFonts, setEditorAssetPath } from 'capacitor-video-kit/ui';
  * import { defineCustomElement } from 'capacitor-video-kit/dist/components/ve-editor.js';
  *
- * defineCustomElement();                 // ve-editor, and with it the other twenty tags
+ * defineCustomElement();                 // ve-editor, and with it the other twenty eight tags
  * setEditorAssetPath('/video-editor/');  // where this package's `assets` directory is served
  * void installEditorFonts();             // the faces the render burns into the finished video
  *

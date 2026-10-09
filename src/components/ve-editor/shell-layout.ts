@@ -13,7 +13,7 @@ import type { EditorPanel } from '../../state/editor.types';
  * How tall a sheet is allowed to be, and therefore what stays on screen above it.
  *
  * `compact` keeps the preview, the transport and a slim timeline; `tall` takes the screen and the
- * sheet is the only thing on it. Thirteen of the sixteen are compact, and the three that are not
+ * sheet is the only thing on it. Fifteen of the eighteen are compact, and the three that are not
  * are the ones with a keyboard or a scrolling list in them.
  *
  * A `Record` rather than the set of compact panels the Angular shell kept, because a `Record` over
@@ -46,6 +46,11 @@ export const PANEL_LAYOUT: Readonly<Record<EditorPanel, 'compact' | 'tall'>> = {
   animation: 'compact',
   /* Compact so the canvas being coloured stays on screen above the swatches choosing it. */
   background: 'compact',
+  /*
+   * Compact so the sound being treated stays on the slim timeline, and Play stays in reach: an effect
+   * is chosen by ear, and the sheet has nothing to show for one but its name.
+   */
+  audioEffects: 'compact',
   /* The keyboard sits under this one and the sheet has to clear it. */
   text: 'tall',
   /* A scrolling grid of several hundred tiles, with a search field and a category bar. */

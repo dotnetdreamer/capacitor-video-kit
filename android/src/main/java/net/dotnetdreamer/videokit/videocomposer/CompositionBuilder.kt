@@ -721,7 +721,7 @@ object CompositionBuilder {
         for (item in plan.items) {
             // Its length on the output, which for sped-up music is not the stretch of file it plays.
             val length = ExactLengthAudioProcessor(item.atUs, item.atUs + item.lengthUs)
-            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length, item.speed))
+            builder.addItem(audioItem(plan.uri, item.inUs, item.decodeEndUs, item.gain, length, item.speed, item.effect))
         }
         return builder.build()
     }
@@ -750,6 +750,9 @@ object CompositionBuilder {
      * processor that changes an item's length (`TransformerUtil.containsSpeedChangingEffects`, an
      * `IllegalStateException` at `build()`), and [length] is one - it is what holds a pass to its
      * length on the sample, so a loop's seams join. Measured on the A13 on 2026-10-06.
+     *
+     * An [effect] comes next, after the stretch and ahead of [length] and the gain, so it treats the
+     * sound as it plays and the level and the fades take down what it made ([SoundEffectProcessor]).
      */
     private fun audioItem(
         uri: String,
@@ -758,6 +761,7 @@ object CompositionBuilder {
         gain: RampGainProvider,
         length: ExactLengthAudioProcessor? = null,
         speed: Float = 1f,
+        effect: SoundEffect? = null,
     ): EditedMediaItem {
         val mediaItem = MediaItem.Builder()
             .setUri(Uri.parse(uri))
@@ -772,6 +776,7 @@ object CompositionBuilder {
             .build()
         val processors: List<AudioProcessor> = listOfNotNull(
             if (speed != 1f) timeStretch(speed) else null,
+            effect?.let { SoundEffectProcessor(it) },
             length,
             if (gain.isNoOp()) null else GainProcessor(gain),
         )

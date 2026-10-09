@@ -40,6 +40,7 @@ import {
 } from './edit-manifest';
 import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
+import { normaliseSoundEffectId } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -1356,6 +1357,10 @@ export function patchMusic(manifest: EditManifest, patch: Partial<EditMusic>): E
     next.speed = normaliseSpeed(next.speed);
     if (next.speed === 1) delete next.speed;
   }
+  // An effect only by an id this version can play, and no key at all for none.
+  const effect = normaliseSoundEffectId(next.effect);
+  if (effect) next.effect = effect;
+  else delete next.effect;
   if (next.outMs > 0 && next.outMs - next.inMs < MIN_LAYER_MS) return manifest;
   if (next.endMs > 0 && next.endMs - next.startMs < MIN_LAYER_MS) return manifest;
   if (sameFields(manifest.music, next)) return manifest;
@@ -1553,6 +1558,20 @@ export function setMusicSpeed(manifest: EditManifest, speed: number): EditManife
 }
 
 /**
+ * One sound on the lanes through an effect from [SOUND_EFFECTS], or through none for `null`. Nothing
+ * else about it changes - an effect never makes a sound longer - so it cannot come to meet its
+ * neighbour, and an id this version does not know is none.
+ */
+export function setAudioEffect(manifest: EditManifest, id: string, effectId: string | null): EditManifest {
+  return patchAudioClip(manifest, id, { effect: effectId ?? undefined });
+}
+
+/** The post's music through an effect, or through none; see [setAudioEffect]. */
+export function setMusicEffect(manifest: EditManifest, effectId: string | null): EditManifest {
+  return patchMusic(manifest, { effect: effectId ?? undefined });
+}
+
+/**
  * Another file under a placed sound, which is what Replace is for: trying a different song in the same
  * place. Where it starts, its lane, its level, its fades and its loop are the customer's and stay; the
  * trim was cut from the old file and goes. A sound that ran on with no stop is stopped where the next
@@ -1747,7 +1766,7 @@ export function splitAudioClipAt(manifest: EditManifest, id: string, atMs: numbe
 /**
  * A lane's sounds with every run that plays on unbroken as the one sound it is: the halves of a cut
  * that nothing has been done to since, which are the same stretch of the same file, at the same
- * speed and level, with no fade where they meet. What goes to the engines and to the preview, so a cut
+ * speed, level and effect, with no fade where they meet. What goes to the engines and to the preview, so a cut
  * is heard as nothing at all - two items of one file meet with a seam the engines cannot close
  * ([splitAudioClipAt]; Media3 starts a sound inside its file on a codec frame, without the frame
  * before it). Each run keeps its first sound's id; a sound alone is returned as it was.
@@ -1768,14 +1787,16 @@ export function joinContinuousAudio(clips: readonly EditAudioClip[]): EditAudioC
 }
 
 /**
- * Whether `next` carries `sound` on unbroken: the same file at the same speed and level, nothing
- * fading where they meet, and `next` starting where `sound` stops - on the post and in the file, to
+ * Whether `next` carries `sound` on unbroken: the same file at the same speed, level and effect,
+ * nothing fading where they meet, and `next` starting where `sound` stops - on the post and in the file, to
  * within the millisecond a cut rounds a sped-up sound by. A loop goes on in the same section, its
  * repeats where the earlier one's had got to; a sound played once ends on its section, which the
  * next one starts its own on.
  */
 function playsOn(sound: EditAudioClip, next: EditAudioClip): boolean {
   if (next.uri !== sound.uri || musicSpeed(next) !== musicSpeed(sound) || next.volume !== sound.volume || next.loop !== sound.loop) return false;
+  // A word cut out of a line for a megaphone is a different sound from the line either side of it.
+  if (next.effect !== sound.effect) return false;
   if (sound.fadeOutMs > 0 || (next.fadeInMs ?? 0) > 0) return false;
   const speed = musicSpeed(sound);
   if (sound.loop) {
@@ -1792,7 +1813,7 @@ function playsOn(sound: EditAudioClip, next: EditAudioClip): boolean {
  * else on the first lane it fits on, else on a new lane `newTrackId` under its own. A sound heard to the
  * end of the post has no after, so its copy goes where it is, on another lane, as a layer's copy goes
  * over the layer ([duplicateOverlay]). The copy is the sound's in everything else - its trim, level,
- * fades, loop and speed - and a stop the sound has moves with it ([musicMovedTo]).
+ * fades, loop, speed and effect - and a stop the sound has moves with it ([musicMovedTo]).
  *
  * Null when the copy could not be heard anywhere, or when either id is taken.
  */

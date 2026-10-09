@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { soundEffectPreset } from '../../editor/sound-effects';
 import { TRANSITIONS, compileTransition } from '../../editor/transitions';
-import { MAX_CAMERA_KEYS, MAX_CAMERA_SCALE, MAX_OVERLAY_MOTION_KEYS, type ComposeClip, type ComposeSpec } from '../definitions';
+import { MAX_CAMERA_KEYS, MAX_CAMERA_SCALE, MAX_OVERLAY_MOTION_KEYS, MAX_SOUND_OPS, type ComposeClip, type ComposeSpec } from '../definitions';
 
 import { MAX_VIDEO_TRACKS, SpecError, validateSpec } from './spec';
 
@@ -611,5 +612,44 @@ describe('overlay motion', () => {
 
   it('is read after the rest of the layer', () => {
     expect(refusal(spec({ overlays: [{ ...layer({ atMs: 'x' }), wPx: 0 }] })).path).toBe('overlays[0].wPx');
+  });
+});
+
+describe('a sound’s speed and effect', () => {
+  const music = { uri: 'file:///sound.m4a', startMs: 0, inMs: 0, outMs: 900, volume: 1, loop: false, fadeInMs: 0, fadeOutMs: 0 };
+  const withMusic = (over: Record<string, unknown>) => spec({ audio: { ...spec().audio, music: { ...music, ...over } } });
+  const onLane = (over: Record<string, unknown>) => spec({ audio: { ...spec().audio, musicTracks: [[{ ...music, ...over }]] } });
+
+  it('keeps a speed, held to the clips’ range, and none at 1x', () => {
+    // It used to be dropped here, and every sped-up sound rendered on the web at 1x.
+    expect(validateSpec(withMusic({ speed: 1.5 })).audio.music?.speed).toBe(1.5);
+    expect(validateSpec(onLane({ speed: 9 })).audio.musicTracks?.[0]?.[0]?.speed).toBe(4);
+    expect(validateSpec(withMusic({ speed: 1 })).audio.music).not.toHaveProperty('speed');
+  });
+
+  it('keeps an effect as the editor sends it, and none for an effect that does nothing', () => {
+    const effect = soundEffectPreset('megaphone')!.effect;
+    expect(validateSpec(withMusic({ effect })).audio.music?.effect).toEqual(effect);
+    expect(validateSpec(onLane({ effect })).audio.musicTracks?.[0]?.[0]?.effect).toEqual(effect);
+    expect(validateSpec(withMusic({ effect: { ops: [] } })).audio.music).not.toHaveProperty('effect');
+    expect(validateSpec(withMusic({})).audio.music).not.toHaveProperty('effect');
+  });
+
+  it('holds an effect’s numbers to their ranges', () => {
+    const read = validateSpec(withMusic({ effect: { ops: [{ op: 'gain', db: 60 }] } })).audio.music?.effect;
+    expect(read).toEqual({ ops: [{ op: 'gain', db: 24 }] });
+  });
+
+  it('refuses an effect no engine could play, with the path that broke', () => {
+    expect(() => validateSpec(withMusic({ effect: 'megaphone' }))).toThrow('invalid_spec:audio.music.effect');
+    expect(() => validateSpec(withMusic({ effect: { ops: [{ op: 'reverb' }] } }))).toThrow('invalid_spec:audio.music.effect.ops[0].op');
+    expect(() => validateSpec(onLane({ effect: { mono: 1, ops: [] } }))).toThrow('invalid_spec:audio.musicTracks[0][0].effect.mono');
+    expect(() => validateSpec(onLane({ effect: { ops: [{ op: 'drive', db: 6, knee: 2 }] } }))).toThrow('invalid_spec:audio.musicTracks[0][0].effect.ops[0].knee');
+    const many = { ops: Array.from({ length: MAX_SOUND_OPS + 1 }, () => ({ op: 'gain', db: 0 })) };
+    expect(() => validateSpec(withMusic({ effect: many }))).toThrow(`invalid_spec:audio.music.effect.ops at most ${MAX_SOUND_OPS} steps`);
+  });
+
+  it('reports a sound broken somewhere else first, as the native parsers do', () => {
+    expect(() => validateSpec(withMusic({ outMs: 0, effect: 'bad' }))).toThrow('invalid_spec:audio.music.outMs');
   });
 });

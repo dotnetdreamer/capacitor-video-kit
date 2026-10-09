@@ -688,7 +688,83 @@ export interface ComposeMusic {
    * and the fades follow the window it is heard in. Every engine holds a speed outside the range to it.
    */
   speed?: number;
+  /**
+   * What the sound is put through on its way into the mix: a megaphone, say. Absent is the sound as
+   * it is, which is every spec written before this key, and the builder never sends an effect that
+   * does nothing - an engine takes the path it always took for a sound with none.
+   *
+   * It is applied to the sound as it PLAYS, after a [speed] has stretched it and BEFORE its `volume`
+   * and its fades, so a fade takes the treated sound down and a quieter sound is not a less distorted
+   * one. See [ComposeSoundEffect] for the arithmetic.
+   */
+  effect?: ComposeSoundEffect;
 }
+
+/**
+ * A sound's effect, LOWERED to a few plain steps exactly as a layer's animation is
+ * ([ComposeOverlayMotion]): the editor names an effect (`SOUND_EFFECTS` in
+ * `src/editor/sound-effects.ts`) and this is what it is made of. An engine runs the steps and knows
+ * nothing about megaphones, so a new effect built from them needs no new engine, and three
+ * hand-written copies of an effect cannot drift apart one release at a time.
+ *
+ * RUNNING IT. Every engine works in 64-bit floating point on samples at the rate the sound is
+ * processed at, `fs`, as numbers in -1..1 (16-bit PCM read as `v / 32768`). With [mono] the channels
+ * of each frame are first replaced by their MEAN, the steps run once on it, and the result goes back
+ * to every channel; without it each channel runs the steps with a state of its own. Every state starts
+ * at 0 where a pass of the sound starts - an engine may carry it across the seams of a loop instead,
+ * as iOS's tap does, which differs only in the few milliseconds a filter takes to settle. The steps
+ * run in array order on every sample:
+ *
+ *   highpass, lowpass, peak - the biquads of the Audio EQ Cookbook (Bristow-Johnson), with
+ *     `f = min(hz, 0.45 * fs)`, `w0 = 2 * PI * f / fs`, `alpha = sin(w0) / (2 * q)`:
+ *       lowpass   b = [(1 - cos w0) / 2, 1 - cos w0, (1 - cos w0) / 2]   a = [1 + alpha, -2 cos w0, 1 - alpha]
+ *       highpass  b = [(1 + cos w0) / 2, -(1 + cos w0), (1 + cos w0) / 2] a = [1 + alpha, -2 cos w0, 1 - alpha]
+ *       peak      A = 10^(db / 40)
+ *                 b = [1 + alpha * A, -2 cos w0, 1 - alpha * A]           a = [1 + alpha / A, -2 cos w0, 1 - alpha / A]
+ *     each divided by `a0` and run in transposed direct form II:
+ *       y = b0 * x + z1;  z1 = b1 * x - a1 * y + z2;  z2 = b2 * x - a2 * y
+ *   drive - soft clipping, `g = 10^(db / 20)`. Without `followMs`, `y = tanh(g * x)`. With it, the
+ *     clipping is measured against the sound's own recent peak, so a quiet recording is driven as
+ *     hard as a loud one and comes out as quiet as it went in:
+ *       level = |x| > level ? |x| : level * exp(-1000 / (followMs * fs))
+ *       e = max(level, 10^(-50 / 20));  y = e * tanh(g * x / e)
+ *   gain - `y = 10^(db / 20) * x`.
+ *
+ * A filter's two state values are set to 0 together once BOTH are under 1e-20 in size, and the
+ * drive's level once it is, so a long silence ends in exact silence rather than running on denormal
+ * numbers - one value zeroed alone unbalances the recurrence and holds it just over the line. The
+ * result is written back in the stream's own format, held to -1..1.
+ *
+ * Each parser CLAMPS the numbers - `hz` to 10..20000, `q` to 0.1..10, a peak's `db` to -24..24, a
+ * drive's to 0..40 and its `followMs` to 1..10000, a gain's to -40..24. REFUSED, as shape errors,
+ * with the path that broke: an effect that is not an object, a `mono` that is not a boolean, `ops`
+ * that is there and is not an array, more than [MAX_SOUND_OPS] steps, a step that is not an object,
+ * an `op` nobody defined, a number a step needs that is missing or not finite (an absent `followMs` is
+ * a drive without one), and a key nobody defined on the effect or a step, the alphabetically first
+ * when there are several - a step an engine silently skipped would be a different sound from the
+ * preview's. No `ops` is no steps, and an effect with no
+ * steps and no `mono` is ABSENT. `normaliseSoundEffect` states these rules once for
+ * the web engine and the tests; the Kotlin and Swift parsers check in the same order: the effect,
+ * `mono`, `ops`, its unknown keys, the count, then each step's `op`, its numbers in the order declared
+ * below, and its unknown keys.
+ */
+export interface ComposeSoundEffect {
+  /** Fold the channels into one before the steps, and play the result from every channel. */
+  mono?: boolean;
+  /** At most [MAX_SOUND_OPS], run in order. */
+  ops: SoundOp[];
+}
+
+/** One step of a [ComposeSoundEffect]; the arithmetic of each is there. */
+export type SoundOp =
+  | { op: 'highpass'; hz: number; q: number }
+  | { op: 'lowpass'; hz: number; q: number }
+  | { op: 'peak'; hz: number; q: number; db: number }
+  | { op: 'drive'; db: number; followMs?: number }
+  | { op: 'gain'; db: number };
+
+/** The most steps one effect may carry. A spec with more is refused rather than cut short. */
+export const MAX_SOUND_OPS = 16;
 
 export interface ComposeVoiceover {
   uri: string;

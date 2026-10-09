@@ -275,15 +275,20 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'music' });
     await until('the sound row', () => label(bar) === 'Sound tools');
-    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'effects', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
 
     const audio = store.addAudioClip({ ...store.manifest.value.music!, startMs: 0 })!;
     await until('the audio row', () => label(bar) === 'Audio tools');
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
-    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['split', 'volume', 'speed', 'effects', 'loop', 'start-here', 'duplicate', 'replace', 'delete']);
     // Speed opens the sheet on the sound, which stays selected: the sheet reads it off the selection.
     tile(bar, 'speed').click();
     expect(store.panel.value).toBe('speed');
+    expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
+    store.closePanel();
+    // And Effects the sound's own effects, which are not the root row's effects for the picture.
+    tile(bar, 'effects').click();
+    expect(store.panel.value).toBe('audioEffects');
     expect(store.selection.value).toEqual({ kind: 'audio', id: audio });
     store.closePanel();
 

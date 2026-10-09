@@ -147,3 +147,51 @@ describe('a sound’s speed through the ops', () => {
     expect(summary).toMatch(/"a" a\.m4a, from 0ms, at 0ms on the post, 100%, at 2x; heard 0ms\.\.2500ms/);
   });
 });
+
+/*
+ * A sound's effect: an id from the editor's catalogue, or "none", stored as the Audio effects sheet
+ * stores one - and how an agent gives one word of a line a megaphone: cut it out, then patch that piece.
+ */
+describe('a sound’s effect through the ops', () => {
+  const effectOf = (manifest: EditManifest, id: string): string | undefined => manifest.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === id)?.effect;
+
+  it('takes an effect with the sound, and leaves "none" without the key', () => {
+    const manifest = applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'megaphone' } }), add('b', 6000, { sound: { ...sound('b', 6000), effect: 'none' } })]);
+    expect(effectOf(manifest, 'a')).toBe('megaphone');
+    expect(manifest.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === 'b')).not.toHaveProperty('effect');
+  });
+
+  it('puts one word of a line through the megaphone, and takes it off again', () => {
+    const line = applyEditOps(post(), [add('a', 0)]);
+    const word = applyEditOps(line, [
+      { op: 'splitAudio', id: 'a', atMs: 1000, newId: 'word' },
+      { op: 'splitAudio', id: 'word', atMs: 2000, newId: 'rest' },
+      { op: 'patchAudio', id: 'word', patch: { effect: 'megaphone' } },
+    ]);
+    expect(['a', 'word', 'rest'].map(id => effectOf(word, id))).toEqual([undefined, 'megaphone', undefined]);
+    const off = applyEditOps(word, [{ op: 'patchAudio', id: 'word', patch: { effect: 'none' } }]);
+    expect(off.audioTracks?.flatMap(track => track.clips).find(clip => clip.id === 'word')).not.toHaveProperty('effect');
+    // "none" on a sound with none asks for nothing, and is the success it looks like.
+    expect(applyEditOps(line, [{ op: 'patchAudio', id: 'a', patch: { effect: 'none' } }])).toEqual(line);
+  });
+
+  it('refuses an effect the editor does not have, naming the ones it does', () => {
+    expect(() => applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'echo' } })])).toThrow(/"sound\.effect" must be "megaphone" or "none"/);
+    expect(() => applyEditOps(post(), [add('a', 0), { op: 'patchAudio', id: 'a', patch: { effect: 2 } }])).toThrow(/"patch\.effect" must be "megaphone" or "none"/);
+  });
+
+  it('puts the post’s one music through an effect too', () => {
+    const music = applyEditOps(post(), [{ op: 'setMusic', music: { ...sound('m', 0), effect: 'megaphone' } }]).music;
+    expect(music?.effect).toBe('megaphone');
+  });
+
+  it('says the effect in the summary', () => {
+    const summary = summariseManifest(applyEditOps(post(), [add('a', 0, { sound: { ...sound('a', 0), effect: 'megaphone' } })]));
+    expect(summary).toMatch(/"a" a\.m4a, from 0ms, at 0ms on the post, 100%, through the megaphone \(effect "megaphone"\); heard 0ms\.\.5000ms/);
+  });
+
+  it('tells an agent what an effect is and how to give one word a megaphone', () => {
+    expect(OP_REFERENCE['setMusic']).toMatch(/effect puts the sound through one of "megaphone", or "none"/);
+    expect(OP_REFERENCE['setMusic']).toMatch(/cut the word out with splitAudio and patch that piece alone/);
+  });
+});

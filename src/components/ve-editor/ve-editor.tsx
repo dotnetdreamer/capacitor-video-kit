@@ -1108,7 +1108,7 @@ export class VeEditor {
   /**
    * The open sheet, or the toolbar when nothing is open.
    *
-   * Seventeen literal tags rather than a lookup, and this is the one place in the package where that
+   * Eighteen literal tags rather than a lookup, and this is the one place in the package where that
    * matters: under `dist-custom-elements` a component's generated `defineCustomElement` also defines
    * every tag it renders, transitively, and the compiler finds those tags by collecting the string
    * literals passed to `h()`. A tag produced through a variable is invisible to that analysis, so a
@@ -1156,6 +1156,8 @@ export class VeEditor {
         return <ve-animation-sheet key="animation" class="ve__sheet" ctx={ctx} />;
       case 'background':
         return <ve-background-sheet key="background" class="ve__sheet" ctx={ctx} />;
+      case 'audioEffects':
+        return <ve-audio-effects-sheet key="audioEffects" class="ve__sheet" ctx={ctx} />;
       default:
         return <ve-toolbar key="toolbar" class="ve__toolbar" ctx={ctx} />;
     }

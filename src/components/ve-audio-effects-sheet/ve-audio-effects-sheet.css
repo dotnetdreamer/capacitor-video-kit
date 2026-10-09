@@ -1,0 +1,110 @@
+/*
+ * The Audio effects sheet: a row of effect tiles under the frame's head.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file. The tiles are the Filters sheet's thumbnails with a sign
+ * where the picture would be, so choosing a sound's effect looks like choosing the post's look.
+ */
+
+.afx__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.afx__row::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * `font-family` is named because this is a `<button>` inside a shadow root: form controls do not
+ * inherit the page's font, and no reset stylesheet reaches in here to make them.
+ */
+.afx__tile {
+  display: flex;
+  flex: 0 0 84px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 84px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.afx__tile:active .afx__face {
+  transform: scale(0.96);
+}
+
+.afx__tile:focus-visible {
+  outline: none;
+}
+
+.afx__tile:focus-visible .afx__face {
+  outline: 2px solid var(--ve-accent, #a6ff2e);
+  outline-offset: 2px;
+}
+
+.afx__face {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 84px;
+  height: 84px;
+  border-radius: 14px;
+  background: var(--ve-raised, #2c2c2e);
+  transition: transform 120ms ease;
+}
+
+/* The ring is drawn over the face rather than as a border, so choosing one does not shrink it. */
+.afx__face::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* One em square, as every `ve-icon` is: the size is the font's. */
+.afx__icon {
+  font-size: 36px;
+}
+
+.afx__label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.afx__tile--on {
+  color: var(--ve-text, #fff);
+}
+
+.afx__tile--on .afx__face::after {
+  border-color: #fff;
+}
+
+.afx__tile--on .afx__label {
+  font-weight: 700;
+}
+
+.afx__empty {
+  margin: 0;
+  align-items: center;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 14px;
+}
