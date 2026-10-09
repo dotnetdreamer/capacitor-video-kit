@@ -21,11 +21,18 @@ Three of its methods exist because the sheets inside it cannot reach into this s
 `bodyElement` and `scrollBodyTo` for the two sheets whose content is one long scroller, and
 `blurSearch` for the one that has to drop the keyboard before it closes.
 
+A sheet that can be pulled up turns on `grabber`: a handle over the head, and the head and the
+handle both drag the sheet. The frame reports the finger (`veSheetDrag`) and a press on the handle
+(`veSheetToggle`), and the shell, which knows the column, decides the height. Both events bubble
+out of the sheet to it.
+
 ## Properties
 
 | Property            | Attribute            | Description                                                                                                                                                                                                                                                                                                                                                                                           | Type                  | Default  |
 | ------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | -------- |
 | `activeTab`         | `active-tab`         | Which tab is underlined, by `id`. Null underlines none, which is how a search result list reads.                                                                                                                                                                                                                                                                                                      | `null \| string`      | `null`   |
+| `expanded`          | `expanded`           | The sheet is pulled up, which is what the grabber offers to undo. Only its name reads this.                                                                                                                                                                                                                                                                                                           | `boolean`             | `false`  |
+| `grabber`           | `grabber`            | Draws a grabber over the head and lets the head and the grabber drag the sheet, reported as `veSheetDrag`. A press on the grabber that is not a drag is `veSheetToggle`.                                                                                                                                                                                                                              | `boolean`             | `false`  |
 | `heading`           | `heading`            | The sheet's name, at the left of the head.  Not `title`, which is what the Angular component called it: an element with a `title` attribute grows a browser tooltip, and the generated `HTMLVeSheetElement` would be redeclaring `HTMLElement.title` with a type that does not match it.                                                                                                              | `null \| string`      | `null`   |
 | `noneLabel`         | `none-label`         | What a screen reader calls the "none" button. Two sheets clear a setting rather than remove a thing, and "None" tells a screen reader nothing about what will happen on those.  This is a prop because the Angular sheets could not make it one: they waited a frame and rewrote the rendered button's attribute by hand, through a `querySelector` that now returns null from outside a shadow root. | `string`              | `'None'` |
 | `searchPlaceholder` | `search-placeholder` | Shows the search row when set, with this as the field's placeholder.                                                                                                                                                                                                                                                                                                                                  | `null \| string`      | `null`   |
@@ -37,12 +44,14 @@ Three of its methods exist because the sheets inside it cannot reach into this s
 
 ## Events
 
-| Event       | Description                                                | Type                  |
-| ----------- | ---------------------------------------------------------- | --------------------- |
-| `veConfirm` | The tick was pressed.                                      | `CustomEvent<void>`   |
-| `veNone`    | The "none" button was pressed.                             | `CustomEvent<void>`   |
-| `veSearch`  | The search text changed, carrying the field's whole value. | `CustomEvent<string>` |
-| `veTab`     | A tab was pressed, carrying its `id`.                      | `CustomEvent<string>` |
+| Event           | Description                                                                                   | Type                     |
+| --------------- | --------------------------------------------------------------------------------------------- | ------------------------ |
+| `veConfirm`     | The tick was pressed.                                                                         | `CustomEvent<void>`      |
+| `veNone`        | The "none" button was pressed.                                                                | `CustomEvent<void>`      |
+| `veSearch`      | The search text changed, carrying the field's whole value.                                    | `CustomEvent<string>`    |
+| `veSheetDrag`   | The sheet is being dragged by its grabber or its head; see [SheetDrag].                       | `CustomEvent<SheetDrag>` |
+| `veSheetToggle` | The grabber was pressed without being dragged: tapped, clicked, or pressed from the keyboard. | `CustomEvent<void>`      |
+| `veTab`         | A tab was pressed, carrying its `id`.                                                         | `CustomEvent<string>`    |
 
 
 ## Methods

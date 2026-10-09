@@ -2,7 +2,16 @@ import { Capacitor } from '@capacitor/core';
 
 import { debugWarn } from '../host/debug';
 import { browserMediaHost, mediaDuration, withoutExtension } from '../host/defaults';
-import type { EditorMediaHost, EditorSoundLibrary, EditorSource, EditorVoiceHost, ReleaseRequest, SavedSound, ThumbnailRequest } from '../host/host.types';
+import type {
+  EditorMediaHost,
+  EditorSoundCatalogue,
+  EditorSoundLibrary,
+  EditorSource,
+  EditorVoiceHost,
+  ReleaseRequest,
+  SavedSound,
+  ThumbnailRequest,
+} from '../host/host.types';
 import { readVoiceTake } from '../host/read-file';
 import { webViewUrl } from '../host/web-view-url';
 
@@ -81,6 +90,13 @@ export interface ComposerMediaHostOptions {
   sounds?: 'browser' | 'native' | EditorSoundLibrary;
 
   /**
+   * The host's music library, used on every platform: see [EditorMediaHost.soundCatalogue]. Left
+   * out, none, and the Sound sheet has no tabs. Its two methods are called on this object, so a
+   * service that passes itself keeps its `this`.
+   */
+  soundCatalogue?: EditorSoundCatalogue;
+
+  /**
    * The voiceover recorder. Left out, the composer's own on a phone (see [nativeVoice]), and none in a
    * page, as the browser defaults have none: the web composer's recorder answers a `videokit-file:`
    * name, the durable one its jobs write down, and that is nothing the editor's preview can play.
@@ -133,9 +149,15 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
         }
       : {}),
     sounds: soundLibrary(options.sounds, browser, native),
+    ...(options.soundCatalogue ? { soundCatalogue: boundCatalogue(options.soundCatalogue) } : {}),
     release: releaseWith(browser, options.release),
     ...(voice ? { voice } : {}),
   };
+}
+
+/** [ComposerMediaHostOptions.soundCatalogue], each method bound to the object it came on. */
+function boundCatalogue(catalogue: EditorSoundCatalogue): EditorSoundCatalogue {
+  return { categories: catalogue.categories.bind(catalogue), file: catalogue.file.bind(catalogue) };
 }
 
 /** The pickers the host brought, each bound to the object it came on. */

@@ -365,6 +365,24 @@
   min-height: 0;
 }
 
+/*
+ * The Sound sheet pulled up by its grabber, to most of the column; a tall sheet at rest is held to
+ * the compact cap above. `SheetDragger` measures these two rules rather than repeating their numbers,
+ * so a sheet let go settles exactly where they then put it.
+ */
+.ve__sheet--expanded {
+  height: 90%;
+  max-height: none;
+}
+
+/*
+ * What the stage keeps under a pulled up sheet: a strip with the video small in it, and room for a
+ * toast, which sits at the bottom of the stage and so just above the sheet.
+ */
+.ve--expanded .ve__stage {
+  min-height: 64px;
+}
+
 /* The text sheet sizes itself to its content, which sits above the keyboard. */
 .ve__sheet--text {
   height: auto;

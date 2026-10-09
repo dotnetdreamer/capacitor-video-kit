@@ -16,7 +16,7 @@ import {
 } from '../editor';
 
 import { debugWarn } from '../host/debug';
-import type { EditorSource, ResolvedEditorHost, SavedSound } from '../host/host.types';
+import type { CatalogueSound, EditorSource, PickedAudio, ResolvedEditorHost, SavedSound, SoundCategory } from '../host/host.types';
 import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
@@ -117,6 +117,35 @@ export class EditorMedia {
    * is still looking at.
    */
   readonly downloadingSound = signal<string | null>(null);
+
+  /**
+   * The host's music library ([EditorMediaHost.soundCatalogue]) as it last answered, with the
+   * categories that hold no track left out: one tab each on the Sound sheet. Empty until
+   * [loadCatalogue] has answered, and empty for good on a host with no catalogue or one that could
+   * not be read.
+   */
+  readonly catalogue = signal<readonly SoundCategory[]>([]);
+
+  /** The catalogue has answered once, a list or a failure, so the sheet can stop waiting on it. */
+  readonly catalogueLoaded = signal(false);
+
+  /**
+   * The id of the catalogue track being fetched right now ([useCatalogueSound]), or null. Its row
+   * puts a spinner where the tick goes, because a track on a server can take seconds to arrive.
+   */
+  readonly fetchingSound = signal<string | null>(null);
+
+  /**
+   * The file each catalogue track became in this edit, by track id: how the sheet ticks the track
+   * the post is using, since a catalogue row knows its track and not its file.
+   */
+  readonly catalogueFiles = signal<ReadonlyMap<string, string>>(new Map());
+
+  /**
+   * The Sound sheet's tab the customer last chose in this edit, or null before they chose one. The
+   * sheet reopens on it, where it would otherwise pick one by what is in each.
+   */
+  readonly soundTab = signal<string | null>(null);
 
   /** Filmstrips are cut one clip at a time: each batch holds a hardware decoder the preview needs. */
   private filmstripQueue: Promise<void> = Promise.resolve();
@@ -549,13 +578,14 @@ export class EditorMedia {
    * The door every "Add sound" in the editor goes through: the Sound menu, the timeline's own
    * buttons, and with `replace` a sound row's Replace, whose pick goes in place of that sound.
    *
-   * A host with a library gets the Sound sheet, where extracting one is the first thing on it. A
-   * host without one gets the file picker straight away, exactly as every host did before the
-   * library existed - a sheet whose only content is one button is worse than the button.
+   * A host with a library or a catalogue gets the Sound sheet, where extracting one is the first
+   * thing on it and the catalogue's categories are tabs. A host with neither gets the file picker
+   * straight away, exactly as every host did before the library existed - a sheet whose only content
+   * is one button is worse than the button.
    */
   openSound(replace: SoundReplaceTarget | null = null): void {
     this.store.pause();
-    if (this.host.media.sounds) {
+    if (this.host.media.sounds || this.host.media.soundCatalogue) {
       this.store.openSoundSheet(replace);
     } else {
       // No sheet to hold the choice, so it is held for the picker's one answer; see [pickMusic].
@@ -735,6 +765,73 @@ export class EditorMedia {
       this.store.haptic('warning');
     } finally {
       if (!this.destroyed) this.downloadingSound.value = null;
+    }
+  }
+
+  /** Whether the host keeps the customer's own sounds, which is what the sheet's Saved tab lists. */
+  get hasSoundLibrary(): boolean {
+    return !!this.host.media.sounds;
+  }
+
+  /**
+   * Reads the host's music library into [catalogue]. The Sound sheet asks on every opening and the
+   * host keeps the answer ([EditorSoundCatalogue.categories]), so the second opening costs nothing.
+   *
+   * A catalogue that will not answer - offline, or a server that has none yet - leaves the tabs as
+   * they were and says so in the console. The saved sounds and both ways in are still there, and a
+   * red bar would only tell a customer about a library they never asked for.
+   */
+  async loadCatalogue(): Promise<void> {
+    const catalogue = this.host.media.soundCatalogue;
+    if (!catalogue) {
+      this.catalogueLoaded.value = true;
+      return;
+    }
+    try {
+      const categories = await catalogue.categories();
+      if (this.destroyed) return;
+      this.catalogue.value = categories.filter(category => category.sounds.length > 0);
+    } catch (error) {
+      debugWarn('[EditorMedia] sound catalogue failed', error);
+    } finally {
+      if (!this.destroyed) this.catalogueLoaded.value = true;
+    }
+  }
+
+  /**
+   * Puts a catalogue track on the post: the host fetches it, or finds it where it kept it, and it
+   * goes on as a saved sound does. A track that cannot be had is said once, and the post and the
+   * sheet stay as they were, so a second tap can try again.
+   *
+   * It holds [busy] meanwhile, as a picker does: the file arriving is a change on its way into the
+   * manifest, and Next must not build a post that is about to have a sound added under it.
+   */
+  async useCatalogueSound(sound: CatalogueSound): Promise<void> {
+    const catalogue = this.host.media.soundCatalogue;
+    if (!catalogue || this.busy.value) return;
+    this.store.pause();
+    this.busy.value = true;
+    this.fetchingSound.value = sound.id;
+    try {
+      let file: PickedAudio;
+      try {
+        file = await catalogue.file(sound);
+      } catch (error) {
+        debugWarn('[EditorMedia] catalogue track failed', sound.id, error);
+        if (this.destroyed) return;
+        this.store.showToast('Track not downloaded. Check your connection', 2400);
+        this.store.haptic('warning');
+        return;
+      }
+      if (this.destroyed) return;
+      this.catalogueFiles.value = new Map(this.catalogueFiles.value).set(sound.id, file.uri);
+      this.landOpenTextEdit();
+      this.useTrack(file.uri, sound.title || file.fileName || 'Music', file.sourceDurationMs || sound.durationMs);
+    } finally {
+      if (!this.destroyed) {
+        this.fetchingSound.value = null;
+        this.busy.value = false;
+      }
     }
   }
 

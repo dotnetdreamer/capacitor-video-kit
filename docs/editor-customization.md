@@ -83,7 +83,7 @@ UI package that guessed at them would be wrong in two of the three.
 
 ```ts
 editor.host = {
-  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, sounds, release, voice },
+  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, sounds, soundCatalogue, release, voice },
   render: { isSupported, render },
   platform: { fileUrl, haptic, keyboard, registerBackHandler, confirm, measureInsets, debug },
 };
@@ -103,6 +103,7 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 | `media.probeDuration` | How long a source runs | a throwaway `<video>` and a ten second timeout |
 | `media.thumbnails` | The timeline's filmstrip | one `<video>`, seeked to each time in turn, onto one canvas |
 | `media.sounds` | The customer's kept sounds: list, extract one from a video, delete one | audio decoded in the page and kept in IndexedDB |
+| `media.soundCatalogue` | A music library: ready-made tracks in categories, one tab each on the Sound sheet | no tabs: the sheet is the customer's own sounds |
 | `media.release` | Give back what the edit dropped | the object URLs the default picker minted are revoked |
 | `media.voice` | Record a voiceover | the voiceover sheet does not offer itself |
 | `render` | Turn the edit into a file: `composerRenderHost()` from the package root, on Capacitor and in a browser | Next hands back the manifest unrendered |
@@ -144,6 +145,36 @@ that is `composerMediaHost({ sounds: 'native' })` ([Native media host](editor.md
 **A host with no `sounds` never opens the Sound sheet at all.** "Add sound" goes straight to
 `pickAudio`, which is what every host did before the library existed and is still the right answer
 for one with nowhere durable to put a file.
+
+**A music library is two calls, and the tracks are the host's.** `soundCatalogue.categories()`
+answers with the categories in tab order, each with its tracks: an `id`, a `title`, a `durationMs`, a
+`previewUrl` the sheet's `<audio>` plays while somebody listens, and optionally an `artworkUrl`
+(drawn round, as the track's play button) and a `sizeBytes` (shown beside the length). The sheet then
+has tabs: Saved first, the customer's own sounds and the two ways in, then one per category, leaving
+out a category with no tracks. It opens on Saved for somebody who has saved sounds and on the first
+category for somebody who has none, and on whichever tab they chose last in the same edit.
+
+`soundCatalogue.file(track)` is called when a track is chosen, with a spinner on its row and the
+editor busy as it is under a picker. It answers as a pick from files does, `{ uri, fileName,
+sourceDurationMs }`: the host fetches the track, keeps it wherever it keeps such things (a phone needs
+a file for its render), and answers the same `uri` for the same track after that, which is how the
+sheet ticks the track the post is using. The editor names the sound by the track's `title`.
+
+Both reject on a real failure. A list that cannot be read leaves the sheet as it was before there
+was a catalogue, with no tabs and nothing said; a track that cannot be had is a toast, and the sheet
+stays open so a second tap can try again. The editor asks `categories()` on every opening of the
+sheet, so a host reading it over a network keeps the answer.
+
+A host with a catalogue and no `sounds` still gets the sheet: its first tab is Files, with From files
+on it. The MCP server places a sound by its URI, as it always has; a host's catalogue, like its saved
+sounds, is not something the server can see.
+
+**The Sound sheet can be pulled up.** It opens at the height of every tall sheet, with a grabber over
+its head. Dragging the grabber or the head up takes it to 90% of the editor's column, for a long list
+of tracks, and down again; dragging it well down, or flicking it, closes it. A press on the grabber,
+which is how a keyboard or a screen reader does it, goes up or back down. It opens at its usual height
+every time, and Back closes it at either height. There is nothing for a host to set: the heights are
+the editor's own stylesheet.
 
 **Three members stay null when the host supplied nothing, and the editor tests for null.** Not
 because there was nothing to write, but because in each case "nobody answered" means something no

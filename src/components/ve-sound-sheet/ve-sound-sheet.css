@@ -144,6 +144,40 @@
 }
 
 /*
+ * A catalogue track's picture is its play button, round, as a music library draws a track. The icon
+ * sits on a dimmed disc so it reads over any picture, light or dark.
+ */
+.snd__art {
+  border-radius: 50%;
+  background-color: var(--ve-raised, #2c2c2e);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.snd__art ve-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  font-size: 14px;
+}
+
+/* The spinner while a track is fetched, in the box the tick takes once it is on the post. */
+.snd__fetching {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--ve-accent, #a6ff2e);
+  --ve-spinner-size: 18px;
+  --ve-spinner-thickness: 2px;
+}
+
+/*
  * Dimmed like the bin, and lit while held, as the play button is. A save already under way puts a
  * spinner in the same box, so the row does not move when it starts or ends.
  */
@@ -197,6 +231,12 @@
 
 .snd__pick:active .snd__name {
   color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+/* Every track while one is on its way: one fetch at a time, as one picker at a time. */
+.snd__pick:disabled {
+  opacity: 0.5;
+  cursor: progress;
 }
 
 .snd__name {

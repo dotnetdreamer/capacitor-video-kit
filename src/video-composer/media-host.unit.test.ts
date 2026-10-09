@@ -173,6 +173,31 @@ describe('composerMediaHost in a page', () => {
     await host.sounds?.list();
     expect(kit.composer.listSounds).not.toHaveBeenCalled();
   });
+
+  it('has no music library unless the host brought one', () => {
+    expect('soundCatalogue' in build().host).toBe(false);
+  });
+
+  it("hands the host's music library to the editor, each call on the object it came on", async () => {
+    const service = {
+      list: [{ id: 'travel', name: 'Travel', sounds: [] }],
+      folder: 'file:///music',
+      async categories() {
+        return this.list;
+      },
+      async file() {
+        return { uri: `${this.folder}/open-road.m4a`, fileName: 'open-road.m4a', sourceDurationMs: 60_000 };
+      },
+    };
+    const { host } = build({ soundCatalogue: service });
+
+    // Called detached, as the editor calls it, and still reading the service's own state.
+    const { categories, file } = host.soundCatalogue!;
+    expect(await categories()).toBe(service.list);
+    expect((await file({ id: 'open-road', title: 'Open Road', durationMs: 0, previewUrl: 'https://x/open-road.m4a' })).uri).toBe(
+      'file:///music/open-road.m4a',
+    );
+  });
 });
 
 describe('probing a source on a phone', () => {

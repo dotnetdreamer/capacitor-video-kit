@@ -2,7 +2,18 @@ import { MAX_LAYERS, MAX_VIDEO_TRACKS, PICTURE_CLIP_MS, PICTURE_SOURCE_MS, empty
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
-import type { EditorMediaHost, EditorSoundLibrary, EditorSource, ResolvedEditorHost, SavedSound, ThumbnailRequest } from '../host/host.types';
+import type {
+  CatalogueSound,
+  EditorMediaHost,
+  EditorSoundCatalogue,
+  EditorSoundLibrary,
+  EditorSource,
+  PickedAudio,
+  ResolvedEditorHost,
+  SavedSound,
+  SoundCategory,
+  ThumbnailRequest,
+} from '../host/host.types';
 import type { Peaks, extractPeaks } from '../web-runtime/waveform';
 import { EditorMedia, type PictureReader } from './editor-media';
 import { EditorStore } from './editor-store';
@@ -700,6 +711,122 @@ describe('EditorMedia', () => {
 
       expect(media.downloadingSound.value).toBeNull();
       expect(store.toast.value).toBeNull();
+    });
+  });
+
+  describe('the music library', () => {
+    const track: CatalogueSound = {
+      id: 'open-road',
+      title: 'Open Road',
+      durationMs: 60_000,
+      previewUrl: 'https://example.test/music/open-road.m4a',
+    };
+    const categories: SoundCategory[] = [
+      { id: 'travel', name: 'Travel', sounds: [track] },
+      { id: 'empty', name: 'Nothing', sounds: [] },
+    ];
+
+    /** A catalogue that answers instantly, so what the editor does with each answer is what is tested. */
+    function fakeCatalogue(overrides: Partial<EditorSoundCatalogue> = {}): EditorSoundCatalogue {
+      return {
+        categories: vi.fn(async () => categories),
+        file: vi.fn(async () => ({ uri: 'file:///music/open-road.m4a', fileName: 'open-road.m4a', sourceDurationMs: 60_023 })),
+        ...overrides,
+      };
+    }
+
+    it('opens the sheet for a host with a catalogue and no library of its own', () => {
+      open(fakeMedia({ soundCatalogue: fakeCatalogue() }));
+      media.openSound();
+
+      expect(store.panel.value).toBe('sound');
+      expect(host.media.pickAudio).not.toHaveBeenCalled();
+      expect(media.hasSoundLibrary).toBe(false);
+    });
+
+    it('reads the categories, leaving out any with no track', async () => {
+      open(fakeMedia({ soundCatalogue: fakeCatalogue() }));
+      await media.loadCatalogue();
+
+      expect(media.catalogue.value.map(category => category.id)).toEqual(['travel']);
+      expect(media.catalogueLoaded.value).toBe(true);
+    });
+
+    it('settles with no tabs when the catalogue cannot be read', async () => {
+      open(
+        fakeMedia({
+          soundCatalogue: fakeCatalogue({
+            categories: vi.fn(async () => {
+              throw new Error('offline');
+            }),
+          }),
+        }),
+      );
+      await media.loadCatalogue();
+
+      expect(media.catalogue.value).toEqual([]);
+      expect(media.catalogueLoaded.value).toBe(true);
+      expect(store.toast.value).toBeNull();
+    });
+
+    it('settles at once on a host with no catalogue', async () => {
+      await media.loadCatalogue();
+
+      expect(media.catalogue.value).toEqual([]);
+      expect(media.catalogueLoaded.value).toBe(true);
+    });
+
+    it("puts a track on the post as the file the host fetched, under the track's title", async () => {
+      const catalogue = fakeCatalogue();
+      open(fakeMedia({ soundCatalogue: catalogue }));
+      await media.useCatalogueSound(track);
+
+      expect(catalogue.file).toHaveBeenCalledWith(track);
+      expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({
+        uri: 'file:///music/open-road.m4a',
+        fileName: 'Open Road',
+        sourceDurationMs: 60_023,
+      });
+      expect(media.catalogueFiles.value.get('open-road')).toBe('file:///music/open-road.m4a');
+      expect(media.fetchingSound.value).toBeNull();
+      expect(media.busy.value).toBe(false);
+    });
+
+    it("holds the editor busy while the track is fetched and says which one it is", async () => {
+      let arrive!: (file: PickedAudio) => void;
+      open(fakeMedia({ soundCatalogue: fakeCatalogue({ file: vi.fn(() => new Promise<PickedAudio>(resolve => (arrive = resolve))) }) }));
+      const using = media.useCatalogueSound(track);
+
+      expect(media.fetchingSound.value).toBe('open-road');
+      expect(media.busy.value).toBe(true);
+      // A second track while the first is on its way is not queued behind it.
+      await media.useCatalogueSound({ ...track, id: 'other' });
+      expect(host.media.soundCatalogue?.file).toHaveBeenCalledTimes(1);
+
+      arrive({ uri: 'file:///music/open-road.m4a', fileName: 'open-road.m4a', sourceDurationMs: 0 });
+      await using;
+      // No length from the file, so the catalogue's own is the one on the post.
+      expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({ sourceDurationMs: 60_000 });
+      expect(media.busy.value).toBe(false);
+    });
+
+    it('says a track that would not download, and leaves the post alone', async () => {
+      open(
+        fakeMedia({
+          soundCatalogue: fakeCatalogue({
+            file: vi.fn(async () => {
+              throw new Error('offline');
+            }),
+          }),
+        }),
+      );
+      await media.useCatalogueSound(track);
+
+      expect(store.manifest.value.audioTracks ?? []).toEqual([]);
+      expect(store.toast.value?.text).toBe('Track not downloaded. Check your connection');
+      expect(media.catalogueFiles.value.size).toBe(0);
+      expect(media.fetchingSound.value).toBeNull();
+      expect(media.busy.value).toBe(false);
     });
   });
 

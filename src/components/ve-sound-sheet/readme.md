@@ -14,15 +14,23 @@ for - pick any video, the sound is pulled out of it, kept, and put on the post -
 kept, the same sound is one tap away in every edit after this one. "From files" is the picker the
 Sound menu used to open directly, unchanged.
 
-Tapping a saved sound uses it and closes the sheet, which is the same gesture the sticker sheet
-has: the sound lands on the timeline and the customer's eyes are already going there. A host whose
-library can hand a sound to the person ([EditorSoundLibrary.download]) gets a download button on
-every row as well, which leaves the post and the sheet as they were.
+A host with a music library ([EditorSoundCatalogue]) adds a tab per category beside them, the
+customer's own sounds first as Saved. A catalogue row is a track on the host's server, so choosing
+one waits for the host to fetch it, with a spinner on its row; listening to one before choosing
+plays the host's `previewUrl` and fetches nothing.
 
-The library itself belongs to the host - see [EditorSoundLibrary] - and this sheet only ever asks
-it four things. A host with no library never opens this sheet at all: `media.openSound()` sends
-it straight to the file picker instead, because a sheet whose only content is one button is worse
-than the button.
+Tapping a saved sound or a track uses it and closes the sheet, which is the same gesture the
+sticker sheet has: the sound lands on the timeline and the customer's eyes are already going
+there. A host whose library can hand a sound to the person ([EditorSoundLibrary.download]) gets a
+download button on every saved row as well, which leaves the post and the sheet as they were.
+
+It is the one sheet with a grabber. It opens at the height every tall sheet has, and dragging its
+head up pulls it to most of the screen, for a long list of tracks; dragging it down closes it. The
+shell owns the heights (`SheetDragger`); this sheet only turns the grabber on.
+
+The library and the catalogue belong to the host, and this sheet only ever asks them for what it
+shows. A host with neither never opens this sheet at all: `media.openSound()` sends it straight to
+the file picker instead, because a sheet whose only content is one button is worse than the button.
 
 The preview player is this element's own. It is an `<audio>` rather than anything the editor's
 preview owns, because what is being listened to here is not on the post yet and must not be mixed

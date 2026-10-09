@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorContext } from '../../bridge/editor-context';
 import { defaultClipEdit, emptyManifest } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
-import type { EditorMediaHost, EditorSoundLibrary, SavedSound } from '../../host/host.types';
+import type { CatalogueSound, EditorMediaHost, EditorSoundCatalogue, EditorSoundLibrary, SavedSound, SoundCategory } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
 
@@ -36,7 +36,7 @@ function library(overrides: Partial<EditorSoundLibrary> = {}): EditorSoundLibrar
   };
 }
 
-function mediaHost(sounds: EditorSoundLibrary | undefined): EditorMediaHost {
+function mediaHost(sounds: EditorSoundLibrary | undefined, soundCatalogue?: EditorSoundCatalogue): EditorMediaHost {
   return {
     pickVideo: vi.fn(async () => ({ key: 'picked', fileName: 'picked.mp4' })),
     pickImage: vi.fn(async () => null),
@@ -44,15 +44,19 @@ function mediaHost(sounds: EditorSoundLibrary | undefined): EditorMediaHost {
     probeDuration: vi.fn(async () => 3000),
     thumbnails: vi.fn(async () => []),
     ...(sounds ? { sounds } : {}),
+    ...(soundCatalogue ? { soundCatalogue } : {}),
   };
 }
 
-async function mount(sounds: EditorSoundLibrary | undefined = library()): Promise<{
+async function mount(
+  sounds: EditorSoundLibrary | undefined = library(),
+  soundCatalogue?: EditorSoundCatalogue,
+): Promise<{
   store: EditorStore;
   media: EditorMedia;
   sheet: HTMLElement;
 }> {
-  const host = resolveEditorHost({ media: mediaHost(sounds) });
+  const host = resolveEditorHost({ media: mediaHost(sounds, soundCatalogue) });
   const store = new EditorStore(host);
   const media = new EditorMedia(store, host);
   const ctx: EditorContext = { store, media };
@@ -302,5 +306,165 @@ describe('ve-sound-sheet', () => {
 
     expect(rows(sheet)[0].querySelector('.snd__save')).toBeNull();
     expect(rows(sheet)[1].querySelector('.snd__save')).not.toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------- the music library */
+
+const TRACKS: CatalogueSound[] = [
+  {
+    id: 'open-road',
+    title: 'Open Road',
+    durationMs: 60_023,
+    previewUrl: 'https://music.example/open-road.m4a',
+    artworkUrl: 'https://music.example/open-road.webp',
+    sizeBytes: 1_258_291,
+  },
+  { id: 'easy-days', title: 'Easy Days', durationMs: 60_023, previewUrl: 'https://music.example/easy-days.m4a' },
+];
+
+const CATEGORIES: SoundCategory[] = [
+  { id: 'recommended', name: 'Recommended', sounds: TRACKS },
+  { id: 'travel', name: 'Travel', sounds: [TRACKS[0]] },
+  { id: 'empty', name: 'Empty', sounds: [] },
+];
+
+function catalogue(overrides: Partial<EditorSoundCatalogue> = {}): EditorSoundCatalogue {
+  return {
+    categories: vi.fn(async () => CATEGORIES),
+    file: vi.fn(async (sound: CatalogueSound) => ({ uri: `file:///music/${sound.id}.m4a`, fileName: `${sound.id}.m4a`, sourceDurationMs: sound.durationMs })),
+    ...overrides,
+  };
+}
+
+/** The tab strip, which is drawn by the frame inside its own shadow root. */
+function tabs(sheet: HTMLElement): HTMLButtonElement[] {
+  const frame = sheet.shadowRoot?.querySelector('ve-sheet');
+  return [...(frame?.shadowRoot?.querySelectorAll<HTMLButtonElement>('.sheet__tab') ?? [])];
+}
+
+function frameTitle(sheet: HTMLElement): Element | null {
+  return sheet.shadowRoot?.querySelector('ve-sheet')?.shadowRoot?.querySelector('.sheet__title') ?? null;
+}
+
+function activeTabLabel(sheet: HTMLElement): string {
+  return text(tabs(sheet).find(tab => tab.getAttribute('aria-selected') === 'true'));
+}
+
+describe('ve-sound-sheet with a music library', () => {
+  it('draws no tabs and keeps its name on a host with no catalogue', async () => {
+    const { sheet } = await mount();
+    await until('the list', () => rows(sheet).length === 2);
+
+    expect(tabs(sheet)).toEqual([]);
+    expect(text(frameTitle(sheet))).toBe('Sound');
+  });
+
+  it('puts the saved sounds first and a tab per category, leaving out one with no tracks', async () => {
+    const { sheet } = await mount(library(), catalogue());
+    await until('the tabs', () => tabs(sheet).length > 0);
+
+    expect(tabs(sheet).map(text)).toEqual(['Saved', 'Recommended', 'Travel']);
+    // The tabs say where the sounds come from, so the name gives way to them.
+    expect(frameTitle(sheet)).toBeNull();
+  });
+
+  it('opens on the saved sounds for somebody who has some', async () => {
+    const { sheet } = await mount(library(), catalogue());
+    await until('the tabs and the list', () => tabs(sheet).length > 0 && rows(sheet).length === 2);
+
+    expect(activeTabLabel(sheet)).toBe('Saved');
+    expect(actions(sheet).length).toBe(2);
+  });
+
+  it('opens on the first category for somebody with no saved sounds yet', async () => {
+    const { sheet } = await mount(library({ list: vi.fn(async () => []) }), catalogue());
+    await until('the first category', () => activeTabLabel(sheet) === 'Recommended');
+
+    expect(rows(sheet).map(row => text(row.querySelector('.snd__name')))).toEqual(['Open Road', 'Easy Days']);
+    expect(actions(sheet)).toEqual([]);
+  });
+
+  it("shows a track's length, its download size and its picture", async () => {
+    const { sheet } = await mount(library({ list: vi.fn(async () => []) }), catalogue());
+    await until('the tracks', () => rows(sheet).length === 2);
+
+    expect(text(rows(sheet)[0].querySelector('.snd__meta'))).toBe('1:00 · 1.2 MB');
+    expect(text(rows(sheet)[1].querySelector('.snd__meta'))).toBe('1:00');
+    const art = rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__play')!;
+    expect(art.classList.contains('snd__art')).toBe(true);
+    expect(art.style.backgroundImage).toContain('open-road.webp');
+    expect(rows(sheet)[1].querySelector('.snd__art')).toBeNull();
+    expect(textName(art)).toBe('Play Open Road');
+  });
+
+  it('fetches a tapped track through the host, puts it on the post and closes', async () => {
+    const music = catalogue();
+    const { store, sheet } = await mount(library({ list: vi.fn(async () => []) }), music);
+    await until('the tracks', () => rows(sheet).length === 2);
+
+    rows(sheet)[1].querySelector<HTMLButtonElement>('.snd__pick')!.click();
+
+    await until('the track to land', () => (store.manifest.value.audioTracks?.[0]?.clips.length ?? 0) === 1);
+    expect(music.file).toHaveBeenCalledWith(TRACKS[1]);
+    expect(store.manifest.value.audioTracks?.[0]?.clips[0]).toMatchObject({ uri: 'file:///music/easy-days.m4a', fileName: 'Easy Days' });
+    await until('the sheet to close', () => store.panel.value === null);
+  });
+
+  it('spins on the track being fetched and greys the others until it lands', async () => {
+    let arrive = (_: { uri: string; fileName: string; sourceDurationMs: number }) => undefined as void;
+    const file = vi.fn(() => new Promise<{ uri: string; fileName: string; sourceDurationMs: number }>(resolve => (arrive = resolve)));
+    const { store, sheet } = await mount(library({ list: vi.fn(async () => []) }), catalogue({ file }));
+    await until('the tracks', () => rows(sheet).length === 2);
+
+    rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__pick')!.click();
+    await until('the spinner', () => !!rows(sheet)[0].querySelector('.snd__fetching ve-spinner'));
+    expect(rows(sheet).map(row => row.querySelector<HTMLButtonElement>('.snd__pick')!.disabled)).toEqual([true, true]);
+    expect(store.panel.value).toBe('sound');
+
+    arrive({ uri: 'file:///music/open-road.m4a', fileName: 'open-road.m4a', sourceDurationMs: 60_023 });
+    await until('the sheet to close', () => store.panel.value === null);
+  });
+
+  it('stays open and says so when a track will not download', async () => {
+    const file = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    const { store, sheet } = await mount(library({ list: vi.fn(async () => []) }), catalogue({ file }));
+    await until('the tracks', () => rows(sheet).length === 2);
+
+    rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__pick')!.click();
+
+    await until('the toast', () => store.toast.value?.text === 'Track not downloaded. Check your connection');
+    expect(store.panel.value).toBe('sound');
+    expect(store.manifest.value.audioTracks ?? []).toEqual([]);
+    await until('the tracks to come back', () => rows(sheet).every(row => !row.querySelector<HTMLButtonElement>('.snd__pick')!.disabled));
+  });
+
+  it('reopens on the tab chosen last, and ticks the track the post is using', async () => {
+    const { store, media, sheet } = await mount(library(), catalogue());
+    await until('the tabs', () => tabs(sheet).length === 3);
+
+    tabs(sheet)[2].click();
+    await until('Travel', () => activeTabLabel(sheet) === 'Travel');
+    expect(media.soundTab.value).toBe('category:travel');
+    expect(rows(sheet).map(row => text(row.querySelector('.snd__name')))).toEqual(['Open Road']);
+
+    rows(sheet)[0].querySelector<HTMLButtonElement>('.snd__pick')!.click();
+    await until('the sheet to close', () => store.panel.value === null);
+
+    store.openPanel('sound');
+    await until('Travel again, with its tick', () => activeTabLabel(sheet) === 'Travel' && !!rows(sheet)[0]?.querySelector('.snd__in-use'));
+  });
+
+  it('keeps the saved sounds and draws no tabs when the catalogue cannot be read', async () => {
+    const categories = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    const { media, sheet } = await mount(library(), catalogue({ categories }));
+    await until('the catalogue to settle', () => media.catalogueLoaded.value && rows(sheet).length === 2);
+
+    expect(tabs(sheet)).toEqual([]);
+    expect(actions(sheet).length).toBe(2);
   });
 });

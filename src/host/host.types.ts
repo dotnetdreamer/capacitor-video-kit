@@ -273,6 +273,15 @@ export interface EditorMediaHost {
   sounds?: EditorSoundLibrary;
 
   /**
+   * Ready-made tracks the host offers, in categories: a music library, drawn as one tab per category
+   * on the Sound sheet after the customer's own saved sounds.
+   *
+   * Absent, the sheet is the customer's own sounds, as it always was. A host with a catalogue and no
+   * `sounds` still gets the sheet, with From files where the saved sounds would be.
+   */
+  soundCatalogue?: EditorSoundCatalogue;
+
+  /**
    * Takes back what the edit stopped using, once, immediately before the editor hands its result
    * back. Never during the edit: a clip whose every segment was deleted stays in the store so that
    * an undo can bring it back, and only the customer tapping Next settles which ones are gone.
@@ -387,6 +396,63 @@ export interface EditorSoundLibrary {
    * `VideoComposer.saveToDownloads`.
    */
   download?(sound: SavedSound): Promise<boolean>;
+}
+
+/**
+ * Where ready-made tracks come from: the host's music library.
+ *
+ * The editor owns none of it, for the reason it owns no saved sound. The tracks are the host's, a
+ * catalogue on its server or files it ships, and a track has to become a file on this device before
+ * a render can read it, which only the host knows how to do. So the editor asks for the list, plays
+ * a track's [CatalogueSound.previewUrl] while somebody listens, and asks for the file only when one
+ * is chosen, with a spinner on its row meanwhile.
+ *
+ * Both methods REJECT on a real failure. A list that cannot be read leaves the sheet with the saved
+ * sounds and no other tab; a file that cannot be had is said in a toast, and the sheet stays open.
+ */
+export interface EditorSoundCatalogue {
+  /**
+   * The categories, in the order their tabs are drawn, each with its tracks in the order its rows
+   * are. Asked on every opening of the Sound sheet, so a host reading it over a network keeps the
+   * answer. A category with no tracks draws no tab.
+   */
+  categories(): Promise<readonly SoundCategory[]>;
+
+  /**
+   * One track as a file the editor can put on the post, answered as a pick from files is: fetched
+   * once, kept where the host keeps such things, and found there after that. The same track asked
+   * for twice answers the same `uri`, which is how the sheet ticks the track the post is using.
+   */
+  file(sound: CatalogueSound): Promise<PickedAudio>;
+}
+
+/** One tab of the music library. */
+export interface SoundCategory {
+  /** The host's own, stable. Never shown. */
+  readonly id: string;
+  /** What the tab says. */
+  readonly name: string;
+  /** In the order the rows are drawn. A track can be in more than one category. */
+  readonly sounds: readonly CatalogueSound[];
+}
+
+/** One ready-made track, as its row shows it before anybody has chosen it. */
+export interface CatalogueSound {
+  /** The host's own, stable, and the same in every category the track is in. Never shown. */
+  readonly id: string;
+  /** What the row shows. */
+  readonly title: string;
+  /** 0 when unknown; the row then shows no time. */
+  readonly durationMs: number;
+  /**
+   * What an `<audio>` in the WebView plays while somebody listens before choosing: any URL
+   * `platform.fileUrl` hands back as one it can play, the track itself on a server included.
+   */
+  readonly previewUrl: string;
+  /** A square picture, drawn round on the row. Optional; a note stands in for it. */
+  readonly artworkUrl?: string;
+  /** What choosing the track downloads, shown beside its length. Optional. */
+  readonly sizeBytes?: number;
 }
 
 export interface ThumbnailRequest {

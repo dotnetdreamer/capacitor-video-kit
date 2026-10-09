@@ -49,6 +49,59 @@
   margin-inline: auto;
 }
 
+/* ---------------------------------------------------------------------------------- grabber */
+
+/*
+ * iOS's grabber: a short bar at the top of a sheet that can be pulled up. The whole strip is the
+ * button, full width, so a finger has the sheet's width to aim at rather than the bar's 36px.
+ *
+ * `touch-action: none` is what keeps the browser out of a drag that starts here. Left to itself it
+ * takes a vertical move as a scroll, and sends `pointercancel` where the moves should have been.
+ */
+.sheet__grab {
+  display: flex;
+  justify-content: center;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+  height: 16px;
+  padding: 6px 0 0;
+  border: 0;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sheet__grab-bar {
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--ve-faint, rgba(255, 255, 255, 0.35));
+}
+
+.sheet__grab:focus-visible {
+  outline: 0;
+}
+
+.sheet__grab:focus-visible .sheet__grab-bar {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: 3px;
+}
+
+/*
+ * The head drags the sheet too, so a vertical move that starts on it has to reach the frame rather
+ * than be taken as a scroll, while a sideways one is still the tab strip's. Named on every box a
+ * finger can land on, because `touch-action` is not inherited, and the strip is a scroller of its
+ * own, where a value set on the head above it stops counting.
+ */
+.sheet__head--drag,
+.sheet__head--drag .sheet__tabs,
+.sheet__head--drag .sheet__tab,
+.sheet__head--drag .sheet__icon-btn {
+  touch-action: pan-x;
+}
+
 /* ----------------------------------------------------------------------------------- search */
 
 .sheet__search-row {

@@ -49,6 +49,7 @@
  * `Platform` are values; the rest is the shape a host implements.
  */
 export type {
+  CatalogueSound,
   ConfirmRequest,
   EditorCancelReason,
   EditorEditingOptions,
@@ -59,6 +60,7 @@ export type {
   EditorOutputOptions,
   EditorPlatformHost,
   EditorRenderHost,
+  EditorSoundCatalogue,
   EditorSoundLibrary,
   EditorSnapshot,
   EditorSource,
@@ -75,6 +77,7 @@ export type {
   ResolvedOutputOptions,
   ResolvedPlatformHost,
   SavedSound,
+  SoundCategory,
   ThumbnailRequest,
   VideoEditorHost,
   VideoEditorResult,

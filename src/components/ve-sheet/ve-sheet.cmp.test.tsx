@@ -1,7 +1,7 @@
 import { render, describe, it, expect } from '@stencil/vitest';
 
 import { activeElementDeep } from '../../bridge/active-element';
-import type { SheetTab } from '../sheet.types';
+import type { SheetDrag, SheetTab } from '../sheet.types';
 
 /**
  * A browser test, because nearly everything this frame promises is shape: which of the two rows is
@@ -148,6 +148,24 @@ describe('ve-sheet', () => {
 
     expect(tabs(root).map(tab => tab.getAttribute('aria-selected'))).toEqual(['false', 'true']);
     expect(getComputedStyle(tabs(root)[1], '::after').height).toBe('3px');
+  });
+
+  it('scrolls the underlined tab wholly into sight, on the first paint and whenever it changes', async () => {
+    const many: SheetTab[] = ['Saved', 'Recommended', 'Travel', 'Vlog', 'Party', 'Chill'].map(label => ({ id: label.toLowerCase(), label }));
+    const { root, setProps } = await render<HTMLVeSheetElement>(<ve-sheet style={{ width: '260px' }} tabs={many} activeTab="vlog"></ve-sheet>);
+    const strip = shadow(root).querySelector<HTMLElement>('.sheet__tabs')!;
+    const inSight = (id: string) => {
+      const tab = tabs(root)[many.findIndex(one => one.id === id)].getBoundingClientRect();
+      const box = strip.getBoundingClientRect();
+      return tab.left >= box.left - 0.5 && tab.right <= box.right + 0.5;
+    };
+
+    // A sheet that opens on a tab past the edge of a narrow strip, as the Sound sheet reopens on one.
+    await until('Vlog in sight', () => inSight('vlog'));
+    expect(strip.scrollLeft).toBeGreaterThan(0);
+
+    await setProps({ activeTab: 'saved' });
+    await until('Saved in sight again', () => inSight('saved'));
   });
 
   it('underlines nothing while a search is what is on screen', async () => {
@@ -310,5 +328,145 @@ describe('ve-sheet', () => {
 
     await expect(root.blurSearch()).resolves.toBeUndefined();
     await expect(root.scrollBodyTo(40)).resolves.toBeUndefined();
+  });
+});
+
+/*
+ * The grabber, which only the Sound sheet turns on. The frame reports the finger and nothing else:
+ * how tall that makes the sheet is the shell's, and is tested there. What is pinned here is when a
+ * press on the head IS a drag - a tap on a tab must stay a tap, and a sideways swipe must stay the
+ * tab strip's scroll - and that a drag lifted over a tab does not also press it.
+ */
+describe('ve-sheet with a grabber', () => {
+  function grab(sheet: HTMLElement): HTMLButtonElement | null {
+    return shadow(sheet).querySelector('.sheet__grab');
+  }
+
+  /** A finger's pointer event, sent where a finger would land and bubbling out to the frame. */
+  function finger(target: Element, type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel', x: number, y: number): void {
+    target.dispatchEvent(
+      new PointerEvent(type, { bubbles: true, composed: true, cancelable: true, pointerId: 7, isPrimary: true, button: 0, pointerType: 'touch', clientX: x, clientY: y }),
+    );
+  }
+
+  function recordDrags(sheet: HTMLElement): { drags: SheetDrag[]; toggles: () => number } {
+    const drags: SheetDrag[] = [];
+    let toggles = 0;
+    sheet.addEventListener('veSheetDrag', event => drags.push((event as CustomEvent<SheetDrag>).detail));
+    sheet.addEventListener('veSheetToggle', () => toggles++);
+    return { drags, toggles: () => toggles };
+  }
+
+  it('draws no grabber, and drags nothing, unless it is asked to', async () => {
+    const { root } = await render<HTMLVeSheetElement>(<ve-sheet tabs={TABS} activeTab="clip"></ve-sheet>);
+    const { drags } = recordDrags(root);
+
+    expect(grab(root)).toBe(null);
+    finger(tabs(root)[0], 'pointerdown', 100, 300);
+    finger(tabs(root)[0], 'pointermove', 100, 240);
+    finger(tabs(root)[0], 'pointerup', 100, 240);
+
+    expect(drags).toEqual([]);
+  });
+
+  it('names the grabber for what pressing it does, and reports a press as a toggle', async () => {
+    const { root, setProps } = await render<HTMLVeSheetElement>(<ve-sheet grabber={true} tabs={TABS}></ve-sheet>);
+    const { toggles } = recordDrags(root);
+
+    // Above the head, so it is the first thing on the sheet.
+    expect(grab(root)!.getBoundingClientRect().bottom).toBeLessThanOrEqual(head(root)!.getBoundingClientRect().top + 0.5);
+    expect(grab(root)!.getAttribute('aria-label')).toBe('Expand');
+    grab(root)!.click();
+    expect(toggles()).toBe(1);
+
+    await setProps({ expanded: true });
+    expect(grab(root)!.getAttribute('aria-label')).toBe('Collapse');
+  });
+
+  it('reports a drag of the head once the finger has moved far enough up or down, and where it lifts', async () => {
+    const { root } = await render<HTMLVeSheetElement>(<ve-sheet grabber={true} tabs={TABS} activeTab="clip"></ve-sheet>);
+    const { drags } = recordDrags(root);
+    const tab = tabs(root)[1];
+
+    finger(tab, 'pointerdown', 100, 300);
+    // A wobble, which is still a tap.
+    finger(tab, 'pointermove', 102, 296);
+    expect(drags).toEqual([]);
+
+    finger(tab, 'pointermove', 102, 260);
+    finger(tab, 'pointerup', 102, 250);
+
+    expect(drags.map(drag => [drag.phase, drag.dy])).toEqual([
+      ['start', -40],
+      ['move', -40],
+      ['end', -50],
+    ]);
+    expect(drags[2].velocity).toBeLessThanOrEqual(0);
+  });
+
+  it('leaves a sideways swipe to the tab strip', async () => {
+    const { root } = await render<HTMLVeSheetElement>(<ve-sheet grabber={true} tabs={TABS} activeTab="clip"></ve-sheet>);
+    const { drags } = recordDrags(root);
+    const tab = tabs(root)[0];
+
+    finger(tab, 'pointerdown', 100, 300);
+    finger(tab, 'pointermove', 130, 302);
+    // Once it was sideways it stays the strip's, however it bends afterwards.
+    finger(tab, 'pointermove', 130, 240);
+    finger(tab, 'pointerup', 130, 240);
+
+    expect(drags).toEqual([]);
+  });
+
+  it('does not let the click a drag leaves behind press the tab or the grabber under it', async () => {
+    const { root } = await render<HTMLVeSheetElement>(<ve-sheet grabber={true} tabs={TABS} activeTab="clip"></ve-sheet>);
+    const fired = recordEvents(root);
+    const { toggles } = recordDrags(root);
+    const tab = tabs(root)[1];
+
+    finger(tab, 'pointerdown', 100, 300);
+    finger(tab, 'pointermove', 100, 200);
+    finger(tab, 'pointerup', 100, 200);
+    tab.click();
+    expect(fired).toEqual([]);
+
+    // One click is swallowed, not every click: the next tap on the tab is a tap.
+    tab.click();
+    expect(fired).toEqual([['veTab', 'all']]);
+
+    finger(grab(root)!, 'pointerdown', 100, 10);
+    finger(grab(root)!, 'pointermove', 100, 120);
+    finger(grab(root)!, 'pointerup', 100, 120);
+    grab(root)!.click();
+    expect(toggles()).toBe(0);
+  });
+
+  it('follows a mouse whose moves land outside the sheet, as its first move over the video does', async () => {
+    const { root } = await render<HTMLVeSheetElement>(<ve-sheet grabber={true} heading="Sound"></ve-sheet>);
+    const { drags } = recordDrags(root);
+    // A mouse is captured by nothing before it is a drag, so its moves go to whatever is under it.
+    const mouse = (target: Element, type: string, y: number) =>
+      target.dispatchEvent(new PointerEvent(type, { bubbles: true, composed: true, pointerId: 1, isPrimary: true, button: 0, pointerType: 'mouse', clientX: 100, clientY: y }));
+
+    mouse(grab(root)!, 'pointerdown', 10);
+    mouse(document.body, 'pointermove', -30);
+    mouse(document.body, 'pointerup', -60);
+
+    expect(drags.map(drag => [drag.phase, drag.dy])).toEqual([
+      ['start', -40],
+      ['move', -40],
+      ['end', -70],
+    ]);
+  });
+
+  it('says so when the browser takes the touch back', async () => {
+    const { root } = await render<HTMLVeSheetElement>(<ve-sheet grabber={true} heading="Sound"></ve-sheet>);
+    const { drags } = recordDrags(root);
+
+    finger(grab(root)!, 'pointerdown', 100, 10);
+    finger(grab(root)!, 'pointermove', 100, -40);
+    finger(grab(root)!, 'pointercancel', 100, -40);
+
+    expect(drags.map(drag => drag.phase)).toEqual(['start', 'move', 'cancel']);
   });
 });

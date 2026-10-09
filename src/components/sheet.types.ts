@@ -17,3 +17,25 @@ export interface SheetTab {
   /** What is printed on the tab. */
   readonly label: string;
 }
+
+/**
+ * One step of a sheet being dragged by its grabber or its head, which `veSheetDrag` carries. Here
+ * rather than in `ve-sheet.tsx` for the reason [SheetTab] is.
+ *
+ * The frame only reports the finger. How tall that makes the sheet, and where it settles, is the
+ * shell's: it is the one that knows the column the sheet sits in.
+ */
+export interface SheetDrag {
+  /**
+   * `start` once the finger has moved far enough up or down to be a drag, `move` after that, and
+   * `end` when it lifts. `cancel` is the browser taking the touch back, which is nothing the
+   * customer chose: the sheet goes back to where it was.
+   */
+  readonly phase: 'start' | 'move' | 'end' | 'cancel';
+
+  /** How far the finger is from where it went down, in CSS pixels. Down is positive. */
+  readonly dy: number;
+
+  /** How fast it was moving over its last few events, in CSS pixels a millisecond. Down is positive. */
+  readonly velocity: number;
+}

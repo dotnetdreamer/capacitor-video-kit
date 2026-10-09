@@ -560,6 +560,11 @@ export class EditorStore {
    */
   readonly soundReplaceTarget = signal<SoundReplaceTarget | null>(null);
   /**
+   * The open sheet has been pulled up by its grabber, to most of the column. Only the Sound sheet
+   * has a grabber. Goes with the sheet, so every sheet opens at its own height.
+   */
+  readonly sheetExpanded = signal(false);
+  /**
    * The boundary the transition sheet is dressing while it is open, named by its INCOMING clip -
    * the clip that holds the transition. Null whenever the sheet is shut.
    */
@@ -949,6 +954,7 @@ export class EditorStore {
     // A layout opening still being played is the layout sheet's, and goes with it.
     if (this.panel.value === 'layout' && panel !== 'layout') this.endAudition();
     if (panel !== 'sound') this.soundReplaceTarget.value = null;
+    if (panel !== this.panel.value) this.sheetExpanded.value = false;
     this.panel.value = panel;
   }
 
@@ -959,6 +965,7 @@ export class EditorStore {
     this.panel.value = null;
     this.volumeTarget.value = null;
     this.soundReplaceTarget.value = null;
+    this.sheetExpanded.value = false;
   }
 
   openVolume(target: VolumeTarget): void {

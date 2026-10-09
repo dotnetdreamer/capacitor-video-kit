@@ -1,4 +1,4 @@
-import { Component, Element, Event, type EventEmitter, Host, Prop, State } from '@stencil/core';
+import { Component, Element, Event, type EventEmitter, Host, Listen, Prop, State } from '@stencil/core';
 import { computed, type ReadonlySignal } from '@preact/signals-core';
 
 import { deferredEffect } from '../../bridge/deferred-effect';
@@ -23,8 +23,10 @@ import { EditorStore } from '../../state/editor-store';
 import type { EditorPanel } from '../../state/editor.types';
 import { OverlayBitmaps } from '../../state/overlay-bitmap';
 import { isPictureSource } from '../../web-runtime/picture';
+import type { SheetDrag } from '../sheet.types';
 import { EditorConfirm, leaveQuestion, RENDER_UNAVAILABLE, renderFailed } from '../ve-alert/editor-confirm';
-import { formatClock, shellLayout } from './shell-layout';
+import { EXPANDED_COLUMN, EXPANDED_SHEET, SheetDragger, type SheetSlot } from './sheet-drag';
+import { canExpand, formatClock, shellLayout } from './shell-layout';
 
 /**
  * How long after the window changes size the insets are measured a second time. The bar flags can
@@ -185,6 +187,15 @@ export class VeEditor {
     if (el) void this.paintStill(el as HTMLCanvasElement);
   };
 
+  /** The column every row sits in, which a sheet pulled up by its grabber is measured against. */
+  private column?: HTMLElement;
+  private readonly keepColumn = (el?: HTMLElement) => {
+    this.column = el;
+  };
+
+  /** Moves a sheet under a finger on its grabber; see [SheetDragger]. */
+  private sheetDrag?: SheetDragger;
+
   private built = false;
   private destroyed = false;
   private leaving = false;
@@ -235,6 +246,7 @@ export class VeEditor {
     this.bitmaps = new OverlayBitmaps(this.store, host);
     this.confirm = new EditorConfirm(host.platform);
     this.ctx = { store: this.store, media: this.media };
+    this.sheetDrag = new SheetDragger(this.store, this.openSheetSlot);
 
     this.unregisterBack = host.platform.registerBackHandler(this.onBack);
 
@@ -306,7 +318,36 @@ export class VeEditor {
     if (this.confirm.showing || this.rendering) this.el.setAttribute('aria-hidden', 'false');
     else this.el.removeAttribute('aria-hidden');
     this.moveFocusWithExport();
+    // A sheet that settled pulled up or back down keeps its inline height until its class is on.
+    this.sheetDrag?.rendered();
   }
+
+  /*
+   * A sheet's grabber, which the frame reports and the shell answers, because the shell is what
+   * knows the column the sheet's height comes out of. Only a sheet the layout lets grow is moved.
+   */
+  @Listen('veSheetDrag')
+  onSheetDrag(event: CustomEvent<SheetDrag>): void {
+    const drag = this.sheetDrag;
+    if (!drag || !canExpand(this.store.panel.value)) return;
+    const { phase, dy, velocity } = event.detail;
+    if (phase === 'start') drag.begin();
+    else if (phase === 'move') drag.move(dy);
+    else if (phase === 'end') drag.end(velocity);
+    else drag.cancel();
+  }
+
+  @Listen('veSheetToggle')
+  onSheetToggle(): void {
+    if (canExpand(this.store.panel.value)) this.sheetDrag?.toggle();
+  }
+
+  /** The open sheet and the column it is in, for [SheetDragger]. Every sheet is a child of the column. */
+  private readonly openSheetSlot = (): SheetSlot | null => {
+    const column = this.column;
+    const sheet = column?.querySelector<HTMLElement>(':scope > .ve__sheet');
+    return column && sheet ? { column, sheet } : null;
+  };
 
   /** Whether the last frame drawn had the export screen on it, so focus moves once per change. */
   private exportShown = false;
@@ -363,6 +404,7 @@ export class VeEditor {
 
     // Anyone still waiting on a question is answered null rather than left holding a dead promise.
     this.confirm.dispose();
+    this.sheetDrag?.dispose();
     this.watcher.stop();
     this.bitmaps.dispose();
     this.media.dispose();
@@ -906,6 +948,7 @@ export class VeEditor {
       const layout = shellLayout(panel);
       const fullscreen = store.fullscreen.value;
       const asking = this.confirm.showing;
+      const expanded = canExpand(panel) && store.sheetExpanded.value;
 
       return (
         <Host>
@@ -921,10 +964,12 @@ export class VeEditor {
               've': true,
               've--compact': layout === 'compact',
               've--tall': layout === 'tall',
+              [EXPANDED_COLUMN]: expanded,
               've--fullscreen': fullscreen,
             }}
             inert={this.rendering}
             aria-hidden={this.rendering ? 'true' : undefined}
+            ref={this.keepColumn}
           >
             {this.loading
               ? this.renderLoading()
@@ -932,7 +977,7 @@ export class VeEditor {
                   this.renderStage(ctx, layout, fullscreen),
                   layout === 'tall' ? null : this.renderTransport(ctx, fullscreen),
                   !fullscreen && layout !== 'tall' ? <ve-timeline key="timeline" class="ve__timeline" ctx={ctx} compact={layout === 'compact'} /> : null,
-                  fullscreen ? null : this.renderTools(ctx, panel),
+                  fullscreen ? null : this.renderTools(ctx, panel, expanded),
                 ]}
           </div>
 
@@ -1070,8 +1115,10 @@ export class VeEditor {
    * host would define `ve-editor`, get most of the tags, and find that one sheet opens as an unknown
    * element - which lays out as nothing and throws nothing. [PANEL_LAYOUT] is what keeps the list
    * exhaustive; this switch is what makes the elements.
+   *
+   * `expanded` is the Sound sheet pulled up by its grabber, which only it has ([canExpand]).
    */
-  private renderTools(ctx: EditorContext, panel: EditorPanel | null) {
+  private renderTools(ctx: EditorContext, panel: EditorPanel | null, expanded: boolean) {
     switch (panel) {
       case 'text':
         return <ve-text-sheet key="text" class="ve__sheet ve__sheet--text" ctx={ctx} />;
@@ -1100,7 +1147,7 @@ export class VeEditor {
         // it leaves the document, and the vdom moving it would end the take with no press.
         return <ve-voiceover-sheet key="voiceover" class="ve__sheet" ctx={ctx} />;
       case 'sound':
-        return <ve-sound-sheet key="sound" class="ve__sheet ve__sheet--tall" ctx={ctx} />;
+        return <ve-sound-sheet key="sound" class={{ 've__sheet': true, 've__sheet--tall': true, [EXPANDED_SHEET]: expanded }} ctx={ctx} />;
       case 'transition':
         return <ve-transition-sheet key="transition" class="ve__sheet" ctx={ctx} />;
       case 'zoom':
