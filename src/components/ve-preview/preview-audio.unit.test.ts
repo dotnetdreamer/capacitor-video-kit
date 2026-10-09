@@ -829,6 +829,55 @@ describe('a sound at a speed', () => {
   });
 });
 
+/*
+ * A sound put through an effect plays from its copy through the effect ([EditorStore.soundCopies]),
+ * which is the file on the same timeline: the player only puts its element on another URL, and puts it
+ * exactly where it would have put the file.
+ */
+describe('a sound through an effect', () => {
+  const word = { ...LOOPED, id: 'word', uri: 'blob:capacitor://localhost/word', loop: false, effect: 'megaphone' };
+  const copyKey = 'megaphone:blob:capacitor://localhost/word';
+  const copy = 'blob:capacitor://localhost/word-through-megaphone';
+
+  it('plays its file until its copy is made, and then the copy, in step with the playhead', async () => {
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
+    const [el] = r.lanes;
+    await playFrom(r, 0);
+    await playTo(r, 1000);
+    expect(el.src).toBe(word.uri);
+
+    r.store.soundCopies.value = new Map([[copyKey, copy]]);
+    await playTo(r, 2500);
+    expect(el.src).toBe(copy);
+    expect(el.paused).toBe(false);
+    expect(Math.abs(el.currentTime * 1000 - r.store.playheadMs.value)).toBeLessThan(200);
+  });
+
+  it('plays its file where no copy could be made, and its file again once the effect is taken off', async () => {
+    const r = await rig('chromium', null, { audioTracks: [{ id: 'lane', clips: [word] }] });
+    const [el] = r.lanes;
+    r.store.soundCopies.value = new Map<string, string | null>([[copyKey, null]]);
+    await playFrom(r, 0);
+    await playTo(r, 500);
+    expect(el.src).toBe(word.uri);
+
+    r.store.soundCopies.value = new Map([[copyKey, copy]]);
+    await playTo(r, 1000);
+    expect(el.src).toBe(copy);
+    r.store.setSoundEffect({ kind: 'audio', id: 'word' }, null);
+    await playTo(r, 1500);
+    expect(el.src).toBe(word.uri);
+  });
+
+  it('puts the post’s one music on its copy too', async () => {
+    const r = await rig('chromium', { ...LOOPED, uri: word.uri, effect: 'megaphone' });
+    r.store.soundCopies.value = new Map([[copyKey, copy]]);
+    await playFrom(r, 0);
+    await playTo(r, 500);
+    expect(r.music.src).toBe(copy);
+  });
+});
+
 describe('the stand-in for a WebKit audio element', () => {
   it('loses its length to a seek that lands between the end of the file and the notice of it', async () => {
     // What the preview used to do at a seam, and what the probe caught WebKit doing with it.

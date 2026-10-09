@@ -337,6 +337,13 @@ data class Music(
      * defaulted, so every sound built without one is the 1x sound it always was.
      */
     val speed: Float = 1f,
+    /**
+     * What the sound is put through after its speed and before its level and fades - see
+     * [SoundEffect]. Null, which is every spec written before sounds had effects and what the parser
+     * makes of one that does nothing, is the sound as it is. Last and defaulted, so every sound built
+     * without one is built exactly as it was.
+     */
+    val effect: SoundEffect? = null,
 )
 
 data class Voiceover(

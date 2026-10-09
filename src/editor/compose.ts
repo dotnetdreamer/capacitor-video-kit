@@ -1,4 +1,4 @@
-import type { ComposeClip, ComposeOverlay, ComposeOverlayMotion, ComposePlacement, ComposeRect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
+import type { ComposeClip, ComposeOverlay, ComposeOverlayMotion, ComposePlacement, ComposeRect, ComposeSoundEffect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
 
 import {
   MAX_SPEED,
@@ -27,6 +27,7 @@ import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
+import { soundEffectPreset } from './sound-effects';
 import { compileTransition, transitionSpans } from './transitions';
 import { compileCamera } from './zoom';
 
@@ -198,6 +199,7 @@ export async function toComposeSpec(
             fadeInMs: Math.max(0, Math.round(music.fadeInMs ?? 0)),
             fadeOutMs: Math.max(0, Math.round(music.fadeOutMs)),
             ...wireSpeed(music),
+            ...wireEffect(music),
           }
         : null,
       voiceover: [...manifest.voiceovers]
@@ -224,6 +226,7 @@ export async function toComposeSpec(
                 fadeInMs: Math.max(0, Math.round(sound.fadeInMs ?? 0)),
                 fadeOutMs: Math.max(0, Math.round(sound.fadeOutMs)),
                 ...wireSpeed(sound),
+                ...wireEffect(sound),
               })),
             ),
           }
@@ -269,6 +272,19 @@ export async function toComposeSpec(
 function wireSpeed(music: EditMusic): { speed?: number } {
   const speed = musicSpeed(music);
   return speed !== 1 ? { speed } : {};
+}
+
+/**
+ * A sound's effect as the wire carries it: the steps its id stands for, and no key at all for none
+ * or for an id this version does not know, so a sound nobody put through anything is the music this
+ * package has always sent. The steps are copied off the frozen catalogue rather than handed over, so
+ * nothing that holds the spec can change an effect for every post after it.
+ */
+function wireEffect(music: EditMusic): { effect?: ComposeSoundEffect } {
+  const preset = soundEffectPreset(music.effect);
+  if (!preset) return {};
+  const { mono, ops } = preset.effect;
+  return { effect: { ...(mono ? { mono } : {}), ops: ops.map(op => ({ ...op })) } };
 }
 
 /**

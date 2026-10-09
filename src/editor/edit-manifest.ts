@@ -1,6 +1,7 @@
 import type { FilterOp } from '../video-composer/definitions';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
+import { normaliseSoundEffectId } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
 /**
@@ -17,7 +18,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 15;
+export const MANIFEST_VERSION = 16;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -353,6 +354,16 @@ export interface EditMusic {
    * [normaliseManifest] and `patchMusic` take the key off instead.
    */
   speed?: number;
+  /**
+   * What the sound is put through, an id from [SOUND_EFFECTS]: a megaphone, say. Absent is the sound
+   * as it is, which is every sound of every manifest written before version 16, and absent is what
+   * [toComposeSpec] turns into a sound with no `effect` on the wire. Never stored for none, and an id
+   * this version does not know is dropped when it is read ([normaliseSoundEffectId]).
+   *
+   * It belongs to the sound, not to the post: a Cut leaves it on both halves and a Duplicate on the
+   * copy, which is what lets a customer cut one word out of a line and give only that word a megaphone.
+   */
+  effect?: string;
 }
 
 /** One independently placed sound on an audio lane. Its timing is on the output timeline. */
@@ -1760,6 +1771,11 @@ export function emptyManifest(): EditManifest {
  * manifest: a version-14 sound has no `speed`, which is 1x, and [toComposeSpec] sends it with none -
  * byte for byte the spec version 14 produced. Bumped because an older build reading a version-15 draft
  * plays a sped-up sound at 1x, and runs a slowed one over whatever follows it on its lane.
+ *
+ * Version 15 to version 16 adds a sound's [EditMusic.effect], and nothing is written into an older
+ * manifest: a version-15 sound has no `effect`, which is the sound as it is, and [toComposeSpec] sends
+ * it with none - byte for byte the spec version 15 produced. Bumped because an older build reading a
+ * version-16 draft plays a megaphone's word in the speaker's own voice.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1875,6 +1891,7 @@ export function normaliseManifest(input: unknown): EditManifest {
     const musicInMs = Math.max(0, num(m.inMs, 0));
     const musicStartMs = Math.max(0, num(m.startMs, 0));
     const speed = normaliseSpeed(num(m.speed, 1));
+    const effect = normaliseSoundEffectId(m.effect);
     return {
       uri: String(m.uri),
       fileName: String(m.fileName ?? 'Music'),
@@ -1891,6 +1908,8 @@ export function normaliseManifest(input: unknown): EditManifest {
       fadeOutMs: Math.max(0, num(m.fadeOutMs, 400)),
       // The same rule, for a sound played at its own speed.
       ...(speed !== 1 ? { speed } : {}),
+      // And for a sound played as it is.
+      ...(effect ? { effect } : {}),
     };
   };
   const music: EditMusic | null = raw['music'] ? readMusic(raw['music']) : null;

@@ -398,6 +398,10 @@ struct ComposeMusic: Sendable {
     /// output; `startMs`, `endMs` and the fades stay places on the output. A defaulted `var`, so the
     /// memberwise initialiser every caller already uses still builds the 1x sound it always did.
     var speed: Double = 1
+    /// What the sound is put through before its level and fades - see `SoundEffect` and
+    /// `SoundEffectTap`. Nil, which is every spec written before sounds had effects and what the parser
+    /// makes of one that does nothing, is the sound as it is. Defaulted for `speed`'s reason.
+    var effect: SoundEffect? = nil
 }
 
 struct ComposeVoiceover: Sendable {

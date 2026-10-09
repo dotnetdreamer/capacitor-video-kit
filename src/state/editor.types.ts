@@ -30,7 +30,8 @@ export type EditorPanel =
   | 'transition'
   | 'zoom'
   | 'animation'
-  | 'background';
+  | 'background'
+  | 'audioEffects';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the
@@ -48,6 +49,9 @@ export type VolumeTarget = { kind: 'clip'; id: string } | { kind: 'music' } | { 
 /** The sound the Sound sheet's next pick goes in place of, while a Replace tile has it open. */
 export type SoundReplaceTarget = { kind: 'music' } | { kind: 'audio'; id: string };
 
+/** The sound the Effects sheet puts through an effect: a sound on a lane, or an older edit's one sound. */
+export type SoundEffectTarget = { kind: 'music' } | { kind: 'audio'; id: string };
+
 /** Frames cut from one source clip for the filmstrip, one every `stepMs` of SOURCE time. */
 /**
  * What a video source's own sound is filed under in `store.waveforms`.
@@ -57,6 +61,15 @@ export type SoundReplaceTarget = { kind: 'music' } | { kind: 'audio'; id: string
  */
 export function clipWaveKey(sourceKey: string): string {
   return `clip:${sourceKey}`;
+}
+
+/**
+ * What a sound's copy through an effect is filed under in `store.soundCopies`: the effect and the
+ * file, since one file through two effects is two copies and two sounds of one file through the same
+ * effect - the halves of a cut - are one.
+ */
+export function soundCopyKey(uri: string, effectId: string): string {
+  return `${effectId}:${uri}`;
 }
 
 export interface Filmstrip {

@@ -7,6 +7,7 @@ import type {
   ComposePlacement,
   ComposeRect,
   ComposeRectMotion,
+  ComposeSoundEffect,
   ComposeSpec,
   ComposeTransition,
   ComposeTransitionCurves,
@@ -19,6 +20,7 @@ import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } fro
 import { normaliseCamera } from '../../editor/camera';
 import { RectMotionError, normaliseRectMotion } from '../../editor/layout-motion';
 import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
+import { SoundEffectError, normaliseSoundEffect } from '../../editor/sound-effects';
 import { batchIdRefusal } from '../batch-id';
 
 import { clamp, MAX_SPEED, MIN_SPEED } from './plan';
@@ -280,6 +282,10 @@ function normaliseMusic(music: ComposeMusic, path: string): ComposeMusic {
   const inMs = Math.max(0, finite(music.inMs, 0));
   const outMs = Math.max(0, finite(music.outMs, 0));
   if (outMs <= inMs) throw new SpecError(`${path}.outMs`);
+  // Held to the clips' range, as a clip's own speed is, and left off at 1x.
+  const speed = clamp(finite(music.speed, 1), MIN_SPEED, MAX_SPEED);
+  // Last of the sound's fields, so a sound broken somewhere else reports the same first failure.
+  const effect = readSoundEffect((music as unknown as Record<string, unknown>)['effect'], `${path}.effect`);
   return {
     uri,
     startMs: Math.max(0, finite(music.startMs, 0)),
@@ -291,7 +297,25 @@ function normaliseMusic(music: ComposeMusic, path: string): ComposeMusic {
     loop: music.loop === true,
     fadeInMs: Math.max(0, finite(music.fadeInMs, 0)),
     fadeOutMs: Math.max(0, finite(music.fadeOutMs, 0)),
+    ...(speed !== 1 ? { speed } : {}),
+    ...(effect ? { effect } : {}),
   };
+}
+
+/**
+ * A sound's effect, checked and clamped - or null for none, which is also what an effect that does
+ * nothing comes back as. The rules are `normaliseSoundEffect`'s, shared with the editor and the
+ * tests, for the reason [readOverlayMotion] gives; what this adds is the refusal as a [SpecError]
+ * naming the path that broke, `audio.musicTracks[0][1].effect.ops[4].db`.
+ */
+function readSoundEffect(value: unknown, path: string): ComposeSoundEffect | null {
+  try {
+    return normaliseSoundEffect(value);
+  } catch (error) {
+    if (!(error instanceof SoundEffectError)) throw error;
+    const at = error.field ? `${path}.${error.field}` : path;
+    throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
+  }
 }
 
 /** The base64 payload of an overlay's data URL, without the prefix the parser insisted on. */

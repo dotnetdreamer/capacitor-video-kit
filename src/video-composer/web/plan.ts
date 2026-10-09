@@ -9,6 +9,7 @@ import type {
   ComposeOverlayMotion,
   ComposePlacement,
   ComposeRectMotion,
+  ComposeSoundEffect,
   ComposeSpec,
   ComposeTrack,
   ComposeTransition,
@@ -176,6 +177,11 @@ export interface MusicPlan {
    * and `lengthUs` of the output, stretched to it by the mix at its own pitch. Absent at 1x.
    */
   speed?: number;
+  /**
+   * What each repetition is put through after its stretch and before its level and fades,
+   * [ComposeMusic.effect], from a state of its own. Absent for the sound as it is.
+   */
+  effect?: ComposeSoundEffect;
   items: MusicItem[];
 }
 
@@ -560,6 +566,7 @@ function planMusic(music: ComposeMusic | null, probes: ReadonlyMap<string, Probe
   const speed = music.speed !== undefined && Number.isFinite(music.speed) ? clamp(music.speed, 0.25, 4) : 1;
   return layMusic({
     ...(speed !== 1 ? { speed } : {}),
+    ...(music.effect ? { effect: music.effect } : {}),
     uri: music.uri,
     volume: clamp(music.volume, 0, 1),
     inUs: Math.round(music.inMs * 1000),

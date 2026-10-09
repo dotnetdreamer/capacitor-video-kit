@@ -148,7 +148,8 @@ enum ComposeSpecParser {
                          fadeInMs: m.fadeInMs,
                          fadeOutMs: m.fadeOutMs,
                          // Held to the clips' range, as a clip's own speed is; absent is 1x.
-                         speed: clamp(m.speed, ComposeSpecParser.minSpeed, ComposeSpecParser.maxSpeed))
+                         speed: clamp(m.speed, ComposeSpecParser.minSpeed, ComposeSpecParser.maxSpeed),
+                         effect: m.effect)
         }
         let music = d.audio.music.map(makeMusic)
         let musicTracks = d.audio.musicTracks.map { $0.map(makeMusic) }
@@ -1474,9 +1475,10 @@ private struct MusicDTO: Decodable {
     let fadeInMs: Int64
     let fadeOutMs: Int64
     let speed: Double
+    let effect: SoundEffect?
 
     private enum K: String, CodingKey {
-        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs, speed
+        case uri, startMs, inMs, outMs, phaseMs, endMs, volume, loop, fadeInMs, fadeOutMs, speed, effect
     }
 
     /// Throws the full `audio.music.*` path itself. A sound on a lane cannot name its own lane and
@@ -1497,6 +1499,113 @@ private struct MusicDTO: Decodable {
         fadeInMs = max(0, c.long(.fadeInMs, 0))
         fadeOutMs = max(0, c.long(.fadeOutMs, 0))
         speed = c.double(.speed, 1)
+        // Last of the sound's fields, where Android's `parseMusic` reads it, so a sound broken somewhere
+        // else reports the same first failure it always did. Absent, or null, is the sound as it is;
+        // present and not an object fails as `effect`.
+        if c.has(.effect) {
+            do {
+                effect = try c.decode(SoundEffectDTO.self, forKey: .effect).effect
+            } catch let e as SpecError {
+                throw e
+            } catch {
+                // Capacitor's decoder throws a `DecodingError` when the value is not an object.
+                throw SpecError("audio.music.effect")
+            }
+        } else {
+            effect = nil
+        }
+    }
+}
+
+/// A sound's `effect`: `mono` and the steps of `ops`, exactly as `ComposeSoundEffect` puts them on the
+/// wire. `normaliseSoundEffect` in `src/editor/sound-effects.ts` is the rule book, and Android's
+/// `parseSoundEffect` and this check in its order:
+///
+/// - not an object: `effect` (thrown by `MusicDTO`, where the `DecodingError` surfaces).
+/// - `mono` present and not a boolean: `effect.mono`.
+/// - `ops` present and not an array: `effect.ops`. Absent, or null, is no steps.
+/// - a key that is none of those: `effect.<key>`, the alphabetically first (`firstUnknownKey`).
+/// - more than `SoundEffect.maxOps` steps: `effect.ops`, in Android's words.
+/// - each step not an object: `effect.ops[i]`; an `op` nobody defined: `effect.ops[i].op`; a number it
+///   needs that is missing or not finite, in the contract's order: `effect.ops[i].<name>`; a key that
+///   is none of its own: `effect.ops[i].<key>`.
+/// - every number is CLAMPED to its range.
+///
+/// An effect with no steps that does not fold is nil: the absent path. Paths are thrown whole, under
+/// `audio.music`, as `MusicDTO` throws its own; the lane loop in `AudioDTO` moves them under the lane.
+private struct SoundEffectDTO: Decodable {
+    let effect: SoundEffect?
+
+    private static let path = "audio.music.effect"
+
+    /// Each step's numbers in the contract's order, and the ranges they are held to: `OP_FIELDS` in
+    /// sound-effects.ts.
+    private static let fields: [String: [(name: String, range: ClosedRange<Double>, optional: Bool)]] = [
+        "highpass": [("hz", 10...20_000, false), ("q", 0.1...10, false)],
+        "lowpass": [("hz", 10...20_000, false), ("q", 0.1...10, false)],
+        "peak": [("hz", 10...20_000, false), ("q", 0.1...10, false), ("db", -24...24, false)],
+        "drive": [("db", 0...40, false), ("followMs", 1...10_000, true)],
+        "gain": [("db", -40...24, false)],
+    ]
+
+    init(from decoder: Decoder) throws {
+        // Not an object throws a DecodingError here, which `MusicDTO` reports as `effect`.
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        let path = Self.path
+        var mono = false
+        if let key = AnyKey(stringValue: "mono"), c.has(key) {
+            guard let value = try? c.decode(Bool.self, forKey: key) else { throw SpecError("\(path).mono") }
+            mono = value
+        }
+        var list: UnkeyedDecodingContainer?
+        if let key = AnyKey(stringValue: "ops"), c.has(key) {
+            guard let ops = try? c.nestedUnkeyedContainer(forKey: key) else { throw SpecError("\(path).ops") }
+            list = ops
+        }
+        if let unknown = firstUnknownKey(c, known: ["mono", "ops"]) { throw SpecError("\(path).\(unknown)") }
+        let count = list?.count ?? 0
+        if count > SoundEffect.maxOps {
+            throw SpecError("\(path).ops", "invalid_spec:\(path).ops at most \(SoundEffect.maxOps) steps")
+        }
+        var steps: [SoundOp] = []
+        if var ops = list {
+            for i in 0..<count {
+                guard let op = try? ops.nestedContainer(keyedBy: AnyKey.self) else { throw SpecError("\(path).ops[\(i)]") }
+                steps.append(try Self.step(op, "\(path).ops[\(i)]"))
+            }
+        }
+        effect = steps.isEmpty && !mono ? nil : SoundEffect(mono: mono, ops: steps)
+    }
+
+    private static func step(_ c: KeyedDecodingContainer<AnyKey>, _ path: String) throws -> SoundOp {
+        guard let opKey = AnyKey(stringValue: "op"),
+              let name = try? c.decode(String.self, forKey: opKey),
+              let fields = Self.fields[name] else { throw SpecError("\(path).op") }
+        var read: [Double?] = []
+        for field in fields {
+            guard let key = AnyKey(stringValue: field.name), c.has(key) else {
+                if field.optional {
+                    read.append(nil)
+                    continue
+                }
+                throw SpecError("\(path).\(field.name)")
+            }
+            guard let value = try? c.decode(Double.self, forKey: key), value.isFinite else {
+                throw SpecError("\(path).\(field.name)")
+            }
+            read.append(min(field.range.upperBound, max(field.range.lowerBound, value)))
+        }
+        // A closure and not `\.name`, for the reason `OverlayMotionDTO` gives.
+        if let unknown = firstUnknownKey(c, known: ["op"] + fields.map({ $0.name })) {
+            throw SpecError("\(path).\(unknown)")
+        }
+        switch name {
+        case "highpass": return .highpass(hz: read[0]!, q: read[1]!)
+        case "lowpass": return .lowpass(hz: read[0]!, q: read[1]!)
+        case "peak": return .peak(hz: read[0]!, q: read[1]!, db: read[2]!)
+        case "drive": return .drive(db: read[0]!, followMs: read[1])
+        default: return .gain(db: read[0]!)
+        }
     }
 }
 
@@ -1568,7 +1677,10 @@ private struct AudioDTO: Decodable {
                     do {
                         lane.append(try clips.decode(MusicDTO.self))
                     } catch let e as SpecError where e.path.hasPrefix("audio.music.") {
-                        throw SpecError("audio.musicTracks[\(i)][\(j)]\(e.path.dropFirst("audio.music".count))")
+                        let path = "audio.musicTracks[\(i)][\(j)]\(e.path.dropFirst("audio.music".count))"
+                        // The words move with the path, so a refusal that carries its own - an effect
+                        // with too many steps - keeps them under the lane as well.
+                        throw SpecError(path, e.message.replacingOccurrences(of: e.path, with: path))
                     } catch let e as SpecError {
                         throw e
                     } catch {

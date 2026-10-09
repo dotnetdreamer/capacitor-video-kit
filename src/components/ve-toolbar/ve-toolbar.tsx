@@ -554,6 +554,16 @@ export class VeToolbar {
     return { id: 'speed', label: 'Speed', icon: 'speedometer-outline', run: () => store.openPanel('speed') };
   }
 
+  /**
+   * The Audio effects sheet for the selected sound, on both sound rows beside Speed. Named Effects, as
+   * the root row's tile for the picture's effects is: on a sound's row there is only one kind to mean.
+   * The sheet reads its target off the selection, as Speed's does.
+   */
+  private effectsTile(): ToolTile {
+    const store = this.ctx.store;
+    return { id: 'effects', label: 'Effects', icon: 'sparkles-outline', run: () => store.openPanel('audioEffects') };
+  }
+
   /** The selected segment's own volume. On both clip rows, and on neither for a picture. */
   private volumeTile(): ToolTile {
     const store = this.ctx.store;
@@ -790,6 +800,7 @@ export class VeToolbar {
           run: () => store.openVolume({ kind: 'music' }),
         },
         this.speedTile(),
+        this.effectsTile(),
         {
           id: 'loop',
           label: 'Loop',
@@ -834,6 +845,7 @@ export class VeToolbar {
           },
         },
         this.speedTile(),
+        this.effectsTile(),
         {
           id: 'loop',
           label: 'Loop',

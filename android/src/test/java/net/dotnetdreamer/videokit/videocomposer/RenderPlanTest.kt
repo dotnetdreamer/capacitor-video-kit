@@ -1245,6 +1245,21 @@ class RenderPlanTest {
         assertTrue(items.all { it.speed == 1f && it.lengthUs == it.outUs - it.inUs })
     }
 
+    @Test
+    fun `every pass of a sound carries its effect, and changes nothing else about the plan`() {
+        val effect = SoundEffect(true, listOf(SoundOp.Gain(-4.0)))
+        val plain = Music("file:///m.m4a", 0, 0, 3_000, 1f, loop = true, fadeInMs = 0, fadeOutMs = 500, speed = 1.5f)
+        val treated = musicPlan(plain.copy(effect = effect), videoMs = 10_000, trackMs = 3_000).music!!.items
+        val untreated = musicPlan(plain, videoMs = 10_000, trackMs = 3_000).music!!.items
+        assertTrue(treated.size > 1)
+        assertTrue(treated.all { it.effect == effect })
+        assertTrue(untreated.all { it.effect == null })
+        // Laid exactly as the sound with none: a gain has no equality of its own, so the times stand for it.
+        val laid = { items: List<RenderPlan.MusicItem> -> items.map { listOf(it.inUs, it.outUs, it.atUs, it.decodeEndUs, it.lengthUs) } }
+        assertEquals(laid(untreated), laid(treated))
+        assertEquals(musicGainAt(musicPlan(plain, videoMs = 10_000, trackMs = 3_000), 9_800_000L), musicGainAt(musicPlan(plain.copy(effect = effect), videoMs = 10_000, trackMs = 3_000), 9_800_000L), 1e-6f)
+    }
+
     /* ------------------------------------------------------------------------------------- */
 
     @Test

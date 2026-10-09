@@ -62,8 +62,11 @@ import {
   reorderAudioClip,
   replaceAudioClip as replaceAudioClipOp,
   setAudioLoop,
+  setAudioEffect as setAudioEffectOp,
   setAudioSpeed as setAudioSpeedOp,
+  setMusicEffect as setMusicEffectOp,
   setMusicSpeed as setMusicSpeedOp,
+  soundEffectPreset,
   removeOverlay,
   removeVideoTrack,
   removeVoiceover,
@@ -135,7 +138,7 @@ import {
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
-import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, ToolbarMode, VolumeTarget } from './editor.types';
+import type { EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundEffectTarget, SoundReplaceTarget, ToolbarMode, VolumeTarget } from './editor.types';
 import { sameUrl } from './same-url';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
@@ -292,6 +295,17 @@ export class EditorStore {
    * template studio calls again for every template over the same clips.
    */
   readonly previewUrls = signal<ReadonlyMap<string, string>>(new Map());
+  /**
+   * The preview's copy of a sound through its effect, by `soundCopyKey`: a URL the preview plays in
+   * the sound's place - the same sound on the same timeline, through the effect - since an element
+   * plays a file and not an effect. See `sound-copy.ts` for why it is a file.
+   *
+   * Filled in by `EditorMedia` for every sound the manifest puts through an effect, and played by the
+   * preview alone (`PreviewPlayer.soundCopy`), so no render, draft or result ever carries one. No
+   * entry is a copy still being made, and `null` one that could not be made; both play the file as it
+   * is, and the render has the effect either way.
+   */
+  readonly soundCopies = signal<ReadonlyMap<string, string | null>>(new Map());
   /**
    * Peak amplitudes per audio URI - the music track and every voiceover take - as they are measured.
    *
@@ -2180,6 +2194,17 @@ export class EditorStore {
   setMusicSpeed(speed: number, live = false): void {
     if (live) this.previewFromStart(m => setMusicSpeedOp(m, speed));
     else this.commit('Speed', m => setMusicSpeedOp(m, speed));
+  }
+
+  /**
+   * A sound through an effect from [SOUND_EFFECTS], or through none for `null`, as one undo step named
+   * for what it did - "Undo: Megaphone", as Loop's is "Loop off". Nothing about the sound's place or
+   * length changes, so it is never refused for its neighbours. Returns whether anything changed.
+   */
+  setSoundEffect(target: SoundEffectTarget, effectId: string | null): boolean {
+    const preset = soundEffectPreset(effectId);
+    const label = preset ? preset.label : 'Effect off';
+    return this.commit(label, m => (target.kind === 'audio' ? setAudioEffectOp(m, target.id, preset?.id ?? null) : setMusicEffectOp(m, preset?.id ?? null)));
   }
 
   /**

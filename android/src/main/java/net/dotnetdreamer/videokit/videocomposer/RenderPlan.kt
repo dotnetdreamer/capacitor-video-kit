@@ -366,6 +366,8 @@ class RenderPlan private constructor(
         val lengthUs: Long = outUs - inUs,
         /** The music's speed, which the builder stretches this pass by; see [Music.speed]. */
         val speed: Float = 1f,
+        /** What the builder puts this pass through after its stretch; see [Music.effect]. */
+        val effect: SoundEffect? = null,
     )
 
     data class MusicPlan(
@@ -1238,6 +1240,7 @@ class RenderPlan private constructor(
                     decodeEndUs = decodeEndUs(itemInUs + fileUs, probedMs),
                     lengthUs = lenUs,
                     speed = speed,
+                    effect = music.effect,
                 )
             }
             return MusicPlan(uri = music.uri, leadGapUs = startUs, items = items)

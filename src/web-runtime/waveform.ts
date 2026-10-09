@@ -334,8 +334,11 @@ function audioContext(): BaseAudioContext | null {
   return null;
 }
 
-/** `decodeAudioData` in both of its shapes: the promise, and the callback pair Safari once had. */
-function decodeAudioData(context: BaseAudioContext, bytes: ArrayBuffer): Promise<AudioBuffer> {
+/**
+ * `decodeAudioData` in both of its shapes: the promise, and the callback pair Safari once had.
+ * Exported for the preview's copies through an effect (`sound-copy.ts`), which decode the same way.
+ */
+export function decodeAudioData(context: BaseAudioContext, bytes: ArrayBuffer): Promise<AudioBuffer> {
   return new Promise<AudioBuffer>((ok, fail) => {
     const reject = (error: unknown) => fail(error instanceof Error ? error : new Error('could not decode audio'));
     let maybe: Promise<AudioBuffer> | undefined;

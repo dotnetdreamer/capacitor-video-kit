@@ -84,8 +84,8 @@ class CompositionBuilderTest {
      * The device's spec on 2026-10-06: a minute of video with its own sound off, and on a lane the
      * seeded 12 s tone at 2x, played once with a one-second fade out.
      */
-    private fun spedSoundPlan(speed: Float = 2f): RenderPlan {
-        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = false, fadeInMs = 0, fadeOutMs = 1_000, speed = speed)
+    private fun spedSoundPlan(speed: Float = 2f, effect: SoundEffect? = null): RenderPlan {
+        val music = Music("file:///m.m4a", 0, 0, 3_600_000, 0.8f, loop = false, fadeInMs = 0, fadeOutMs = 1_000, speed = speed, effect = effect)
         return RenderPlan.build(
             spec(listOf(clip("a", outMs = 60_000))).copy(audio = Audio(true, 1f, null, emptyList(), musicTracks = listOf(listOf(music)))),
             mapOf("file:///a.mp4" to probe(60_000), "file:///m.m4a" to probe(12_000)),
@@ -114,6 +114,31 @@ class CompositionBuilderTest {
         val length = processors[1] as ExactLengthAudioProcessor
         assertEquals(6L * 48_000L, length.framesAt(48_000))
         assertTrue(processors[2] is GainProcessor)
+    }
+
+    /*
+     * An effect treats the sound as it plays and is taken down by the sound's own level and fades:
+     * after the stretch, ahead of the exact length and the gain, which see the same samples either way.
+     */
+    @Test
+    fun `a sound's effect comes after its stretch and before its exact length and gain`() {
+        val effect = SoundEffect(true, listOf(SoundOp.Lowpass(3_500.0, 0.7071), SoundOp.Gain(-4.0)))
+        val plan = spedSoundPlan(effect = effect)
+        val item = CompositionBuilder.toComposition(plan, emptyList(), null).sequences.last().editedMediaItems.single()
+        val processors = item.effects.audioProcessors
+        assertEquals(4, processors.size)
+        assertTrue(processors[0] is SonicAudioProcessor)
+        assertTrue(processors[1] is SoundEffectProcessor)
+        assertTrue(processors[2] is ExactLengthAudioProcessor)
+        assertTrue(processors[3] is GainProcessor)
+        // An effect changes no length: the item is as long on the output as it was without one.
+        assertEquals(6_000_000L, processors[1].getDurationAfterProcessorApplied(6_000_000L))
+    }
+
+    @Test
+    fun `a sound with no effect has no effect processor`() {
+        val item = CompositionBuilder.toComposition(spedSoundPlan(), emptyList(), null).sequences.last().editedMediaItems.single()
+        assertTrue(item.effects.audioProcessors.none { it is SoundEffectProcessor })
     }
 
     @Test

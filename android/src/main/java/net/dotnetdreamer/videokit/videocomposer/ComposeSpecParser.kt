@@ -796,7 +796,69 @@ object ComposeSpecParser {
             phaseMs = o.optLong("phaseMs", 0L),
             // Held to the clips' range, as a clip's own speed is; absent is 1x.
             speed = o.optDouble("speed", 1.0).toFloat().coerceIn(MIN_SPEED, MAX_SPEED),
+            // Last of the sound's fields, so a sound broken somewhere else reports the same first
+            // failure it always did.
+            effect = parseSoundEffect(o.opt("effect"), "$path.effect"),
         )
+    }
+
+    /**
+     * A sound's effect, by the rules `normaliseSoundEffect` in `src/editor/sound-effects.ts` states for
+     * every engine and in its order, so the web export, iOS and this one play the same sound or refuse
+     * the same spec with the same path.
+     *
+     * REFUSED, as shape errors: an effect that is not an object, a `mono` that is not a boolean, `ops`
+     * that is there and is not an array, a key nobody defined (the alphabetically first, as iOS and
+     * the browser name it), more than [SoundEffect.MAX_OPS] steps, and then each step's own: not an
+     * object, an `op` nobody defined, a number it needs that is missing or not a finite JSON number,
+     * and a key nobody defined. CLAMPED, as values: every number to its range in [SOUND_OP_FIELDS].
+     *
+     * ABSENT, which is null: no key, JSON null, and an effect with no steps that does not fold.
+     */
+    private fun parseSoundEffect(value: Any?, path: String): SoundEffect? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val mono = when (val raw = o.opt("mono")) {
+            null, JSONObject.NULL -> false
+            is Boolean -> raw
+            else -> throw SpecException("$path.mono")
+        }
+        val ops = when (val raw = o.opt("ops")) {
+            null, JSONObject.NULL -> JSONArray()
+            is JSONArray -> raw
+            else -> throw SpecException("$path.ops")
+        }
+        firstUnknownKey(o, SOUND_EFFECT_KEYS)?.let { throw SpecException("$path.$it") }
+        if (ops.length() > SoundEffect.MAX_OPS) {
+            throw SpecException("$path.ops", "invalid_spec:$path.ops at most ${SoundEffect.MAX_OPS} steps")
+        }
+        val steps = (0 until ops.length()).map { i -> parseSoundOp(ops.opt(i), "$path.ops[$i]") }
+        if (steps.isEmpty() && !mono) return null
+        return SoundEffect(mono, steps)
+    }
+
+    private fun parseSoundOp(value: Any?, path: String): SoundOp {
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val name = o.opt("op") as? String
+        val fields = SOUND_OP_FIELDS[name] ?: throw SpecException("$path.op")
+        // NaN marks an optional number that is not there; every other one is finite by now.
+        val read = DoubleArray(fields.size)
+        for ((k, field) in fields.withIndex()) {
+            val raw = o.opt(field.name)
+            if ((raw == null || raw == JSONObject.NULL) && field.optional) {
+                read[k] = Double.NaN
+                continue
+            }
+            read[k] = (finiteNumber(raw) ?: throw SpecException("$path.${field.name}")).coerceIn(field.min, field.max)
+        }
+        firstUnknownKey(o, setOf("op") + fields.map { it.name })?.let { throw SpecException("$path.$it") }
+        return when (name) {
+            "highpass" -> SoundOp.Highpass(read[0], read[1])
+            "lowpass" -> SoundOp.Lowpass(read[0], read[1])
+            "peak" -> SoundOp.Peak(read[0], read[1], read[2])
+            "drive" -> SoundOp.Drive(read[0], read[1].takeUnless { it.isNaN() })
+            else -> SoundOp.Gain(read[0])
+        }
     }
 
     private fun JSONObject.nonEmptyString(key: String): String =
@@ -867,6 +929,27 @@ object ComposeSpecParser {
     )
 
     private val MOTION_KEYS = setOf("atMs") + MOTION_CHANNELS.map { it.name }
+
+    /** A number a sound effect's step takes, and the range the parser holds it to. */
+    private class SoundOpField(val name: String, val min: Double, val max: Double, val optional: Boolean = false)
+
+    private val SOUND_EFFECT_KEYS = setOf("mono", "ops")
+
+    /**
+     * Each step's numbers in the contract's order, which is also the order they are read and refused
+     * in. The ranges are `OP_FIELDS` in sound-effects.ts.
+     */
+    private val SOUND_OP_FIELDS: Map<String?, List<SoundOpField>> = run {
+        val hz = SoundOpField("hz", 10.0, 20_000.0)
+        val q = SoundOpField("q", 0.1, 10.0)
+        mapOf(
+            "highpass" to listOf(hz, q),
+            "lowpass" to listOf(hz, q),
+            "peak" to listOf(hz, q, SoundOpField("db", -24.0, 24.0)),
+            "drive" to listOf(SoundOpField("db", 0.0, 40.0), SoundOpField("followMs", 1.0, 10_000.0, optional = true)),
+            "gain" to listOf(SoundOpField("db", -40.0, 24.0)),
+        )
+    }
 
     /** A side's channels in the contract's order, which is also the order they are read in. */
     private val SIDE_CHANNELS = linkedSetOf(

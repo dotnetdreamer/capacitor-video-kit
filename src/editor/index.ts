@@ -18,6 +18,7 @@ export * from './camera';
 export * from './motion';
 export * from './layout-animation';
 export * from './layout-motion';
+export * from './sound-effects';
 
 /**
  * The scenes `labelMedia`'s labels are read into, and the reader itself. Not the editor's, but pure
@@ -36,4 +37,15 @@ export * from '../video-composer/scenes';
  * emit declarations that would need one, so the two names travel with the contract that returns
  * them.
  */
-export type { ComposeCamera, ComposeOverlayMotion, ComposeRectMotion, ComposeSpec, FilterOp, LabelEngine, LabeledFrame, MediaLabel } from '../video-composer/definitions';
+export type {
+  ComposeCamera,
+  ComposeOverlayMotion,
+  ComposeRectMotion,
+  ComposeSoundEffect,
+  ComposeSpec,
+  FilterOp,
+  LabelEngine,
+  LabeledFrame,
+  MediaLabel,
+  SoundOp,
+} from '../video-composer/definitions';

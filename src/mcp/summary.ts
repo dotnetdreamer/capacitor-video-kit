@@ -31,6 +31,7 @@ import {
   type EditZoom,
 } from '../editor/edit-manifest';
 import { clipDurationMs, musicSectionMs, musicSpeed, musicWindow, overlayEndMs, timelineSlots } from '../editor/edit-ops';
+import { soundEffectPreset } from '../editor/sound-effects';
 import type { FilterOp } from '../video-composer/definitions';
 import { zoomOffered, type McpEditingOptions } from './ops';
 
@@ -299,9 +300,11 @@ function describeSound(music: EditMusic, totalMs: number): string {
   const stop = music.endMs > 0 ? `, stopping at ${time(music.endMs)}` : '';
   const loop = music.loop ? ', looped' : '';
   const speed = musicSpeed(music) !== 1 ? `, at ${round(musicSpeed(music))}x` : '';
+  const effect = soundEffectPreset(music.effect);
+  const through = effect ? `, through the ${effect.label.toLowerCase()} (effect "${effect.id}")` : '';
   const fadeIn = (music.fadeInMs ?? 0) > 0 ? `, fades in over ${time(music.fadeInMs ?? 0)}` : '';
   const fade = fadeIn + (music.fadeOutMs > 0 ? `, fades out over ${time(music.fadeOutMs)}` : '');
-  return `${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${speed}${loop}${fade}; ${heard(music, totalMs)}`;
+  return `${music.fileName || music.uri}, ${section}, at ${time(music.startMs)} on the post${stop}, ${percent(music.volume)}${speed}${through}${loop}${fade}; ${heard(music, totalMs)}`;
 }
 
 function heard(music: EditMusic, totalMs: number): string {

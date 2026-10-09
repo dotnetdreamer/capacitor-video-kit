@@ -1239,6 +1239,13 @@ enum CompositionBuilder {
 
         let p = AVMutableAudioMixInputParameters(track: track)
         p.audioTimePitchAlgorithm = .spectral
+        // Ahead of the volume ramps below, which are the sound's level and its fades: a pre-effects
+        // tap hears the sound before them (`SoundEffectTap`). A tap MediaToolbox would not make fails
+        // the render rather than post the sound without the effect the customer heard in the preview.
+        if let effect = m.effect {
+            guard let tap = SoundEffectTap.make(effect) else { throw BuildError.internalFailure("music effect tap") }
+            p.audioTapProcessor = tap
+        }
         // Heard from its start to where the last pass stopped: the stop, the end of the video, or the
         // end of a section that plays once. The fades belong to that window, seams and all.
         Fades.apply(p,
