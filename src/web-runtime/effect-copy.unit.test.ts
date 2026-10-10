@@ -106,6 +106,8 @@ describe('which layers share a copy', () => {
 
   it('lets a copy ring on for its longest reverb, a moment without one, and never past the longest room', () => {
     expect(copyTailMs(null)).toBe(50);
+    // Two of a pitch step's frames: its last moments come out of it that long after its input stops.
+    expect(copyTailMs({ mono: true, ops: [{ op: 'pitch', semitones: -6, formant: -3 }] })).toBe(80);
     expect(copyTailMs({ ops: [{ op: 'reverb', decayMs: 3500, dampHz: 5500, wet: 0.5, dry: 0.8 }] })).toBe(3500);
     expect(copyTailMs({ ops: [{ op: 'reverb', decayMs: 20_000, dampHz: 5500, wet: 0.5, dry: 0.8 }] })).toBe(MAX_COPY_TAIL_MS);
   });

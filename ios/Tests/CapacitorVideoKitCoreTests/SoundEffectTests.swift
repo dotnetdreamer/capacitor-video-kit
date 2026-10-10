@@ -335,6 +335,133 @@ final class SoundEffectTests: RenderTestCase {
         XCTAssertNotEqual(through(ringing, next), fresh, "a room that was not reset should still be ringing")
     }
 
+    // MARK: - The pitch step
+
+    /// The male voice at the middle of its sliders, exactly as the editor sends it (`maleVoice` in
+    /// sound-effects.ts): folded, moved down half an octave with its resonances down a quarter of one.
+    private let maleVoice: [String: Any] = [
+        "mono": true,
+        "ops": [
+            ["op": "pitch", "semitones": -6, "formant": -3] as [String: Any],
+            ["op": "gain", "db": 0.72] as [String: Any],
+        ] as [Any],
+    ]
+
+    private func pitch(_ semitones: Double, _ formant: Double = 0) -> SoundEffect {
+        SoundEffect(mono: false, ops: [.pitch(semitones: semitones, formant: formant)])
+    }
+
+    /// How strong `hz` is in `samples` from `from` on, as the amplitude of a sine: one bin of a DFT.
+    private func amplitude(_ samples: [Float], at hz: Double, from: Int = 24_000, rate: Double = 48_000) -> Double {
+        var re = 0.0, im = 0.0
+        for i in from..<samples.count {
+            re += Double(samples[i]) * cos(2 * Double.pi * hz * Double(i) / rate)
+            im += Double(samples[i]) * sin(2 * Double.pi * hz * Double(i) / rate)
+        }
+        return 2 * (re * re + im * im).squareRoot() / Double(samples.count - from)
+    }
+
+    func testTheMaleVoiceTheEditorSendsIsReadAsItWasSentAndAPitchHeldToAnOctave() throws {
+        XCTAssertEqual(try effectOf(maleVoice), SoundEffect(mono: true, ops: [.pitch(semitones: -6, formant: -3), .gain(db: 0.72)]))
+        let held = try XCTUnwrap(try effectOf(["ops": [["op": "pitch", "semitones": 30, "formant": -40] as [String: Any]]]))
+        XCTAssertEqual(held.ops, [.pitch(semitones: 12, formant: -12)])
+        let p = "audio.music.effect"
+        assertRefused(["ops": [["op": "pitch", "formant": 2] as [String: Any]]], "\(p).ops[0].semitones")
+        assertRefused(["ops": [["op": "pitch", "semitones": -6] as [String: Any]]], "\(p).ops[0].formant")
+        assertRefused(["ops": [["op": "pitch", "semitones": -6, "formant": 0, "ratio": 2] as [String: Any]]], "\(p).ops[0].ratio")
+    }
+
+    /// A step that moves nothing gives the sound back a frame less one sample late - 1919 at 48 kHz - and
+    /// otherwise as it was, but for what its frames hold at 0 Hz.
+    func testAPitchStepThatMovesNothingGivesTheSoundBackAFrameLate() {
+        let input = (0..<48_000).map { i -> Float in
+            Float(0.3 * sin(2 * Double.pi * 220 * Double(i) / 48_000) + 0.2 * sin(2 * Double.pi * 1730 * Double(i) / 48_000 + 1))
+        }
+        let out = through(pitch(0), rate: 48_000, [input])[0]
+        let late = 1919
+        var worst = 0.0
+        for i in (2 * late)..<input.count { worst = max(worst, abs(Double(out[i]) - Double(input[i - late]))) }
+        XCTAssertLessThan(worst, 1e-4)
+    }
+
+    func testAPitchStepMovesAToneByItsSemitonesAndLeavesNothingWhereItWas() {
+        for semitones in [-12.0, -6, 7, 12] {
+            let out = through(pitch(semitones), rate: 48_000, [sine(440, 0.5, frames: 48_000)])[0]
+            XCTAssertGreaterThan(amplitude(out, at: 440 * pow(2, semitones / 12)), 0.3, "\(semitones): the new pitch")
+            XCTAssertLessThan(amplitude(out, at: 440), 0.01, "\(semitones): left at 440 Hz")
+        }
+    }
+
+    func testAPitchStepLeavesSilenceSilentAndFallsBackToExactSilence() {
+        XCTAssertTrue(through(pitch(-6, -3), rate: 48_000, [[Float](repeating: 0, count: 4800)])[0].allSatisfy { $0 == 0 })
+        var burst = [Float](repeating: 0, count: 48_000)
+        for (i, v) in sine(500, 0.9, frames: 4800).enumerated() { burst[i] = v }
+        let after = through(pitch(5, 3), rate: 48_000, [burst])[0]
+        XCTAssertTrue(after[(4800 + 3840)...].allSatisfy { $0 == 0 })
+        XCTAssertTrue(after.allSatisfy { abs($0) <= 1 })
+    }
+
+    /// `reset` leaves a pitch step as it was made, as it does a room.
+    func testResetPutsThePitchStepBackToItsStart() {
+        let effect = pitch(7, 2)
+        let fresh = through(effect, rate: 48_000, [sine(330, 0.6, frames: 4800)])
+        let used = SoundEffectChain(effect: effect, sampleRate: 48_000, channels: 1)
+        _ = through(used, [sine(440, 0.5, frames: 4800)])
+        used.reset()
+        XCTAssertEqual(through(used, [sine(330, 0.6, frames: 4800)]), fresh)
+    }
+
+    /// The numbers `sound-effects.unit.test.ts` and `SoundEffectTest.kt` hold their engines to: the
+    /// megaphone's fragment, four times as long, through the male voice - folded - and through a pitch
+    /// step on each channel. The transforms, the peaks and the envelope have to agree to the operation.
+    func testThePitchStepMatchesTheGoldenNumbersEveryEngineIsHeldTo() throws {
+        let rate = 48_000.0
+        let left = (0..<9600).map { i -> Float in
+            Float(0.6 * sin(2 * Double.pi * 440 * Double(i) / rate) + 0.2 * sin(2 * Double.pi * 3100 * Double(i) / rate))
+        }
+        let right = (0..<9600).map { i -> Float in Float(0.3 * sin(2 * Double.pi * 220 * Double(i) / rate + 0.5)) }
+        let male = through(try XCTUnwrap(try effectOf(maleVoice)), rate: rate, [left, right])
+        let folded: [(Int, Double)] = [
+            (0, 0),
+            (1918, -0.29614120721817017),
+            (1919, -0.25232091546058655),
+            (1920, -0.20355385541915894),
+            (2399, 0.16940973699092865),
+            (2400, 0.20098185539245605),
+            (3000, 0.1624542772769928),
+            (4321, -0.19919995963573456),
+            (5000, -0.30933305621147156),
+            (6000, 0.1856769174337387),
+            (7777, -0.1872776299715042),
+            (8000, 0.0756482258439064),
+            (9599, -0.4480621814727783),
+        ]
+        for (i, value) in folded {
+            XCTAssertEqual(Double(male[0][i]), value, accuracy: 1e-6, "male voice, sample \(i)")
+            XCTAssertEqual(male[0][i], male[1][i], "male voice, sample \(i), the other channel")
+        }
+        let moved = through(pitch(7, 2), rate: rate, [left, right])
+        let stereo: [(Int, Double, Double)] = [
+            (0, 0, 0),
+            (1918, 0.38877439498901367, -0.3224090039730072),
+            (1919, 0.45995599031448364, -0.30201801657676697),
+            (1920, 0.3744523227214813, -0.21382911503314972),
+            (2399, -0.7527450919151306, 0.23698817193508148),
+            (2400, -0.6146458387374878, 0.24650360643863678),
+            (3000, 0.2789718508720398, 0.33405008912086487),
+            (4321, 0.41194868087768555, 0.3025590479373932),
+            (5000, -0.2085523009300232, -0.03757572919130325),
+            (6000, 0.8355948328971863, -0.2713659107685089),
+            (7777, -0.3335418999195099, 0.10749977827072144),
+            (8000, -0.8190305233001709, -0.16935910284519196),
+            (9599, -0.6935299038887024, -0.1321483850479126),
+        ]
+        for (i, l, r) in stereo {
+            XCTAssertEqual(Double(moved[0][i]), l, accuracy: 1e-6, "pitch, sample \(i), left")
+            XCTAssertEqual(Double(moved[1][i]), r, accuracy: 1e-6, "pitch, sample \(i), right")
+        }
+    }
+
     // MARK: - The tap
 
     func testMediaToolboxMakesTheTap() throws {

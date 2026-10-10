@@ -128,8 +128,11 @@ engines' tests.
 **An effect is a few plain steps, run the same way by every engine.** `ComposeSoundEffect` is not a
 name: the editor keeps the names (`SOUND_EFFECTS` in `src/editor/sound-effects.ts`) and sends what an
 effect is made of - cookbook biquads, a soft-clipping drive measured against the sound's own peak, a
-gain, a Freeverb-tuned reverb, and whether to fold the channels into one. A new effect built from
-those steps needs no new engine, and neither does a slider: a layer's sliders
+gain, a Freeverb-tuned reverb, a pitch step, and whether to fold the channels into one. The pitch step
+is the male and female voices: a phase vocoder that moves a voice's pitch and, apart from it, its
+resonances, a 40 ms frame at a time, so what it treats is heard 40 ms late and a layer of it comes in
+that much after the sound it takes over goes out. The telephone is filters and a drive. A new effect
+built from those steps needs no new engine, and neither does a slider: a layer's sliders
 (`EditAudioEffect.effectSettings`, 0 to 100 each) only move the numbers in its steps. The same steps
 can still go on one sound, `ComposeMusic.effect`, run after the pass's speed change and before its
 volume and fades, with `ComposeMusic.varispeed` for a speed played as a record; the editor no longer

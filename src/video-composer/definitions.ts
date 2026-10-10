@@ -761,6 +761,45 @@ export interface ComposeMusic {
  *       y = dry * x + wet * r
  *     and each `p` then moves on one, back to the start of its buffer from its end. The allpasses are
  *     true ones, where Freeverb's own lift the tail by some 15 dB on average.
+ *   pitch - a phase vocoder that moves the pitch by `P = 2^(semitones / 12)` and, apart from it, the
+ *     resonances - what makes a voice a man's or a woman's - by `F = 2^(formant / 12)`. It works a
+ *     frame at a time and is `W - 1` samples LATE, some 40 ms: nothing else accounts for that, so a
+ *     window of it ([ComposeAudioEffect]) comes in that much after the mix it takes over goes out.
+ *     With `H = max(1, floor(fs / 100 + 0.5))` (10 ms), `W = 4 * H`, `N` the least power of two from
+ *     `W`, `M = N / 2`, `T = 2 * PI * H / N`, `w(n) = 0.5 - 0.5 * cos(2 * PI * n / W)` and
+ *     `R = max(1, floor(100 * N / fs + 0.5))`, sample `t` of the step (from 0) goes into the last `W`
+ *     it keeps (0 before the first), and when `t + 1` is a multiple of `H` a frame is made of those:
+ *       - Sample `n` of the `W`, oldest first, times `w(n)`, goes to place `n - W / 2` of a transform of
+ *         `N`, or `N - W / 2 + n` below `W / 2`, every other place 0, and `X` is its DFT,
+ *         `X(k) = sum x(m) e^(-2 PI i k m / N)`, with power `p(k) = Re X(k)^2 + Im X(k)^2`, k = 0..M.
+ *       - Its PEAKS are each `k` in `1..M-1` with `p(k) > p(k - 1)`, `p(k) > p(k - 2)`,
+ *         `p(k) >= p(k + 1)` and `p(k) >= p(k + 2)`, leaving out a neighbour below 0 or past `M`. A
+ *         peak owns the bins from one past the last one's end (1 for the first) to the first quietest
+ *         bin strictly between it and the next (`M - 1` for the last).
+ *       - The ENVELOPE runs through the peaks no bin within `R` of is louder than and that are at least
+ *         `1e-6` of the loudest peak's power (60 dB), in `ln p`: `L(b)`, at a bin `b` that need not be
+ *         whole, is the first such peak's `ln p` at or below it, the last's at or above it,
+ *         `l0 + t * (l1 - l0)` with `t = (b - k0) / (k1 - k0)` between the two either side of it, and
+ *         0 for every `b` when there is no such peak.
+ *       - Each peak `k`, in order: `phi = atan2(Im X(k), Re X(k))`, `phi0` the same of the frame
+ *         before's `X(k)` (0 for the first frame), `d = phi - phi0 - k * T`,
+ *         `d = d - 2 * PI * floor(d / (2 * PI) + 0.5)`, its true bin `b = k + d / T`, its move
+ *         `s = floor(b * (P - 1) + 0.5)`, and `j = k + s`; it is dropped when `j < 1` or `j >= M`. Else
+ *         `theta = atan2(Im Y0(j), Re Y0(j)) + b * P * T - phi`, `Y0` being the frame before's output
+ *         (0 for the first), or `theta = 0` where `Y0(j)` is 0, and
+ *         `g = exp(0.5 * (L(j / F) - L(k))) * sqrt(P / F)` held to 0.1..10, and each bin `i` it owns with `i + s`
+ *         in `1..M-1` adds `g * (cos theta + i sin theta) * X(i)` to `Y(i + s)`: in parts,
+ *         `c = g * cos theta`, `s' = g * sin theta`, `Re += Re X(i) * c - Im X(i) * s'` and
+ *         `Im += Re X(i) * s' + Im X(i) * c`. `Y` starts at 0 every frame and stays 0 at 0 and `M`.
+ *       - `y(m) = sum Y(k) e^(2 PI i k m / N)` over `k = 0..N-1` with `Y(N - k) = conj Y(k)`, unscaled,
+ *         and `y` at sample `n`'s place times `w(n) / (N * 1.5)` is added to output sample `t - W + 1 + n`.
+ *     Output sample `t - W + 1` is then whole, and is the step's `y` for sample `t`; the `H - 1` after
+ *     it are the next ones'. Both transforms are radix 2 in place, as `fft` in sound-effects.ts:
+ *     bit-reversed order first, then stages of width 2, 4 .. N, each butterfly `a`, `b = a + width / 2`
+ *     at twiddle `k * N / width` from tables of `cos` and `sin` of `2 * PI * k / N` taken as
+ *     `wr = cos`, `wi = -sin` forward and `+sin` back: `xr = Re b * wr - Im b * wi`,
+ *     `xi = Re b * wi + Im b * wr`, `b = a - x`, `a = a + x`. At `P = F = 1` the step gives the sound
+ *     back `W - 1` samples late, all but what the frames hold at 0 Hz and at `fs / 2`.
  *
  * A filter's two state values are set to 0 together once BOTH are under 1e-20 in size, the drive's
  * level once it is, and a comb's `f` and every value written into a reverb's buffer as it is stored,
@@ -770,7 +809,8 @@ export interface ComposeMusic {
  *
  * Each parser CLAMPS the numbers - `hz` to 10..20000, `q` to 0.1..10, a peak's `db` to -24..24, a
  * drive's to 0..40 and its `followMs` to 1..10000, a gain's to -40..24, a reverb's `decayMs` to
- * 100..20000, its `dampHz` to 10..20000 and its `wet` and `dry` to 0..1. REFUSED, as shape errors,
+ * 100..20000, its `dampHz` to 10..20000 and its `wet` and `dry` to 0..1, and a pitch's `semitones`
+ * and `formant` to -12..12. REFUSED, as shape errors,
  * with the path that broke: an effect that is not an object, a `mono` that is not a boolean, `ops`
  * that is there and is not an array, more than [MAX_SOUND_OPS] steps, a step that is not an object,
  * an `op` nobody defined, a number a step needs that is missing or not finite (an absent `followMs` is
@@ -796,7 +836,8 @@ export type SoundOp =
   | { op: 'peak'; hz: number; q: number; db: number }
   | { op: 'drive'; db: number; followMs?: number }
   | { op: 'gain'; db: number }
-  | { op: 'reverb'; decayMs: number; dampHz: number; wet: number; dry: number };
+  | { op: 'reverb'; decayMs: number; dampHz: number; wet: number; dry: number }
+  | { op: 'pitch'; semitones: number; formant: number };
 
 /** The most steps one effect may carry. A spec with more is refused rather than cut short. */
 export const MAX_SOUND_OPS = 16;

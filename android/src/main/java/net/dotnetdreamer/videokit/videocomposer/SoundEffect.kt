@@ -1,9 +1,11 @@
 package net.dotnetdreamer.videokit.videocomposer
 
 import kotlin.math.PI
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.floor
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -47,6 +49,12 @@ sealed interface SoundOp {
      * the further along the frame it is, which is what makes a stereo tail wide.
      */
     data class Reverb(val decayMs: Double, val dampHz: Double, val wet: Double, val dry: Double) : SoundOp
+
+    /**
+     * The pitch moved by [semitones] and, apart from it, the resonances - what makes a voice a man's or
+     * a woman's - by [formant], a frame of 40 ms at a time and that much late.
+     */
+    data class Pitch(val semitones: Double, val formant: Double) : SoundOp
 }
 
 /**
@@ -210,6 +218,215 @@ class SoundEffectChain(private val effect: SoundEffect, private val sampleRate: 
         }
     }
 
+    /**
+     * The pitch step, exactly as `ComposeSoundEffect` writes it down and `Pitch` in sound-effects.ts
+     * runs it, expression for expression: a phase vocoder that moves every peak of the spectrum to its
+     * new pitch with the bins around it locked to it, and weighs each by the spectrum's envelope where
+     * it lands, so a voice's resonances move by its formant whatever the pitch does. Its buffers are
+     * made here, once - some 160 KB at 48 kHz - and a sample only reads and writes them.
+     */
+    private class Pitch(op: SoundOp.Pitch, rate: Int) : Step {
+        private val ratio = 2.0.pow(op.semitones / 12)
+        private val formant = 2.0.pow(op.formant / 12)
+        private val hop = max(1, floor(rate / 100.0 + 0.5).toInt())
+        private val length = 4 * hop
+        private val size = transformSize(length)
+        private val half = size / 2
+
+        /** How many bins either side a peak has to be the loudest of to mark the envelope. */
+        private val reach = max(1, floor(ENVELOPE_REACH_HZ * size / rate + 0.5).toInt())
+
+        /** `sqrt(ratio / formant)`: what keeps the sound as loud with its peaks spread or crowded. */
+        private val loudness = sqrt(ratio / formant)
+
+        /** What a bin's centre frequency turns through in a hop, per bin. */
+        private val turn = 2 * PI * hop / size
+        private val window = DoubleArray(length) { 0.5 - 0.5 * cos(2 * PI * it / length) }
+
+        /** The window again, with the transform's and the overlap's scale in it. */
+        private val synthesis = DoubleArray(length) { window[it] / (size * HANN_OVERLAP) }
+        private val cosTable = DoubleArray(half) { cos(2 * PI * it / size) }
+        private val sinTable = DoubleArray(half) { sin(2 * PI * it / size) }
+
+        /** The last [length] inputs, the oldest at [at]. */
+        private val input = DoubleArray(length)
+        private var at = 0
+
+        /** Inputs since the last frame. */
+        private var count = 0
+
+        /** The overlap-add, from the oldest sample a frame still reaches; and the [hop] it finished last. */
+        private val sum = DoubleArray(length)
+        private val ready = DoubleArray(hop)
+        private val re = DoubleArray(size)
+        private val im = DoubleArray(size)
+
+        /** The frame before's spectrum, as it was read and as it was made, bins 0 to [half]. */
+        private val lastRe = DoubleArray(half + 1)
+        private val lastIm = DoubleArray(half + 1)
+        private var outRe = DoubleArray(half + 1)
+        private var outIm = DoubleArray(half + 1)
+        private var lastOutRe = DoubleArray(half + 1)
+        private var lastOutIm = DoubleArray(half + 1)
+        private val power = DoubleArray(half + 1)
+        private val peaks = IntArray(half + 1)
+
+        /** The peaks that mark the envelope, and the log of each one's power. */
+        private val marks = IntArray(half + 1)
+        private val levels = DoubleArray(half + 1)
+        private var markCount = 0
+
+        override fun run(x: Double): Double {
+            input[at] = x
+            at = if (at + 1 == length) 0 else at + 1
+            count++
+            if (count == hop) {
+                count = 0
+                frame()
+            }
+            return ready[count]
+        }
+
+        private fun frame() {
+            val mid = length / 2
+            // The frame turned so its middle is the transform's first sample: a peak's neighbours then
+            // carry its phase rather than a turn each, which is what lets them follow it.
+            re.fill(0.0)
+            im.fill(0.0)
+            var p = at
+            for (n in 0 until length) {
+                re[if (n < mid) size - mid + n else n - mid] = input[p] * window[n]
+                p = if (p + 1 == length) 0 else p + 1
+            }
+            fft(re, im, cosTable, sinTable, false)
+
+            for (k in 0..half) power[k] = re[k] * re[k] + im[k] * im[k]
+
+            outRe.fill(0.0)
+            outIm.fill(0.0)
+            var peakCount = 0
+            for (k in 1 until half) {
+                val v = power[k]
+                if (v > power[k - 1] && (k < 2 || v > power[k - 2]) && v >= power[k + 1] && (k + 2 > half || v >= power[k + 2])) {
+                    peaks[peakCount++] = k
+                }
+            }
+            // The envelope runs through the peaks nothing near them outshines - a voice's harmonics,
+            // and not the ripples between them - straight from one to the next in decibels.
+            var loudest = 0.0
+            for (i in 0 until peakCount) if (power[peaks[i]] > loudest) loudest = power[peaks[i]]
+            val quietest = loudest * ENVELOPE_FLOOR
+            var markTotal = 0
+            for (i in 0 until peakCount) {
+                val k = peaks[i]
+                val v = power[k]
+                if (v < quietest) continue
+                val a = if (k - reach > 0) k - reach else 0
+                val b = if (k + reach < half) k + reach else half
+                var top = true
+                for (m in a..b) {
+                    if (power[m] > v) {
+                        top = false
+                        break
+                    }
+                }
+                if (top) {
+                    marks[markTotal] = k
+                    levels[markTotal] = ln(v)
+                    markTotal++
+                }
+            }
+            markCount = markTotal
+            // Each peak takes the bins from the last one's edge to the quietest bin before the next.
+            var from = 1
+            for (i in 0 until peakCount) {
+                val k = peaks[i]
+                var to = half - 1
+                if (i + 1 < peakCount) {
+                    val next = peaks[i + 1]
+                    to = k + 1
+                    for (b in k + 2 until next) if (power[b] < power[to]) to = b
+                }
+                move(k, from, to)
+                from = to + 1
+            }
+
+            for (k in 0..half) {
+                lastRe[k] = re[k]
+                lastIm[k] = im[k]
+            }
+            re.fill(0.0)
+            im.fill(0.0)
+            for (k in 1 until half) {
+                re[k] = outRe[k]
+                im[k] = outIm[k]
+                re[size - k] = outRe[k]
+                im[size - k] = -outIm[k]
+            }
+            fft(re, im, cosTable, sinTable, true)
+            for (n in 0 until length) sum[n] = sum[n] + re[if (n < mid) size - mid + n else n - mid] * synthesis[n]
+
+            for (n in 0 until hop) ready[n] = sum[n]
+            sum.copyInto(sum, 0, hop, length)
+            sum.fill(0.0, length - hop, length)
+            val madeRe = outRe
+            val madeIm = outIm
+            outRe = lastOutRe
+            outIm = lastOutIm
+            lastOutRe = madeRe
+            lastOutIm = madeIm
+        }
+
+        /** Bins [from] to [to], the region of the peak at bin [k], moved to where its pitch goes. */
+        private fun move(k: Int, from: Int, to: Int) {
+            val phase = atan2(im[k], re[k])
+            var d = phase - atan2(lastIm[k], lastRe[k]) - k * turn
+            d -= 2 * PI * floor(d / (2 * PI) + 0.5)
+            // Its true frequency, in bins, from how far its phase turned since the frame before.
+            val bin = k + d / turn
+            val shift = floor(bin * (ratio - 1) + 0.5).toInt()
+            val j = k + shift
+            if (j < 1 || j >= half) return
+            // Carried on from the phase the frame before left at its new bin, so a held note stays one note.
+            val previousRe = lastOutRe[j]
+            val previousIm = lastOutIm[j]
+            val theta = if (previousRe != 0.0 || previousIm != 0.0) atan2(previousIm, previousRe) + bin * ratio * turn - phase else 0.0
+            // As loud as the envelope is where its resonances have moved to, against where it came from.
+            val lift = exp(0.5 * (level(j / formant) - level(k.toDouble()))) * loudness
+            val g = if (lift > PITCH_MAX_GAIN) PITCH_MAX_GAIN else if (lift < 1 / PITCH_MAX_GAIN) 1 / PITCH_MAX_GAIN else lift
+            val c = g * cos(theta)
+            val s = g * sin(theta)
+            for (i in from..to) {
+                val target = i + shift
+                if (target < 1 || target >= half) continue
+                val xr = re[i]
+                val xi = im[i]
+                outRe[target] = outRe[target] + (xr * c - xi * s)
+                outIm[target] = outIm[target] + (xr * s + xi * c)
+            }
+        }
+
+        /**
+         * The log of the envelope's power at bin [at], which need not be whole: straight between the
+         * marks either side of it, the nearest one's own beyond the first and the last, and 0 with no
+         * mark at all.
+         */
+        private fun level(at: Double): Double {
+            val total = markCount
+            if (total == 0) return 0.0
+            if (at <= marks[0]) return levels[0]
+            if (at >= marks[total - 1]) return levels[total - 1]
+            var lo = 0
+            var hi = total - 1
+            while (hi - lo > 1) {
+                val m = (lo + hi) shr 1
+                if (marks[m] <= at) lo = m else hi = m
+            }
+            val t = (at - marks[lo]) / (marks[hi] - marks[lo])
+            return levels[lo] + t * (levels[hi] - levels[lo])
+        }
+    }
+
     private companion object {
         /**
          * Under this a filter's state, the drive's level, a comb's `f` and every value a reverb stores
@@ -231,8 +448,76 @@ class SoundEffectChain(private val effect: SoundEffect, private val sampleRate: 
         /** How many samples, at [TUNING_RATE], each channel's delays are longer than the one before it's. */
         const val STEREO_SPREAD = 23
 
+        /** A peak marks the pitch step's envelope when no bin this close to it, in Hz, is louder... */
+        const val ENVELOPE_REACH_HZ = 100.0
+
+        /** ...and when it is no more than 60 dB, in power, under the frame's loudest peak. */
+        const val ENVELOPE_FLOOR = 1e-6
+
+        /** The most the pitch step's envelope lifts a peak by, 20 dB, and lowers one by. */
+        const val PITCH_MAX_GAIN = 10.0
+
+        /** What a frame's spectrum loses to its two windows overlapping four times: a periodic Hann's squares sum to 1.5. */
+        const val HANN_OVERLAP = 1.5
+
+        /** The least power of two from [length], the pitch step's transform. */
+        fun transformSize(length: Int): Int {
+            var size = 2
+            while (size < length) size *= 2
+            return size
+        }
+
+        /**
+         * The discrete Fourier transform of `re + i im`, in place, as `fft` in sound-effects.ts:
+         * radix 2, its length a power of two, with tables of `cos` and `sin` of `2 * PI * k / length`
+         * for the first half of `k`. Forward turns by `e^-i`, inverse by `e^+i`, and neither scales.
+         */
+        fun fft(re: DoubleArray, im: DoubleArray, cosTable: DoubleArray, sinTable: DoubleArray, inverse: Boolean) {
+            val n = re.size
+            var j = 0
+            for (i in 1 until n) {
+                var bit = n shr 1
+                while ((j and bit) != 0) {
+                    j = j xor bit
+                    bit = bit shr 1
+                }
+                j = j xor bit
+                if (i < j) {
+                    val r = re[i]
+                    re[i] = re[j]
+                    re[j] = r
+                    val m = im[i]
+                    im[i] = im[j]
+                    im[j] = m
+                }
+            }
+            var width = 2
+            while (width <= n) {
+                val halfWidth = width / 2
+                val step = n / width
+                var i = 0
+                while (i < n) {
+                    for (k in 0 until halfWidth) {
+                        val wr = cosTable[k * step]
+                        val wi = if (inverse) sinTable[k * step] else -sinTable[k * step]
+                        val a = i + k
+                        val b = a + halfWidth
+                        val xr = re[b] * wr - im[b] * wi
+                        val xi = re[b] * wi + im[b] * wr
+                        re[b] = re[a] - xr
+                        im[b] = im[a] - xi
+                        re[a] = re[a] + xr
+                        im[a] = im[a] + xi
+                    }
+                    i += width
+                }
+                width *= 2
+            }
+        }
+
         /** The step [op] stands for at [rate], on the channel numbered [channel] - which only a reverb asks. */
         fun stepFor(op: SoundOp, rate: Int, channel: Int): Step = when (op) {
+            is SoundOp.Pitch -> Pitch(op, rate)
             is SoundOp.Drive -> Drive(
                 10.0.pow(op.db / 20.0),
                 op.followMs?.let { exp(-1000.0 / (it * rate)) },

@@ -25,6 +25,7 @@
  * a long layer does not hold the editor up while it is made.
  */
 import { AudioEffectRunner, frameAt } from '../editor/audio-effect-windows';
+import { PITCH_FRAME_MS } from '../editor/sound-effects';
 import type { ComposeAudioEffect, ComposeSoundEffect } from '../video-composer/definitions';
 import { decodeSource, mixWindow, offlineContext, type AudioSourceReader, type DecodedSource } from '../video-composer/web/audio';
 import type { RenderPlan } from '../video-composer/web/plan';
@@ -44,12 +45,16 @@ const STEP_S = 1;
 
 /**
  * How long the preview lets a layer ring on after it: its longest reverb's `decayMs` - 60 dB down,
- * under any sound that goes on after it - and a moment for a filter to settle otherwise. Shorter than
- * the render's tail (`audioEffectTailMs`, 120 dB): past this the copy only holds the sound up.
+ * under any sound that goes on after it - two of a pitch step's frames, which is how long its last
+ * moments take to come out of it, and a moment for a filter to settle otherwise. Shorter than the
+ * render's tail (`audioEffectTailMs`, 120 dB): past this the copy only holds the sound up.
  */
 export function copyTailMs(effect: ComposeSoundEffect | null | undefined): number {
   let decayMs = 0;
-  for (const op of effect?.ops ?? []) if (op.op === 'reverb') decayMs = Math.max(decayMs, op.decayMs);
+  for (const op of effect?.ops ?? []) {
+    if (op.op === 'reverb') decayMs = Math.max(decayMs, op.decayMs);
+    if (op.op === 'pitch') decayMs = Math.max(decayMs, 2 * PITCH_FRAME_MS);
+  }
   return Math.min(MAX_COPY_TAIL_MS, Math.max(50, decayMs));
 }
 

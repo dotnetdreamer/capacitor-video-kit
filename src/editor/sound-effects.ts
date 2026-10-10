@@ -1,7 +1,8 @@
 import { MAX_SOUND_OPS, MIN_AUDIO_EFFECT_SPEED, type ComposeSoundEffect, type SoundOp } from '../video-composer/definitions';
 
 /**
- * What the sound of a post can be put through - a megaphone, a slowed and reverberant edit - and how far.
+ * What the sound of a post can be put through - a megaphone, a slowed and reverberant edit, a man's or a
+ * woman's voice, a phone line - and how far.
  *
  * An audio effect layer names its effect by id ([EditAudioEffect.effect]) and keeps where the customer
  * left its sliders ([EditAudioEffect.effectSettings]), the way a post names its filter and keeps its
@@ -148,6 +149,91 @@ function slowReverb(settings: SoundEffectSettings): ComposeSoundEffect {
   };
 }
 
+/**
+ * THE MALE AND FEMALE VOICES move a voice's pitch and, apart from it, its resonances - the length of
+ * the throat that makes a voice a man's or a woman's - with the pitch step ([ComposeSoundEffect]). A
+ * woman's voice sits some ten semitones above a man's and her resonances 15 to 20% higher, so each
+ * moves both the same way, the resonances half as far as the pitch: moved as far, a man comes out a
+ * cartoon rather than a woman.
+ *
+ * PITCH runs from an octave down at 0 to none at 100 for the male voice, six semitones at the
+ * middle, and from none to an octave up for the female voice; TONE moves the resonances the same way
+ * by up to half an octave, three semitones at the middle. Both fold the sound to one channel - a pitch
+ * step on each channel would place the two channels' peaks a little apart - and put back what moving
+ * the voice costs it, [VOICE_LEVEL_PER_SEMITONE].
+ *
+ * Measured on 2026-10-09 with Windows' Zira and David voices: the male voice takes Zira from 174 Hz to
+ * 123 and David from 89 to 64, the female voice David to 127 and Zira to 246; within 1.3 LU of the
+ * voice at every corner of both sliders; and as harmonic as Rubber Band's pitch shift at the same
+ * pitch, but for 1 to 1.8 dB of harmonics-to-noise ratio.
+ */
+function maleVoice(settings: SoundEffectSettings): ComposeSoundEffect {
+  return voiceShift(12 * (setting(settings, 'pitch') / SOUND_EFFECT_SETTING_MAX - 1), 6 * (setting(settings, 'tone') / SOUND_EFFECT_SETTING_MAX - 1));
+}
+
+/** See [maleVoice]: the same, up rather than down. */
+function femaleVoice(settings: SoundEffectSettings): ComposeSoundEffect {
+  return voiceShift((12 * setting(settings, 'pitch')) / SOUND_EFFECT_SETTING_MAX, (6 * setting(settings, 'tone')) / SOUND_EFFECT_SETTING_MAX);
+}
+
+function voiceShift(semitones: number, formant: number): ComposeSoundEffect {
+  return {
+    mono: true,
+    ops: [
+      { op: 'pitch', semitones: round3(semitones), formant: round3(formant) },
+      { op: 'gain', db: round3(VOICE_LEVEL_PER_SEMITONE * Math.abs(semitones)) },
+    ],
+  };
+}
+
+/**
+ * How much louder a voice is put for each semitone it is moved: what the phase vocoder loses of it,
+ * about 1 LU at six semitones and 2 at twelve, the further the more.
+ */
+const VOICE_LEVEL_PER_SEMITONE = 0.12;
+
+/**
+ * THE TELEPHONE is a voice down a phone line: only the 300 Hz to 3.4 kHz a narrowband line carries,
+ * through three high-passes and three low-passes, a little of an earpiece's honk at 1.4 kHz, and the
+ * crackle of a line driven a little hard - the drive measured against the voice's own peak, as the
+ * megaphone's is, so a quiet recording crackles as a loud one does - folded to one channel.
+ *
+ * INTENSITY narrows the band and drives it harder together: from 200 Hz-4.8 kHz and no drive at all
+ * at 0 to 455 Hz-2.4 kHz and 20 dB at 100, the level after it coming down [TELEPHONE_LEVEL_PER_DB]
+ * for each decibel more, so a worse line is not a louder one. TONE moves the whole band by up to
+ * [TELEPHONE_TONE_OCTAVES] either side: down is an old landline, up a tinny little speaker.
+ *
+ * Measured on 2026-10-09 with Windows' Zira and David voices at the middle of its sliders: 1.1 LU
+ * under the voice and 1.3 over, and within 3.1 LU at every Intensity, peaking well under full scale.
+ */
+function telephone(settings: SoundEffectSettings): ComposeSoundEffect {
+  const k = (setting(settings, 'intensity') - 50) / 50;
+  const scale = Math.pow(2, ((setting(settings, 'tone') - 50) / 50) * TELEPHONE_TONE_OCTAVES);
+  const low = Math.round(300 * Math.pow(2, 0.6 * k) * scale);
+  const high = Math.round(3400 * Math.pow(2, -0.5 * k) * scale);
+  const drive = 10 + 10 * k;
+  return {
+    mono: true,
+    ops: [
+      { op: 'highpass', hz: low, q: BUTTERWORTH_Q },
+      { op: 'highpass', hz: low, q: BUTTERWORTH_Q },
+      { op: 'lowpass', hz: high, q: BUTTERWORTH_Q },
+      { op: 'peak', hz: Math.round(1400 * scale), q: 1.2, db: 5 },
+      { op: 'drive', db: round3(drive), followMs: 300 },
+      { op: 'highpass', hz: low, q: BUTTERWORTH_Q },
+      { op: 'lowpass', hz: high, q: BUTTERWORTH_Q },
+      { op: 'lowpass', hz: high, q: BUTTERWORTH_Q },
+      { op: 'gain', db: round3(-3.5 - TELEPHONE_LEVEL_PER_DB * (drive - 10)) },
+    ],
+  };
+}
+
+/** How much quieter the telephone is put for each decibel more drive; see [telephone]. */
+const TELEPHONE_LEVEL_PER_DB = 0.3;
+
+/** How far the telephone's Tone takes its band, in octaves either side of the middle. */
+const TELEPHONE_TONE_OCTAVES = 0.5;
+
 /** Every effect, in the order the sheet offers them. */
 export const SOUND_EFFECTS: readonly SoundEffectPreset[] = freezeAll(
   [
@@ -169,6 +255,33 @@ export const SOUND_EFFECTS: readonly SoundEffectPreset[] = freezeAll(
         { key: 'room', label: 'Room', name: 'Room size', default: 50 },
       ],
       steps: slowReverb,
+    },
+    {
+      id: 'maleVoice',
+      label: 'Male voice',
+      controls: [
+        { key: 'pitch', label: 'Pitch', name: 'Male voice pitch', default: 50 },
+        { key: 'tone', label: 'Tone', name: 'Male voice tone', default: 50 },
+      ],
+      steps: maleVoice,
+    },
+    {
+      id: 'femaleVoice',
+      label: 'Female voice',
+      controls: [
+        { key: 'pitch', label: 'Pitch', name: 'Female voice pitch', default: 50 },
+        { key: 'tone', label: 'Tone', name: 'Female voice tone', default: 50 },
+      ],
+      steps: femaleVoice,
+    },
+    {
+      id: 'telephone',
+      label: 'Telephone',
+      controls: [
+        { key: 'intensity', label: 'Intensity', name: 'Telephone intensity', default: 50 },
+        { key: 'tone', label: 'Tone', name: 'Telephone tone', default: 50 },
+      ],
+      steps: telephone,
     },
   ].map((preset: Omit<SoundEffectPreset, 'effect'>): SoundEffectPreset => ({ ...preset, effect: preset.steps(defaultsOf(preset.controls)) })),
 );
@@ -289,6 +402,10 @@ const OP_FIELDS: Readonly<Record<SoundOp['op'], readonly OpField[]>> = {
     { name: 'dampHz', min: 10, max: 20_000 },
     { name: 'wet', min: 0, max: 1 },
     { name: 'dry', min: 0, max: 1 },
+  ],
+  pitch: [
+    { name: 'semitones', min: -12, max: 12 },
+    { name: 'formant', min: -12, max: 12 },
   ],
 };
 
@@ -488,9 +605,323 @@ class Reverb implements Step {
   }
 }
 
+/** A peak marks the pitch step's envelope when no bin this close to it, in Hz, is louder. */
+const ENVELOPE_REACH_HZ = 100;
+/**
+ * And when it is no more than 60 dB, in power, under the frame's loudest peak: a tone's spectrum falls
+ * to the noise of its own rounding far below it, and an envelope run down to that would take the tone
+ * away wherever it moved.
+ */
+const ENVELOPE_FLOOR = 1e-6;
+/** The most the pitch step's envelope lifts a peak by, 20 dB, and lowers one by: a peak moved out of a hush stays quiet. */
+const PITCH_MAX_GAIN = 10;
+/** What a frame's spectrum loses to its two windows overlapping four times: a periodic Hann's squares sum to 1.5. */
+const HANN_OVERLAP = 1.5;
+
+/** How long the pitch step's frame is, in ms: its output is that late, and runs on that long after its input. */
+export const PITCH_FRAME_MS = 40;
+
+/**
+ * The pitch step's frame at `rate`, as [ComposeSoundEffect] sets it: it moves on `hop` samples at a
+ * time, 10 ms, and reads `length` of them, four hops, [PITCH_FRAME_MS], padded to a transform of
+ * `size`. Its output is `length - 1` samples behind its input.
+ */
+export function pitchFrame(rate: number): { length: number; hop: number; size: number } {
+  const hop = Math.max(1, Math.floor(rate / 100 + 0.5));
+  const length = 4 * hop;
+  let size = 2;
+  while (size < length) size *= 2;
+  return { length, hop, size };
+}
+
+/**
+ * The pitch step, exactly as [ComposeSoundEffect] writes it down: a phase vocoder that moves every peak
+ * of the spectrum to its new pitch with the bins around it locked to it, and weighs each by the
+ * spectrum's envelope where it lands, so the voice's resonances move by `formant` whatever the pitch
+ * does. Every buffer is made here, once; a sample only reads and writes them.
+ */
+class Pitch implements Step {
+  private readonly ratio: number;
+  private readonly formant: number;
+  private readonly length: number;
+  private readonly hop: number;
+  private readonly size: number;
+  private readonly half: number;
+  /** How many bins either side a peak has to be the loudest of to mark the envelope. */
+  private readonly reach: number;
+  /** `sqrt(ratio / formant)`: what keeps the sound as loud with its peaks spread or crowded. */
+  private readonly loudness: number;
+  /** What a bin's centre frequency turns through in a hop, per bin: `2 * PI * hop / size`. */
+  private readonly turn: number;
+  private readonly window: Float64Array;
+  /** The window again, with the transform's and the overlap's scale in it. */
+  private readonly synthesis: Float64Array;
+  private readonly cos: Float64Array;
+  private readonly sin: Float64Array;
+  /** The last `length` inputs, the oldest at `at`. */
+  private readonly input: Float64Array;
+  private at = 0;
+  /** Inputs since the last frame. */
+  private count = 0;
+  /** The overlap-add, from the oldest sample a frame still reaches; and the `hop` it finished last. */
+  private readonly sum: Float64Array;
+  private readonly ready: Float64Array;
+  private readonly re: Float64Array;
+  private readonly im: Float64Array;
+  /** The frame before's spectrum, as it was read and as it was made, bins 0 to `half`. */
+  private readonly lastRe: Float64Array;
+  private readonly lastIm: Float64Array;
+  private outRe: Float64Array;
+  private outIm: Float64Array;
+  private lastOutRe: Float64Array;
+  private lastOutIm: Float64Array;
+  private readonly power: Float64Array;
+  private readonly peaks: Int32Array;
+  /** The peaks that mark the envelope, and the log of each one's power. */
+  private readonly marks: Int32Array;
+  private readonly levels: Float64Array;
+  private markCount = 0;
+
+  constructor(op: Extract<SoundOp, { op: 'pitch' }>, rate: number) {
+    this.ratio = Math.pow(2, op.semitones / 12);
+    this.formant = Math.pow(2, op.formant / 12);
+    const frame = pitchFrame(rate);
+    this.length = frame.length;
+    this.hop = frame.hop;
+    this.size = frame.size;
+    this.half = frame.size / 2;
+    this.reach = Math.max(1, Math.floor((ENVELOPE_REACH_HZ * this.size) / rate + 0.5));
+    this.loudness = Math.sqrt(this.ratio / this.formant);
+    this.turn = (2 * Math.PI * this.hop) / this.size;
+    this.window = new Float64Array(this.length);
+    this.synthesis = new Float64Array(this.length);
+    for (let n = 0; n < this.length; n++) {
+      this.window[n] = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / this.length);
+      this.synthesis[n] = this.window[n]! / (this.size * HANN_OVERLAP);
+    }
+    this.cos = new Float64Array(this.half);
+    this.sin = new Float64Array(this.half);
+    for (let k = 0; k < this.half; k++) {
+      this.cos[k] = Math.cos((2 * Math.PI * k) / this.size);
+      this.sin[k] = Math.sin((2 * Math.PI * k) / this.size);
+    }
+    this.input = new Float64Array(this.length);
+    this.sum = new Float64Array(this.length);
+    this.ready = new Float64Array(this.hop);
+    this.re = new Float64Array(this.size);
+    this.im = new Float64Array(this.size);
+    const bins = this.half + 1;
+    this.lastRe = new Float64Array(bins);
+    this.lastIm = new Float64Array(bins);
+    this.outRe = new Float64Array(bins);
+    this.outIm = new Float64Array(bins);
+    this.lastOutRe = new Float64Array(bins);
+    this.lastOutIm = new Float64Array(bins);
+    this.power = new Float64Array(bins);
+    this.peaks = new Int32Array(bins);
+    this.marks = new Int32Array(bins);
+    this.levels = new Float64Array(bins);
+  }
+
+  run(x: number): number {
+    this.input[this.at] = x;
+    this.at = this.at + 1 === this.length ? 0 : this.at + 1;
+    this.count++;
+    if (this.count === this.hop) {
+      this.count = 0;
+      this.frame();
+    }
+    return this.ready[this.count]!;
+  }
+
+  private frame(): void {
+    const { length, size, half, re, im, power } = this;
+    const mid = length / 2;
+    // The frame turned so its middle is the transform's first sample: a peak's neighbours then carry
+    // its phase rather than a turn each, which is what lets them follow it.
+    re.fill(0);
+    im.fill(0);
+    let p = this.at;
+    for (let n = 0; n < length; n++) {
+      re[n < mid ? size - mid + n : n - mid] = this.input[p]! * this.window[n]!;
+      p = p + 1 === length ? 0 : p + 1;
+    }
+    fft(re, im, this.cos, this.sin, false);
+
+    for (let k = 0; k <= half; k++) power[k] = re[k]! * re[k]! + im[k]! * im[k]!;
+
+    this.outRe.fill(0);
+    this.outIm.fill(0);
+    let peaks = 0;
+    for (let k = 1; k < half; k++) {
+      const v = power[k]!;
+      if (v > power[k - 1]! && (k < 2 || v > power[k - 2]!) && v >= power[k + 1]! && (k + 2 > half || v >= power[k + 2]!)) this.peaks[peaks++] = k;
+    }
+    // The envelope runs through the peaks nothing near them outshines - a voice's harmonics, and not
+    // the ripples between them - straight from one to the next in decibels.
+    let loudest = 0;
+    for (let i = 0; i < peaks; i++) if (power[this.peaks[i]!]! > loudest) loudest = power[this.peaks[i]!]!;
+    const floor = loudest * ENVELOPE_FLOOR;
+    let marks = 0;
+    for (let i = 0; i < peaks; i++) {
+      const k = this.peaks[i]!;
+      const v = power[k]!;
+      if (v < floor) continue;
+      const a = k - this.reach > 0 ? k - this.reach : 0;
+      const b = k + this.reach < half ? k + this.reach : half;
+      let top = true;
+      for (let m = a; m <= b; m++) {
+        if (power[m]! > v) {
+          top = false;
+          break;
+        }
+      }
+      if (top) {
+        this.marks[marks] = k;
+        this.levels[marks] = Math.log(v);
+        marks++;
+      }
+    }
+    this.markCount = marks;
+    // Each peak takes the bins from the last one's edge to the quietest bin before the next.
+    let from = 1;
+    for (let i = 0; i < peaks; i++) {
+      const k = this.peaks[i]!;
+      let to = half - 1;
+      if (i + 1 < peaks) {
+        const next = this.peaks[i + 1]!;
+        to = k + 1;
+        for (let b = k + 2; b < next; b++) if (power[b]! < power[to]!) to = b;
+      }
+      this.move(k, from, to);
+      from = to + 1;
+    }
+
+    for (let k = 0; k <= half; k++) {
+      this.lastRe[k] = re[k]!;
+      this.lastIm[k] = im[k]!;
+    }
+    re.fill(0);
+    im.fill(0);
+    for (let k = 1; k < half; k++) {
+      re[k] = this.outRe[k]!;
+      im[k] = this.outIm[k]!;
+      re[size - k] = this.outRe[k]!;
+      im[size - k] = -this.outIm[k]!;
+    }
+    fft(re, im, this.cos, this.sin, true);
+    for (let n = 0; n < length; n++) this.sum[n] = this.sum[n]! + re[n < mid ? size - mid + n : n - mid]! * this.synthesis[n]!;
+
+    const hop = this.hop;
+    for (let n = 0; n < hop; n++) this.ready[n] = this.sum[n]!;
+    this.sum.copyWithin(0, hop);
+    this.sum.fill(0, length - hop);
+    const outRe = this.outRe;
+    const outIm = this.outIm;
+    this.outRe = this.lastOutRe;
+    this.outIm = this.lastOutIm;
+    this.lastOutRe = outRe;
+    this.lastOutIm = outIm;
+  }
+
+  /** Bins `from` to `to`, the region of the peak at bin `k`, moved to where its pitch goes. */
+  private move(k: number, from: number, to: number): void {
+    const { re, im, half, ratio, turn } = this;
+    const phase = Math.atan2(im[k]!, re[k]!);
+    let d = phase - Math.atan2(this.lastIm[k]!, this.lastRe[k]!) - k * turn;
+    d -= 2 * Math.PI * Math.floor(d / (2 * Math.PI) + 0.5);
+    // Its true frequency, in bins, from how far its phase turned since the frame before.
+    const bin = k + d / turn;
+    const shift = Math.floor(bin * (ratio - 1) + 0.5);
+    const j = k + shift;
+    if (j < 1 || j >= half) return;
+    // Carried on from the phase the frame before left at its new bin, so a held note stays one note.
+    const lastRe = this.lastOutRe[j]!;
+    const lastIm = this.lastOutIm[j]!;
+    const theta = lastRe !== 0 || lastIm !== 0 ? Math.atan2(lastIm, lastRe) + bin * ratio * turn - phase : 0;
+    // As loud as the envelope is where its resonances have moved to, against where it came from.
+    const lift = Math.exp(0.5 * (this.level(j / this.formant) - this.level(k))) * this.loudness;
+    const g = lift > PITCH_MAX_GAIN ? PITCH_MAX_GAIN : lift < 1 / PITCH_MAX_GAIN ? 1 / PITCH_MAX_GAIN : lift;
+    const c = g * Math.cos(theta);
+    const s = g * Math.sin(theta);
+    for (let i = from; i <= to; i++) {
+      const at = i + shift;
+      if (at < 1 || at >= half) continue;
+      const xr = re[i]!;
+      const xi = im[i]!;
+      this.outRe[at] = this.outRe[at]! + (xr * c - xi * s);
+      this.outIm[at] = this.outIm[at]! + (xr * s + xi * c);
+    }
+  }
+
+  /**
+   * The log of the envelope's power at bin `at`, which need not be whole: straight between the marks
+   * either side of it, the nearest one's own beyond the first and the last, and 0 with no mark at all.
+   */
+  private level(at: number): number {
+    const count = this.markCount;
+    const marks = this.marks;
+    const levels = this.levels;
+    if (count === 0) return 0;
+    if (at <= marks[0]!) return levels[0]!;
+    if (at >= marks[count - 1]!) return levels[count - 1]!;
+    let lo = 0;
+    let hi = count - 1;
+    while (hi - lo > 1) {
+      const m = (lo + hi) >> 1;
+      if (marks[m]! <= at) lo = m;
+      else hi = m;
+    }
+    const t = (at - marks[lo]!) / (marks[hi]! - marks[lo]!);
+    return levels[lo]! + t * (levels[hi]! - levels[lo]!);
+  }
+}
+
+/**
+ * The discrete Fourier transform of `re + i im`, in place: radix 2, its length a power of two, with
+ * `cos` and `sin` of `2 * PI * k / length` for the first half of `k`. Forward turns by `e^-i`, inverse
+ * by `e^+i`, and neither scales.
+ */
+function fft(re: Float64Array, im: Float64Array, cos: Float64Array, sin: Float64Array, inverse: boolean): void {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; (j & bit) !== 0; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const r = re[i]!;
+      re[i] = re[j]!;
+      re[j] = r;
+      const m = im[i]!;
+      im[i] = im[j]!;
+      im[j] = m;
+    }
+  }
+  for (let width = 2; width <= n; width *= 2) {
+    const halfWidth = width / 2;
+    const step = n / width;
+    for (let i = 0; i < n; i += width) {
+      for (let k = 0; k < halfWidth; k++) {
+        const wr = cos[k * step]!;
+        const wi = inverse ? sin[k * step]! : -sin[k * step]!;
+        const a = i + k;
+        const b = a + halfWidth;
+        const xr = re[b]! * wr - im[b]! * wi;
+        const xi = re[b]! * wi + im[b]! * wr;
+        re[b] = re[a]! - xr;
+        im[b] = im[a]! - xi;
+        re[a] = re[a]! + xr;
+        im[a] = im[a]! + xi;
+      }
+    }
+  }
+}
+
 /** The step `op` stands for at `rate`, on the channel numbered `channel` - which only a reverb asks. */
 function stepFor(op: SoundOp, rate: number, channel: number): Step {
   switch (op.op) {
+    case 'pitch':
+      return new Pitch(op, rate);
     case 'drive':
       return new Drive(Math.pow(10, op.db / 20), op.followMs ? Math.exp(-1000 / (op.followMs * rate)) : null);
     case 'gain':

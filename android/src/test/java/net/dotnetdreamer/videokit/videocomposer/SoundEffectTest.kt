@@ -318,6 +318,127 @@ class SoundEffectTest {
 
     /* ------------------------------------------------------------------------------------- */
 
+    /** The male voice at the middle of its sliders, exactly as the editor sends it (`SOUND_EFFECTS` in sound-effects.ts). */
+    private val maleVoiceJson = """{"mono":true,"ops":[{"op":"pitch","semitones":-6,"formant":-3},{"op":"gain","db":0.72}]}"""
+
+    private fun pitch(semitones: Double, formant: Double = 0.0) = SoundEffect(false, listOf(SoundOp.Pitch(semitones, formant)))
+
+    /** How strong [hz] is in [samples] from [from] on, as the amplitude of a sine: one bin of a DFT. */
+    private fun amplitudeAt(samples: FloatArray, hz: Double, from: Int = 24_000, rate: Int = 48_000): Double {
+        var re = 0.0
+        var im = 0.0
+        for (i in from until samples.size) {
+            re += samples[i] * kotlin.math.cos(2 * PI * hz * i / rate)
+            im += samples[i] * sin(2 * PI * hz * i / rate)
+        }
+        return 2 * kotlin.math.hypot(re, im) / (samples.size - from)
+    }
+
+    @Test
+    fun `the male voice the editor sends is read as it was sent, and a pitch's numbers held to an octave`() {
+        assertEquals(
+            SoundEffect(true, listOf(SoundOp.Pitch(-6.0, -3.0), SoundOp.Gain(0.72))),
+            parsed(JSONObject(maleVoiceJson)),
+        )
+        assertEquals(
+            listOf(SoundOp.Pitch(12.0, -12.0)),
+            parsed(JSONObject("""{"ops":[{"op":"pitch","semitones":30,"formant":-40}]}"""))!!.ops,
+        )
+        assertEquals("ops[0].semitones", refusal(JSONObject("""{"ops":[{"op":"pitch","formant":2}]}""")))
+        assertEquals("ops[0].formant", refusal(JSONObject("""{"ops":[{"op":"pitch","semitones":-6}]}""")))
+        assertEquals("ops[0].ratio", refusal(JSONObject("""{"ops":[{"op":"pitch","semitones":-6,"formant":0,"ratio":2}]}""")))
+    }
+
+    @Test
+    fun `a pitch step that moves nothing gives the sound back a frame late, and otherwise as it was`() {
+        val input = FloatArray(48_000) { (0.3 * sin(2 * PI * 220 * it / 48_000) + 0.2 * sin(2 * PI * 1730 * it / 48_000 + 1)).toFloat() }
+        val out = through(pitch(0.0), 48_000, input)[0]
+        // 40 ms a frame at 48 kHz, and the step is a frame less one sample late.
+        val late = 1_919
+        var worst = 0.0
+        for (i in 2 * late until input.size) worst = maxOf(worst, abs(out[i].toDouble() - input[i - late]))
+        assertTrue("worst $worst", worst < 1e-4)
+    }
+
+    @Test
+    fun `a pitch step moves a tone by its semitones and leaves nothing where it was`() {
+        for (semitones in listOf(-12.0, -6.0, 7.0, 12.0)) {
+            val out = through(pitch(semitones), 48_000, sine(440.0, 0.5, 48_000))[0]
+            val moved = amplitudeAt(out, 440 * Math.pow(2.0, semitones / 12))
+            assertTrue("$semitones: $moved at the new pitch", moved > 0.3)
+            assertTrue("$semitones: something left at 440 Hz", amplitudeAt(out, 440.0) < 0.01)
+        }
+    }
+
+    @Test
+    fun `a pitch step leaves silence silent, and falls back to exact silence two frames after a sound`() {
+        assertTrue(through(pitch(-6.0, -3.0), 48_000, FloatArray(4_800))[0].all { it == 0f })
+        val burst = FloatArray(48_000)
+        sine(500.0, 0.9, 4_800).copyInto(burst)
+        val after = through(pitch(5.0, 3.0), 48_000, burst)[0]
+        assertTrue(after.copyOfRange(4_800 + 3_840, after.size).all { it == 0f })
+        assertTrue(after.all { abs(it) <= 1f })
+    }
+
+    /*
+     * The same numbers `sound-effects.unit.test.ts` and `SoundEffectTests.swift` hold their engines to:
+     * the megaphone's fragment, four times as long, through the male voice - folded - and through a
+     * pitch step on each channel. The transforms, the peaks and the envelope have to agree to the
+     * operation for these to hold in all three.
+     */
+    @Test
+    fun `the pitch step matches the golden numbers every engine is held to`() {
+        val rate = 48_000
+        fun fragment() = listOf(
+            FloatArray(9_600) { (0.6 * sin(2 * PI * 440 * it / rate) + 0.2 * sin(2 * PI * 3100 * it / rate)).toFloat() },
+            FloatArray(9_600) { (0.3 * sin(2 * PI * 220 * it / rate + 0.5)).toFloat() },
+        )
+        val (left, right) = fragment()
+        val (l, r) = through(parsed(JSONObject(maleVoiceJson))!!, rate, left, right)
+        val male = listOf(
+            0 to 0.0,
+            1918 to -0.29614120721817017,
+            1919 to -0.25232091546058655,
+            1920 to -0.20355385541915894,
+            2399 to 0.16940973699092865,
+            2400 to 0.20098185539245605,
+            3000 to 0.1624542772769928,
+            4321 to -0.19919995963573456,
+            5000 to -0.30933305621147156,
+            6000 to 0.1856769174337387,
+            7777 to -0.1872776299715042,
+            8000 to 0.0756482258439064,
+            9599 to -0.4480621814727783,
+        )
+        for ((i, value) in male) {
+            assertEquals("male voice, sample $i", value, l[i].toDouble(), 1e-6)
+            assertEquals("male voice, sample $i, the other channel", l[i], r[i])
+        }
+        val (a, b) = fragment()
+        val (pl, pr) = through(pitch(7.0, 2.0), rate, a, b)
+        val stereo = listOf(
+            Triple(0, 0.0, 0.0),
+            Triple(1918, 0.38877439498901367, -0.3224090039730072),
+            Triple(1919, 0.45995599031448364, -0.30201801657676697),
+            Triple(1920, 0.3744523227214813, -0.21382911503314972),
+            Triple(2399, -0.7527450919151306, 0.23698817193508148),
+            Triple(2400, -0.6146458387374878, 0.24650360643863678),
+            Triple(3000, 0.2789718508720398, 0.33405008912086487),
+            Triple(4321, 0.41194868087768555, 0.3025590479373932),
+            Triple(5000, -0.2085523009300232, -0.03757572919130325),
+            Triple(6000, 0.8355948328971863, -0.2713659107685089),
+            Triple(7777, -0.3335418999195099, 0.10749977827072144),
+            Triple(8000, -0.8190305233001709, -0.16935910284519196),
+            Triple(9599, -0.6935299038887024, -0.1321483850479126),
+        )
+        for ((i, leftValue, rightValue) in stereo) {
+            assertEquals("pitch, sample $i, left", leftValue, pl[i].toDouble(), 1e-6)
+            assertEquals("pitch, sample $i, right", rightValue, pr[i].toDouble(), 1e-6)
+        }
+    }
+
+    /* ------------------------------------------------------------------------------------- */
+
     /** Everything [p] hands over for [input], fed in buffers of [chunkFrames] frames. */
     private fun process(p: SoundEffectProcessor, format: AudioFormat, input: ByteBuffer, chunkFrames: Int): ByteBuffer {
         p.configure(format)

@@ -487,7 +487,10 @@ export const OP_REFERENCE: Record<string, string> = {
     'speaker driven hard - the middle of the voice, buzzing, a little louder - which is how one word of a line is made to stand out: put ' +
     'a layer over just that word. "slowReverb" is the slowed and reverberant edit of a song, in a big soft room: what it covers plays ' +
     'from the layer’s start at speed, lower as well as slower as a record does, so a layer at 0.8 plays the first 80% of what is under ' +
-    'it and the post picks up where it has got to at the layer’s end. Layers STACK, as the picture’s layers do: a new one goes on top ' +
+    'it and the post picks up where it has got to at the layer’s end. "maleVoice" and "femaleVoice" move a voice’s pitch and, apart ' +
+    'from it, its resonances, down or up, so a woman sounds like a man or a man like a woman, or a man like another man; what they ' +
+    'cover is heard 40 ms late. "telephone" is a voice down a phone line, 300 Hz to 3.4 kHz and a little crackle: a layer over the ' +
+    'stretch of a call. Layers STACK, as the picture’s layers do: a new one goes on top ' +
     'of the others, over whatever already covers that time, and where layers cover the same time a later one works on what the ones ' +
     'before it made, so their order is part of the sound - a megaphone over slow + reverb puts the slowed room through the horn, and ' +
     'slow + reverb over a megaphone slows the horn and puts it in the room; moveAudioEffect and moveAudioEffectTo change the order. ' +
@@ -496,7 +499,9 @@ export const OP_REFERENCE: Record<string, string> = {
     'effectSettings moves the effect’s sliders, each ' +
     `0..${SOUND_EFFECT_SETTING_MAX}, the rest staying at their defaults: ${AUDIO_EFFECT_SLIDERS}. The megaphone’s intensity is how hard it ` +
     'is driven and its tone the size of the horn, dull at 0 and tinny at 100; slowReverb’s reverb is how much of the room is heard and ' +
-    `its room how long and dark the room is. A slider the effect has not got is refused. speed is for an effect that slows - ` +
+    'its room how long and dark the room is; a voice’s pitch runs from an octave down at 0 to none at 100 for maleVoice, and from none ' +
+    'to an octave up for femaleVoice, its tone the resonances the same way by half an octave; the telephone’s intensity is how narrow ' +
+    `and crackly the line is and its tone where its band sits. A slider the effect has not got is refused. speed is for an effect that slows - ` +
     `${AUDIO_EFFECT_SPEEDS} - and refused for any other, or outside its range.`,
   patchAudioEffect:
     'id, patch {effect?, effectSettings?, speed?, startMs?, endMs?} - what the audio effects sheet and a drag on the timeline change. ' +

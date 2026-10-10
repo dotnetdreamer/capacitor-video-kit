@@ -5,11 +5,13 @@ import { MAX_SOUND_OPS, type ComposeSoundEffect } from '../video-composer/defini
 import {
   SOUND_EFFECTS,
   SOUND_EFFECT_SETTING_MAX,
+  PITCH_FRAME_MS,
   SoundEffectError,
   SoundEffectRunner,
   normaliseSoundEffect,
   normaliseSoundEffectId,
   normaliseSoundEffectSettings,
+  pitchFrame,
   sameSoundEffectSettings,
   soundEffectPreset,
   soundEffectSettings,
@@ -58,10 +60,9 @@ function refusal(value: unknown): string {
 }
 
 describe('the catalogue', () => {
-  it('offers the megaphone first, then slow + reverb', () => {
-    expect(SOUND_EFFECTS.map(preset => preset.id)).toEqual(['megaphone', 'slowReverb']);
-    expect(soundEffectPreset('megaphone')?.label).toBe('Megaphone');
-    expect(soundEffectPreset('slowReverb')?.label).toBe('Slow + reverb');
+  it('offers the megaphone first, then slow + reverb, the two voices and the telephone', () => {
+    expect(SOUND_EFFECTS.map(preset => preset.id)).toEqual(['megaphone', 'slowReverb', 'maleVoice', 'femaleVoice', 'telephone']);
+    expect(SOUND_EFFECTS.map(preset => preset.label)).toEqual(['Megaphone', 'Slow + reverb', 'Male voice', 'Female voice', 'Telephone']);
   });
 
   it('is wire data every engine takes as it is', () => {
@@ -219,6 +220,9 @@ describe('the parser', () => {
     expect(refusal({ ops: [{ op: 'peak', hz: 1000, q: 1 }] })).toBe('ops[0].db');
     expect(refusal({ ops: [{ op: 'drive', db: 6, followMs: 'slow' }] })).toBe('ops[0].followMs');
     expect(refusal({ ops: [{ op: 'gain', db: 1, hz: 10 }] })).toBe('ops[0].hz');
+    expect(refusal({ ops: [{ op: 'pitch', formant: 2 }] })).toBe('ops[0].semitones');
+    expect(refusal({ ops: [{ op: 'pitch', semitones: -6 }] })).toBe('ops[0].formant');
+    expect(refusal({ ops: [{ op: 'pitch', semitones: -6, formant: 0, ratio: 2 }] })).toBe('ops[0].ratio');
     expect(refusal({ ops: Array.from({ length: MAX_SOUND_OPS + 1 }, () => ({ op: 'gain', db: 0 })) })).toBe(`ops at most ${MAX_SOUND_OPS} steps`);
     expect(refusal({ ops: Array.from({ length: MAX_SOUND_OPS }, () => ({ op: 'gain', db: 0 })) })).toBe('accepted');
   });
@@ -245,6 +249,7 @@ describe('the parser', () => {
           { op: 'drive', db: -3 },
           { op: 'gain', db: 60 },
           { op: 'reverb', decayMs: 5, dampHz: 99_999, wet: 2, dry: -1 },
+          { op: 'pitch', semitones: 30, formant: -40 },
         ],
       }),
     ).toEqual({
@@ -256,6 +261,7 @@ describe('the parser', () => {
         { op: 'drive', db: 0 },
         { op: 'gain', db: 24 },
         { op: 'reverb', decayMs: 100, dampHz: 20_000, wet: 1, dry: 0 },
+        { op: 'pitch', semitones: 12, formant: -12 },
       ],
     });
   });
@@ -637,6 +643,265 @@ describe('slow + reverb', () => {
     for (const [i, l, r] of golden) {
       expect(left[i]).toBeCloseTo(l, 6);
       expect(right[i]).toBeCloseTo(r, 6);
+    }
+  });
+});
+
+/** How strong `hz` is in `samples` from `from` on, as the amplitude of a sine: one bin of a DFT. */
+function amplitudeAt(samples: Float32Array, hz: number, from = Math.round(0.5 * RATE)): number {
+  let re = 0;
+  let im = 0;
+  for (let i = from; i < samples.length; i++) {
+    re += samples[i]! * Math.cos((2 * Math.PI * hz * i) / RATE);
+    im += samples[i]! * Math.sin((2 * Math.PI * hz * i) / RATE);
+  }
+  return (2 * Math.hypot(re, im)) / (samples.length - from);
+}
+
+/** A buzz at `f0` - every harmonic to 6 kHz - shaped by `shape` at each harmonic's frequency. */
+function buzz(f0: number, amplitude: number, seconds: number, shape: (hz: number) => number): Float32Array {
+  const out = new Float32Array(Math.round(seconds * RATE));
+  for (let h = 1; h * f0 < 6000; h++) {
+    const a = amplitude * shape(h * f0);
+    for (let i = 0; i < out.length; i++) out[i] = out[i]! + a * Math.sin((2 * Math.PI * h * f0 * i) / RATE + h);
+  }
+  return out;
+}
+
+describe('the pitch step', () => {
+  const pitch = (semitones: number, formant = 0): ComposeSoundEffect => ({ ops: [{ op: 'pitch', semitones, formant }] });
+
+  it('reads a 40 ms frame every 10 ms at any rate, padded to a power of two', () => {
+    expect(PITCH_FRAME_MS).toBe(40);
+    expect(pitchFrame(48_000)).toEqual({ length: 1920, hop: 480, size: 2048 });
+    expect(pitchFrame(44_100)).toEqual({ length: 1764, hop: 441, size: 2048 });
+    expect(pitchFrame(32_000)).toEqual({ length: 1280, hop: 320, size: 2048 });
+    expect(pitchFrame(22_050)).toEqual({ length: 884, hop: 221, size: 1024 });
+  });
+
+  it('gives the sound back a frame late, and otherwise as it was, when it moves nothing', () => {
+    const input = sine(220, 0.3, 1).map((v, i) => v + 0.2 * Math.sin((2 * Math.PI * 1730 * i) / RATE + 1));
+    const [out] = through(pitch(0), input);
+    const late = pitchFrame(RATE).length - 1;
+    let worst = 0;
+    for (let i = 2 * late; i < input.length; i++) worst = Math.max(worst, Math.abs(out![i]! - input[i - late]!));
+    // All but what the frames hold at 0 Hz, a window's leakage some 90 dB down.
+    expect(worst).toBeLessThan(1e-4);
+  });
+
+  it('moves a tone by its semitones, up or down, and leaves nothing where it was', () => {
+    for (const semitones of [-12, -6, 7, 12]) {
+      const [out] = through(pitch(semitones), sine(440, 0.5, 1));
+      // A tone alone is as loud as it was but for `sqrt(P)`, which keeps a voice's crowded harmonics as loud.
+      expect(amplitudeAt(out!, 440 * Math.pow(2, semitones / 12))).toBeGreaterThan(0.3);
+      expect(amplitudeAt(out!, 440)).toBeLessThan(0.01);
+    }
+  });
+
+  it('moves every harmonic of a voice together, so it is still one voice', () => {
+    const [out] = through(pitch(-6), buzz(210, 0.1, 1, hz => 1000 / (hz + 1000)));
+    const f0 = 210 * Math.pow(2, -6 / 12);
+    for (const h of [1, 2, 3, 5, 8]) {
+      expect(amplitudeAt(out!, h * f0)).toBeGreaterThan(0.02);
+      // Half way between two of the new harmonics there is nothing much.
+      expect(amplitudeAt(out!, (h + 0.5) * f0)).toBeLessThan(0.1 * amplitudeAt(out!, h * f0));
+    }
+  });
+
+  it('moves the resonance of a voice with its formant, the pitch staying where it is', () => {
+    // A buzz at 200 Hz with one resonance, at 1 kHz: each harmonic comes out as loud as the resonance
+    // moved half an octave is at its frequency, give or take what harmonics 200 Hz apart can say of it.
+    const resonance = (hz: number) => 1 / (1 + Math.pow((hz - 1000) / 150, 2));
+    for (const formant of [-6, 6]) {
+      const [out] = through(pitch(0, formant), buzz(200, 0.2, 1, resonance));
+      const moved = (hz: number) => resonance(hz / Math.pow(2, formant / 12));
+      for (let hz = 400; hz <= 1600; hz += 200) expect(Math.abs(db(amplitudeAt(out!, hz) / 0.2 / moved(hz)))).toBeLessThan(3);
+      expect(amplitudeAt(out!, 200 * Math.round(1000 / 200))).toBeLessThan(0.3 * 0.2);
+    }
+  });
+
+  it('keeps a voice about as loud as it was, whichever way it moves it', () => {
+    const voice = buzz(140, 0.05, 1, hz => 1000 / (hz + 500));
+    for (const [semitones, formant] of [
+      [-12, -6],
+      [-6, -3],
+      [6, 3],
+      [12, 6],
+    ] as const) {
+      const [out] = through(pitch(semitones, formant), voice);
+      expect(Math.abs(db(rms(out!, RATE / 2) / rms(voice, RATE / 2)))).toBeLessThan(2);
+    }
+  });
+
+  it('comes out the same handed over in pieces as in one', () => {
+    const input = sine(330, 0.7, 0.5);
+    const [whole] = through(pitch(5, 2), input);
+    const pieces = input.slice();
+    const runner = new SoundEffectRunner(pitch(5, 2), RATE);
+    for (const [from, count] of [
+      [0, 479],
+      [479, 1],
+      [480, 5000],
+      [5480, pieces.length - 5480],
+    ] as const) {
+      runner.process([pieces], from, count);
+    }
+    expect(Array.from(pieces)).toEqual(Array.from(whole!));
+  });
+
+  it('leaves silence silent, and falls back to exact silence two frames after a sound', () => {
+    const [silent] = through(pitch(-6, -3), new Float32Array(4800));
+    expect(silent!.every(v => v === 0)).toBe(true);
+    const burst = new Float32Array(RATE);
+    burst.set(sine(500, 0.9, 0.1));
+    const [after] = through(pitch(5, 3), burst);
+    const end = 0.1 * RATE + Math.round((2 * PITCH_FRAME_MS * RATE) / 1000);
+    expect(after!.subarray(end).every(v => v === 0)).toBe(true);
+    expect(after!.every(v => Math.abs(v) <= 1)).toBe(true);
+  });
+
+  it('folds the channels into one before it when the effect does', () => {
+    const [l, r] = through({ mono: true, ...pitch(4) }, sine(300, 0.4, 0.3), sine(500, 0.2, 0.3));
+    expect(Array.from(l!)).toEqual(Array.from(r!));
+  });
+
+  /*
+   * The same numbers as `SoundEffectTest.kt` and `SoundEffectTests.swift`: the megaphone's fragment,
+   * four times as long, through the male voice - folded - and through a pitch step on each channel.
+   */
+  it('matches the golden numbers every engine is held to', () => {
+    const n = 9600;
+    const fragment = (): [Float32Array, Float32Array] => {
+      const left = new Float32Array(n);
+      const right = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        left[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / RATE) + 0.2 * Math.sin((2 * Math.PI * 3100 * i) / RATE);
+        right[i] = 0.3 * Math.sin((2 * Math.PI * 220 * i) / RATE + 0.5);
+      }
+      return [left, right];
+    };
+    const [left, right] = fragment();
+    new SoundEffectRunner(soundEffectPreset('maleVoice')!.effect, RATE).process([left, right]);
+    const male: [number, number][] = [
+      [0, 0],
+      [1918, -0.29614120721817017],
+      [1919, -0.25232091546058655],
+      [1920, -0.20355385541915894],
+      [2399, 0.16940973699092865],
+      [2400, 0.20098185539245605],
+      [3000, 0.1624542772769928],
+      [4321, -0.19919995963573456],
+      [5000, -0.30933305621147156],
+      [6000, 0.1856769174337387],
+      [7777, -0.1872776299715042],
+      [8000, 0.0756482258439064],
+      [9599, -0.4480621814727783],
+    ];
+    for (const [i, value] of male) {
+      expect(left[i]).toBeCloseTo(value, 6);
+      expect(right[i]).toBe(left[i]);
+    }
+    const [l, r] = fragment();
+    new SoundEffectRunner(pitch(7, 2), RATE).process([l, r]);
+    const stereo: [number, number, number][] = [
+      [0, 0, 0],
+      [1918, 0.38877439498901367, -0.3224090039730072],
+      [1919, 0.45995599031448364, -0.30201801657676697],
+      [1920, 0.3744523227214813, -0.21382911503314972],
+      [2399, -0.7527450919151306, 0.23698817193508148],
+      [2400, -0.6146458387374878, 0.24650360643863678],
+      [3000, 0.2789718508720398, 0.33405008912086487],
+      [4321, 0.41194868087768555, 0.3025590479373932],
+      [5000, -0.2085523009300232, -0.03757572919130325],
+      [6000, 0.8355948328971863, -0.2713659107685089],
+      [7777, -0.3335418999195099, 0.10749977827072144],
+      [8000, -0.8190305233001709, -0.16935910284519196],
+      [9599, -0.6935299038887024, -0.1321483850479126],
+    ];
+    for (const [i, a, b] of stereo) {
+      expect(l[i]).toBeCloseTo(a, 6);
+      expect(r[i]).toBeCloseTo(b, 6);
+    }
+  });
+});
+
+describe('the male and female voices', () => {
+  const steps = (id: string, settings: Record<string, number> = {}) => soundEffectSteps(id, settings)!;
+
+  it('folds the sound and moves it down for the male voice: Pitch to an octave, Tone to half of one', () => {
+    expect(steps('maleVoice')).toEqual({
+      mono: true,
+      ops: [
+        { op: 'pitch', semitones: -6, formant: -3 },
+        { op: 'gain', db: 0.72 },
+      ],
+    });
+    expect(steps('maleVoice', { pitch: 0, tone: 0 }).ops[0]).toEqual({ op: 'pitch', semitones: -12, formant: -6 });
+    expect(steps('maleVoice', { pitch: 100, tone: 100 }).ops[0]).toEqual({ op: 'pitch', semitones: 0, formant: 0 });
+  });
+
+  it('folds the sound and moves it up for the female voice, as far the other way', () => {
+    expect(steps('femaleVoice')).toEqual({
+      mono: true,
+      ops: [
+        { op: 'pitch', semitones: 6, formant: 3 },
+        { op: 'gain', db: 0.72 },
+      ],
+    });
+    expect(steps('femaleVoice', { pitch: 0, tone: 0 }).ops[0]).toEqual({ op: 'pitch', semitones: 0, formant: 0 });
+    expect(steps('femaleVoice', { pitch: 100, tone: 100 }).ops[0]).toEqual({ op: 'pitch', semitones: 12, formant: 6 });
+  });
+
+  it('makes up what moving a voice loses, more the further it goes', () => {
+    expect(steps('maleVoice', { pitch: 0 }).ops[1]).toEqual({ op: 'gain', db: 1.44 });
+    expect(steps('femaleVoice', { pitch: 0 }).ops[1]).toEqual({ op: 'gain', db: 0 });
+  });
+
+  it('puts a woman in the range of a man, and a man in the range of a woman', () => {
+    // Two buzzes in the middle of each range, 210 Hz and 120 Hz, falling as a voice does.
+    const slope = (hz: number) => 1000 / (hz + 1000);
+    const [male] = through(soundEffectPreset('maleVoice')!.effect, buzz(210, 0.1, 1, slope));
+    expect(amplitudeAt(male!, 210 * Math.pow(2, -0.5))).toBeGreaterThan(5 * amplitudeAt(male!, 210));
+    const [female] = through(soundEffectPreset('femaleVoice')!.effect, buzz(120, 0.1, 1, slope));
+    expect(amplitudeAt(female!, 120 * Math.pow(2, 0.5))).toBeGreaterThan(5 * amplitudeAt(female!, 120));
+  });
+});
+
+describe('the telephone', () => {
+  const telephone = (settings: Record<string, number> = {}) => soundEffectSteps('telephone', settings)!;
+  const level = (hz: number, settings: Record<string, number> = {}): number =>
+    db(rms(through(telephone(settings), sine(hz, 0.1, 0.6))[0]!) / rms(sine(hz, 0.1, 0.6)));
+
+  it('is the band a phone line carries, 300 Hz to 3.4 kHz, and little of either side', () => {
+    const ops = telephone().ops as { op: string; hz?: number }[];
+    expect(ops.filter(step => step.op === 'highpass').map(step => step.hz)).toEqual([300, 300, 300]);
+    expect(ops.filter(step => step.op === 'lowpass').map(step => step.hz)).toEqual([3400, 3400, 3400]);
+    expect(telephone().mono).toBe(true);
+    const middle = level(1000);
+    expect(level(100) - middle).toBeLessThan(-30);
+    expect(level(8000) - middle).toBeLessThan(-30);
+    expect(level(500) - middle).toBeGreaterThan(-6);
+    expect(level(2500) - middle).toBeGreaterThan(-6);
+  });
+
+  it('narrows its band and drives harder with Intensity, and moves the band with Tone', () => {
+    const corners = (settings: Record<string, number>) => {
+      const ops = telephone(settings).ops as { op: string; hz?: number; db?: number }[];
+      return { low: ops[0]!.hz, high: ops[2]!.hz, drive: ops[4]!.db };
+    };
+    expect(corners({ intensity: 0 })).toEqual({ low: 198, high: 4808, drive: 0 });
+    expect(corners({ intensity: 100 })).toEqual({ low: 455, high: 2404, drive: 20 });
+    expect(corners({ tone: 0 })).toEqual({ low: 212, high: 2404, drive: 10 });
+    expect(corners({ tone: 100 })).toEqual({ low: 424, high: 4808, drive: 10 });
+  });
+
+  it('comes out about as loud as a voice it was given, at any Intensity, and under full scale', () => {
+    // A 140 Hz buzz falling 6 dB an octave above 500 Hz: most of a voice is in the band a line keeps.
+    const voice = buzz(140, 0.05, 0.5, hz => 1000 / (hz + 500));
+    for (const intensity of [0, 50, 100]) {
+      const [out] = through(telephone({ intensity }), voice);
+      expect(out!.every(v => Math.abs(v) < 1)).toBe(true);
+      expect(Math.abs(db(rms(out!) / rms(voice)))).toBeLessThan(4.5);
     }
   });
 });

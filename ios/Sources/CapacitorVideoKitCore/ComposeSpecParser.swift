@@ -1554,6 +1554,7 @@ private struct SoundEffectDTO: Decodable {
         "drive": [("db", 0...40, false), ("followMs", 1...10_000, true)],
         "gain": [("db", -40...24, false)],
         "reverb": [("decayMs", 100...20_000, false), ("dampHz", 10...20_000, false), ("wet", 0...1, false), ("dry", 0...1, false)],
+        "pitch": [("semitones", -12...12, false), ("formant", -12...12, false)],
     ]
 
     init(from decoder: Decoder) throws {
@@ -1613,6 +1614,7 @@ private struct SoundEffectDTO: Decodable {
         case "peak": return .peak(hz: read[0]!, q: read[1]!, db: read[2]!)
         case "drive": return .drive(db: read[0]!, followMs: read[1])
         case "reverb": return .reverb(decayMs: read[0]!, dampHz: read[1]!, wet: read[2]!, dry: read[3]!)
+        case "pitch": return .pitch(semitones: read[0]!, formant: read[1]!)
         default: return .gain(db: read[0]!)
         }
     }

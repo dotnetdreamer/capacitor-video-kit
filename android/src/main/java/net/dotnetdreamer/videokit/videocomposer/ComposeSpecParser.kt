@@ -912,6 +912,7 @@ object ComposeSpecParser {
             "drive" -> SoundOp.Drive(read[0], read[1].takeUnless { it.isNaN() })
             "gain" -> SoundOp.Gain(read[0])
             "reverb" -> SoundOp.Reverb(read[0], read[1], read[2], read[3])
+            "pitch" -> SoundOp.Pitch(read[0], read[1])
             // Every op is named above. One given numbers in [SOUND_OP_FIELDS] and not a step here is
             // refused as nobody's, rather than read as some other step with its numbers.
             else -> throw SpecException("$path.op")
@@ -1013,6 +1014,7 @@ object ComposeSpecParser {
                 SoundOpField("wet", 0.0, 1.0),
                 SoundOpField("dry", 0.0, 1.0),
             ),
+            "pitch" to listOf(SoundOpField("semitones", -12.0, 12.0), SoundOpField("formant", -12.0, 12.0)),
         )
     }
 

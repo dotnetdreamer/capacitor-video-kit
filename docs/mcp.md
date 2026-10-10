@@ -68,12 +68,15 @@ does: the sounds it passes close up behind it, each keeping its length and setti
 Audio effects are layers over the post's time, as they are in the editor: from a layer's `startMs`
 to its `endMs`, everything heard - every clip's own sound, every sound on every lane, every
 voiceover - goes through its effect. `addAudioEffect` puts one down with its `effect`,
-`"megaphone"` or `"slowReverb"`, anything else refused with the list, running to the end of the
-post unless it is given an `endMs`. A layer running past the end of the post is cut there, and one
-starting less than 100 ms before the end is refused, saying where the post ends. One word of a line
-gets a megaphone from a layer over just that word. `effectSettings` moves the effect's sliders, 0 to
-100 each - the megaphone's `intensity` and `tone`, slow + reverb's `reverb` and `room` - and a
-slider the effect has not got is refused with the ones it has. `speed` is slow + reverb's Slow, 0.5
+`"megaphone"`, `"slowReverb"`, `"maleVoice"`, `"femaleVoice"` or `"telephone"`, anything else
+refused with the list, running to the end of the post unless it is given an `endMs`. A layer running
+past the end of the post is cut there, and one starting less than 100 ms before the end is refused,
+saying where the post ends. One word of a line gets a megaphone from a layer over just that word,
+and a stretch of a call a telephone from a layer over just that stretch. The male and female voices
+move a voice's pitch and, apart from it, its resonances, so a woman sounds like a man or a man like
+a woman, and are heard 40 ms late. `effectSettings` moves the effect's sliders, 0 to 100 each - the
+megaphone's and the telephone's `intensity` and `tone`, slow + reverb's `reverb` and `room`, the
+voices' `pitch` and `tone` - and a slider the effect has not got is refused with the ones it has. `speed` is slow + reverb's Slow, 0.5
 to 1 and 0.8 unless it is set: what the layer covers plays from its start that much slower, and
 lower, as a record does, and at the layer's end the sound jumps to where the post is, skipping what
 the slowing left unplayed. Any other effect refuses a `speed`.

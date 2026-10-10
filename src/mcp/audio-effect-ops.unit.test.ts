@@ -103,8 +103,10 @@ describe('addAudioEffect', () => {
   });
 
   it('refuses an effect this version does not have, naming the ones it does', () => {
-    expect(() => applyEditOps(post(), [add('a', 0, 1000, { effect: 'echo' })])).toThrow(/^op 0 \(addAudioEffect\): "effect" must be one of megaphone, slowReverb$/);
-    expect(() => applyEditOps(post(), [{ op: 'addAudioEffect', id: 'a', startMs: 0 }])).toThrow(/"effect" must be one of megaphone, slowReverb/);
+    expect(() => applyEditOps(post(), [add('a', 0, 1000, { effect: 'echo' })])).toThrow(
+      /^op 0 \(addAudioEffect\): "effect" must be one of megaphone, slowReverb, maleVoice, femaleVoice, telephone$/,
+    );
+    expect(() => applyEditOps(post(), [{ op: 'addAudioEffect', id: 'a', startMs: 0 }])).toThrow(/"effect" must be one of megaphone, slowReverb, maleVoice/);
   });
 
   it('refuses a slider the effect has not got, and one off its scale, naming what there is', () => {
@@ -288,7 +290,7 @@ describe('patchAudioEffect', () => {
       /"patch\.effectSetting" is not an audio effect field - the fields are effect, effectSettings, speed, startMs, endMs$/,
     );
     expect(() => applyEditOps(manifest, [patch('a', { id: 'z' })])).toThrow(/an audio effect’s "id" cannot be patched$/);
-    expect(() => applyEditOps(manifest, [patch('a', { effect: null })])).toThrow(/"patch\.effect" must be one of megaphone, slowReverb$/);
+    expect(() => applyEditOps(manifest, [patch('a', { effect: null })])).toThrow(/"patch\.effect" must be one of megaphone, slowReverb, maleVoice, femaleVoice, telephone$/);
     expect(() => applyEditOps(manifest, [patch('a', { effectSettings: null })])).toThrow(/"patch\.effectSettings" must be an object/);
     expect(() => applyEditOps(manifest, [patch('a', { speed: null })])).toThrow(/"patch\.speed" must be a number from 0\.5 to 1/);
     expect(() => applyEditOps(manifest, [patch('a', { endMs: null })])).toThrow(/"patch\.endMs" must be a number of milliseconds, 0 or more$/);
@@ -544,6 +546,30 @@ describe('what an agent reads about the audio effects', () => {
           ],
           speed: { label: 'Slow', default: 0.8, min: 0.5, max: 1 },
         },
+        {
+          id: 'maleVoice',
+          label: 'Male voice',
+          sliders: [
+            { key: 'pitch', label: 'Pitch', default: 50, min: 0, max: 100 },
+            { key: 'tone', label: 'Tone', default: 50, min: 0, max: 100 },
+          ],
+        },
+        {
+          id: 'femaleVoice',
+          label: 'Female voice',
+          sliders: [
+            { key: 'pitch', label: 'Pitch', default: 50, min: 0, max: 100 },
+            { key: 'tone', label: 'Tone', default: 50, min: 0, max: 100 },
+          ],
+        },
+        {
+          id: 'telephone',
+          label: 'Telephone',
+          sliders: [
+            { key: 'intensity', label: 'Intensity', default: 50, min: 0, max: 100 },
+            { key: 'tone', label: 'Tone', default: 50, min: 0, max: 100 },
+          ],
+        },
       ],
     });
     const text = result.content[0]?.text ?? '';
@@ -555,6 +581,9 @@ describe('what an agent reads about the audio effects', () => {
     expect(text).toContain(
       "\n  slowReverb (Slow + reverb) - speed (the sheet's Slow) 0.5..1, default 0.8; sliders (effectSettings) reverb 0..100, default 50; room 0..100, default 50",
     );
+    expect(text).toContain('\n  maleVoice (Male voice) - sliders (effectSettings) pitch 0..100, default 50; tone 0..100, default 50');
+    expect(text).toContain('\n  femaleVoice (Female voice) - sliders (effectSettings) pitch 0..100, default 50; tone 0..100, default 50');
+    expect(text).toContain('\n  telephone (Telephone) - sliders (effectSettings) intensity 0..100, default 50; tone 0..100, default 50');
     // In the whole catalogue too, and in its limits.
     expect(Object.keys(catalog.run({}).structuredContent ?? {})).toContain('audioEffects');
     const limits = catalog.run({ section: 'limits' });

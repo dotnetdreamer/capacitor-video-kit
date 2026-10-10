@@ -21,9 +21,10 @@ import { SOUND_EFFECT_ICONS } from './effect-icons';
 const SNAP_RADIUS = 3;
 
 /**
- * The effects for an audio effect layer: a row of tiles - a megaphone, slow + reverb - and under it the
- * sliders of the one the selected layer has: how hard the megaphone is and its tone, how slow the
- * layer plays what it covers and how big its room is. With no layer selected, a tile adds one at the
+ * The effects for an audio effect layer: a row of tiles - a megaphone, slow + reverb, a male and a
+ * female voice, a telephone - and under it the sliders of the one the selected layer has: how hard
+ * the megaphone is and its tone, how slow the layer plays what it covers and how big its room is, how
+ * far a voice is moved, how narrow the line is. With no layer selected, a tile adds one at the
  * playhead, on top of any already there ([EditorStore.chooseAudioEffect]); with one, a tile changes its
  * effect, and the head's "none" takes the layer away, as the Filters sheet's takes a filter off. A tap
  * is one undo step and so is a drag of a slider. The preview plays every sound the layer covers through
