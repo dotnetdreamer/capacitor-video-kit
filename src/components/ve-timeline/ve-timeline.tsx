@@ -4335,7 +4335,8 @@ type DragCursor = 'move' | 'resize' | null;
 function dragCursor(drag: TimelineDrag): DragCursor {
   if (drag.kind === 'trim' || drag.kind === 'end') return 'resize';
   // A layer's and a sound's two edge modes trim; the third moves the whole window.
-  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'afx' || drag.kind === 'music' || drag.kind === 'audio') && (drag.mode === 'start' || drag.mode === 'end')) return 'resize';
+  if ((drag.kind === 'layer' || drag.kind === 'zoom' || drag.kind === 'afx' || drag.kind === 'music' || drag.kind === 'audio') && (drag.mode === 'start' || drag.mode === 'end'))
+    return 'resize';
   return 'move';
 }
 

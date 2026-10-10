@@ -85,6 +85,7 @@ export type EditorIconName =
   | 'transition'
   | 'transition-outline'
   | 'trash-outline'
+  | 'trim-outline'
   | 'volume-high'
   | 'volume-high-outline'
   | 'volume-mute';
@@ -226,12 +227,18 @@ export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
    * an outline that thin would be a smudge; it is filled from the host and stroked as well, so its
    * corners come out as round as the outline's.
    */
-  'transition':
-    '<path d="M88 128 256 256 88 384ZM424 128 256 256 424 384Z" stroke="currentColor" stroke-linejoin="round" stroke-width="48px"/>',
+  'transition': '<path d="M88 128 256 256 88 384ZM424 128 256 256 424 384Z" stroke="currentColor" stroke-linejoin="round" stroke-width="48px"/>',
   'transition-outline':
     '<path d="M80 120 256 256 80 392ZM432 120 256 256 432 392Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'trash-outline':
     '<path d="m112 112 20 320c.95 18.49 14.4 32 32 32h184c17.67 0 30.87-13.51 32-32l20-320" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="M80 112h352" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32px"/><path d="M192 112V72h0a23.93 23.93 0 0 1 24-24h80a23.93 23.93 0 0 1 24 24h0v40M256 176v224M184 176l8 224M328 176l-8 224" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  /*
+   * Not an Ionicon - it has nothing for picking a stretch of a clip - and drawn in the transition
+   * glyphs' grammar: a bracketed window over a clip's line, the part held inside it, which is what
+   * the Trim tool slides along the clip.
+   */
+  'trim-outline':
+    '<path d="M184 128h-56v256h56M328 128h56v256h-56M48 256h32M432 256h32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><rect x="176" y="216" width="160" height="80" rx="16" fill="currentColor"/>',
   'volume-high':
     '<path d="M232 416a23.88 23.88 0 0 1-14.2-4.68 8 8 0 0 1-.66-.51L125.76 336H56a24 24 0 0 1-24-24V200a24 24 0 0 1 24-24h69.75l91.37-74.81a8 8 0 0 1 .66-.51A24 24 0 0 1 256 120v272a24 24 0 0 1-24 24M320 336a16 16 0 0 1-14.29-23.19c9.49-18.87 14.3-38 14.3-56.81 0-19.38-4.66-37.94-14.25-56.73a16 16 0 0 1 28.5-14.54C346.19 208.12 352 231.44 352 256c0 23.86-6 47.81-17.7 71.19A16 16 0 0 1 320 336"/><path d="M368 384a16 16 0 0 1-13.86-24C373.05 327.09 384 299.51 384 256c0-44.17-10.93-71.56-29.82-103.94a16 16 0 0 1 27.64-16.12C402.92 172.11 416 204.81 416 256c0 50.43-13.06 83.29-34.13 120a16 16 0 0 1-13.87 8"/><path d="M416 432a16 16 0 0 1-13.39-24.74C429.85 365.47 448 323.76 448 256c0-66.5-18.18-108.62-45.49-151.39a16 16 0 1 1 27-17.22C459.81 134.89 480 181.74 480 256c0 64.75-14.66 113.63-50.6 168.74A16 16 0 0 1 416 432"/>',
   'volume-high-outline':

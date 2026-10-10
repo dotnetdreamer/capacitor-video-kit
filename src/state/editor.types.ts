@@ -32,7 +32,8 @@ export type EditorPanel =
   | 'zoom'
   | 'animation'
   | 'background'
-  | 'audioEffects';
+  | 'audioEffects'
+  | 'slip';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the

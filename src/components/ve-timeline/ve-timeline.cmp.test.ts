@@ -1425,8 +1425,16 @@ describe('audio lanes', () => {
   function packedSounds(store: EditorStore, secondDurationMs = 2000) {
     store.pps.value = 24;
     const sound = (fileName: string, startMs: number): EditMusic => ({
-      uri: `blob:${fileName}`, fileName, sourceDurationMs: 2000,
-      inMs: 0, outMs: 0, startMs, endMs: 0, volume: 0.8, loop: false, fadeOutMs: 0,
+      uri: `blob:${fileName}`,
+      fileName,
+      sourceDurationMs: 2000,
+      inMs: 0,
+      outMs: 0,
+      startMs,
+      endMs: 0,
+      volume: 0.8,
+      loop: false,
+      fadeOutMs: 0,
     });
     const first = store.addAudioClip(sound('first', 0))!;
     const second = store.addAudioClip({ ...sound('second', 2000), sourceDurationMs: secondDurationMs })!;
@@ -1476,7 +1484,10 @@ describe('audio lanes', () => {
     expect(store.manifest.value).toBe(before);
     expect(scroller.scrollLeft).toBe(0);
     pointer(scroller, 'pointerup', from.x + 40, from.y);
-    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[second, 0], [first, 2000]]);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([
+      [second, 0],
+      [first, 2000],
+    ]);
     store.undo();
     expect(store.manifest.value).toBe(before);
     expect(store.toast.value?.text).toBe('Undo: Reorder audio');
@@ -1487,7 +1498,10 @@ describe('audio lanes', () => {
     await until('the first rail slot', () => heldIndex(tl) === 0);
     expect(store.manifest.value).toBe(swapped);
     pointer(scroller, 'pointerup', back.x - 40, back.y);
-    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[first, 0], [second, 2000]]);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([
+      [first, 0],
+      [second, 2000],
+    ]);
     store.undo();
     expect(store.manifest.value).toBe(swapped);
     expect(store.toast.value?.text).toBe('Undo: Reorder audio');
@@ -1532,7 +1546,10 @@ describe('audio lanes', () => {
     expect(store.manifest.value).toBe(before);
     expect(scroller.scrollLeft).toBe(0);
     pointer(scroller, 'pointerup', from.x - 40, from.y);
-    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[second, 0], [first, 8000]]);
+    expect(store.manifest.value.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([
+      [second, 0],
+      [first, 8000],
+    ]);
   });
 
   it('commits the last rail position when released before the next animation frame', async () => {
@@ -1645,8 +1662,16 @@ describe('audio lanes', () => {
     let first: string | null = null;
     for (let i = 0; i < 12; i += 1) {
       const id = store.addAudioClip({
-        uri: `blob:sound-${i}`, fileName: `sound-${i}`, sourceDurationMs: 500,
-        inMs: 0, outMs: 0, startMs: i * 500, endMs: 0, volume: 0.8, loop: false, fadeOutMs: 0,
+        uri: `blob:sound-${i}`,
+        fileName: `sound-${i}`,
+        sourceDurationMs: 500,
+        inMs: 0,
+        outMs: 0,
+        startMs: i * 500,
+        endMs: 0,
+        volume: 0.8,
+        loop: false,
+        fadeOutMs: 0,
       })!;
       first ??= id;
     }
@@ -1670,9 +1695,15 @@ describe('audio lanes', () => {
     const other = store.addAudioClip({ ...store.selectedAudio.value!, fileName: 'other', uri: 'blob:other', startMs: 0 })!;
     store.commit('Colliding domain IDs', m => ({
       ...m,
-      audioTracks: m.audioTracks!.map((track, i) => i === 0 ? {
-        ...track, id: 'vt-1', clips: track.clips.map(clip => clip.id === first ? { ...clip, id: 'seg-a' } : clip),
-      } : track),
+      audioTracks: m.audioTracks!.map((track, i) =>
+        i === 0
+          ? {
+              ...track,
+              id: 'vt-1',
+              clips: track.clips.map(clip => (clip.id === first ? { ...clip, id: 'seg-a' } : clip)),
+            }
+          : track,
+      ),
     }));
     const before = store.manifest.value;
     const from = await holdAudio(tl, store, 'seg-a');

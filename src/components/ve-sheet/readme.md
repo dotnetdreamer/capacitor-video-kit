@@ -131,6 +131,7 @@ Type: `Promise<void>`
  - [ve-layout-sheet](../ve-layout-sheet)
  - [ve-opacity-sheet](../ve-opacity-sheet)
  - [ve-quality-sheet](../ve-quality-sheet)
+ - [ve-slip-sheet](../ve-slip-sheet)
  - [ve-sound-sheet](../ve-sound-sheet)
  - [ve-speed-sheet](../ve-speed-sheet)
  - [ve-sticker-sheet](../ve-sticker-sheet)
@@ -158,6 +159,7 @@ graph TD;
   ve-layout-sheet --> ve-sheet
   ve-opacity-sheet --> ve-sheet
   ve-quality-sheet --> ve-sheet
+  ve-slip-sheet --> ve-sheet
   ve-sound-sheet --> ve-sheet
   ve-speed-sheet --> ve-sheet
   ve-sticker-sheet --> ve-sheet

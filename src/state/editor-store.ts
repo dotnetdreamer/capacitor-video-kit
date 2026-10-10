@@ -89,6 +89,7 @@ import {
   setTrackOpacity,
   setTrackStart,
   setPostDuration,
+  slipClip as slipClipOp,
   slotAt,
   sourceMsAt,
   splitAudioClipAt,
@@ -974,7 +975,16 @@ export class EditorStore {
     if (selection) this.toolbarMode.value = 'root';
     // A sheet that was about the old selection makes no sense for the new one.
     const panel = this.panel.value;
-    if (panel === 'speed' || panel === 'volume' || panel === 'opacity' || panel === 'crop' || panel === 'transition' || panel === 'zoom' || panel === 'animation')
+    if (
+      panel === 'speed' ||
+      panel === 'volume' ||
+      panel === 'opacity' ||
+      panel === 'crop' ||
+      panel === 'transition' ||
+      panel === 'zoom' ||
+      panel === 'animation' ||
+      panel === 'slip'
+    )
       this.closePanel();
     // The Audio effects sheet is about a layer, and stays open only while one is what is selected.
     if (panel === 'audioEffects' && selection?.kind !== 'audioEffect') this.closePanel();
@@ -992,6 +1002,7 @@ export class EditorStore {
     this.timelineAddMenuOpen.value = false;
     if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
     if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
+    if (this.panel.value === 'slip' && panel !== 'slip') this.leaveSlip();
     // A layout opening still being played is the layout sheet's, and goes with it.
     if (this.panel.value === 'layout' && panel !== 'layout') this.endAudition();
     if (panel !== 'sound') this.soundReplaceTarget.value = null;
@@ -1003,6 +1014,7 @@ export class EditorStore {
   closePanel(): void {
     if (this.panel.value === 'transition') this.leaveTransition();
     if (this.panel.value === 'animation') this.leaveAnimation();
+    if (this.panel.value === 'slip') this.leaveSlip();
     if (this.panel.value === 'layout') this.endAudition();
     this.panel.value = null;
     this.volumeTarget.value = null;
@@ -1195,8 +1207,15 @@ export class EditorStore {
     const boundary = this.targetBoundary.value;
     if (!boundary || boundary.effectiveMs <= 0) return;
     const middle = boundary.atMs + boundary.effectiveMs / 2;
-    const fromMs = Math.max(0, boundary.atMs - 600);
-    const toMs = Math.min(this.totalMs.value, boundary.atMs + boundary.effectiveMs + 400);
+    this.audition(Math.max(0, boundary.atMs - 600), Math.min(this.totalMs.value, boundary.atMs + boundary.effectiveMs + 400), middle);
+  }
+
+  /**
+   * Plays `fromMs` to `toMs` of the post once, then pauses and parks the preview on `parkMs`. Paused
+   * by the customer part way, it is over there and then, and the playhead stays where they stopped
+   * it. One at a time: a new one ends the one before.
+   */
+  private audition(fromMs: number, toMs: number, parkMs: number): void {
     this.endAudition();
     this.seek(fromMs);
     this.play();
@@ -1213,7 +1232,7 @@ export class EditorStore {
         this.endAudition();
         if (!interrupted) {
           this.pause();
-          this.seek(middle);
+          this.seek(parkMs);
         }
       });
     });
@@ -1344,6 +1363,69 @@ export class EditorStore {
     if (!clip) return;
     const source = this.sourceDurationMs(clip.clipKey);
     this.preview(m => trimClip(m, clipId, inMs, outMs, source));
+  }
+
+  /**
+   * The Trim sheet, on the selected segment: which part of its clip it plays, at the length it has
+   * now. Paused, with the preview on the segment's first frame, which is the frame the sheet's strip
+   * moves. A picture has no part to choose, and opens nothing.
+   */
+  openSlip(): void {
+    const clip = this.selectedClip.value;
+    if (!clip || clip.image) return;
+    this.pause();
+    this.seekToClip(clip.id);
+    this.openPanel('slip');
+  }
+
+  /**
+   * Plays segment `clipId` from `inMs` of its clip on, at the length it has ([slipClipOp]): live inside
+   * the strip's gesture, one step otherwise. The preview goes back to the segment's first frame each
+   * time, so the picture follows the strip as it follows the left trim handle.
+   */
+  slipClip(clipId: string, inMs: number, live = false): void {
+    const clip = findClip(this.manifest.value, clipId);
+    if (!clip) return;
+    const fn = (m: EditManifest): EditManifest => slipClipOp(m, clipId, inMs, this.sourceDurationMs(clip.clipKey));
+    if (live) this.preview(fn);
+    else if (!this.commit('Trim', fn)) return;
+    this.seekToClip(clipId);
+  }
+
+  /**
+   * Plays segment `clipId` once, first frame to last, and parks the preview back on its first frame:
+   * the part as the post will play it, with nothing either side of it.
+   */
+  auditionClip(clipId: string): void {
+    const place = this.clipPlace(clipId);
+    if (place) this.audition(place.startMs, place.startMs + place.durationMs, place.startMs);
+  }
+
+  /** The playhead to segment `clipId`'s first frame, on the base track or a layer. */
+  private seekToClip(clipId: string): void {
+    const place = this.clipPlace(clipId);
+    if (place) this.seek(place.startMs);
+  }
+
+  /**
+   * Where segment `clipId` plays on the post: from its first frame, for as long as it is on screen,
+   * the stretch under the next clip's transition included. On the base track or a layer; null for a
+   * segment the manifest does not have.
+   */
+  private clipPlace(clipId: string): { startMs: number; durationMs: number } | null {
+    const manifest = this.manifest.value;
+    const trackId = trackIdOfClip(manifest, clipId);
+    if (trackId === undefined) return null;
+    const track = trackId === null ? null : findVideoTrack(manifest, trackId);
+    const slot = (track ? timelineSlots({ clips: track.clips }) : this.slots.value).find(s => s.clip.id === clipId);
+    return slot ? { startMs: (track?.startMs ?? 0) + slot.startMs, durationMs: slot.durationMs + slot.tailMs } : null;
+  }
+
+  /** What the Trim sheet was holding, let go of as it shuts: a part still playing stops where it is. */
+  private leaveSlip(): void {
+    const auditioning = this.stopAudition !== null;
+    this.endAudition();
+    if (auditioning) this.pause();
   }
 
   setClipSpeed(clipId: string, speed: number, live = false): void {
@@ -2357,7 +2439,9 @@ export class EditorStore {
     const newId = this.newId('afx');
     if (!this.commit('Cut', m => splitAudioEffectOp(m, id, this.playheadMs.value, newId))) {
       // A cut makes a second layer, so at the cap it is refused however well the playhead is placed.
-      this.showToast(this.audioEffects.value.length >= MAX_AUDIO_EFFECTS ? `You can add up to ${MAX_AUDIO_EFFECTS} audio effects` : 'Move the playhead inside the effect to cut it');
+      this.showToast(
+        this.audioEffects.value.length >= MAX_AUDIO_EFFECTS ? `You can add up to ${MAX_AUDIO_EFFECTS} audio effects` : 'Move the playhead inside the effect to cut it',
+      );
       this.haptic('warning');
       return;
     }

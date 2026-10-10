@@ -302,6 +302,28 @@ export function trimClip(manifest: EditManifest, clipId: string, inMs: number, o
 }
 
 /**
+ * Slides a segment's window along its source: the same length of footage, played from `inMs` on.
+ * What an editor calls a slip. The segment keeps its length, so nothing on the timeline moves - not
+ * the segment, not a cut after it, not a transition across either edge - and only which part of the
+ * clip plays there changes. Held inside the source. A picture has no time to slide through and is
+ * left as it is.
+ *
+ * Not [trimClip] with both edges moved: that lets an edge give way to keep a segment inside its
+ * source, which at the end of the clip would quietly make the segment shorter.
+ *
+ * @param sourceDurationMs 0 when unknown, which lifts the upper bound.
+ */
+export function slipClip(manifest: EditManifest, clipId: string, inMs: number, sourceDurationMs: number): EditManifest {
+  const clip = findClip(manifest, clipId);
+  if (!clip || clip.image) return manifest;
+  const length = clip.outMs - clip.inMs;
+  const latest = sourceDurationMs > 0 ? Math.max(0, sourceDurationMs - length) : Number.MAX_SAFE_INTEGER;
+  const nextIn = Math.round(clamp(inMs, 0, latest));
+  if (nextIn === clip.inMs) return manifest;
+  return patchClip(manifest, clipId, { inMs: nextIn, outMs: nextIn + length });
+}
+
+/**
  * Cuts the segment under `outputMs` in two. The left piece keeps the id; the right piece gets
  * `newId`. Null when either piece would be shorter than [MIN_CLIP_MS] of source.
  */

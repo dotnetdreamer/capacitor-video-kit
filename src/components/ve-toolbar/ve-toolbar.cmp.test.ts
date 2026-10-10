@@ -219,6 +219,20 @@ describe('ve-toolbar', () => {
     expect(tile(bar, 'split').textContent?.trim()).toBe('Cut');
   });
 
+  /* A slip, labelled for what people call it: choosing which part of the video plays. */
+  it('calls the tool that slides a segment along its clip Trim, beside Cut, and opens its sheet on the segment', async () => {
+    const { store, bar } = await mount();
+
+    store.select({ kind: 'clip', id: 'seg-a' });
+    await until('the clip row', () => label(bar) === 'Clip tools');
+    expect(ids(bar).slice(0, 3)).toEqual(['split', 'slip', 'speed']);
+    expect(tile(bar, 'slip').textContent?.trim()).toBe('Trim');
+
+    tile(bar, 'slip').click();
+    expect(store.panel.value).toBe('slip');
+    expect(store.selection.value).toEqual({ kind: 'clip', id: 'seg-a' });
+  });
+
   it('gives a picture no Speed and no Volume, on the base track and on a layer', async () => {
     const { store, bar } = await mount();
     const still = { image: true as const, inMs: 1_800_000, outMs: 1_803_000 };
@@ -232,6 +246,8 @@ describe('ve-toolbar', () => {
     await until('the clip row', () => label(bar) === 'Clip tools');
     expect(ids(bar)).not.toContain('speed');
     expect(ids(bar)).not.toContain('volume');
+    // Nor a part of its clip to choose, which is all Trim does.
+    expect(ids(bar)).not.toContain('slip');
     // Everything else a segment has, a picture has.
     for (const id of ['split', 'transition', 'delete', 'duplicate', 'replace', 'crop', 'fit', 'filters', 'adjust']) {
       expect(ids(bar)).toContain(id);
@@ -266,7 +282,7 @@ describe('ve-toolbar', () => {
     // rectangle, and for a while it was the one segment that could not be told to.
     store.select({ kind: 'clip', id: 'seg-c' });
     await until('the video layer row', () => label(bar) === 'Video layer tools');
-    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'speed', 'volume', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'slip', 'speed', 'volume', 'start-here', 'replace', 'delete']);
     expect(tile(bar, 'delete').textContent).toContain('Remove');
 
     store.select({ kind: 'overlay', id: 'ov-text' });
