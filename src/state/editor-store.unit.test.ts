@@ -163,7 +163,10 @@ describe('EditorStore', () => {
     store.reorderAudio(first, 1);
     store.reorderAudio(first, 1);
     const after = store.manifest.value;
-    expect(after.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([[second, 0], [first, 1000]]);
+    expect(after.audioTracks![0]!.clips.map(clip => [clip.id, clip.startMs])).toEqual([
+      [second, 0],
+      [first, 1000],
+    ]);
     expect(store.selectedAudio.value?.id).toBe(first);
     store.undo();
     expect(store.manifest.value).toBe(before);
@@ -583,6 +586,86 @@ describe('EditorStore', () => {
       store.splitAtPlayhead();
       store.undo();
       expect(store.toast.value?.text).toBe('Undo: Cut');
+    });
+  });
+
+  /* Trim: which part of its clip a segment plays, at the length it has - a slip. */
+  describe('Trim', () => {
+    /** Clip b plays 0.5..1.5 s of its two seconds, so it has room to slide either way. */
+    beforeEach(() => load({ clips: [clip('a', 0, 4000), clip('b', 500, 1500)] }));
+
+    it('opens on the selected segment, paused on its first frame', () => {
+      store.select({ kind: 'clip', id: 'b' });
+      store.openSlip();
+
+      expect(store.panel.value).toBe('slip');
+      expect(store.playheadMs.value).toBe(4000);
+    });
+
+    it('opens on nothing with no part to choose: nothing selected, or a picture', () => {
+      store.openSlip();
+      expect(store.panel.value).toBeNull();
+
+      store.commit('Picture', m => ({ ...m, clips: [m.clips[0], { ...m.clips[1], image: true }] }));
+      store.select({ kind: 'clip', id: 'b' });
+      store.openSlip();
+      expect(store.panel.value).toBeNull();
+    });
+
+    it('slides the segment along its clip at the length it has, one undo step a slide', () => {
+      store.select({ kind: 'clip', id: 'b' });
+      store.openSlip();
+      store.slipClip('b', 200, true);
+      store.slipClip('b', 900, true);
+      store.endGesture('Trim');
+
+      expect(store.manifest.value.clips[1]).toMatchObject({ inMs: 900, outMs: 1900 });
+      expect(store.totalMs.value).toBe(5000);
+      store.undo();
+      expect(store.toast.value?.text).toBe('Undo: Trim');
+      expect(store.manifest.value.clips[1]).toMatchObject({ inMs: 500, outMs: 1500 });
+      expect(store.canUndo.value).toBe(false);
+    });
+
+    it('holds the part inside the clip, as one step from a key', () => {
+      store.slipClip('b', 1800);
+
+      expect(store.manifest.value.clips[1]).toMatchObject({ inMs: 1000, outMs: 2000 });
+      store.undo();
+      expect(store.toast.value?.text).toBe('Undo: Trim');
+    });
+
+    /* The picture follows the strip, as it follows the left trim handle. */
+    it('keeps the preview on the segment’s first frame as it slides', () => {
+      store.playheadMs.value = 0;
+      store.slipClip('b', 900, true);
+
+      expect(store.playheadMs.value).toBe(4000);
+    });
+
+    it('closes when something else is selected', () => {
+      store.select({ kind: 'clip', id: 'b' });
+      store.openSlip();
+      store.select({ kind: 'clip', id: 'a' });
+
+      expect(store.panel.value).toBeNull();
+    });
+
+    it('slides a segment on a layer, and finds its first frame there', () => {
+      load({ clips: [clip('a', 0, 4000)], videoTracks: [track([clip('b', 0, 1000)], { startMs: 1500 })] });
+      store.select({ kind: 'clip', id: 'b' });
+      store.openSlip();
+      expect(store.playheadMs.value).toBe(1500);
+
+      store.slipClip('b', 600);
+      expect(store.manifest.value.videoTracks[0].clips[0]).toMatchObject({ inMs: 600, outMs: 1600 });
+    });
+
+    it('plays the segment from its first frame', () => {
+      store.playheadMs.value = 0;
+      store.auditionClip('b');
+
+      expect(store.playheadMs.value).toBe(4000);
     });
   });
 

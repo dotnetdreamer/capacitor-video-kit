@@ -33,7 +33,8 @@ export type EditorPanel =
   | 'animation'
   | 'background'
   | 'audioEffects'
-  | 'focus';
+  | 'focus'
+  | 'slip';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the

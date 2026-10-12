@@ -542,7 +542,7 @@ export class VeToolbar {
     const tiles: ToolTile[] = [
       // Labelled Cut: the tool cuts the segment in two at the playhead. `split` stays its id.
       { id: 'split', label: 'Cut', icon: 'cut-outline', run: () => store.splitAtPlayhead() },
-      ...(picture ? [] : [this.speedTile()]),
+      ...(picture ? [] : [this.slipTile(), this.speedTile()]),
       {
         id: 'transition',
         label: 'Transition',
@@ -600,6 +600,16 @@ export class VeToolbar {
     const store = this.ctx.store;
     if (!store.host.media.findSubjects) return [];
     return [{ id: 'focus', label: 'Focus', icon: 'aperture-outline', run: () => store.openFocus() }];
+  }
+
+  /**
+   * Which part of its clip the selected segment plays, slid along the clip at the length it has: a
+   * slip, labelled Trim, which is what people call choosing the bit of a video they want. On both
+   * clip rows, beside Cut on the base one, and on neither for a picture, which has no time to slide.
+   */
+  private slipTile(): ToolTile {
+    const store = this.ctx.store;
+    return { id: 'slip', label: 'Trim', icon: 'trim-outline', run: () => store.openSlip() };
   }
 
   /**
@@ -675,7 +685,7 @@ export class VeToolbar {
           run: () => store.toggleFit(),
         },
         // Neither for a picture, as on the base row.
-        ...(picture ? [] : [this.speedTile(), this.volumeTile()]),
+        ...(picture ? [] : [this.slipTile(), this.speedTile(), this.volumeTile()]),
         ...this.focusTile(),
         {
           id: 'start-here',

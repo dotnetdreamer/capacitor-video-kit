@@ -88,7 +88,10 @@ describe('addAudioEffect', () => {
 
   /* Five slow + reverbs over one line is the customer's choice, and so is the agent's. */
   it('stacks the same effect over the same time as many times as it is asked to', () => {
-    const five = applyEditOps(post(), Array.from({ length: 5 }, (_, i) => add(`s${i}`, 0, 5000, { effect: 'slowReverb' })));
+    const five = applyEditOps(
+      post(),
+      Array.from({ length: 5 }, (_, i) => add(`s${i}`, 0, 5000, { effect: 'slowReverb' })),
+    );
     expect(windows(five)).toEqual(['s0@0..5000', 's1@0..5000', 's2@0..5000', 's3@0..5000', 's4@0..5000']);
   });
 
@@ -96,7 +99,9 @@ describe('addAudioEffect', () => {
     const manifest = applyEditOps(post(), [add('b', 8000, 9000)]);
     expect(windows(applyEditOps(manifest, [add('a', 18_000, 40_000)]))).toEqual(['b@8000..9000', 'a@18000..20000']);
     expect(windows(applyEditOps(manifest, [add('a', 20_000 - MIN_LAYER_MS)]))).toEqual(['b@8000..9000', 'a@19900..20000']);
-    expect(() => applyEditOps(manifest, [add('a', 19_950)])).toThrow(/^op 0 \(addAudioEffect\): "a" cannot start at 19950ms - the post ends at 20000ms, and a layer runs at least 100ms$/);
+    expect(() => applyEditOps(manifest, [add('a', 19_950)])).toThrow(
+      /^op 0 \(addAudioEffect\): "a" cannot start at 19950ms - the post ends at 20000ms, and a layer runs at least 100ms$/,
+    );
     expect(() => applyEditOps(manifest, [add('a', 25_000, 26_000)])).toThrow(/^op 0 \(addAudioEffect\): "a" cannot start at 25000ms - the post ends at 20000ms/);
     // A post with nothing on it has no time for one at all.
     expect(() => applyEditOps(emptyManifest(), [add('a', 0)])).toThrow(/"a" cannot start at 0ms - the post ends at 0ms, and a layer runs at least 100ms$/);
@@ -151,7 +156,10 @@ describe('addAudioEffect', () => {
   it('refuses a taken id, and one more layer than a post holds', () => {
     expect(() => applyEditOps(post(), [add('a', 0, 1000), add('a', 2000, 3000)])).toThrow(/^op 1 \(addAudioEffect\): audio effect id "a" is already on this post$/);
     // All of them over the same second: any number may cover a moment, up to the cap.
-    const full = applyEditOps(post(), Array.from({ length: MAX_AUDIO_EFFECTS }, (_, i) => add(`l${i}`, 0, 1000)));
+    const full = applyEditOps(
+      post(),
+      Array.from({ length: MAX_AUDIO_EFFECTS }, (_, i) => add(`l${i}`, 0, 1000)),
+    );
     expect(full.audioEffects).toHaveLength(MAX_AUDIO_EFFECTS);
     for (const op of [add('more', 15_000, 16_000), { op: 'duplicateAudioEffect', id: 'l0', newId: 'more' }, { op: 'splitAudioEffect', id: 'l0', atMs: 500, newId: 'more' }]) {
       expect(() => applyEditOps(full, [op]), op.op).toThrow(/this post already has the maximum of 50 audio effects$/);
@@ -356,7 +364,13 @@ describe('splitAudioEffect, duplicateAudioEffect and removeAudioEffect', () => {
   it('removes a layer, and the key with the last one', () => {
     const manifest = applyEditOps(post(), [add('a', 1000, 3000), add('b', 4000, 5000)]);
     expect(windows(applyEditOps(manifest, [{ op: 'removeAudioEffect', id: 'a' }]))).toEqual(['b@4000..5000']);
-    expect('audioEffects' in applyEditOps(manifest, [{ op: 'removeAudioEffect', id: 'a' }, { op: 'removeAudioEffect', id: 'b' }])).toBe(false);
+    expect(
+      'audioEffects' in
+        applyEditOps(manifest, [
+          { op: 'removeAudioEffect', id: 'a' },
+          { op: 'removeAudioEffect', id: 'b' },
+        ]),
+    ).toBe(false);
   });
 
   it('refuses an id the post has not got on every op, listing the ones it has', () => {
@@ -378,11 +392,7 @@ describe('splitAudioEffect, duplicateAudioEffect and removeAudioEffect', () => {
     const before = applyEditOps(post(), [add('a', 1000, 3000)]);
     const snapshot = JSON.stringify(before);
     expect(() =>
-      applyEditOps(before, [
-        { op: 'splitAudioEffect', id: 'a', atMs: 2000, newId: 'a2' },
-        { op: 'removeAudioEffect', id: 'a' },
-        patch('a2', { effect: 'echo' }),
-      ]),
+      applyEditOps(before, [{ op: 'splitAudioEffect', id: 'a', atMs: 2000, newId: 'a2' }, { op: 'removeAudioEffect', id: 'a' }, patch('a2', { effect: 'echo' })]),
     ).toThrow(/^op 2 \(patchAudioEffect\)/);
     expect(JSON.stringify(before)).toBe(snapshot);
   });

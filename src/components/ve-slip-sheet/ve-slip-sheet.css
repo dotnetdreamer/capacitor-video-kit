@@ -1,0 +1,152 @@
+/*
+ * The shell gives a compact sheet 320px, which leaves about 227px under the head on the test phone:
+ * the row with Play and the times, the strip, and the line under it all fit with room to breathe.
+ *
+ * The strip runs edge to edge, so only the rows around it are padded.
+ */
+.slip {
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.slip__empty {
+  padding: 4px 20px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  text-align: center;
+}
+
+.slip__row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 20px;
+}
+
+.slip__play {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-size: 20px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.slip__times {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------------------------- strip */
+
+.slip__strip {
+  position: relative;
+  height: 64px;
+  overflow: hidden;
+}
+
+/*
+ * `pan-x` leaves a sideways finger to the browser's own scrolling, fling and all, and a vertical one
+ * to the sheet. `contain` keeps a fling that hits either end from scrolling anything behind it.
+ */
+.slip__scroll {
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  cursor: grab;
+}
+
+.slip__scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.slip__track {
+  position: relative;
+  height: 100%;
+}
+
+.slip__film {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--ve-raised, #2c2c2e);
+}
+
+.slip__tile {
+  position: absolute;
+  top: 0;
+  width: 56px;
+  height: 100%;
+}
+
+.slip__tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+/*
+ * The segment: fixed in the middle while the strip slides under it. Its shadow darkens everything
+ * outside it, out to the strip's edges, which clip it.
+ */
+.slip__frame {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  box-sizing: border-box;
+  border: 2px solid var(--ve-text, #fff);
+  border-radius: 8px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+/* For a keyboard and a screen reader only: the strip is what a finger moves. */
+.slip__keys {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.slip__strip:has(.slip__keys:focus-visible) .slip__frame {
+  outline: 2px solid var(--ve-accent, #a6ff2e);
+  outline-offset: 2px;
+}
+
+.slip__hint {
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  text-align: center;
+}
+
+.slip__play:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) {
+  .slip__play {
+    cursor: pointer;
+  }
+}

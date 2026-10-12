@@ -215,7 +215,14 @@ describe('the parser', () => {
     expect(refusal({ ops: [{ op: 'reverb', decayMs: 1000 }] })).toBe('ops[0].dampHz');
     expect(refusal({ ops: [{ op: 'reverb', decayMs: 1000, dampHz: 5000, wet: 0.5 }] })).toBe('ops[0].dry');
     expect(refusal({ ops: [{ op: 'reverb', decayMs: 1000, dampHz: 5000, wet: 0.5, dry: 1, size: 2 }] })).toBe('ops[0].size');
-    expect(refusal({ ops: [{ op: 'gain', db: 1 }, { op: 'lowpass', q: 1 }] })).toBe('ops[1].hz');
+    expect(
+      refusal({
+        ops: [
+          { op: 'gain', db: 1 },
+          { op: 'lowpass', q: 1 },
+        ],
+      }),
+    ).toBe('ops[1].hz');
     expect(refusal({ ops: [{ op: 'lowpass', hz: Number.NaN, q: 1 }] })).toBe('ops[0].hz');
     expect(refusal({ ops: [{ op: 'peak', hz: 1000, q: 1 }] })).toBe('ops[0].db');
     expect(refusal({ ops: [{ op: 'drive', db: 6, followMs: 'slow' }] })).toBe('ops[0].followMs');
@@ -344,7 +351,12 @@ describe('the arithmetic', () => {
   });
 
   it('runs every channel apart when it does not fold', () => {
-    const effect: ComposeSoundEffect = { ops: [{ op: 'lowpass', hz: 500, q: 1 }, { op: 'drive', db: 6 }] };
+    const effect: ComposeSoundEffect = {
+      ops: [
+        { op: 'lowpass', hz: 500, q: 1 },
+        { op: 'drive', db: 6 },
+      ],
+    };
     const [l, r] = through(effect, sine(440, 0.5, 0.2), sine(2000, 0.5, 0.2));
     const [alone] = through(effect, sine(2000, 0.5, 0.2));
     expect(Array.from(r!)).toEqual(Array.from(alone!));
@@ -563,7 +575,10 @@ describe('the reverb', () => {
     const left = sine(300, 0.5, 0.2);
     const right = sine(700, 0.3, 0.2);
     const [folded] = through({ mono: true, ...room() }, left, right);
-    const [first] = through(room(), left.map((v, i) => (v + right[i]!) / 2));
+    const [first] = through(
+      room(),
+      left.map((v, i) => (v + right[i]!) / 2),
+    );
     for (let i = 0; i < first!.length; i += 7) expect(folded![i]).toBeCloseTo(first![i]!, 6);
   });
 
@@ -699,7 +714,10 @@ describe('the pitch step', () => {
   });
 
   it('moves every harmonic of a voice together, so it is still one voice', () => {
-    const [out] = through(pitch(-6), buzz(210, 0.1, 1, hz => 1000 / (hz + 1000)));
+    const [out] = through(
+      pitch(-6),
+      buzz(210, 0.1, 1, hz => 1000 / (hz + 1000)),
+    );
     const f0 = 210 * Math.pow(2, -6 / 12);
     for (const h of [1, 2, 3, 5, 8]) {
       expect(amplitudeAt(out!, h * f0)).toBeGreaterThan(0.02);
@@ -869,8 +887,7 @@ describe('the male and female voices', () => {
 
 describe('the telephone', () => {
   const telephone = (settings: Record<string, number> = {}) => soundEffectSteps('telephone', settings)!;
-  const level = (hz: number, settings: Record<string, number> = {}): number =>
-    db(rms(through(telephone(settings), sine(hz, 0.1, 0.6))[0]!) / rms(sine(hz, 0.1, 0.6)));
+  const level = (hz: number, settings: Record<string, number> = {}): number => db(rms(through(telephone(settings), sine(hz, 0.1, 0.6))[0]!) / rms(sine(hz, 0.1, 0.6)));
 
   it('is the band a phone line carries, 300 Hz to 3.4 kHz, and little of either side', () => {
     const ops = telephone().ops as { op: string; hz?: number }[];
