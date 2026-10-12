@@ -31,6 +31,7 @@ import {
   type EditAudioClip,
   type EditAudioTrack,
   type EditFit,
+  type EditFocus,
   type EditManifest,
   type EditMusic,
   type EditOverlay,
@@ -40,8 +41,10 @@ import {
   type EditVideoTrack,
   type EditVoiceover,
   type EditZoom,
+  type FocusSubjects,
   type LayoutAnimation,
 } from './edit-manifest';
+import { MAX_FOCUS_CHANGES, normaliseFocus, sameFocus } from './focus';
 import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
 import { sameSoundEffectSettings } from './sound-effects';
@@ -188,7 +191,8 @@ export function trackIdOfClip(manifest: EditManifest, clipId: string): string | 
 export function patchClip(
   manifest: EditManifest,
   clipId: string,
-  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image'>> & ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null },
+  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image' | 'focus'>> &
+    ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null; focus?: EditFocus | null },
 ): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
@@ -199,6 +203,12 @@ export function patchClip(
   }
   // The key goes rather than being left as `null`: a video segment carries no `image` at all.
   if ('image' in patch && !patch.image) delete next.image;
+  // Held to what the manifest keeps, so a sheet's raw numbers never reach a draft.
+  if ('focus' in patch) {
+    const focus = patch.focus ? normaliseFocus(patch.focus) : undefined;
+    if (focus) next.focus = focus;
+    else delete next.focus;
+  }
   if (sameClip(current, next)) return manifest;
   if (manifest.clips.some(clip => clip.id === clipId)) {
     return { ...manifest, clips: manifest.clips.map(clip => (clip.id === clipId ? next : clip)) };
@@ -340,6 +350,8 @@ export function canJoinWithNext(manifest: EditManifest, clipId: string): boolean
     // A transition between the halves is a boundary somebody chose to keep and dress. Joining would
     // throw it away without a word, so the halves stay two until it is taken off.
     !b.transitionIn &&
+    // So is a focus on one half and not the other, or a different one: the join would keep only the first.
+    sameFocus(a.focus, b.focus) &&
     Math.abs(a.outMs - b.inMs) <= 1
   );
 }
@@ -450,14 +462,15 @@ function reordered(clips: EditClip[], clipId: string, toIndex: number): EditClip
  * picture's length the same way it takes any segment's, and stops being one.
  */
 export function replaceClipSource(manifest: EditManifest, clipId: string, clipKey: string, sourceDurationMs: number, keepLength = true, picture = false): EditManifest {
+  const found = findClip(manifest, clipId);
+  const focus = found?.focus ? { focus: focusForNewSource(found.focus) } : {};
   if (picture) {
-    const found = findClip(manifest, clipId);
     if (!found) return manifest;
     const window = defaultPictureEdit(clipKey, clipId, keepLength ? clipDurationMs(found) : PICTURE_CLIP_MS);
-    return patchClip(manifest, clipId, { clipKey, inMs: window.inMs, outMs: window.outMs, speed: 1, image: true });
+    return patchClip(manifest, clipId, { clipKey, inMs: window.inMs, outMs: window.outMs, speed: 1, image: true, ...focus });
   }
 
-  const current = keepLength ? findClip(manifest, clipId) : null;
+  const current = keepLength ? found : null;
   const wanted = current ? current.outMs - current.inMs : sourceDurationMs;
 
   return patchClip(manifest, clipId, {
@@ -465,7 +478,82 @@ export function replaceClipSource(manifest: EditManifest, clipId: string, clipKe
     inMs: 0,
     outMs: Math.max(MIN_CLIP_MS, Math.round(Math.min(wanted, sourceDurationMs))),
     image: null,
+    ...focus,
   });
+}
+
+/**
+ * A focus carried onto new footage: its look kept, its choice of subjects kept where it names them by
+ * what they are (`main`, `all`) and made `main` where it named the old footage's ids, which mean
+ * nothing in the new one - and its changes gone, being moments of footage that is no longer there.
+ */
+function focusForNewSource(focus: EditFocus): EditFocus {
+  const next: EditFocus = { ...focus, subjects: Array.isArray(focus.subjects) ? 'main' : focus.subjects };
+  delete next.changes;
+  return next;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Focus                                                                                          */
+/* -------------------------------------------------------------------------------------------- */
+
+/** A segment's focus, or `null` to take it off. A focus is held to what the manifest keeps ([normaliseFocus]). */
+export function setClipFocus(manifest: EditManifest, clipId: string, focus: EditFocus | null): EditManifest {
+  return patchClip(manifest, clipId, { focus });
+}
+
+/** The focus's look - how soft, how grey, how dark, which way round - changed, and its subjects left alone. */
+export function patchClipFocus(manifest: EditManifest, clipId: string, patch: Partial<Pick<EditFocus, 'blur' | 'mono' | 'dim'>> & { invert?: boolean }): EditManifest {
+  const focus = findClip(manifest, clipId)?.focus;
+  if (!focus) return manifest;
+  const next: EditFocus = { ...focus };
+  if (patch.blur !== undefined) next.blur = patch.blur;
+  if (patch.mono !== undefined) next.mono = patch.mono;
+  if (patch.dim !== undefined) next.dim = patch.dim;
+  if (patch.invert !== undefined) {
+    if (patch.invert) next.invert = true;
+    else delete next.invert;
+  }
+  return patchClip(manifest, clipId, { focus: next });
+}
+
+/**
+ * The subjects of one of the focus's choices - `-1` its own, which holds until the first change, or a
+ * change's index (see [focusEntryAt]) - set to `subjects`.
+ */
+export function setFocusSubjects(manifest: EditManifest, clipId: string, entry: number, subjects: FocusSubjects): EditManifest {
+  const focus = findClip(manifest, clipId)?.focus;
+  if (!focus) return manifest;
+  if (entry < 0) return patchClip(manifest, clipId, { focus: { ...focus, subjects } });
+  const changes = focus.changes ?? [];
+  if (!changes[entry]) return manifest;
+  return patchClip(manifest, clipId, { focus: { ...focus, changes: changes.map((change, i) => (i === entry ? { ...change, subjects } : change)) } });
+}
+
+/**
+ * A change of focus at source time `atMs` of the segment, to `subjects`: a pull starting there. Null
+ * where the segment has no focus, the time is outside its trim, or it already has as many changes as
+ * it keeps; one already at that time is replaced.
+ */
+export function addFocusChange(manifest: EditManifest, clipId: string, atMs: number, subjects: FocusSubjects): EditManifest | null {
+  const clip = findClip(manifest, clipId);
+  const focus = clip?.focus;
+  if (!clip || !focus) return null;
+  const at = Math.round(atMs);
+  if (at < clip.inMs || at >= clip.outMs) return null;
+  const changes = (focus.changes ?? []).filter(change => change.atMs !== at);
+  if (changes.length >= MAX_FOCUS_CHANGES) return null;
+  return patchClip(manifest, clipId, { focus: { ...focus, changes: [...changes, { atMs: at, subjects }] } });
+}
+
+/** The change at `index` taken off, the focus pulling straight from the choice before it to the one after. */
+export function removeFocusChange(manifest: EditManifest, clipId: string, index: number): EditManifest {
+  const focus = findClip(manifest, clipId)?.focus;
+  if (!focus?.changes?.[index]) return manifest;
+  const changes = focus.changes.filter((_, i) => i !== index);
+  const next: EditFocus = { ...focus, changes };
+  if (changes.length === 0) delete next.changes;
+  return patchClip(manifest, clipId, { focus: next });
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -2116,7 +2204,8 @@ function sameClip(a: EditClip, b: EditClip): boolean {
     sameRect(a.crop, b.crop) &&
     sameRect(a.rect, b.rect) &&
     sameTransition(a.transitionIn, b.transitionIn) &&
-    !!a.image === !!b.image
+    !!a.image === !!b.image &&
+    sameFocus(a.focus, b.focus)
   );
 }
 

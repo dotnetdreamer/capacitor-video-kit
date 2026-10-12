@@ -224,7 +224,105 @@ export interface ComposeClip {
    * black, because the H.264 it turns each picture into has no alpha.
    */
   image?: boolean;
+  /**
+   * Some of the footage's subjects kept sharp and everything else softened: see [ComposeFocus]. Absent
+   * is the footage as it is, which is every spec written before this key, and every engine decides
+   * that ONCE, when it builds its plan, so a clip with no focus is drawn by exactly the path it always
+   * was. Last on the clip, after `image`, in every parser.
+   */
+  focus?: ComposeFocus;
 }
+
+/**
+ * Which of a clip's subjects are in focus over its footage, and what happens to everything else -
+ * LOWERED, as a camera is: JS resolves which subjects the customer picked, and compiles every change
+ * of focus into keys, so an engine only interpolates between numbers it is handed.
+ *
+ * WHERE THE SUBJECTS COME FROM. [uri] is a subject track: the file `findSubjects` wrote for THIS
+ * clip's source (see [SUBJECT_TRACK_MAGIC] for its layout). It holds, for frames of the source at
+ * times of its own, a coarse grid over the ORIENTED source frame in which every cell names the
+ * subject it falls on (1..255) or the background (0). Subject ids are the track's; a subject the
+ * track does not have simply covers no cell.
+ *
+ * DRAWING IT, for a source frame `C` at SOURCE time `s` (ms), in the oriented source's own pixels
+ * (`Ws` x `Hs`), gamma-encoded RGB:
+ *
+ *   1. The track's frames either side: `i` the last whose time is at or before `s` and `i + 1` the
+ *      next, with `w = (s - t[i]) / (t[i + 1] - t[i])`. Before the first frame the first HOLDS, after
+ *      the last the last holds, and a track of one frame (a picture's) is that frame at every `s`.
+ *   2. Each listed subject's focus at `s`, read off [atMs] exactly as a camera key is read: holding
+ *      before the first key and after the last, straight lines between, and two keys at one time a
+ *      STEP, the later taking effect at that time. The background and every subject not listed are 0.
+ *   3. Each cell's value `m = (1 - w) * f(L[i]) + w * f(L[i + 1])`, with `f` the focus of whichever
+ *      subject the cell names in that frame. [invert] makes it `1 - m`.
+ *   4. The mask at a pixel: `m` interpolated bilinearly between CELL CENTRES - cell (cx, cy) of a
+ *      `W` x `H` grid is centred at ((cx + 0.5) / W, (cy + 0.5) / H) of the frame, the grid's edges
+ *      clamped - then eased, `e = m * m * (3 - 2 * m)`. 1 is in focus; 0 is not.
+ *   5. What is out of focus, `B`: the frame Gaussian-blurred with sigma `blur * min(Ws, Hs)`, edges
+ *      clamped, each pixel WEIGHTED by `1 - e` - `B = G(C * (1 - e)) / G(1 - e)` - so a subject's
+ *      colour never bleeds into the softened world around it. Where `G(1 - e)` is below 1/1024 (deep
+ *      inside a subject, where `e` keeps the frame anyway) `B` is `C`. A `blur` of 0 is `B = C`.
+ *   6. `B = mix(B, Y, mono)`, `Y` its luma `0.2126 R + 0.7152 G + 0.0722 B` on all three channels.
+ *   7. `B = B * (1 - dim)`.
+ *   8. The frame becomes `mix(B, C, e)`, held to 0..1.
+ *
+ * WHERE IN THE PIPELINE. It is the FIRST thing done to the oriented source frame, so everything after
+ * it treats the focused picture as the footage: the grade, the crop, the fit, the rectangle and its
+ * turn, the camera, slow motion and a transition's two sides. A frame a slowed clip makes between two
+ * source frames is focused as the footage at the instant it stands for - either each source frame is
+ * focused at its own source time before the frame between them is made, or the frame made is focused
+ * at its own source time; the two differ by less than a subject moves in a frame. A transition's
+ * outgoing side is a clip like any other and carries its own `focus`, its keys still in its source's
+ * time.
+ *
+ * Engines may approximate the Gaussian the way they approximate a transition's - halvings and a few
+ * passes - to within what an 8-bit frame shows, and may work at less than the source's size where the
+ * frame is drawn smaller than that; the mask, its ease and the weighting may not be approximated.
+ *
+ * Each parser REFUSES, as shape errors with the path that broke: a focus that is not an object, a
+ * [uri] that is not a non-empty string, a missing [atMs] or [subjects] or one that is not an array,
+ * an `atMs` with no keys or more than [MAX_FOCUS_KEYS], a time that is not a finite number or goes
+ * back in time, a subject that is not an object, an id that is not a whole number 1..255 or names a
+ * subject twice, a `focus` that is not an array of `atMs`'s length or holds a value that is not a
+ * finite number, and a [blur], [mono] or [dim] that is present and not a finite number. It CLAMPS
+ * every focus to 0..1, [blur] to 0..[MAX_FOCUS_BLUR] and [mono] and [dim] to 0..1, and IGNORES keys it
+ * does not know. A focus whose blur, mono and dim are all 0 changes nothing and is DROPPED, which is
+ * the absent path. A subject track that cannot be read when the render needs it - missing, not a
+ * subject track, a frame that does not decode - fails the render as `unreadable_input` naming the
+ * clip, exactly as footage that cannot be read does.
+ */
+export interface ComposeFocus {
+  /** The subject track `findSubjects` wrote for this clip's source: `file://` on a phone, `blob:` in a page. */
+  uri: string;
+  /** SOURCE milliseconds of the clip's file, non-decreasing; equal times are a step (the later key wins). */
+  atMs: number[];
+  /** How in focus each listed subject is at every key. A subject not listed is out of focus throughout. */
+  subjects: ComposeFocusSubject[];
+  /** Gaussian sigma of what is out of focus, a fraction of the oriented source frame's shorter side. */
+  blur: number;
+  /** 0..1, how far what is out of focus is turned grey. Absent is 0. */
+  mono?: number;
+  /** 0..1, how far what is out of focus is darkened. Absent is 0. */
+  dim?: number;
+  /** The subjects are what is softened and the rest is kept sharp. Absent is false. */
+  invert?: boolean;
+}
+
+/** One subject's focus over a clip: its id in the subject track, and 0..1 at each of [ComposeFocus.atMs]. */
+export interface ComposeFocusSubject {
+  id: number;
+  focus: number[];
+}
+
+/** The most keys one [ComposeFocus] may carry. A spec with more is rejected rather than truncated. */
+export const MAX_FOCUS_KEYS = 2000;
+
+/**
+ * The most a [ComposeFocus.blur] may be, a tenth of the source's shorter side: far past anything the
+ * editor offers, which only keeps a hand-built spec from asking an engine for a kernel the size of
+ * the frame.
+ */
+export const MAX_FOCUS_BLUR = 0.1;
 
 /**
  * How one base clip gives way to the next.
@@ -1627,6 +1725,135 @@ export interface LabelMediaResult {
   /** One entry per frame looked at, in time order: one for a picture. */
   frames: LabeledFrame[];
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* Subjects                                                                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * What found a footage's subjects: Apple's Vision on iOS - its foreground instance masks from iOS
+ * 17, which separate people, pets and things from what is behind them, and its person segmentation
+ * on iOS 16 - Google's ML Kit selfie segmentation on Android, and MediaPipe's selfie segmenter in a
+ * browser. The last two, and Vision on iOS 16, find PEOPLE and nothing else, and tell two of them
+ * apart only where they do not touch.
+ */
+export type SubjectEngine = 'vision' | 'mlkit' | 'mediapipe';
+
+/** A video or picture whose subjects are to be found. */
+export interface FindSubjectsOptions {
+  /** `file://`, `content://` or an absolute path on a phone; in a browser any URL the page can read. */
+  uri: string;
+  /** What the file holds. Absent is read off the file, as [LabelMediaOptions.kind] is. */
+  kind?: 'video' | 'image';
+  /**
+   * How many frames a second of a video are looked at, 1 to 30. Absent is the engine's own: 15 on
+   * iOS, 10 on Android and in a browser, where a frame costs more. Between two frames looked at,
+   * the subjects are taken to move in a straight line ([ComposeFocus], step 3).
+   */
+  fps?: number;
+}
+
+/** One subject found in a footage. */
+export interface SubjectInfo {
+  /**
+   * 1..255, and the value its cells have in the track. Ranked: 1 is the subject that is on screen
+   * the most, largest and longest - the footage's MAIN subject - 2 the next, and so on.
+   */
+  id: number;
+  /** `person` where the engine finds only people; `subject` where it finds anything that stands out. */
+  kind: 'person' | 'subject';
+  /** The first and the last frame it was found in, source ms. */
+  startMs: number;
+  endMs: number;
+  /** The frame it is largest in, source ms - the one to show it by. */
+  peakMs: number;
+  /** Where it is in that frame, 0..1 of the oriented frame, top-left origin. */
+  box: ComposeRect;
+  /** How much of the frame it covers, 0..1, averaged over the frames it is in. */
+  area: number;
+}
+
+export interface FindSubjectsResult {
+  engine: SubjectEngine;
+  /**
+   * The subject track: a file in the app's cache on a phone (`file://`), a `blob:` URL in a page. It
+   * is what [ComposeFocus.uri] names, and the editor's preview reads it too. A phone's cache may be
+   * emptied by the system: ask again before a render, which answers at once from a track still there.
+   */
+  uri: string;
+  /** The track was already there from an earlier call, and nothing was looked at. */
+  cached: boolean;
+  /** Whether the file was read as a picture or as a video. */
+  kind: 'video' | 'image';
+  /** The track's grid, in cells, over the oriented frame: [SUBJECT_GRID] on its longer side. */
+  width: number;
+  height: number;
+  /** How many frames were looked at: one for a picture. */
+  frames: number;
+  /** How long the source is, ms: 0 for a picture. */
+  durationMs: number;
+  /** Strongest first, which is id order. Empty when nothing stood out in any frame. */
+  subjects: SubjectInfo[];
+}
+
+/** Searches to keep when the others are stopped: see `stopFindingSubjects`. */
+export interface StopFindingSubjectsOptions {
+  /** The `uri` of every search to let run. Absent stops all of them. */
+  keep?: string[];
+}
+
+export interface StopFindingSubjectsResult {
+  /** How many searches were stopped. */
+  stopped: number;
+}
+
+/** How far a `findSubjects` has got, a few times a second while it runs. */
+export interface SubjectsProgressEvent {
+  /** The `uri` the search was asked for, as it was asked. */
+  uri: string;
+  /** 0..1 of the frames to look at. */
+  progress: number;
+}
+
+/**
+ * The longer side of a subject track's grid, in cells. Each cell is about 6 output pixels of a
+ * 1080x1920 post: the mask is eased across one, which is softer than a subject's real edge and
+ * firmer than the step a segmenter's own errors would show as. The other side is in proportion,
+ * rounded, at least 1.
+ */
+export const SUBJECT_GRID = 320;
+
+/** The most subjects a track keeps, strongest first. More are background. */
+export const MAX_SUBJECTS = 8;
+
+/**
+ * A subject track, the file `findSubjects` writes, starts with these four bytes (`VKST`).
+ *
+ * LAYOUT, every integer little-endian:
+ *
+ *   offset 0   4 bytes  magic, ASCII `VKST`
+ *          4   u8       version, [SUBJECT_TRACK_VERSION]
+ *          5   u8       flags, 0
+ *          6   u16      W, the grid's columns
+ *          8   u16      H, the grid's rows
+ *         10   u16      0
+ *         12   u32      F, the frames, at least 1
+ *         16   u32      J, the bytes of the JSON that follows
+ *         20   J bytes  UTF-8 JSON: `{ engine, kind, durationMs, fps, subjects }` - the
+ *                       [FindSubjectsResult] fields of the same names. Only a reader that shows the
+ *                       subjects needs it; a renderer skips it.
+ *     20 + J   u32 * F  each frame's source time, ms, strictly increasing
+ *              u32 * F  each frame's offset into the data that follows, non-decreasing
+ *              data     the frames, each running to the next one's offset (the last to the end)
+ *
+ * A FRAME is the W x H cells, row by row from the top-left, run-length coded as pairs of a value
+ * (one byte: 0 the background, 1..255 a subject id) and a run of at least one cell (an unsigned
+ * LEB128 varint). Its runs add up to exactly W * H. A reader refuses a file whose magic or version
+ * it does not know, whose W, H or F is 0, whose W * H is over 1,000,000 cells, whose tables run past
+ * its end or go back, and a frame whose runs do not add up.
+ */
+export const SUBJECT_TRACK_MAGIC = 'VKST';
+export const SUBJECT_TRACK_VERSION = 1;
 
 export interface StartVoiceRecordingOptions {
   /**

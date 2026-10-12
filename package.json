@@ -105,6 +105,8 @@
     "android/src/labeling/",
     "android/src/labelingplay/",
     "android/src/nolabeling/",
+    "android/src/subjects/",
+    "android/src/nosubjects/",
     "android/build.gradle",
     "android/proguard-rules.pro",
     "mcp/**",

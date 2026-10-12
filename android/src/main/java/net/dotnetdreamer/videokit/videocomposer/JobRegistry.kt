@@ -69,6 +69,14 @@ object JobRegistry {
          */
         @Volatile var overlays: List<TimedBitmapOverlay> = emptyList()
 
+        /**
+         * Every focused clip's subject track, by [Focus.uri], read and checked by the pre-flight - so a
+         * track that cannot be read fails the render there, naming its clip, rather than in the middle
+         * of the export. Held for the job like [overlays], because a relaxed retry builds the
+         * composition again from them.
+         */
+        @Volatile var subjectTracks: Map<String, SubjectTrack> = emptyMap()
+
         @Volatile var cancelRequested: Boolean = false
 
         /** One relaxed-settings retry is allowed when an encoder refuses our request. */

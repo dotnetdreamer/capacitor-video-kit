@@ -59,10 +59,16 @@ private struct TimelineEntry {
     /// across several tracks (see `FormatTracks`).
     let trackID: CMPersistentTrackID
     let range: CMTimeRange
+    /// The SOURCE range handed to `insertTimeRange`, which `range` is that range placed and scaled: the
+    /// two ends of the time mapping a focused clip is drawn by (`FocusClip`).
+    let inserted: CMTimeRange
     let gain: Float
     /// The clip's own frames and the ranges it was laid with, for a clip slowed below 1x; nil for every other
     /// clip, and for every clip of a build with `SlowMotionMode.off`. See `SlowClip`.
     let slow: SlowClip?
+    /// The clip's focus with its subject track and its time mapping, or nil for every clip with no
+    /// focus. Attached once every clip's footage has been opened (`build`), which is why it is a `var`.
+    var focus: FocusClip? = nil
 }
 
 /// One video layer's clips after they have been placed, and what the instructions need to draw it.
@@ -489,7 +495,7 @@ enum CompositionBuilder {
             let slow = await slowClip(clip, speed: speed, held: held, source: src, inserted: srcRange,
                                       placed: placed, with: slowClips)
             entries.append(TimelineEntry(clip: clip, source: src, trackID: video.trackID,
-                                         range: placed, gain: clipGain, slow: slow))
+                                         range: placed, inserted: srcRange, gain: clipGain, slow: slow))
             cursor = placed.end
 
             // The outgoing clip's last moments, laid UNDER this clip's first ones. After this clip
@@ -609,6 +615,27 @@ enum CompositionBuilder {
             if let p = extra.params { params.append(p) }
         }
 
+        // FOCUS, now that every clip's footage has been opened and before the sounds are: each focused
+        // clip's subject track read once per file, in the web's order and at the web's point - after the
+        // footage, so a post broken in both names the same clip on both engines - and attached to every
+        // entry it is laid for, in `everyClip`'s order: the base, the transitions' tails, the layers. A
+        // track that will not read, or a frame of it a clip can reach that will not decode, fails the
+        // build as `unreadable_input` naming the clip. A spec with no focus reads nothing and changes
+        // nothing here.
+        let tracks = try FocusTracks.load(spec)
+        if !tracks.isEmpty {
+            func focused(_ layer: LayerTimeline) throws -> LayerTimeline {
+                LayerTimeline(isBase: layer.isBase, z: layer.z, opacity: layer.opacity,
+                              entries: try layer.entries.map { try focusing($0, tracks) })
+            }
+            layers[0] = try focused(layers[0])
+            windows = try windows.map { w in
+                TransitionWindow(entry: w.entry, startMs: w.startMs, durMs: w.durMs,
+                                 tail: try focusing(w.tail, tracks), transition: w.transition)
+            }
+            for index in layers.indices.dropFirst() { layers[index] = try focused(layers[index]) }
+        }
+
         if let music = spec.audio.music,
            let p = try await addMusic(music, to: comp, total: total, batchId: spec.batchId) {
             params.append(p)
@@ -685,13 +712,15 @@ enum CompositionBuilder {
         // engine has always built - one per base clip, naming one source track and carrying one
         // layer. A transition retires it, because a window's end is a cut that no base clip has.
         if layers.count == 1 && windows.isEmpty {
-            var instructions = base.entries.map { EditInstruction(timeRange: $0.range,
-                                                                  layers: [editLayer($0, of: base, plan: plan)],
+            // `layers[0]` and not `base`: the base as it stands now, its clips' focus attached.
+            let lone = layers[0]
+            var instructions = lone.entries.map { EditInstruction(timeRange: $0.range,
+                                                                  layers: [editLayer($0, of: lone, plan: plan)],
                                                                   plan: plan) }
             // A post stretched past its footage with no layer over the stretch. The instructions
             // must reach the composition's end all the same, and the stretch is black, which is an
             // instruction with no layers in it - the one `merged` gives the same instant.
-            let footageEnd = base.entries.last?.range.end ?? .zero
+            let footageEnd = lone.entries.last?.range.end ?? .zero
             if total > footageEnd {
                 instructions.append(EditInstruction(timeRange: CMTimeRange(start: footageEnd, end: total),
                                                      layers: [],
@@ -872,7 +901,7 @@ enum CompositionBuilder {
                                 startMs: startMs,
                                 durMs: span.placedMs,
                                 tail: TimelineEntry(clip: from, source: src, trackID: video.trackID,
-                                                    range: range, gain: tailGain, slow: slow),
+                                                    range: range, inserted: srcRange, gain: tailGain, slow: slow),
                                 transition: transition)
     }
 
@@ -989,7 +1018,7 @@ enum CompositionBuilder {
             let slow = await slowClip(clip, speed: speed, held: held, source: src, inserted: srcRange,
                                       placed: placed, with: slowClips)
             entries.append(TimelineEntry(clip: clip, source: src, trackID: dest.trackID,
-                                         range: placed, gain: clipGain, slow: slow))
+                                         range: placed, inserted: srcRange, gain: clipGain, slow: slow))
             cursor = placed.end
         }
 
@@ -1028,7 +1057,19 @@ enum CompositionBuilder {
                   slow: e.slow,
                   // The keys as they came, read per frame: a layer is made per instruction, and the
                   // keys are output time, so every instruction cut from this clip reads them alike.
-                  rectMotion: e.clip.rectMotion)
+                  rectMotion: e.clip.rectMotion,
+                  // One per entry, shared by every instruction cut from it, as `slow` is.
+                  focus: e.focus)
+    }
+
+    /// `e` with its `FocusClip` attached when its clip has a focus, its track read already in `tracks`;
+    /// `e` as it is otherwise. Throws `BuildError.unreadable` naming the clip for a frame of the track
+    /// the clip can reach that does not decode.
+    private static func focusing(_ e: TimelineEntry, _ tracks: [String: SubjectTrack]) throws -> TimelineEntry {
+        guard let focus = e.clip.focus, let track = tracks[focus.uri] else { return e }
+        var entry = e
+        entry.focus = try FocusClip(clip: e.clip, focus: focus, track: track, inserted: e.inserted, placed: e.range)
+        return entry
     }
 
     /// The outgoing side of one transition as the compositor draws it: the tail's clip on its tail
@@ -1046,7 +1087,9 @@ enum CompositionBuilder {
                                               slow: w.tail.slow,
                                               // The tail is its clip carried on, keys and all, so it
                                               // moves on through the window as that clip would have.
-                                              rectMotion: w.tail.clip.rectMotion),
+                                              rectMotion: w.tail.clip.rectMotion,
+                                              // Its own focus, in its own source's time.
+                                              focus: w.tail.focus),
                               startUs: w.startMs * 1000,
                               durationUs: w.durMs * 1000,
                               curves: t.curves,

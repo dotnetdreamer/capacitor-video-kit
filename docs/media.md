@@ -6,6 +6,7 @@
 - [Saving any other file to Downloads](#saving-any-other-file-to-downloads)
 - [Reading the gallery, for a host that draws its own picker](#reading-the-gallery-for-a-host-that-draws-its-own-picker)
 - [Reading what footage shows](#reading-what-footage-shows)
+- [Finding the subjects in footage](#finding-the-subjects-in-footage)
 - [Keeping picked media](#keeping-picked-media)
 
 ## Saving the finished video to the gallery
@@ -391,6 +392,99 @@ Vision sends nothing.
 with no frame, `unsupported` in a browser and in the iOS simulator, and `unknown` when the engine
 itself fails. `describeMedia` answers null for `unsupported` and for an app whose native build is older
 than the call (`UNIMPLEMENTED`), and rejects for the rest.
+
+## Finding the subjects in footage
+
+`findSubjects` finds the people in a video or a picture, and from iOS 17 the pets and things that
+stand out too, follows each one through the footage, and writes where every one of them is, frame by
+frame, into a **subject track**: the file a clip's `focus` is drawn from (see
+[Video composition](composer.md#composer)) and the editor's Focus sheet outlines them from.
+
+```ts
+import { VideoComposer } from 'capacitor-video-kit';
+
+const listening = await VideoComposer.addListener('subjectsProgress', ({ uri, progress }) => setBar(progress));
+const found = await VideoComposer.findSubjects({ uri: 'file:///.../walk.mov' });
+// found.uri       -> the subject track: file:// in the app's cache, blob: in a page
+// found.subjects  -> [{ id: 1, kind: 'person', startMs, endMs, peakMs, box, area }, ...], 1 the main subject
+// found.cached    -> true when the track was already there and nothing was looked at
+await listening.remove();
+```
+
+The editor makes these calls itself: `composerMediaHost` starts a search as soon as a clip has a
+focus, and `composerRenderHost` asks again before each render, which answers at once from the track
+already made. A host calls `findSubjects` directly only to build a focus of its own, as a template
+renderer does.
+
+| | iOS | Android | Browser |
+|---|---|---|---|
+| Engine (`engine`) | Vision (`vision`): foreground instance masks from iOS 17, person segmentation on iOS 16 | ML Kit selfie segmentation (`mlkit`), `com.google.mlkit:segmentation-selfie` 16.0.0-beta6, bundled | MediaPipe's selfie segmenter (`mediapipe`), from a model the host serves |
+| What it finds | people, pets and things from iOS 17; people on iOS 16 | people | people |
+| Frames looked at | 15 a second | 10 a second | 10 a second |
+| What it adds | nothing: Vision is part of the system | about 22 MB for each CPU a build carries (below) | 250 KB served beside the page, nothing in the bundle |
+
+Everything happens on the device, with nothing downloaded and no permission asked. Every frame of a
+video is looked at, `fps` of them a second (1 to 30), so a long clip takes a while, and
+`subjectsProgress` says how far it has got a few times a second. A picture is looked at once.
+
+**A subject keeps its number through the footage.** Each frame's mask is cut into its separate
+pieces, and a piece is matched to the subject it overlaps most in the frame before, so a person keeps
+their id while they move. One gone for more than a second is forgotten, so somebody new in the same
+place is somebody new. Specks are dropped, at most 8 subjects are kept, and they are ranked by how
+much of the footage they are in and how large, so subject 1 is the footage's main subject on every
+engine. ML Kit, MediaPipe and Vision on iOS 16 find people and nothing else, and two people who touch
+are one subject to them: a couple holding hands is one. Vision from iOS 17 gives each person, pet or
+thing a mask of its own.
+
+**The track is kept.** A track is a file in the app's cache (`video-composer/subjects` on iOS,
+`subject-tracks` on Android), named after the source and when it last changed, so asking again for the same file answers
+at once with `cached` set. The system may empty that folder, which is why the render host asks again
+before every render rather than keeping the answer. In a page the track is a `blob:` URL, kept for
+as long as the page is open. Its layout, a header, a table of frame times and each frame's grid as
+runs, is written down on `SUBJECT_TRACK_MAGIC` in `definitions.ts`; the grid is 320 cells on the
+frame's long side.
+
+**On Android a search waits for a render.** The two share the phone's video decoders, so a search
+started while a render runs waits for it, and a render that starts stops a running search, which
+starts again once the render is over. A picture does not wait.
+
+**What ML Kit's selfie segmentation weighs.** It brings MediaPipe's native library with it, which
+image labeling's does not serve: 21.6 MB for arm64-v8a, 16 MB for armeabi-v7a and about 20 MB each
+for x86 and x86_64, stored uncompressed, and a 250 KB model. On an arm64 phone installing from an app
+bundle that is about 22 MB installed and 5.7 MB downloaded; Google's own page quotes 4.5 MB. There is
+no Play services form of it. A host that does not want Focus leaves it out in its `variables.gradle`:
+
+```groovy
+ext {
+    videokitSubjects = false   // or -PvideokitSubjects=false on the command line
+}
+```
+
+and passes `subjects: false` to `composerMediaHost`, so the editor does not offer Focus. Without it,
+`findSubjects` refuses as `unsupported`. Any value but `true` or `false` fails the build.
+
+**In a browser** the kit runs MediaPipe's selfie segmenter through the same runtime and WebAssembly
+as [image labeling](#reading-what-footage-shows), so a host that serves those serves one more file:
+
+| File | From | Size |
+|---|---|---|
+| `labeling/selfie_segmenter.tflite` | `node_modules/capacitor-video-kit/web-assets/labeling/` | 250 KB |
+
+`configureWebSubjects({ modelUrl })` points it somewhere else; the runtime and WebAssembly are where
+`configureWebLabeling` says. Like the image recogniser it needs WebGL, and where it cannot start
+`findSubjects` refuses as `unsupported` and the editor's Focus sheet says Focus is not available.
+MediaPipe reports its use to Google here as it does for labeling (above), from the first search.
+
+**The iOS simulator refuses, with `unsupported`.** Vision's segmentation requests do not run there.
+Test Focus on a device, on the Android emulator, or in a browser.
+
+**What leaves the phone.** No picture, no frame and no mask. ML Kit sends Google metrics about how it
+performs and is used, as it does for labeling; Vision sends nothing.
+
+`findSubjects` rejects `invalid_spec` without a `uri`, `unreadable_input` for a file that will not
+open or has no picture, `cancelled` for a search `stopFindingSubjects` stopped, `unsupported` where
+there is no segmenter, and `unknown` when the engine itself fails. Footage where nothing stands out
+resolves with no subjects.
 
 ## Keeping picked media
 

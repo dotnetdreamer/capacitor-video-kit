@@ -8,6 +8,8 @@ import type {
   DropPreviewProxiesResult,
   ExtractAudioOptions,
   ExtractAudioResult,
+  FindSubjectsOptions,
+  FindSubjectsResult,
   ListSoundsResult,
   PreviewProxyOptions,
   PreviewProxyResult,
@@ -18,6 +20,9 @@ import type {
   SaveToDownloadsResult,
   StageRenderInputOptions,
   StageRenderInputResult,
+  StopFindingSubjectsOptions,
+  StopFindingSubjectsResult,
+  SubjectsProgressEvent,
   ThumbnailsOptions,
   ThumbnailsResult,
   VoiceRecordingResult,
@@ -39,6 +44,8 @@ const kit = vi.hoisted(() => {
     pickAudio: vi.fn(async () => null),
     probeDuration: vi.fn(async (_source: EditorSource): Promise<number> => 0),
     thumbnails: vi.fn(async (_request: ThumbnailRequest): Promise<string[]> => ['data:image/jpeg;base64,browser']),
+    findSubjects: vi.fn(async (_source: EditorSource, _onProgress: (progress: number) => void): Promise<FindSubjectsResult | null> => null),
+    stopFindingSubjects: vi.fn(async (_keep: readonly EditorSource[]) => undefined),
     sounds: {
       list: vi.fn(async () => []),
       extract: vi.fn(async () => null),
@@ -65,6 +72,9 @@ const kit = vi.hoisted(() => {
       releaseRenderInputs: vi.fn<(options: ReleaseRenderInputsOptions) => Promise<void>>(),
       startVoiceRecording: vi.fn<() => Promise<void>>(),
       stopVoiceRecording: vi.fn<() => Promise<VoiceRecordingResult>>(),
+      findSubjects: vi.fn<(options: FindSubjectsOptions) => Promise<FindSubjectsResult>>(),
+      stopFindingSubjects: vi.fn<(options: StopFindingSubjectsOptions) => Promise<StopFindingSubjectsResult>>(),
+      addListener: vi.fn<(event: string, listener: (event: SubjectsProgressEvent) => void) => Promise<{ remove: () => Promise<void> }>>(),
     },
   };
 });
@@ -662,6 +672,114 @@ describe('the voiceover recorder on a phone', () => {
 
   it('is none when the host turns it off', () => {
     expect('voice' in build({ voice: false }).host).toBe(false);
+  });
+});
+
+describe('looking for subjects', () => {
+  const FOUND: FindSubjectsResult = {
+    engine: 'vision',
+    uri: 'file:///app/Library/Caches/video-composer/subjects/9F2C.vkst',
+    cached: false,
+    kind: 'video',
+    width: 180,
+    height: 320,
+    frames: 45,
+    durationMs: 3000,
+    subjects: [],
+  };
+
+  /** The listeners the composer was handed, by event, and how many were taken off again. */
+  function listeners() {
+    const added: ((event: SubjectsProgressEvent) => void)[] = [];
+    const removed = { count: 0 };
+    kit.composer.addListener.mockImplementation(async (_event, listener) => {
+      added.push(listener);
+      return {
+        remove: async () => {
+          removed.count++;
+        },
+      };
+    });
+    return { added, removed };
+  }
+
+  it("is the browser's own in a page", () => {
+    const { host, browser } = build();
+    expect(host.findSubjects).toBe(browser.findSubjects);
+    expect(host.stopFindingSubjects).toBe(browser.stopFindingSubjects);
+  });
+
+  describe('on a phone', () => {
+    beforeEach(() => {
+      kit.native = true;
+    });
+
+    it('asks the composer about the file itself, passing on the progress of that file alone', async () => {
+      const { added, removed } = listeners();
+      let finish!: (result: FindSubjectsResult) => void;
+      kit.composer.findSubjects.mockReturnValue(new Promise(resolve => (finish = resolve)));
+      const progress: number[] = [];
+
+      const search = build().host.findSubjects!(CLIP, value => progress.push(value));
+      await vi.waitFor(() => expect(kit.composer.findSubjects).toHaveBeenCalledWith({ uri: CLIP.sourcePath }));
+      added[0]!({ uri: 'file:///another.mp4', progress: 0.9 });
+      added[0]!({ uri: CLIP.sourcePath!, progress: 0.25 });
+      finish(FOUND);
+
+      await expect(search).resolves.toBe(FOUND);
+      expect(progress).toEqual([0.25]);
+      expect(kit.composer.addListener).toHaveBeenCalledWith('subjectsProgress', expect.any(Function));
+      expect(removed.count).toBe(1);
+    });
+
+    it('says a picture is one, so the composer does not have to work it out', async () => {
+      listeners();
+      kit.composer.findSubjects.mockResolvedValue({ ...FOUND, kind: 'image', frames: 1, durationMs: 0 });
+      await build().host.findSubjects!({ ...CLIP, kind: 'image' }, () => undefined);
+      expect(kit.composer.findSubjects).toHaveBeenCalledWith({ uri: CLIP.sourcePath, kind: 'image' });
+    });
+
+    it('is null where the phone has nothing to look with, and passes on any other failure', async () => {
+      const { removed } = listeners();
+      const host = build().host;
+
+      kit.composer.findSubjects.mockRejectedValueOnce(coded('unsupported'));
+      await expect(host.findSubjects!(CLIP, () => undefined)).resolves.toBeNull();
+      kit.composer.findSubjects.mockRejectedValueOnce(coded('UNIMPLEMENTED'));
+      await expect(host.findSubjects!(CLIP, () => undefined)).resolves.toBeNull();
+      const unreadable = coded('unreadable_input');
+      kit.composer.findSubjects.mockRejectedValueOnce(unreadable);
+      await expect(host.findSubjects!(CLIP, () => undefined)).rejects.toBe(unreadable);
+
+      expect(removed.count).toBe(3);
+    });
+
+    /* Null here: a test's page has no MediaPipe, which the page's search answers as nothing to look with. */
+    it('leaves a source with no path to the page, and asks the composer nothing', async () => {
+      const search = build().host.findSubjects!({ key: 'clip-2', fileName: 'web.mp4', playbackUrl: 'blob:clip-2' }, () => undefined);
+      await expect(search).resolves.toBeNull();
+      expect(kit.composer.findSubjects).not.toHaveBeenCalled();
+    });
+
+    it('stops the searches of every file but those kept, and never rejects', async () => {
+      kit.composer.stopFindingSubjects.mockResolvedValueOnce({ stopped: 2 });
+      const host = build().host;
+      await host.stopFindingSubjects!([CLIP, { key: 'clip-2', fileName: 'web.mp4', playbackUrl: 'blob:clip-2' }]);
+      expect(kit.composer.stopFindingSubjects).toHaveBeenCalledWith({ keep: [CLIP.sourcePath] });
+
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      kit.composer.stopFindingSubjects.mockRejectedValueOnce(coded('UNIMPLEMENTED'));
+      await expect(host.stopFindingSubjects!([])).resolves.toBeUndefined();
+    });
+  });
+
+  it('is none anywhere when the host turns Focus off, so the toolbar does not offer it', () => {
+    for (const native of [false, true]) {
+      kit.native = native;
+      const { host } = build({ subjects: false });
+      expect('findSubjects' in host).toBe(false);
+      expect('stopFindingSubjects' in host).toBe(false);
+    }
   });
 });
 

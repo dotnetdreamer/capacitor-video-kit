@@ -213,6 +213,82 @@ object ComposeSpecParser {
             // both is refused for the same one everywhere.
             rectMotion = parseRectMotion(o.opt("rectMotion"), "$path.rectMotion"),
             image = image,
+            // Last of the clip's fields, as every parser reads it, so a clip broken somewhere else
+            // reports the same first failure it always did.
+            focus = parseFocus(o.opt("focus"), "$path.focus"),
+        )
+    }
+
+    /**
+     * A clip's focus, or null for none - by the rules `ComposeFocus` states for every parser, check for
+     * check and in the order of `normaliseComposeFocus` in `src/editor/focus.ts`, the web's reader, so the
+     * web export, iOS and this one draw the same focus or refuse the same spec with the same path.
+     *
+     * REFUSED, as shape errors: a focus that is not an object; a `uri` that is not a non-empty string;
+     * an `atMs` that is missing or not an array, has no keys or more than [MAX_FOCUS_KEYS], or holds a
+     * time that is not a finite number or goes back - all of `atMs` before anything else; then
+     * `subjects` missing or not an array, and each subject in turn - not an object, an id that is not a
+     * whole number 1..255 or names a subject a second time, a `focus` that is not an array of `atMs`'s
+     * length or holds a value that is not a finite number; and last a `blur`, `mono` or `dim` that is
+     * there and is not a finite number. CLAMPED: every focus to 0..1,
+     * `blur` to 0..[MAX_FOCUS_BLUR], `mono` and `dim` to 0..1. IGNORED, as the contract has it: every
+     * key it does not know, on the focus and on a subject alike. Only a real `true` inverts.
+     *
+     * ABSENT, which is null: no key, JSON null, and a focus whose blur, mono and dim are all 0 once
+     * clamped, which changes nothing - so the plan builds that clip exactly as it built it before
+     * focus existed. JSON null for `blur`, `mono` or `dim` is the number left out, as an explicit null
+     * is everywhere else in this file.
+     */
+    private fun parseFocus(value: Any?, path: String): Focus? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val uri = (o.opt("uri") as? String)?.takeIf { it.isNotEmpty() } ?: throw SpecException("$path.uri")
+        val at = o.opt("atMs") as? JSONArray ?: throw SpecException("$path.atMs")
+        val n = at.length()
+        if (n == 0 || n > MAX_FOCUS_KEYS) {
+            throw SpecException("$path.atMs", "invalid_spec:$path.atMs must have 1 to $MAX_FOCUS_KEYS keys")
+        }
+        val atMs = ArrayList<Double>(n)
+        for (k in 0 until n) {
+            val t = finiteNumber(at.opt(k)) ?: throw SpecException("$path.atMs[$k]")
+            if (k > 0 && t < atMs[k - 1]) throw SpecException("$path.atMs[$k]")
+            atMs += t
+        }
+        val subjectsJson = o.opt("subjects") as? JSONArray ?: throw SpecException("$path.subjects")
+        val named = BooleanArray(MAX_SUBJECT_ID + 1)
+        val subjects = (0 until subjectsJson.length()).map { j ->
+            val subjectPath = "$path.subjects[$j]"
+            val s = subjectsJson.opt(j) as? JSONObject ?: throw SpecException(subjectPath)
+            val id = finiteNumber(s.opt("id"))
+                ?.takeIf { it == floor(it) && it >= 1.0 && it <= MAX_SUBJECT_ID }
+                ?.toInt()
+                ?: throw SpecException("$subjectPath.id")
+            if (named[id]) throw SpecException("$subjectPath.id")
+            named[id] = true
+            val values = s.opt("focus") as? JSONArray
+            if (values == null || values.length() != n) throw SpecException("$subjectPath.focus")
+            val focus = (0 until n).map { k ->
+                (finiteNumber(values.opt(k)) ?: throw SpecException("$subjectPath.focus[$k]")).coerceIn(0.0, 1.0)
+            }
+            FocusSubject(id, focus)
+        }
+        // A number left out, or sent as null, is 0; one that is there has to be a number.
+        fun amount(key: String, max: Double): Float = when (val raw = o.opt(key)) {
+            null, JSONObject.NULL -> 0f
+            else -> (finiteNumber(raw) ?: throw SpecException("$path.$key")).coerceIn(0.0, max).toFloat()
+        }
+        val blur = amount("blur", MAX_FOCUS_BLUR)
+        val mono = amount("mono", 1.0)
+        val dim = amount("dim", 1.0)
+        if (blur == 0f && mono == 0f && dim == 0f) return null
+        return Focus(
+            uri = uri,
+            atMs = atMs,
+            subjects = subjects,
+            blur = blur,
+            mono = mono,
+            dim = dim,
+            invert = o.opt("invert") == true,
         )
     }
 
@@ -942,6 +1018,19 @@ object ComposeSpecParser {
 
     const val MIN_SPEED = 0.25f
     const val MAX_SPEED = 4.0f
+
+    /** The most keys one focus may carry - `MAX_FOCUS_KEYS`. A spec with more is refused rather than truncated. */
+    const val MAX_FOCUS_KEYS = 2000
+
+    /**
+     * The most a focus's blur may be, a tenth of the source's shorter side - `MAX_FOCUS_BLUR`: far past
+     * anything the editor offers (it stops at 0.03), and only there so a hand-built spec cannot ask for
+     * a kernel the size of the frame.
+     */
+    const val MAX_FOCUS_BLUR = 0.1
+
+    /** The largest subject id: a track holds one byte a cell, 0 being the background. */
+    private const val MAX_SUBJECT_ID = 255
 
     /*
      * The ranges a transition's numbers are held to. None of them is a taste: each is a bound past

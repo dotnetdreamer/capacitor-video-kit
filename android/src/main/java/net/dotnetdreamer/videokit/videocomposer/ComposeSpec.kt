@@ -121,7 +121,51 @@ data class Clip(
      * name or by position, is built exactly as it was. See `ComposeClip.rectMotion`.
      */
     val rectMotion: RectMotion? = null,
+    /**
+     * Some of the footage's subjects kept sharp and everything else softened - see [Focus]. Null is
+     * the footage as it is, which is every spec written before the key, and the builder asks this
+     * ONCE, when it builds the clip's item, so a clip with no focus gets exactly the chain it always
+     * had. Last in the list, as the parser reads it last, so every clip built before it existed is
+     * built exactly as it was.
+     */
+    val focus: Focus? = null,
 )
+
+/**
+ * Which of a clip's subjects are in focus over its footage, and what happens to everything else - the
+ * Kotlin mirror of `ComposeFocus`, whose doc comment in definitions.ts is the NORMATIVE drawing
+ * contract. JS has already resolved which subjects the customer picked and compiled every change of
+ * focus into keys, so this engine only reads numbers off them ([SubjectTracks.focusLevels]) and draws
+ * the result ([FocusEffect]).
+ *
+ * Lists, not arrays, and a data class: a transition's tail carries the outgoing clip's focus, and
+ * [RenderPlan] decides whether a tail is that clip carried on - and may take a lead from it - by
+ * comparing the two clips as data. Arrays compare by identity, which would make every focused tail a
+ * stranger to the clip it came from.
+ *
+ * Every number already holds its clamped value - each focus 0..1, [blur] 0..[ComposeSpecParser.MAX_FOCUS_BLUR],
+ * [mono] and [dim] 0..1 - and a focus that would change nothing never gets this far: the parser drops
+ * one whose blur, mono and dim are all 0.
+ */
+data class Focus(
+    /** The subject track `findSubjects` wrote for this clip's source; see [SubjectTrack]. */
+    val uri: String,
+    /** SOURCE milliseconds of the clip's file, never going back; two equal times are a step. */
+    val atMs: List<Double>,
+    /** The subjects listed. One the track has and this does not list is out of focus throughout. */
+    val subjects: List<FocusSubject>,
+    /** Gaussian sigma of what is out of focus, a fraction of the oriented source frame's shorter side. */
+    val blur: Float,
+    /** How far what is out of focus is turned grey, 0..1. */
+    val mono: Float = 0f,
+    /** How far what is out of focus is darkened, 0..1. */
+    val dim: Float = 0f,
+    /** The subjects are what is softened, and the rest is kept sharp. */
+    val invert: Boolean = false,
+)
+
+/** One subject's focus over a clip: its id in the subject track, 1..255, and 0..1 at each of [Focus.atMs]. */
+data class FocusSubject(val id: Int, val focus: List<Double>)
 
 /**
  * How one base clip gives way to the next: the Kotlin mirror of `ComposeTransition`, whose doc

@@ -90,6 +90,12 @@ export interface GestureUi {
   moving: Signal<boolean>;
   trashHot: Signal<boolean>;
   guides: Signal<SnapGuides>;
+  /**
+   * A tap on the frame while the Focus sheet is open, at (`fx`, `fy`) - 0..1 of the frame - which the
+   * preview answers with the subject under it. The sheet owns the frame then: nothing is selected,
+   * moved or played by a touch on it.
+   */
+  focusTap?: (fx: number, fy: number) => void;
 }
 
 /** A layer's size on the frame, independent of how big the frame happens to be on screen. */
@@ -347,6 +353,8 @@ interface Point {
 type Gesture =
   /** A finger down on empty frame: a tap toggles play or clears the selection. */
   | { kind: 'tap-empty'; x0: number; y0: number; t0: number }
+  /** A finger down while the Focus sheet owns the frame: a tap picks the subject under it. */
+  | { kind: 'focus-tap'; x0: number; y0: number; t0: number }
   /**
    * A finger down on a layer that has not moved yet: a tap, or the start of a drag. `pointerId` is
    * the finger that owns it - a second finger that cannot pinch (an effect layer, a layer that has
@@ -496,6 +504,14 @@ export class OverlayGestures {
       this.zoomDown(e);
       return;
     }
+    // So does the Focus sheet: one finger taps a subject, and nothing else on the frame moves.
+    if (this.store.panel.value === 'focus') {
+      e.preventDefault();
+      if (e.isPrimary && this.pointers.size > 0) this.abandon();
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      this.gesture = this.pointers.size === 1 ? { kind: 'focus-tap', x0: e.clientX, y0: e.clientY, t0: performance.now() } : { kind: 'spent' };
+      return;
+    }
     const handle = this.handleAt(e);
     // The delete and edit handles are buttons, and a tap on one is their own click's business. Only
     // a FIRST finger, though: the handles sit on the layer's corners, right where the fingers go to
@@ -548,6 +564,7 @@ export class OverlayGestures {
 
     switch (gesture.kind) {
       case 'tap-empty':
+      case 'focus-tap':
         if (distance(point, { x: gesture.x0, y: gesture.y0 }) > TAP_SLOP_PX) this.gesture = { kind: 'spent' };
         return;
       case 'press': {
@@ -602,6 +619,14 @@ export class OverlayGestures {
         if (!cancelled && performance.now() - gesture.t0 < TAP_MS) this.tapEmpty();
         this.gesture = { kind: 'spent' };
         break;
+      case 'focus-tap': {
+        if (!cancelled && performance.now() - gesture.t0 < TAP_MS) {
+          const rect = this.stage.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) this.ui.focusTap?.((e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
+        }
+        this.gesture = { kind: 'spent' };
+        break;
+      }
       case 'press':
         // Another finger lifting leaves the press to the finger that owns it.
         if (gesture.pointerId !== e.pointerId) break;

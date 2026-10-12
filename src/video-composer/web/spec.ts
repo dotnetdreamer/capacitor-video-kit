@@ -2,6 +2,7 @@ import type {
   ComposeAudioEffect,
   ComposeCamera,
   ComposeFit,
+  ComposeFocus,
   ComposeMusic,
   ComposeOverlay,
   ComposeOverlayMotion,
@@ -19,6 +20,7 @@ import type {
 
 import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
 import { normaliseCamera } from '../../editor/camera';
+import { FocusError, normaliseComposeFocus } from '../../editor/focus';
 import { RectMotionError, normaliseRectMotion } from '../../editor/layout-motion';
 import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
 import { AudioEffectWindowError, normaliseAudioEffectWindows } from '../../editor/audio-effect-windows';
@@ -462,7 +464,26 @@ function readClip(input: unknown, path: string): ComposeSpec['clips'][number] {
     out.speed = 1;
     out.muted = true;
   }
+  // Last, as every parser reads it.
+  const focus = readFocus(clip['focus'], `${path}.focus`);
+  if (focus) out.focus = focus;
   return out;
+}
+
+/**
+ * A clip's focus, or `null` when it has none or it changes nothing. The rules are
+ * `normaliseComposeFocus`'s, shared with the editor and the tests, for the reason [readCamera] gives;
+ * what this adds is the refusal turned into a [SpecError] naming the path that broke -
+ * `clips[1].focus.subjects[0].id`.
+ */
+function readFocus(value: unknown, path: string): ComposeFocus | null {
+  try {
+    return normaliseComposeFocus(value);
+  } catch (error) {
+    if (!(error instanceof FocusError)) throw error;
+    const at = error.field ? `${path}.${error.field}` : path;
+    throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
+  }
 }
 
 function readFit(value: unknown): ComposeFit {

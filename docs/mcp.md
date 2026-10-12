@@ -104,6 +104,17 @@ and is refused only when the layer ends less than 100 ms before the end of the p
 `removeAudioEffect` takes a layer away. A draft saved when effects were a sound's own opens with
 each one as a layer over where its sound was heard.
 
+Focus is a clip's own, as in the editor: `setClipFocus` keeps some of the clip's subjects sharp and
+softens everything else, or takes the focus off with `null`. `subjects` is `"main"`, the default and
+the footage's main subject, `"all"`, or the ids `findSubjects` numbers them by, 1 being the main
+subject; `blur`, `mono` (grey) and `dim` run from 0 to 1, `blur` 0.5 unless it is set; and `invert`
+softens the subjects instead. `changes` pulls focus to other subjects at times of the clip's own
+source, each `{atMs, subjects, pullMs?}` inside the clip's trim, at most 20, and a pull of 0 to
+3000 ms (500 unless it is set); a time outside the trim is refused, saying what the trim is. The
+server cannot see the footage, so it does not know which subjects a clip has: an id the footage turns
+out not to have covers nothing, and `"main"` and `"all"` are the choices that hold whatever the clip
+shows. The app finds the subjects on the device when the post is opened or rendered.
+
 **A list of ops is all or nothing.** A list that fails at op 5 leaves the manifest exactly as it
 was, and the message names the op and its position, because "no clip c3" means something different
 at op 1 than it does at op 7 with five removals behind it.

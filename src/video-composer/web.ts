@@ -17,6 +17,8 @@ import type {
   ComposeSpec,
   ExtractAudioOptions,
   ExtractAudioResult,
+  FindSubjectsOptions,
+  FindSubjectsResult,
   GalleryAccessResult,
   GalleryThumbnailResult,
   JobIdOptions,
@@ -44,6 +46,8 @@ import type {
   SaveToDownloadsResult,
   StageRenderInputResult,
   StartVoiceRecordingOptions,
+  StopFindingSubjectsOptions,
+  StopFindingSubjectsResult,
   SweepMediaOptions,
   SweepMediaResult,
   SystemInsetsResult,
@@ -58,6 +62,7 @@ import { cancelJob, cleanupBatch, jobState, startJob, sweepJobs } from './web/jo
 import { labelMediaInBrowser, LabelingUnavailableError, LabelingUnreadableError } from './web/labels';
 import { probeMedia } from './web/media';
 import { validateSpec } from './web/spec';
+import { findSubjectsInBrowser, stopFindingSubjectsInBrowser, SubjectsCancelledError, SubjectsUnavailableError, SubjectsUnreadableError } from './web/subjects';
 import { thumbnails as cutThumbnails } from './web/thumbnails';
 import { startVoiceRecording, stopVoiceRecording, VoiceError } from './web/voice';
 
@@ -153,6 +158,39 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
       if (error instanceof LabelingUnreadableError) throw coded(error.message, 'unreadable_input');
       throw coded(describe(error), 'unknown');
     }
+  }
+
+  /**
+   * MediaPipe's selfie segmenter over the file's frames, from the files the host serves for
+   * `labelMedia` and the model beside them (`web/subjects.ts`). It finds people. The refusals are the
+   * phones': `unsupported` where MediaPipe will not load, `unreadable_input` for a file the browser
+   * will not open or decodes no picture in, `cancelled` for a search [stopFindingSubjects] stopped.
+   */
+  async findSubjects(options: FindSubjectsOptions): Promise<FindSubjectsResult> {
+    const uri = required(options?.uri, 'uri');
+    if (options.kind !== undefined && options.kind !== 'video' && options.kind !== 'image') {
+      throw coded("kind must be 'video' or 'image'", 'invalid_spec');
+    }
+    // A few times a second, as the phones send it, and once at the end.
+    let sentAt = 0;
+    const progress = (value: number): void => {
+      const now = performance.now();
+      if (value < 1 && now - sentAt < 250) return;
+      sentAt = now;
+      this.notifyListeners('subjectsProgress', { uri, progress: Math.min(1, Math.max(0, value)) });
+    };
+    try {
+      return await findSubjectsInBrowser({ ...options, uri }, progress);
+    } catch (error) {
+      if (error instanceof SubjectsUnavailableError) throw coded(error.message, 'unsupported');
+      if (error instanceof SubjectsUnreadableError) throw coded(error.message, 'unreadable_input');
+      if (error instanceof SubjectsCancelledError) throw coded(error.message, 'cancelled');
+      throw coded(describe(error), 'unknown');
+    }
+  }
+
+  async stopFindingSubjects(options?: StopFindingSubjectsOptions): Promise<StopFindingSubjectsResult> {
+    return { stopped: stopFindingSubjectsInBrowser(options?.keep ?? []) };
   }
 
   /*

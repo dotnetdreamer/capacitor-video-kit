@@ -61,6 +61,9 @@ export type { DescribeMediaOptions, MediaDescription } from './video-composer/me
 // the call that starts it downloading early and says whether it loaded.
 export { configureWebLabeling, prepareWebLabeling } from './video-composer/web/labels';
 export type { WebLabelingFiles } from './video-composer/web/labels';
+// Where a browser's subject segmenter finds its model; it runs on the recogniser's runtime above.
+export { configureWebSubjects } from './video-composer/web/subjects';
+export type { WebSubjectsFiles } from './video-composer/web/subjects';
 
 // The URL the WebView loads a device file by, which the editor's `/ui` defaults use as its
 // `platform.fileUrl` and a Capacitor host wants for everything else it shows: a done screen's

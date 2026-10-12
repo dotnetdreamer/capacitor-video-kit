@@ -1,4 +1,5 @@
 import { MAX_AUDIO_EFFECTS, type FilterOp } from '../video-composer/definitions';
+import { focusChangesPicture, normaliseFocus } from './focus';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
 import { normaliseSoundEffectSettings, soundEffectPreset } from './sound-effects';
@@ -18,7 +19,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 18;
+export const MANIFEST_VERSION = 19;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -143,6 +144,57 @@ export interface EditClip {
    * and [toComposeSpec] mutes it on the wire.
    */
   image?: true;
+  /**
+   * Which of the footage's subjects stay sharp while everything else is softened, greyed or darkened,
+   * and when the focus moves from one to another. Absent is the footage as it is, which is every
+   * segment of every manifest written before version 19, and absent is what [toComposeSpec] turns
+   * into a clip with no `focus` on the wire.
+   *
+   * On the SEGMENT rather than on the source, because a split of one shot can pull focus in one half
+   * and not the other; the subjects it names are the source's, by the ids `findSubjects` gave them, so
+   * every segment over one source shares one subject track. Its times are SOURCE times, like the
+   * trim, so a trim moves the footage under the changes and not the changes under the footage.
+   */
+  focus?: EditFocus;
+}
+
+/**
+ * Which subjects a focus keeps sharp: `main`, the footage's strongest subject - the one on screen the
+ * most, largest and longest - `all` of them, or the ones the customer picked, by their ids in the
+ * footage's subject track (1..255). `main` and `all` are what a template asks for, since it cannot
+ * know the footage; an empty list keeps nobody sharp, and softens the whole frame.
+ */
+export type FocusSubjects = 'all' | 'main' | number[];
+
+/**
+ * A clip's focus: see [EditClip.focus]. The three looks are 0..1 each, 0 being none: [blur] softens
+ * what is out of focus (1 is a sigma of `FOCUS_MAX_SIGMA` of the footage's shorter side), [mono] takes
+ * its colour away - the "colour pop" of a subject kept in colour on a grey world - and [dim] darkens
+ * it, to black at 1.
+ */
+export interface EditFocus {
+  subjects: FocusSubjects;
+  blur: number;
+  /** Absent is 0, and 0 is never stored. */
+  mono?: number;
+  /** Absent is 0, and 0 is never stored. */
+  dim?: number;
+  /** The subjects are what is softened, and everything else is kept sharp: a face hidden. */
+  invert?: true;
+  /**
+   * Later choices of subjects, each pulling focus from the one before it: sorted by [EditFocusChange.atMs],
+   * one per instant, at most `MAX_FOCUS_CHANGES`. Absent is the one choice for the whole segment.
+   */
+  changes?: EditFocusChange[];
+}
+
+/** A pull of focus: at source time [atMs] the focus starts moving to [subjects], and arrives [pullMs] later. */
+export interface EditFocusChange {
+  /** SOURCE ms of the clip's file, like [EditClip.inMs]. */
+  atMs: number;
+  subjects: FocusSubjects;
+  /** Source ms the pull takes; absent is `DEFAULT_FOCUS_PULL_MS`, 0 a cut. */
+  pullMs?: number;
 }
 
 /** A transition between two base clips: which one, and how long the customer asked for it to run. */
@@ -1823,6 +1875,11 @@ export function emptyManifest(): EditManifest {
  * now goes through it too, which is the point of a layer. The layers stack, bottom to top, so two
  * sounds that had effects at the same time keep both, each layer over both sounds. Bumped because an
  * older build reading a version-18 draft drops every layer.
+ *
+ * Version 18 to version 19 adds a segment's [EditClip.focus], and nothing is written into an older
+ * manifest: a version-18 segment has no `focus`, which is the footage as it is, and [toComposeSpec]
+ * sends it with none - byte for byte the spec version 18 produced. Bumped because an older build
+ * reading a version-19 draft shows every focused clip sharp from edge to edge.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -2223,8 +2280,9 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
     const source = durations.get(clip.clipKey) ?? 0;
     const untrimmed = clip.inMs === 0 && (source === 0 || Math.abs(clip.outMs - source) <= 100);
     // A cropped or reframed clip is a different picture from the file on disk, however little else
-    // was done to it, so it has to go through the renderer rather than be posted as it is.
-    return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted && !isClipFramed(clip, manifest.fit);
+    // was done to it, so it has to go through the renderer rather than be posted as it is - and so is
+    // one whose world has been softened around its subject.
+    return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted && !isClipFramed(clip, manifest.fit) && !focusChangesPicture(clip.focus);
   });
 }
 
@@ -2485,6 +2543,8 @@ function readClips(value: unknown, usedIds: Set<string>, base: boolean): EditCli
       clip.image = true;
       clip.speed = 1;
     }
+    const focus = normaliseFocus(c?.focus);
+    if (focus) clip.focus = focus;
     return clip;
   });
 }

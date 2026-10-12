@@ -123,6 +123,22 @@ const importFailures = new Map<string, number>();
  * the looks using it have finished - never under them, which would fail them - and one still loading
  * finishes before the next load starts, so two never run at once.
  */
+/** Where MediaPipe's files are served now: what `findSubjects` in a browser loads its runtime from too. */
+export function webLabelingFiles(): WebLabelingFiles {
+  return files;
+}
+
+/**
+ * Starts `load` once every load before it has settled, and makes it the one the next load waits on:
+ * MediaPipe hands its WebAssembly over through one global, and two loads over each other - this
+ * file's classifier and `subjects.ts`' segmenter - can take each other's. See [loads].
+ */
+export function afterLoads<T>(load: () => Promise<T>): Promise<T> {
+  const promise = loads.then(load);
+  loads = promise.catch(() => undefined);
+  return promise;
+}
+
 export function configureWebLabeling(next: Partial<WebLabelingFiles>): void {
   files = { ...files, ...next };
   failed = null;
@@ -411,7 +427,7 @@ const VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'mov', 'qt', 'webm', 'mkv', '3gp
  * knowing what it held, is an MP4 as readily as a JPEG - so the name is asked, as it is for a file
  * with no type at all.
  */
-async function namesAVideo(uri: string): Promise<boolean> {
+export async function namesAVideo(uri: string): Promise<boolean> {
   const type = await typeOf(uri);
   if (type.startsWith('video/')) return true;
   if (type.startsWith('image/')) return false;
@@ -524,15 +540,7 @@ async function load(from: WebLabelingFiles): Promise<{ classifier: TasksVision.I
   // Read below, or never if the runtime fails first: then its failure is not one to report as well.
   model.catch(() => undefined);
 
-  // From its URL, never through the bundler: a host's build carries none of MediaPipe (see above).
-  const url = absolute(from.runtimeUrl);
-  let runtime: typeof TasksVision;
-  try {
-    runtime = (await import(/* @vite-ignore */ /* webpackIgnore: true */ runtimeUrl(url))) as typeof TasksVision;
-  } catch (error) {
-    importFailures.set(url, (importFailures.get(url) ?? 0) + 1);
-    throw error;
-  }
+  const runtime = await importTasksVision(from);
   const { FilesetResolver, ImageClassifier } = runtime;
   const fileset = await FilesetResolver.forVisionTasks(absolute(from.wasmBaseUrl).replace(/\/+$/, ''));
   const canvas = document.createElement('canvas');
@@ -561,6 +569,21 @@ async function load(from: WebLabelingFiles): Promise<{ classifier: TasksVision.I
 }
 
 /**
+ * MediaPipe's runtime, imported from its URL, never through the bundler: a host's build carries none
+ * of it (see above). The one `import()` of it in the package - `scripts/finish-build.mjs` puts it back
+ * into the CommonJS build by this exact line, so the segmenter imports it through here too.
+ */
+export async function importTasksVision(from: WebLabelingFiles): Promise<typeof TasksVision> {
+  const url = absolute(from.runtimeUrl);
+  try {
+    return (await import(/* @vite-ignore */ /* webpackIgnore: true */ runtimeUrl(url))) as typeof TasksVision;
+  } catch (error) {
+    importFailures.set(url, (importFailures.get(url) ?? 0) + 1);
+    throw error;
+  }
+}
+
+/**
  * The runtime's URL, or the same URL with a query of its own once importing it has failed. Chromium
  * and Firefox keep a module whose fetch failed in the page's module map, so importing the same URL
  * again rejects at once without asking the network - a phone offline for a moment would be without
@@ -577,14 +600,14 @@ function runtimeUrl(url: string): string {
   return retry.href;
 }
 
-async function download(url: string): Promise<Uint8Array> {
+export async function download(url: string): Promise<Uint8Array> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`the model at ${url} answered ${response.status}`);
   return new Uint8Array(await response.arrayBuffer());
 }
 
 /** A download as the stream MediaPipe reads a model from: one chunk, once it has all arrived. */
-function streamOf(bytes: Promise<Uint8Array>): ReadableStreamDefaultReader<Uint8Array> {
+export function streamOf(bytes: Promise<Uint8Array>): ReadableStreamDefaultReader<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
@@ -598,7 +621,7 @@ function streamOf(bytes: Promise<Uint8Array>): ReadableStreamDefaultReader<Uint8
 }
 
 /** A picture of one opaque pixel, for [load] to try the classifier on. */
-function onePixel(): HTMLCanvasElement {
+export function onePixel(): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = 1;
   canvas.height = 1;
@@ -610,7 +633,7 @@ function onePixel(): HTMLCanvasElement {
   return canvas;
 }
 
-function absolute(url: string): string {
+export function absolute(url: string): string {
   return new URL(url, document.baseURI).href;
 }
 
@@ -624,6 +647,6 @@ function clampConfidence(confidence: number | undefined): number {
   return Math.min(1, Math.max(0, confidence));
 }
 
-function messageOf(error: unknown): string {
+export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message || error.name : String(error);
 }

@@ -15,6 +15,7 @@ import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTr
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPictures } from './preview-pictures';
 import { PreviewPlayer } from './preview-player';
+import { SubjectOverlay } from './subject-overlay';
 import { zoomArea, zoomLevelLabel } from './zoom-area';
 
 /**
@@ -237,6 +238,12 @@ export class VePreview implements EditorPlayer {
   };
   private readonly keepCanvas = (el?: HTMLElement) => {
     this.canvasEl = el as HTMLCanvasElement | undefined;
+  };
+  /** The Focus sheet's outlines of the subjects; see [SubjectOverlay]. */
+  private subjectsEl?: HTMLCanvasElement;
+  private subjects: SubjectOverlay | null = null;
+  private readonly keepSubjects = (el?: HTMLElement) => {
+    this.subjectsEl = el as HTMLCanvasElement | undefined;
   };
   private readonly keepVideo = (el?: HTMLElement) => {
     this.videoEl = el as HTMLVideoElement | undefined;
@@ -714,6 +721,8 @@ export class VePreview implements EditorPlayer {
     this.detachExtras();
     this.canvas?.destroy();
     this.canvas = null;
+    this.subjects?.destroy();
+    this.subjects = null;
     this.motion.destroy();
     this.gestures?.destroy();
     this.gestures = null;
@@ -788,11 +797,16 @@ export class VePreview implements EditorPlayer {
     store.attachPlayer(this);
     this.player.start();
 
+    if (this.subjectsEl) this.subjects = new SubjectOverlay(store, this.subjectsEl);
     this.gestures = new OverlayGestures(store, stage, {
       dragging: this.dragging,
       moving: this.moving,
       trashHot: this.trashHot,
       guides: this.guides,
+      focusTap: (fx, fy) => {
+        const id = this.subjects?.hitAt(fx, fy);
+        if (id) store.toggleFocusSubject(id);
+      },
     });
 
     // Both boxes, because either can change without the other: a sheet opening resizes the stage,
@@ -837,8 +851,29 @@ export class VePreview implements EditorPlayer {
             store.cameraLive.value,
             store.layoutMotions.value,
             store.backgroundRgb.value,
+            // A focus put on, changed, or its subjects found: the world softens on a paused frame too.
+            store.focusFrames.value,
           ] as const,
         () => this.canvas?.request(),
+      ),
+    );
+
+    // The subjects' outlines follow the Focus sheet, the frame its clip is on, and who is in focus.
+    this.disposers.push(
+      deferredEffect(
+        () =>
+          [
+            store.panel.value,
+            store.playing.value,
+            store.previewLayers.value,
+            store.focusTrack.value,
+            store.focusSubjectsNow.value,
+            store.camera.value,
+            store.cameraLive.value,
+            store.frameAspect.value,
+            store.output.value,
+          ] as const,
+        () => this.subjects?.request(),
       ),
     );
 
@@ -975,6 +1010,7 @@ export class VePreview implements EditorPlayer {
     // changes how many pixels it draws. Compositing a 4K post at 4K for a 400px preview is waste,
     // and everything a layer carries is a fraction, so the picture is the same either way.
     this.canvas?.resize(rect.width, rect.height);
+    this.subjects?.request();
   }
 
   /* ========================================================================================= */
@@ -1098,6 +1134,8 @@ export class VePreview implements EditorPlayer {
                 is drawn at is [measureStage]'s answer, not the post's.
               */}
               <canvas key="composite" class="pv__canvas" aria-hidden="true" ref={this.keepCanvas}></canvas>
+              {/* The Focus sheet's subjects, drawn over the picture and under every other piece of chrome. */}
+              <canvas key="subjects" class="pv__subjects" aria-hidden="true" ref={this.keepSubjects}></canvas>
 
               {/*
                 The sources. One `<video>` per extra video track and two for the base, seeked by

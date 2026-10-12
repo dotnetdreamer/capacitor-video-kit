@@ -97,6 +97,23 @@ describe('withNativeRenderInputs', () => {
     expect(bridge.stageRenderInput).toHaveBeenCalledTimes(3);
   });
 
+  /* The page's own search writes a clip's subject track as a blob, as it does the clip it read. */
+  it("stages the subject track a clip's focus names, a transition's outgoing side's too, and leaves a file alone", async () => {
+    blobs.set('blob:app/track', new Blob(['VKST'], { type: 'application/octet-stream' }));
+    const focus = { uri: 'blob:app/track', atMs: [0], subjects: [{ id: 1, focus: [1] }], blur: 0.015 };
+    const original = spec();
+    original.clips[0]!.focus = { ...focus };
+    original.clips[1]!.transitionIn!.from.focus = { ...focus };
+    original.tracks![0]!.clips[1]!.focus = { ...focus, uri: 'file:///cache/subjects/d.vkst' };
+
+    const prepared = await withNativeRenderInputs(original, async (copy) => copy);
+
+    expect(prepared.clips[0]?.focus?.uri).toMatch(/^file:\/\/\/tmp\/videokit-render-inputs\/\d+$/);
+    expect(prepared.clips[1]?.transitionIn?.from.focus?.uri).toBe(prepared.clips[0]?.focus?.uri);
+    expect(prepared.tracks?.[0]?.clips[1]?.focus?.uri).toBe('file:///cache/subjects/d.vkst');
+    expect(original.clips[0]?.focus?.uri).toBe('blob:app/track');
+  });
+
   it('stages every extra audio clip and reuses one staged file across lanes', async () => {
     const original = musicOnly('blob:app/music');
     const first = { ...original.audio.music!, endMs: 1000 };

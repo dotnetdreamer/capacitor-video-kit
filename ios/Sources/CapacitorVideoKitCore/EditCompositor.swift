@@ -147,12 +147,19 @@ struct EditLayer {
     /// frame. The angle is still `spin`, about the moving rectangle's own centre.
     let motion: ComposeRectMotion?
 
+    /// The clip's focus - which of its subjects stay sharp, and what becomes of the rest - with its
+    /// subject track and its time mapping, or nil for every clip without one, which then reaches
+    /// `placedPicture` with nothing to test but this nil. Shared, as one instance, by every layer cut
+    /// from the same timeline entry, as `slow` is.
+    let focus: FocusClip?
+
     init(trackID: CMPersistentTrackID, orientation: CGImagePropertyOrientation, fit: Fit,
          crop: ComposeRect?, rect: ComposePlacement?, opacity: Double, render: CGSize,
-         slow: SlowClip? = nil, rectMotion: ComposeRectMotion? = nil) {
+         slow: SlowClip? = nil, rectMotion: ComposeRectMotion? = nil, focus: FocusClip? = nil) {
         self.trackID = trackID
         self.slow = slow
         self.motion = rectMotion
+        self.focus = focus
         self.orientation = orientation
         self.fit = fit
         self.crop = crop
@@ -515,7 +522,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         return CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
     }
 
-    /// One layer's picture, oriented, graded and placed, TRANSPARENT everywhere it does not reach -
+    /// One layer's picture, oriented, focused, graded and placed, TRANSPARENT everywhere it does not reach -
     /// exactly what every layer of every frame has always been drawn as - or nil when there is no
     /// picture to place at all. `src` is what `sourcePicture` answered.
     ///
@@ -537,6 +544,13 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
             into = Placement.destination(moving, in: rect)
         }
         var pic = src.oriented(layer.orientation)
+        // FOCUS, the first thing done to the oriented source (`ComposeFocus`): the grade, the crop, the
+        // fit, the turn and the camera below all act on the focused picture as the footage, and its grey
+        // and dark are under the grade, as on the web and Android. A slowed clip's synthesised frame is
+        // focused at the source instant it stands for. nil - every clip without a focus - skips it.
+        if let focus = layer.focus {
+            pic = focus.focused(pic, atUs: tUs)
+        }
         // The colour goes on the PICTURE, before the letterbox bars exist. Applied to the
         // finished frame instead, any op with a non-zero bias paints the bars: `golden` carries
         // b = [0.1595, 0.1108, 0.0261], which gives rgb(41, 28, 7) bars, and a fade gives grey

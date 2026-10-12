@@ -1,4 +1,4 @@
-import type { RasterisedOverlay } from '../editor';
+import type { FindSubjectsResult, RasterisedOverlay, SubjectTrack } from '../editor';
 
 /** What the customer has picked on the timeline or the preview. At most one thing at a time. */
 export type EditorSelection =
@@ -32,7 +32,8 @@ export type EditorPanel =
   | 'zoom'
   | 'animation'
   | 'background'
-  | 'audioEffects';
+  | 'audioEffects'
+  | 'focus';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the
@@ -119,3 +120,18 @@ export interface EditorPlayer {
   play(): void;
   pause(): void;
 }
+
+/**
+ * How far a source's subjects have got, as `EditorMedia` writes it into [EditorStore.subjectTracks]
+ * and the Focus sheet and the preview read it:
+ *
+ *  - `finding`: the host is looking, `progress` of the way through the footage;
+ *  - `ready`: the host's answer, with its track read and ready to draw a focus from;
+ *  - `none`: nothing to draw one from - `unsupported`, a platform with nothing to look with, or
+ *    `failed`, a search that went wrong. A source a stopped search left is not filed at all, so the
+ *    next look at it asks again.
+ */
+export type SubjectTrackState =
+  | { status: 'finding'; progress: number }
+  | { status: 'ready'; result: FindSubjectsResult; track: SubjectTrack }
+  | { status: 'none'; reason: 'unsupported' | 'failed' };

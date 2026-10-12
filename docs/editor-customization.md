@@ -83,7 +83,7 @@ UI package that guessed at them would be wrong in two of the three.
 
 ```ts
 editor.host = {
-  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, sounds, soundCatalogue, release, voice },
+  media: { pickVideo, pickImage, pickAudio, probeDuration, thumbnails, findSubjects, sounds, soundCatalogue, release, voice },
   render: { isSupported, render },
   platform: { fileUrl, haptic, keyboard, registerBackHandler, confirm, measureInsets, debug },
 };
@@ -102,6 +102,7 @@ and hands back a real manifest, which is the right behaviour on the web rather t
 | `media.pickVideo`, `pickImage`, `pickAudio` | Add a clip, an overlay photo, a track | a hidden `<input type="file">`, except `pickAudio` on iOS in a Capacitor app, which is the kit's own document picker |
 | `media.probeDuration` | How long a source runs | a throwaway `<video>` and a ten second timeout |
 | `media.thumbnails` | The timeline's filmstrip | one `<video>`, seeked to each time in turn, onto one canvas |
+| `media.findSubjects`, `stopFindingSubjects` | Focus: the subjects of a clip, found and followed, which the Focus sheet outlines and keeps sharp ([Finding the subjects in footage](media.md#finding-the-subjects-in-footage)) | MediaPipe's selfie segmenter in the page, from a model the host serves; where it will not load, the Focus sheet says Focus is not available. A host that leaves `findSubjects` out of a host of its own, or passes `subjects: false` to `composerMediaHost`, has no Focus tool |
 | `media.sounds` | The customer's kept sounds: list, extract one from a video, delete one | audio decoded in the page and kept in IndexedDB |
 | `media.soundCatalogue` | A music library: ready-made tracks in categories, one tab each on the Sound sheet | no tabs: the sheet is the customer's own sounds |
 | `media.release` | Give back what the edit dropped | the object URLs the default picker minted are revoked |

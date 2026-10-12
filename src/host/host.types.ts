@@ -1,4 +1,4 @@
-import type { EditManifest, RasterContext } from '../editor';
+import type { EditManifest, FindSubjectsResult, RasterContext } from '../editor';
 
 /**
  * Everything the editor needs from the application that hosts it.
@@ -262,6 +262,28 @@ export interface EditorMediaHost {
    * Android.
    */
   dropPreviewProxies?(keep: readonly EditorSource[]): Promise<void>;
+
+  /**
+   * The subjects of a source - the people in it, and on iOS 17 and later the pets and things that
+   * stand out - followed through the footage and written down as a subject track, which is what a
+   * clip's Focus keeps sharp ([EditClip.focus]). `onProgress` hears how far it has got, 0..1, a few
+   * times a second.
+   *
+   * Resolves null where there is nothing to look with - a platform with no segmenter, a browser
+   * where MediaPipe will not load - and the Focus sheet then says so; rejects for a source that
+   * cannot be read, or a search [stopFindingSubjects] stopped. A long clip takes a while, and the
+   * answer is kept, so asking again for the same source answers at once.
+   *
+   * Optional; absent, the editor offers no Focus. `composerMediaHost()` has one on every platform,
+   * and so does the browser default, from the files a host serves for MediaPipe (`docs/media.md`).
+   */
+  findSubjects?(source: EditorSource, onProgress: (progress: number) => void): Promise<FindSubjectsResult | null>;
+
+  /**
+   * Stops every search [findSubjects] is running for a source not among `keep`: the customer moved
+   * on, or left, and footage nobody will focus should not hold the phone's decoder. Never rejects.
+   */
+  stopFindingSubjects?(keep: readonly EditorSource[]): Promise<void>;
 
   /**
    * The sounds this customer has kept, and how one more gets in there.

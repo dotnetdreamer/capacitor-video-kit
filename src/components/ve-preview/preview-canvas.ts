@@ -574,7 +574,10 @@ export class PreviewCanvas {
     // The segment the crop sheet is open on. Null whenever that sheet is shut, which is almost always.
     const cropping = cropOpen ? (this.store.cropClip.value?.id ?? null) : null;
     const frameAspect = this.store.frameAspect.value;
-    const slowed = this.slowMotion(now, cropping);
+    // Every layer made below - the base, a transition's two sides, each extra track - in focus where
+    // its clip has one, after its slow motion, whose two frames are then both focused.
+    const moving = this.slowMotion(now, cropping);
+    const slowed: SlowMotion = (layer, video, draw) => this.focused(layer, video, moving(layer, video, draw));
 
     const draws: (LayerDraw | TransitionDraw)[] = [];
     // How many layers the POST says are on screen, whether or not their elements can supply one.
@@ -727,6 +730,26 @@ export class PreviewCanvas {
       if (!(pair.weight > 0)) return { ...draw, source: pair.from };
       return { ...draw, source: pair.from, tween: { source: pair.to ?? draw.source, weight: pair.weight } };
     };
+  }
+
+  /**
+   * `draw` with its clip's focus at the frame its element shows, where the clip has a focus with a
+   * track ready ([EditorStore.focusFrames]); the very object otherwise. A video's source time is its
+   * element's own clock - the frame on screen, which the playhead can run a tick ahead of - and a
+   * picture's is how far into its segment the playhead is, the time its keys run on.
+   */
+  private focused(layer: PreviewVideoLayer, video: PreviewSource, draw: LayerDraw): LayerDraw {
+    const frames = this.store.focusFrames.value.get(layer.clipId);
+    if (!frames) return draw;
+    const element = video instanceof ClipMedia ? (video.isPicture ? null : video.element) : video;
+    const clip = element ? null : findClip(this.store.manifest.value, layer.clipId);
+    const sourceMs = element ? element.currentTime * 1000 : layer.sourceMs - (clip?.inMs ?? 0);
+    try {
+      return { ...draw, focus: frames.at(sourceMs) };
+    } catch {
+      // A track frame that will not decode: the clip is drawn as it is rather than not at all.
+      return draw;
+    }
   }
 
   /**

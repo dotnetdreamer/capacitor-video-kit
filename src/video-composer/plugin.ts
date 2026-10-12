@@ -17,6 +17,8 @@ import type {
   EncodeSupport,
   ExtractAudioOptions,
   ExtractAudioResult,
+  FindSubjectsOptions,
+  FindSubjectsResult,
   GalleryAccessOptions,
   GalleryAccessResult,
   GalleryThumbnailOptions,
@@ -59,6 +61,9 @@ import type {
   StageRenderInputOptions,
   StageRenderInputResult,
   StartVoiceRecordingOptions,
+  StopFindingSubjectsOptions,
+  StopFindingSubjectsResult,
+  SubjectsProgressEvent,
   SystemInsetsResult,
   ThumbnailsOptions,
   ThumbnailsResult,
@@ -144,6 +149,34 @@ export interface VideoComposerPlugin {
    * steers it right. On a device it runs.
    */
   labelMedia(options: LabelMediaOptions): Promise<LabelMediaResult>;
+
+  /**
+   * Finds the subjects of a video or a picture - the people, and on iOS 17 and later the pets and
+   * things that stand out - follows each through the footage, and writes where every one is, frame by
+   * frame, into a subject track: the file a clip's `focus` names ([ComposeFocus.uri]) and the editor's
+   * preview reads. On the device, with nothing sent anywhere: Vision on iOS, ML Kit's selfie
+   * segmentation on Android, whose model the kit bundles; in a browser MediaPipe's selfie segmenter,
+   * from files the host serves beside its page as it does for [labelMedia] ([SubjectEngine]).
+   *
+   * Every frame of a video is looked at, [FindSubjectsOptions.fps] of them a second, so a long clip
+   * takes a while, and progress arrives as `subjectsProgress` meanwhile. The answer is kept in the
+   * app's cache, keyed by the file and when it last changed, so asking again for the same file answers
+   * at once with `cached` set.
+   *
+   * Rejects `invalid_spec` without a `uri`, `unreadable_input` for a file that will not open or has no
+   * picture, `cancelled` for a search [stopFindingSubjects] stopped, and `unsupported` where there is
+   * no segmenter: an Android app built without it, the iOS simulator, whose Vision cannot run the
+   * models, and a browser where MediaPipe will not load. Footage where nothing stands out resolves
+   * with no subjects.
+   */
+  findSubjects(options: FindSubjectsOptions): Promise<FindSubjectsResult>;
+
+  /**
+   * Stops every search [findSubjects] is running or has waiting whose `uri` is not among `keep`, for
+   * a page that has moved on: their calls reject with `cancelled`, and a track half made is not kept.
+   * Never rejects.
+   */
+  stopFindingSubjects(options?: StopFindingSubjectsOptions): Promise<StopFindingSubjectsResult>;
 
   /**
    * Pulls a video's audio track out into a file of its own and, by default, keeps it in the sound
@@ -534,6 +567,7 @@ export interface VideoComposerPlugin {
   addListener(eventName: 'progress', listener: (event: ComposeProgressEvent) => void): Promise<PluginListenerHandle>;
   addListener(eventName: 'completed', listener: (event: ComposeCompletedEvent) => void): Promise<PluginListenerHandle>;
   addListener(eventName: 'failed', listener: (event: ComposeFailedEvent) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: 'subjectsProgress', listener: (event: SubjectsProgressEvent) => void): Promise<PluginListenerHandle>;
 
   removeAllListeners(): Promise<void>;
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ComposeError, ComposeResult, ComposeSpec, EncodeSupport, StageRenderInputOptions } from './definitions';
+import type { ComposeError, ComposeResult, ComposeSpec, EncodeSupport, FindSubjectsOptions, FindSubjectsResult, StageRenderInputOptions } from './definitions';
 
 /*
  * The platform and the plugin, stood in for, as `render-inputs.unit.test.ts` does and for its
@@ -21,6 +21,9 @@ const bridge = vi.hoisted(() => ({
   cleanup: vi.fn<(options: { batchId: string }) => Promise<void>>(),
   stageRenderInput: vi.fn<(options: StageRenderInputOptions) => Promise<{ uri: string }>>(),
   releaseRenderInputs: vi.fn<(options: { uris: string[] }) => Promise<void>>(),
+  findSubjects: vi.fn<(options: FindSubjectsOptions) => Promise<FindSubjectsResult>>(),
+  /** The page's own search, `browserSubjects`: what a phone asks about a clip it holds as a blob. */
+  pageSubjects: vi.fn<(source: EditorSource) => Promise<FindSubjectsResult | null>>(),
 }));
 
 vi.mock('@capacitor/core', () => ({
@@ -34,9 +37,15 @@ vi.mock('@capacitor/core', () => ({
     cleanup: bridge.cleanup,
     stageRenderInput: bridge.stageRenderInput,
     releaseRenderInputs: bridge.releaseRenderInputs,
+    findSubjects: bridge.findSubjects,
   }),
   WebPlugin: class {},
 }));
+
+vi.mock('../host/defaults', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../host/defaults')>();
+  return { ...actual, browserSubjects: (source: EditorSource) => bridge.pageSubjects(source) };
+});
 
 /* The real helper, watched: whether it stages is its own suite's to test, that every render goes through it is this one's. */
 vi.mock('./render-inputs', async (importOriginal) => {
@@ -44,7 +53,7 @@ vi.mock('./render-inputs', async (importOriginal) => {
   return { ...actual, withNativeRenderInputs: vi.fn(actual.withNativeRenderInputs) };
 });
 
-import { reconcileManifest, type EditManifest, type RasterContext } from '../editor';
+import { defaultFocus, reconcileManifest, setClipFocus, type EditManifest, type RasterContext } from '../editor';
 import { setEditorDebug } from '../host/debug';
 import { RenderFailedError, type EditorSource, type RenderRequest } from '../host/host.types';
 
@@ -142,6 +151,8 @@ beforeEach(() => {
   bridge.cleanup.mockReset().mockResolvedValue();
   bridge.stageRenderInput.mockReset();
   bridge.releaseRenderInputs.mockReset().mockResolvedValue();
+  bridge.findSubjects.mockReset();
+  bridge.pageSubjects.mockReset();
   vi.mocked(withNativeRenderInputs).mockClear();
 });
 
@@ -269,6 +280,85 @@ describe('composerRenderHost: the job', () => {
     finishing();
     await host().render(request({}, [{ ...CLIP, playbackUrl: 'https://localhost/_capacitor_file_/clips/a.mp4' }]));
     expect(composed().clips[0]!.uri).toBe(CLIP.sourcePath);
+  });
+});
+
+describe('composerRenderHost: focus', () => {
+  /** What a search answers: one subject, the footage's main one, in the track at `uri`. */
+  function found(uri: string): FindSubjectsResult {
+    return {
+      engine: 'vision',
+      uri,
+      cached: true,
+      kind: 'video',
+      width: 180,
+      height: 320,
+      frames: 30,
+      durationMs: 2000,
+      subjects: [{ id: 1, kind: 'person', startMs: 0, endMs: 2000, peakMs: 1000, box: { x: 0.3, y: 0.2, w: 0.4, h: 0.7 }, area: 0.2 }],
+    };
+  }
+
+  /** A render of `sources` with the first one's clip focused, at the Focus sheet's defaults. */
+  function focused(sources: EditorSource[] = [CLIP]): RenderRequest {
+    const plain = request({}, sources);
+    const manifest = setClipFocus(plain.manifest, plain.manifest.clips[0]!.id, defaultFocus());
+    return { ...plain, manifest, raster: raster(manifest) };
+  }
+
+  it('asks the composer for the subjects of every focused clip, and draws its focus from the track it answers with', async () => {
+    finishing();
+    bridge.findSubjects.mockResolvedValue(found('file:///cache/subjects/a.vkst'));
+
+    await host().render(focused());
+    expect(bridge.findSubjects).toHaveBeenCalledWith({ uri: CLIP.sourcePath });
+    expect(composed().clips[0]!.focus).toMatchObject({ uri: 'file:///cache/subjects/a.vkst', subjects: [{ id: 1, focus: [1] }] });
+  });
+
+  it('asks nothing about a post nobody focused', async () => {
+    finishing();
+    await host().render(request());
+    expect(bridge.findSubjects).not.toHaveBeenCalled();
+    expect(composed().clips[0]!.focus).toBeUndefined();
+  });
+
+  it('draws a focused clip as it is when its subjects cannot be had, and logs why', async () => {
+    finishing();
+    const failure = Object.assign(new Error('unsupported'), { code: 'unsupported' });
+    bridge.findSubjects.mockRejectedValue(failure);
+    const log = vi.fn();
+
+    await host({ log }).render(focused());
+    expect(composed().clips[0]!.focus).toBeUndefined();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('no subjects for a focused clip'), failure);
+  });
+
+  /* The composer cannot open a blob, so the page searched it for the preview and answers here too. */
+  it('has the page search a clip a phone holds only as a blob, and stages the track with the clip', async () => {
+    bridge.native = true;
+    const page: EditorSource = { key: 'a', fileName: 'a.mp4', playbackUrl: 'blob:capacitor://localhost/42' };
+    bridge.pageSubjects.mockResolvedValue(found('blob:capacitor://localhost/track'));
+    vi.stubGlobal('fetch', vi.fn(async (uri: string) => ({ ok: true, status: 200, blob: async () => new Blob([uri], { type: uri.endsWith('42') ? 'video/mp4' : 'application/octet-stream' }) })));
+    let files = 0;
+    bridge.stageRenderInput.mockImplementation(async ({ uri, extension }) => ({ uri: uri ?? `file:///tmp/videokit-render-inputs/${++files}${extension ? `.${extension}` : ''}` }));
+    finishing();
+
+    await host().render(focused([page]));
+    expect(bridge.findSubjects).not.toHaveBeenCalled();
+    expect(bridge.pageSubjects).toHaveBeenCalledWith(page);
+    expect(composed().clips[0]!.uri).toBe('file:///tmp/videokit-render-inputs/1.mp4');
+    expect(composed().clips[0]!.focus?.uri).toBe('file:///tmp/videokit-render-inputs/2');
+  });
+
+  it('draws that clip as it is when the page has nothing to look with', async () => {
+    bridge.native = true;
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(['clip'], { type: 'video/mp4' }) })));
+    bridge.stageRenderInput.mockResolvedValue({ uri: 'file:///tmp/videokit-render-inputs/1.mp4' });
+    bridge.pageSubjects.mockResolvedValue(null);
+    finishing();
+
+    await host().render(focused([{ key: 'a', fileName: 'a.mp4', playbackUrl: 'blob:capacitor://localhost/42' }]));
+    expect(composed().clips[0]!.focus).toBeUndefined();
   });
 });
 

@@ -245,12 +245,21 @@ enum TransitionRender {
     static func maskImage(_ mask: ComposeTransitionMask, reveal: Double, rect: CGRect) -> CIImage? {
         let grid = TransitionMath.maskGrid(mask, reveal: reveal,
                                            width: Double(rect.width), height: Double(rect.height))
-        guard let provider = CGDataProvider(data: Data(grid.values) as CFData),
-              let cg = CGImage(width: grid.columns,
-                               height: grid.rows,
+        return gridImage(grid.values, columns: grid.columns, rows: grid.rows, over: rect)
+    }
+
+    /// A grid of bytes, row by row from the TOP, as a grey image stretched over `rect` and read
+    /// LINEARLY between cell centres, its outermost cells held out to the edges: `maskImage`'s, and a
+    /// focus's (`FocusRender`), whose contract asks for exactly that interpolation. nil only if Core
+    /// Graphics refuses to wrap the bytes.
+    static func gridImage(_ values: [UInt8], columns: Int, rows: Int, over rect: CGRect) -> CIImage? {
+        guard columns > 0, rows > 0, values.count == columns * rows,
+              let provider = CGDataProvider(data: Data(values) as CFData),
+              let cg = CGImage(width: columns,
+                               height: rows,
                                bitsPerComponent: 8,
                                bitsPerPixel: 8,
-                               bytesPerRow: grid.columns,
+                               bytesPerRow: columns,
                                space: CGColorSpaceCreateDeviceGray(),
                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
                                provider: provider,
@@ -259,8 +268,8 @@ enum TransitionRender {
                                intent: .defaultIntent)
         else { return nil }
         let small = CIImage(cgImage: cg, options: [.colorSpace: NSNull()])
-        let stretch = CGAffineTransform(scaleX: rect.width / CGFloat(grid.columns),
-                                        y: rect.height / CGFloat(grid.rows))
+        let stretch = CGAffineTransform(scaleX: rect.width / CGFloat(columns),
+                                        y: rect.height / CGFloat(rows))
             .concatenating(CGAffineTransform(translationX: rect.minX, y: rect.minY))
         return small.clampedToExtent()
             .samplingLinear()

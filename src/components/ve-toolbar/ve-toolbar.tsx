@@ -586,8 +586,20 @@ export class VeToolbar {
       },
       { id: 'filters', label: 'Filters', icon: 'color-filter-outline', run: () => store.openPanel('filters') },
       { id: 'adjust', label: 'Adjust', icon: 'options-outline', run: () => store.openPanel('adjust') },
+      ...this.focusTile(),
     );
     return { kind: 'clip', label: 'Clip tools', collapse: this.deselect('Close clip tools'), tiles };
+  }
+
+  /**
+   * Focus, on both clip rows and for a picture as well as a video: its subjects kept sharp and the
+   * rest softened. Left out on a host that cannot look for subjects, rather than dimmed, because
+   * there it is never rather than not now.
+   */
+  private focusTile(): ToolTile[] {
+    const store = this.ctx.store;
+    if (!store.host.media.findSubjects) return [];
+    return [{ id: 'focus', label: 'Focus', icon: 'aperture-outline', run: () => store.openFocus() }];
   }
 
   /**
@@ -664,6 +676,7 @@ export class VeToolbar {
         },
         // Neither for a picture, as on the base row.
         ...(picture ? [] : [this.speedTile(), this.volumeTile()]),
+        ...this.focusTile(),
         {
           id: 'start-here',
           label: 'Start here',

@@ -87,6 +87,11 @@ object CompositionBuilder {
         plan: RenderPlan,
         overlays: List<TextureOverlay>,
         progressTap: AtomicLong?,
+        /**
+         * The subject track of every focused clip, by [Focus.uri], as the pre-flight read them; see
+         * [FocusEffect]. Empty for a post nobody focused, which is every post before focus existed.
+         */
+        subjectTracks: Map<String, SubjectTrack> = emptyMap(),
     ): Composition {
         val output = plan.spec.output
 
@@ -165,9 +170,13 @@ object CompositionBuilder {
         // primary frame, where it used to find one up to a source frame stale. What it cannot do is
         // lend its cadence to a primary that has none: a layer at 1x from 24 fps footage still sets
         // the post's rate while it is on screen, slowed base under it or not.
+        //
+        // A focused clip's effect is its own - its keys, its track and its place on the timeline - so a
+        // new one is made for each, and only for a clip that has a focus; see [Focuses].
+        val focuses = Focuses(subjectTracks)
         val layers = plan.tracks.asReversed()
         for (track in layers) {
-            sequences += layerSequence(track, plan.totalUs, output, grade, plan.camera)
+            sequences += layerSequence(track, plan.totalUs, output, grade, focuses, plan.camera)
         }
         sequences += videoSequence(
             plan.clips,
@@ -176,6 +185,7 @@ object CompositionBuilder {
             plan.videoSeqHasAudio,
             output,
             grade,
+            focuses,
             plan.tails.associateBy { it.index },
             plan.camera,
             background,
@@ -186,7 +196,7 @@ object CompositionBuilder {
         // layers and the base when there are none, so the output keeps the cadence it has today
         // and never takes on the 30 fps of the blank frames that fill the tails' gaps.
         if (plan.tails.isNotEmpty()) {
-            sequences += tailSequence(plan.tails, plan.totalUs, output, grade, plan.camera, background)
+            sequences += tailSequence(plan.tails, plan.totalUs, output, grade, focuses, plan.camera, background)
         }
         plan.music?.let { sequences += musicSequence(it) }
         for (clip in plan.musicTracks) sequences += musicSequence(clip)
@@ -341,6 +351,7 @@ object CompositionBuilder {
         hasAudio: Boolean,
         output: Output,
         grade: ColorMatrixEffect?,
+        focuses: Focuses,
         transitionsInto: Map<Int, RenderPlan.PlannedTail>,
         camera: CameraTrack? = null,
         /** The canvas a transition's incoming side is laid on, or null for black. */
@@ -350,13 +361,14 @@ object CompositionBuilder {
         val items = clips.mapIndexed { i, planned ->
             val tail = transitionsInto[i]
             if (tail == null) {
-                editedClip(planned, startsUs[i], output, grade, geometries, camera = camera)
+                editedClip(planned, startsUs[i], output, grade, focuses, geometries, camera = camera)
             } else {
                 editedClip(
                     planned,
                     startsUs[i],
                     output,
                     grade,
+                    focuses,
                     geometries,
                     transition = TransitionEffect(TransitionRole.TO, tail.transition, tail.startUs, tail.durUs, background),
                     fadeInUs = tail.durUs,
@@ -438,6 +450,7 @@ object CompositionBuilder {
         totalUs: Long,
         output: Output,
         grade: ColorMatrixEffect?,
+        focuses: Focuses,
         /**
          * For a clip whose rectangle moves, and only for one the plan marked zoomed: its picture is
          * the whole frame, so it takes the camera in its own chain as a base clip does. Every other
@@ -454,7 +467,7 @@ object CompositionBuilder {
         if (track.startUs > 0L) builder.addGap(track.startUs)
         val geometries = Geometries()
         for ((i, planned) in track.clips.withIndex()) {
-            builder.addItem(editedClip(planned, track.placements[i].startUs, output, grade, geometries, camera = camera))
+            builder.addItem(editedClip(planned, track.placements[i].startUs, output, grade, focuses, geometries, camera = camera))
         }
         // A gap must have a positive duration or Media3 rejects it, and a layer cut at the base's
         // own end has no room left for one.
@@ -492,6 +505,7 @@ object CompositionBuilder {
         totalUs: Long,
         output: Output,
         grade: ColorMatrixEffect?,
+        focuses: Focuses,
         camera: CameraTrack? = null,
         /** The canvas a transition's outgoing side is laid on, or null for black. */
         background: FloatArray? = null,
@@ -515,6 +529,7 @@ object CompositionBuilder {
                     tail.itemStartUs,
                     output,
                     grade,
+                    focuses,
                     geometries,
                     transition = TransitionEffect(TransitionRole.FROM, tail.transition, tail.startUs, tail.durUs, background),
                     // Over the part of the window the item still plays: all of it, unless the next
@@ -550,6 +565,7 @@ object CompositionBuilder {
         startUs: Long,
         output: Output,
         grade: ColorMatrixEffect?,
+        focuses: Focuses,
         geometries: Geometries,
         transition: TransitionEffect? = null,
         fadeInUs: Long = 0L,
@@ -652,7 +668,17 @@ object CompositionBuilder {
         // motion between them is found in the graded picture, as the web engine finds it (see
         // SlowMotionEffect). A clip at 1x or faster, and
         // every picture, gets nothing, and its list is the one it always had.
+        //
+        // A FOCUSED clip's focus goes first of all, ahead of the grade: the contract makes it the first
+        // thing done to the oriented source frame, so the grade, the geometry, slow motion, the camera
+        // and a transition's side all take the focused picture for the footage, and its grey and dark
+        // come before the post's colour as they do on the web. Ahead of slow motion it also gives the
+        // frames made between two source frames the first of the contract's two answers: each source
+        // frame focused at its own source time, then the frame between them made. A new instance per
+        // clip - its keys and its place on the timeline are its own - so Media3 rebuilds the chain at a
+        // focused clip's cuts, and at nobody else's: a clip with no focus gets nothing here.
         val videoEffects: List<Effect> = listOfNotNull(
+            focuses.effectFor(planned, startUs),
             grade,
             if (planned.slowed) SlowMotionEffect(startUs, startUs + planned.outDurUs, output.fps) else null,
         ) + geometry + listOfNotNull(
@@ -834,6 +860,24 @@ object CompositionBuilder {
         if (varispeed) return SonicAudioProcessor().apply { setSpeed(speed); setPitch(speed) }
         check(MAINTAIN_PITCH) { "music keeps its pitch only while clips do" }
         return SonicAudioProcessor().apply { setSpeed(speed) }
+    }
+
+    /**
+     * The subject tracks the pre-flight read, and the [FocusEffect] each focused clip's item is given.
+     *
+     * Every clip that names a track had it read and every frame decoded before the render started (see
+     * `VideoComposerPlugin.preflightAndStart`), so a track missing here is a caller that built a
+     * composition without the pre-flight: refused at once, rather than rendered as if nobody had asked
+     * for a focus.
+     */
+    private class Focuses(private val tracks: Map<String, SubjectTrack>) {
+
+        /** [planned]'s focus as an item starting at [startUs] of its sequence, or null for a clip with none. */
+        fun effectFor(planned: RenderPlan.PlannedClip, startUs: Long): FocusEffect? {
+            val focus = planned.clip.focus ?: return null
+            val track = checkNotNull(tracks[focus.uri]) { "the subject track of ${planned.clip.key} was not read before the render" }
+            return FocusEffect(focus, track, FocusTiming.of(planned, startUs))
+        }
     }
 
     private fun layoutFor(fit: Fit): Int = when (fit) {

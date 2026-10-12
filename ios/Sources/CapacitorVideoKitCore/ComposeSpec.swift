@@ -115,9 +115,49 @@ struct ComposeClip: Sendable {
     ///
     /// Present, its four numbers replace `rect`'s at every frame and nothing else does: the angle is
     /// still `rect.rotationDeg`, and `crop` and `fit` mean what they mean, measured afresh against the
-    /// moving rectangle. A `var` with a default, declared LAST, so the memberwise initialiser takes it
-    /// as an optional last argument and every clip built without one is built exactly as it was.
+    /// moving rectangle. A `var` with a default, so the memberwise initialiser takes it as an optional
+    /// argument and every clip built without one is built exactly as it was.
     var rectMotion: ComposeRectMotion? = nil
+    /// Some of the footage's subjects kept sharp and everything else softened, greyed or darkened -
+    /// `ComposeFocus` in `definitions.ts`, whose drawing contract `FocusRender` implements. nil is the
+    /// footage as it is, which is every spec written before the key and every focus the parser
+    /// dropped because it changes nothing, and the builder decides that ONCE per clip it lays: a clip
+    /// with no focus reaches the compositor with nothing to test but a nil. Declared LAST, after
+    /// `rectMotion`, for `rectMotion`'s reason, and read last on the wire too.
+    var focus: ComposeFocus? = nil
+}
+
+/// A clip's focus as the parser leaves it: `atMs` finite and non-decreasing, 1...`maxKeys` of them,
+/// every subject's `focus` as long as `atMs` and held to 0...1, ids unique and 1...255, `blur` held to
+/// 0...`maxBlur`, `mono` and `dim` to 0...1, and never all three of those 0 - that focus is dropped,
+/// which is the absent path. The keys are SOURCE milliseconds of the clip's own file, as a subject
+/// track's frames are; `FocusClip` maps the compositor's output time onto them.
+///
+/// Doubles and milliseconds for the camera's reasons (`ComposeCameraKey`).
+struct ComposeFocus: Sendable {
+    /// `MAX_FOCUS_KEYS` and `MAX_FOCUS_BLUR` from `definitions.ts`. More keys are REFUSED rather than
+    /// truncated, and a larger blur is clamped, as every other value out of range is.
+    static let maxKeys = 2000
+    static let maxBlur = 0.1
+
+    /// The subject track `findSubjects` wrote for this clip's source.
+    let uri: String
+    let atMs: [Double]
+    /// The subjects listed, each in focus by its own key values. A subject not listed, and the
+    /// background, are out of focus throughout.
+    let subjects: [ComposeFocusSubject]
+    /// Gaussian sigma of what is out of focus, a fraction of the oriented source frame's shorter side.
+    let blur: Double
+    let mono: Double
+    let dim: Double
+    /// The subjects are what is softened and the rest is kept sharp.
+    let invert: Bool
+}
+
+/// One subject's focus over a clip: its id in the subject track, and 0...1 at each of the focus's keys.
+struct ComposeFocusSubject: Sendable {
+    let id: Int
+    let focus: [Double]
 }
 
 /// A clip's rectangle, LOWERED to keys by JS (`compileLayoutMotions` in
@@ -533,11 +573,11 @@ struct ComposeSpec: Sendable {
         clips + clips.compactMap { $0.transitionIn?.from } + (tracks ?? []).flatMap { $0.clips }
     }
 
-    /// The name of every file the render opens, as the spec gives it: `everyClip`'s, the music's and
-    /// each voiceover take's. `RetainedMedia.sweep` keeps what a render in progress reads through
-    /// `JobRegistry.liveInputURIs`.
+    /// The name of every file the render opens, as the spec gives it: `everyClip`'s, the subject track
+    /// each focused clip is drawn from, the music's and each voiceover take's. `RetainedMedia.sweep`
+    /// keeps what a render in progress reads through `JobRegistry.liveInputURIs`.
     var inputURIs: [String] {
-        everyClip.map(\.uri) + (audio.music.map { [$0.uri] } ?? []) +
+        everyClip.map(\.uri) + everyClip.compactMap { $0.focus?.uri } + (audio.music.map { [$0.uri] } ?? []) +
             audio.musicTracks.flatMap { $0.map(\.uri) } + audio.voiceover.map(\.uri)
     }
 }

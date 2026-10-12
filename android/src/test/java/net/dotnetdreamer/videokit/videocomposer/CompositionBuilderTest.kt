@@ -932,4 +932,151 @@ class CompositionBuilderTest {
             0f,
         )
     }
+
+    /* ------------------------------------------------------------------------------------- */
+    /* Focus                                                                                   */
+    /* ------------------------------------------------------------------------------------- */
+
+    private val trackUri = "file:///cache/subject-tracks/a.vkst"
+
+    /** A one-frame track whose every cell is subject 1, as the pre-flight would have read it. */
+    private val subjectTrack: SubjectTrack = SubjectTracks.parse(
+        SubjectTracks.encode(
+            SubjectTrackContent(4, 2, listOf(0L), listOf(ByteArray(8) { 1 }), SubjectTrackMeta("mlkit", MediaLabels.Kind.VIDEO, 2_000, 10.0, emptyList())),
+        ),
+    )
+
+    private val subjectTracks = mapOf(trackUri to subjectTrack)
+
+    private fun focus() = Focus(trackUri, listOf(0.0), listOf(FocusSubject(1, listOf(1.0))), blur = 0.015f)
+
+    private fun focusOf(item: androidx.media3.transformer.EditedMediaItem): FocusEffect? =
+        item.effects.videoEffects.firstOrNull() as? FocusEffect
+
+    @Test
+    fun `a focused clip is focused first of all, ahead of the grade, and nobody else is`() {
+        val plan = RenderPlan.build(graded(listOf(clip("a"), clip("b").copy(focus = focus()), clip("c"))), probes("a", "b", "c"))
+        val items = CompositionBuilder.toComposition(plan, emptyList(), null, subjectTracks).sequences[0].editedMediaItems
+        val effects = items[1].effects.videoEffects
+        assertEquals(3, effects.size)
+        val focused = effects[0] as FocusEffect
+        assertTrue(effects[1] is ColorMatrixEffect)
+        assertTrue(effects[2] is Presentation)
+        assertEquals(focus(), focused.focus)
+        assertSame(subjectTrack, focused.track)
+        // Its keys are read at the source time of each frame: the item starts at 2 s on the output.
+        assertEquals(FocusTiming(startUs = 2_000_000L, inUs = 0L, outUs = 2_000_000L, speed = 1.0), focused.timing)
+        // The clips either side keep the chain they always shared, with no focus in it.
+        assertEquals(null, focusOf(items[0]))
+        assertEquals(null, focusOf(items[2]))
+        assertEquals(items[0].effects.videoEffects, items[2].effects.videoEffects)
+    }
+
+    @Test
+    fun `a post nobody focused is built without a track and without a focus`() {
+        val plan = RenderPlan.build(graded(listOf(clip("a"), clip("b"))), probes("a", "b"))
+        val items = CompositionBuilder.toComposition(plan, emptyList(), null).sequences[0].editedMediaItems
+        assertTrue(items.all { item -> item.effects.videoEffects.none { it is FocusEffect } })
+    }
+
+    @Test
+    fun `a focused clip's frames are read at their own source time, trim and speed and all`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 1_000), clip("b", inMs = 500, outMs = 1_500, speed = 2f).copy(focus = focus()))),
+            probes("a", "b"),
+        )
+        val timing = focusOf(CompositionBuilder.toComposition(plan, emptyList(), null, subjectTracks).sequences[0].editedMediaItems[1])!!.timing
+        assertEquals(FocusTiming(startUs = 1_000_000L, inUs = 500_000L, outUs = 1_500_000L, speed = 2.0), timing)
+        assertEquals(500.0, timing.sourceMs(1_000_000L), 0.0)
+        // A quarter of a second of output at 2x is half a second of source.
+        assertEquals(1_000.0, timing.sourceMs(1_250_000L), 0.0)
+        // Held to the trim either side, so a stray stamp reads the nearest frame of the clip's own.
+        assertEquals(500.0, timing.sourceMs(0L), 0.0)
+        assertEquals(1_500.0, timing.sourceMs(9_000_000L), 0.0)
+    }
+
+    @Test
+    fun `a slowed focused clip is focused before the frames between its frames are made`() {
+        val plan = RenderPlan.build(graded(listOf(clip("a", outMs = 1_000, speed = 0.5f).copy(focus = focus()))), probes("a"))
+        val effects = CompositionBuilder.toComposition(plan, emptyList(), null, subjectTracks).sequences[0].editedMediaItems[0].effects.videoEffects
+        assertEquals(4, effects.size)
+        assertTrue(effects[0] is FocusEffect)
+        assertTrue(effects[1] is ColorMatrixEffect)
+        assertTrue(effects[2] is SlowMotionEffect)
+        assertTrue(effects[3] is Presentation)
+        assertEquals(0.5, (effects[0] as FocusEffect).timing.speed, 0.0)
+    }
+
+    @Test
+    fun `a picture's focus is read at the picture's own elapsed time`() {
+        val plan = RenderPlan.build(
+            spec(listOf(clip("a", outMs = 1_000), clip("p", outMs = 1_000).copy(image = true, focus = focus()))),
+            probes("a", "p"),
+        )
+        val timing = focusOf(CompositionBuilder.toComposition(plan, emptyList(), null, subjectTracks).sequences[0].editedMediaItems[1])!!.timing
+        assertEquals(FocusTiming(startUs = 1_000_000L, inUs = 0L, outUs = 1_000_000L, speed = 1.0), timing)
+        assertEquals(500.0, timing.sourceMs(1_500_000L), 0.0)
+    }
+
+    @Test
+    fun `a layer's focused clip is timed from where the layer puts it`() {
+        val pip = Track("pip", listOf(clip("d", outMs = 900).copy(focus = focus())), startMs = 400, z = 1, opacity = 1f)
+        val plan = RenderPlan.build(spec(listOf(clip("a")), tracks = listOf(pip)), probes("a", "d"))
+        val layer = CompositionBuilder.toComposition(plan, emptyList(), null, subjectTracks).sequences[0].editedMediaItems
+        assertTrue(isGap(layer[0]))
+        val timing = focusOf(layer[1])!!.timing
+        assertEquals(plan.tracks[0].placements[0].startUs, timing.startUs)
+        assertEquals(400_000L, timing.startUs)
+        assertEquals(250.0, timing.sourceMs(650_000L), 0.0)
+    }
+
+    @Test
+    fun `a transition's tail carries its own focus, timed from its item, its lead included`() {
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", outMs = 1_500).copy(focus = focus()),
+                    clip("b", outMs = 1_700).copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000).copy(focus = focus()))),
+                ),
+            ),
+            probes("a", "b"),
+        )
+        val tail = plan.tails.single()
+        // The tail is still its clip carried on - the same focus is the same focus - so it leads.
+        assertEquals(100_000L, tail.leadUs)
+        val item = CompositionBuilder.toComposition(plan, emptyList(), null, subjectTracks).sequences[1].editedMediaItems.first { !isGap(it) }
+        val effects = item.effects.videoEffects
+        val focused = effects.first() as FocusEffect
+        assertTrue(effects.last() is TransitionEffect)
+        assertEquals(FocusTiming(startUs = tail.itemStartUs, inUs = 1_400_000L, outUs = 2_000_000L, speed = 1.0), focused.timing)
+        // The lead's first frame is the source frame the base showed at the same instant.
+        assertEquals(1_400.0, focused.timing.sourceMs(1_400_000L), 0.0)
+        assertEquals(1_750.0, focused.timing.sourceMs(1_750_000L), 0.0)
+    }
+
+    @Test
+    fun `a tail whose focus is not its clip's is not that clip carried on, and takes no lead`() {
+        val other = focus().copy(blur = 0.03f)
+        val plan = RenderPlan.build(
+            spec(
+                listOf(
+                    clip("a", outMs = 1_500).copy(focus = focus()),
+                    clip("b", outMs = 1_700).copy(transitionIn = dissolve(clip("a", inMs = 1_500, outMs = 2_000).copy(focus = other))),
+                ),
+            ),
+            probes("a", "b"),
+        )
+        assertEquals(0L, plan.tails.single().leadUs)
+    }
+
+    @Test
+    fun `a focus whose track was never read is refused, not drawn as no focus`() {
+        val plan = RenderPlan.build(spec(listOf(clip("a").copy(focus = focus()))), probes("a"))
+        try {
+            CompositionBuilder.toComposition(plan, emptyList(), null)
+            org.junit.Assert.fail("expected the missing track to be refused")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("subject track of a"))
+        }
+    }
 }

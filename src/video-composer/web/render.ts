@@ -3,13 +3,15 @@ import { byteCeiling, cssFor } from '../../editor/edit-manifest';
 import { drawsNothing, rectMotionAt } from '../../editor/layout-motion';
 import { overlayMotionAt } from '../../editor/motion';
 import { lookAt } from '../../editor/transitions';
-import { describe } from '../../web-runtime/files';
-import type { ComposeClip, ComposeFailureCode, ComposeOutput, ComposeRect, ComposeSpec } from '../definitions';
+import { parseSubjectTrack, type SubjectTrack } from '../../editor/subject-track';
+import { describe, resolve } from '../../web-runtime/files';
+import type { ComposeClip, ComposeFailureCode, ComposeFocus, ComposeOutput, ComposeRect, ComposeSpec } from '../definitions';
 
 import { mixdown } from './audio';
 import { throughCamera } from './camera-draw';
 import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
+import { FocusFrames } from './focus-frames';
 import { pictureDest } from './geometry';
 import { decodeImage, FrameReader, probeMedia, probePicture, readFrameTimes, StillReader, type SourceReader } from './media';
 import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from './painter';
@@ -110,6 +112,9 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
 
   const probes = await probeInputs(spec, options.signal);
   const plan = buildPlan(spec, probes);
+  // Read before anything is drawn, like the probes, so a subject track that is not there fails the
+  // render before a frame of it is encoded.
+  const focus = await loadFocus(spec, options.signal);
   options.onProgress(0.02);
 
   const mix = await guard(() => mixdown(plan, options.signal), 'unknown');
@@ -144,7 +149,7 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   );
 
   try {
-    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, options);
+    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, focus, options);
     const { blob, hasAudio, mimeType } = await guard(() => sink.finish(), 'muxer');
     // The finished file, measured once more: the running count leaves out the container's boxes and
     // the sound, which is only encoded now. A file over the ceiling is dropped here, before anything
@@ -177,7 +182,15 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
  * One pass down the output timeline. Returns the poster, cut from the frame the spec asked for
  * rather than encoded a second time.
  */
-async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSink, layers: LayerReaders, overlays: OverlayBitmaps, options: RenderOptions): Promise<Blob | null> {
+async function drawEveryFrame(
+  plan: RenderPlan,
+  painter: Painter,
+  sink: FrameSink,
+  layers: LayerReaders,
+  overlays: OverlayBitmaps,
+  focus: ClipFocus,
+  options: RenderOptions,
+): Promise<Blob | null> {
   const fps = plan.output.fps;
   const frameUs = 1_000_000 / fps;
   // CEIL, with the last frame shortened below - so the video ends exactly where the plan says and
@@ -223,7 +236,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
     const baseRect = base ? rectAt(base.clip, atUs) : undefined;
     const baseJob =
       base && !hidden(baseRect, plan.output)
-        ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0, null, baseRect)
+        ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0, null, baseRect, focus)
         : null;
     // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
     // tail - read from its own element, drawn the way the base clip it continues was drawn - is
@@ -246,6 +259,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
             crossing.planned.tail.clip.rect?.rotationDeg ?? 0,
             null,
             tailRect,
+            focus,
           )
         : null;
     // Never on a frame that asked for a tail: the last window has closed by the time this is true.
@@ -277,7 +291,7 @@ async function drawEveryFrame(plan: RenderPlan, painter: Painter, sink: FrameSin
       // its picture comes out at rather than staying its whole rectangle: bars inside a layer are
       // opaque black over the picture beneath it. See [pictureDest].
       const run = () =>
-        layerDraw(layers, slot, clip, atUs - placement.startUs, frameSeconds, dest, track.opacity, placement.rect.rotationDeg ?? 0, plan.output.width / plan.output.height);
+        layerDraw(layers, slot, clip, atUs - placement.startUs, frameSeconds, dest, track.opacity, placement.rect.rotationDeg ?? 0, plan.output.width / plan.output.height, undefined, focus);
       const before = busy.get(slot);
       const job = before ? before.then(run, run) : run();
       busy.set(slot, job);
@@ -377,6 +391,8 @@ async function layerDraw(
    * `rectMotion` has it now. An extra layer's rectangle is its `dest` instead, and is not given here.
    */
   framingRect: ComposeRect | undefined = clip.clip.rect,
+  /** Each focused clip's frames of focus; see [loadFocus]. */
+  focus: ClipFocus = NO_FOCUS,
 ): Promise<LayerDraw | null> {
   const reader = await layers.reader(layerId, clip.clip);
   const seconds = sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000;
@@ -401,7 +417,58 @@ async function layerDraw(
     rotationDeg,
   };
   if (synthesised?.tween) draw.tween = synthesised.tween;
+  // At the instant the frame stands for, which for a synthesised one is between the two it is made
+  // from; both are focused with it, which is the contract's focusing of the frame made.
+  const frames = clip.clip.focus ? focus.get(clip.clip.focus) : undefined;
+  if (frames) draw.focus = focusAt(frames, seconds * 1000, clip.clip.key);
   return draw;
+}
+
+/**
+ * The frames of every focus in a spec - a base clip's, a tail's, a layer's - by the focus itself, which
+ * the plan carries over by reference onto the copies it makes of a clip: a layer's clip is planned as
+ * a copy with its rectangle taken off.
+ */
+type ClipFocus = ReadonlyMap<ComposeFocus, FocusFrames>;
+
+const NO_FOCUS: ClipFocus = new Map();
+
+/**
+ * Reads the subject track of every clip that has a focus, once per file however many clips share it,
+ * and pairs each clip with the frames of its focus. Empty for a spec with none, which reads nothing.
+ * A track that cannot be read fails the render as `unreadable_input`, naming the first clip that
+ * needed it, as footage that cannot be read does.
+ */
+async function loadFocus(spec: ComposeSpec, signal: AbortSignal): Promise<ClipFocus> {
+  const tails = spec.clips.flatMap(clip => (clip.transitionIn ? [clip.transitionIn.from] : []));
+  const focused = [...spec.clips, ...tails, ...(spec.tracks ?? []).flatMap(track => track.clips)].filter(clip => clip.focus);
+  if (focused.length === 0) return NO_FOCUS;
+  const tracks = new Map<string, SubjectTrack>();
+  const out = new Map<ComposeFocus, FocusFrames>();
+  for (const clip of focused) {
+    throwIfAborted(signal);
+    const focus = clip.focus!;
+    let track = tracks.get(focus.uri);
+    if (!track) {
+      try {
+        track = parseSubjectTrack(await (await resolve(focus.uri)).arrayBuffer());
+      } catch (error) {
+        throw new RenderFailure('unreadable_input', `subject track: ${describe(error)}`, clip.key);
+      }
+      tracks.set(focus.uri, track);
+    }
+    out.set(focus, new FocusFrames(track, focus));
+  }
+  return out;
+}
+
+/** The focus at a source instant, a frame of its track that does not decode failing the render as unreadable. */
+function focusAt(frames: FocusFrames, sourceMs: number, clipKey: string) {
+  try {
+    return frames.at(sourceMs);
+  } catch (error) {
+    throw new RenderFailure('unreadable_input', `subject track: ${describe(error)}`, clipKey);
+  }
 }
 
 /**

@@ -40,6 +40,11 @@ enum JobFolders {
     /// Cache entries older than this are swept on plugin load.
     static let cacheTTL: TimeInterval = 24 * 60 * 60
 
+    /// Subject tracks nothing has asked for in this long are swept on plugin load. Longer than the
+    /// tiles' day because a track is far dearer to make again - every frame of the clip looked at - and
+    /// a draft is opened again days later; a hit touches its file, so the week runs from the last ask.
+    static let subjectsTTL: TimeInterval = 7 * 24 * 60 * 60
+
     /// Job folders whose post finished this long ago are swept. Only folders carrying the marker
     /// the publisher writes when a post is created are eligible.
     static let doneTTL: TimeInterval = 24 * 60 * 60
@@ -144,6 +149,10 @@ enum JobFolders {
     static func thumbsDir() -> URL { caches("video-composer/thumbs") }
 
     static func voiceDir() -> URL { caches("video-composer/voice") }
+
+    /// Where `findSubjects` keeps its subject tracks (`SubjectCache`): Caches, as the tiles are, because a
+    /// track can always be found again.
+    static func subjectsDir() -> URL { caches("video-composer/subjects") }
 
     private static func caches(_ relative: String) -> URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -512,7 +521,8 @@ enum JobFolders {
     /// Deliberately conservative about job folders, because the alternative is deleting the files
     /// behind a post the customer can still retry. Three rules, in order:
     ///
-    /// 1. cache entries and staged render inputs older than 24 h
+    /// 1. cache entries and staged render inputs older than 24 h, and subject tracks nothing has asked
+    ///    for in 7 days (`subjectsTTL`)
     /// 2. a job folder carrying the done marker, 24 h after the marker was written
     /// 3. an unmarked job folder after 7 days, and only when nothing still claims it
     ///
@@ -546,6 +556,7 @@ enum JobFolders {
         sweepCache(thumbsDir(), now: now)
         sweepCache(voiceDir(), now: now)
         sweepCache(StagedRenderInputs.folder, now: now)
+        sweepCache(subjectsDir(), now: now, ttl: subjectsTTL)
     }
 
     /// The folder name IS `folderName(batchId)`, not the batch id, so both of the guards below
@@ -606,12 +617,12 @@ enum JobFolders {
         return values?.contentModificationDate ?? Date.distantPast
     }
 
-    private static func sweepCache(_ dir: URL, now: Date) {
+    private static func sweepCache(_ dir: URL, now: Date, ttl: TimeInterval = cacheTTL) {
         let fm = FileManager.default
         let entries = (try? fm.contentsOfDirectory(at: dir,
                                                    includingPropertiesForKeys: [.contentModificationDateKey],
                                                    options: [])) ?? []
-        for entry in entries where now.timeIntervalSince(modified(entry)) > cacheTTL {
+        for entry in entries where now.timeIntervalSince(modified(entry)) > ttl {
             try? fm.removeItem(at: entry)
         }
     }

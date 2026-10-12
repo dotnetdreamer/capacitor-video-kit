@@ -5,7 +5,8 @@ import UIKit
 /// The bridge surface of the video composer. Argument reading, rejections and event forwarding
 /// only: every decision lives in `ComposeSpecParser`, `JobRegistry`, `JobFolders`, `Thumbnailer`,
 /// `Gallery`, `GalleryLibrary`, `RetainedMedia`, `StagedRenderInputs`, `AudioFilePicker`,
-/// `EncodeSupport`, `MediaLabels` or `VoiceRecorder`, so this file stays readable next to the Kotlin it mirrors.
+/// `EncodeSupport`, `MediaLabels`, `SubjectSearches` or `VoiceRecorder`, so this file stays readable next
+/// to the Kotlin it mirrors.
 ///
 /// Capacitor calls each `@objc func` on its own serial queue, shared with every other plugin in the
 /// app and never main, so nothing here does file or AV work inline: a method either answers from
@@ -17,7 +18,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "VideoComposerPlugin"
     public let jsName = "VideoComposer"
 
-    /// Thirty entries. A method missing from this list is rejected by the bridge before this class
+    /// Thirty-two entries. A method missing from this list is rejected by the bridge before this class
     /// is consulted, which is exactly what used to happen to `systemInsets`: the `@objc func` alone
     /// changes nothing. `addListener` / `removeListener` / `removeAllListeners` are special-cased
     /// by `CapacitorBridge.handleJSCall` before the list is read and stay off it.
@@ -28,6 +29,8 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "probe", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "thumbnails", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "labelMedia", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "findSubjects", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopFindingSubjects", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "extractAudio", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
@@ -251,6 +254,60 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject(ErrorMapping.describe(error), ComposeFailureCode.unknown.rawValue)
             }
         }
+    }
+
+    // MARK: - findSubjects
+
+    /// The subjects of a video or a picture, followed through it and written into a subject track
+    /// (`SubjectFinder`, `SubjectSearches`). `fps` is brought into 1...30 rather than refused, and is 15
+    /// when it is absent or not a number; a `kind` that is neither of the two is refused, as
+    /// `labelMedia` refuses one. Progress arrives as `subjectsProgress` events, about four a second
+    /// and a last one at 1.
+    @objc func findSubjects(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), !uri.isEmpty else {
+            call.reject("uri is required", Reject.invalidSpec)
+            return
+        }
+        var kind: MediaLabelsResult.Kind?
+        if let named = call.getString("kind") {
+            guard let known = MediaLabelsResult.Kind(rawValue: named) else {
+                call.reject("kind must be 'video' or 'image'", Reject.invalidSpec)
+                return
+            }
+            kind = known
+        }
+        guard let url = JobFolders.fileURL(from: uri) else {
+            call.reject("unreadable uri \(uri)", Reject.unreadableInput)
+            return
+        }
+        let fps = SubjectFinder.fps(call.getDouble("fps"))
+        let events = SubjectsProgressEvents(plugin: self, uri: uri)
+
+        Task {
+            do {
+                let finding = try await SubjectSearches.shared.find(uri: uri, url: url, kind: kind, fps: fps,
+                                                                    progress: { events.send($0) })
+                call.resolve(finding.json)
+            } catch let SubjectFinder.FindError.unreadable(message) {
+                call.reject(message, Reject.unreadableInput)
+            } catch let SubjectFinder.FindError.unsupported(message) {
+                call.reject(message, ComposeFailureCode.unsupported.rawValue)
+            } catch is CancellationError {
+                call.reject("cancelled", ComposeFailureCode.cancelled.rawValue)
+            } catch {
+                // Vision failing, or the track that would not write: the platform's own words.
+                call.reject(ErrorMapping.describe(error), ComposeFailureCode.unknown.rawValue)
+            }
+        }
+    }
+
+    /// Stops every search `findSubjects` is running or has waiting that was not asked for by a `uri`
+    /// in `keep` - all of them without one - and answers how many it stopped; their calls reject
+    /// `cancelled`. Never rejects: a `keep` that is not a list of names reads as none, which stops
+    /// everything, the one reading of a page that has moved on that cannot leave a search running.
+    @objc func stopFindingSubjects(_ call: CAPPluginCall) {
+        let keep = call.getArray("keep")?.compactMap { $0 as? String }
+        call.resolve(["stopped": SubjectSearches.shared.stop(keep: keep)])
     }
 
     // MARK: - Sound library
@@ -943,5 +1000,26 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
             await JobRegistry.shared.cleanup(batchId: batchId)
             call.resolve()
         }
+    }
+}
+
+/// `subjectsProgress` for one `findSubjects` call: `{ uri, progress }`, the `uri` as it was asked.
+///
+/// The search runs on a thread of its own and reports from there, so what it holds must be sendable;
+/// the plugin is not, and is held weakly here for the reason `JobRegistry` holds its emitter weakly - a
+/// bridge torn down mid-search leaves nobody to tell, and nothing is queued for a listener that might
+/// come back. Never retained either: a stale progress number is worth nothing once the call has
+/// settled.
+final class SubjectsProgressEvents: @unchecked Sendable {
+    private weak var plugin: VideoComposerPlugin?
+    private let uri: String
+
+    init(plugin: VideoComposerPlugin, uri: String) {
+        self.plugin = plugin
+        self.uri = uri
+    }
+
+    func send(_ progress: Double) {
+        plugin?.emit("subjectsProgress", ["uri": uri, "progress": progress], retain: false)
     }
 }

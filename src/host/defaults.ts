@@ -9,7 +9,8 @@ import {
   qualityOf,
 } from '../editor';
 
-import type { PickAudioFileResult } from '../video-composer/definitions';
+import type { FindSubjectsResult, PickAudioFileResult } from '../video-composer/definitions';
+import { findSubjectsInBrowser, stopFindingSubjectsInBrowser, SubjectsUnavailableError } from '../video-composer/web/subjects';
 import { resolve } from '../web-runtime/files';
 import { downloadBlob } from '../web-runtime/gallery';
 import { deleteSound, extractAudio, listSounds, saveSound } from '../web-runtime/sounds';
@@ -316,6 +317,14 @@ export function browserMediaHost(): EditorMediaHost {
 
     thumbnails(request: ThumbnailRequest): Promise<string[]> {
       return canvasThumbnails(request);
+    },
+
+    findSubjects(source: EditorSource, onProgress: (progress: number) => void): Promise<FindSubjectsResult | null> {
+      return browserSubjects(source, onProgress);
+    },
+
+    async stopFindingSubjects(keep: readonly EditorSource[]): Promise<void> {
+      stopFindingSubjectsInBrowser(keep.map(pageUrl));
     },
 
     sounds: browserSoundLibrary(),
@@ -646,6 +655,22 @@ function pickedKey(): string {
 function pageUrl(source: EditorSource): string {
   if (source.playbackUrl) return source.playbackUrl;
   return source.sourcePath ? webViewUrl(source.sourcePath) : '';
+}
+
+/**
+ * [EditorMediaHost.findSubjects] in a page: MediaPipe's selfie segmenter over the source as the page
+ * plays it (`video-composer/web/subjects.ts`), null where MediaPipe will not load - the "nothing to
+ * look with" the contract answers with - and every other failure passed on.
+ */
+export async function browserSubjects(source: EditorSource, onProgress: (progress: number) => void): Promise<FindSubjectsResult | null> {
+  const uri = pageUrl(source);
+  if (!uri) throw new Error(`${source.fileName} has nothing the page can read`);
+  try {
+    return await findSubjectsInBrowser({ uri, ...(source.kind === 'image' ? { kind: 'image' as const } : {}) }, onProgress);
+  } catch (error) {
+    if (error instanceof SubjectsUnavailableError) return null;
+    throw error;
+  }
 }
 
 /**

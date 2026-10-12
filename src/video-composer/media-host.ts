@@ -1,7 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 
 import { debugWarn } from '../host/debug';
-import { browserMediaHost, mediaDuration, withoutExtension } from '../host/defaults';
+import { browserMediaHost, browserSubjects, mediaDuration, withoutExtension } from '../host/defaults';
 import type {
   EditorMediaHost,
   EditorSoundCatalogue,
@@ -15,6 +15,7 @@ import type {
 import { readVoiceTake } from '../host/read-file';
 import { webViewUrl } from '../host/web-view-url';
 
+import type { FindSubjectsResult } from './definitions';
 import { VideoComposer } from './index';
 import { withNativeFile } from './render-inputs';
 
@@ -108,6 +109,14 @@ export interface ComposerMediaHostOptions {
    * asks without one. Android's `RECORD_AUDIO` comes with the kit's own manifest.
    */
   voice?: false | EditorVoiceHost;
+
+  /**
+   * Looking for the subjects a clip's focus keeps sharp ([EditorMediaHost.findSubjects]). Left out,
+   * the composer's own segmenter on a phone and MediaPipe's in a page. `false` is none anywhere, and
+   * the toolbar does not offer Focus: what an Android app built with `videokitSubjects = false` passes,
+   * so that Focus is not a tool whose sheet only says the phone cannot do it.
+   */
+  subjects?: false;
 }
 
 /**
@@ -120,6 +129,8 @@ export interface ComposerMediaHostOptions {
  * - `thumbnails` has the composer cut the frames from `sourcePath` and answers them as URLs the
  *   WebView may load ([webViewUrl]), and is the browser's canvas for a source with no path;
  * - `voice` is the composer's recorder unless [ComposerMediaHostOptions.voice] says otherwise;
+ * - `findSubjects` is the composer's search of `sourcePath`, and the page's for a source with no path,
+ *   unless [ComposerMediaHostOptions.subjects] turns Focus off;
  * - `sounds` is the composer's library when [ComposerMediaHostOptions.sounds] asks for it, and the
  *   browser's or the composer's hands a sound to the person through `saveToDownloads`.
  *
@@ -133,7 +144,12 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
   const browser = browserMediaHost();
   const native = Capacitor.isNativePlatform();
   const voice = options.voice ?? (native ? nativeVoice() : false);
+  const subjects = options.subjects !== false;
   const { pickMedia, ...browserMembers } = browser;
+  if (!subjects) {
+    delete browserMembers.findSubjects;
+    delete browserMembers.stopFindingSubjects;
+  }
 
   return {
     ...browserMembers,
@@ -146,6 +162,12 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
           thumbnails: (request: ThumbnailRequest) => nativeThumbnails(request, browser),
           previewProxy: (source: EditorSource) => nativePreviewProxy(source),
           dropPreviewProxies: (keep: readonly EditorSource[]) => nativeDropPreviewProxies(keep),
+        }
+      : {}),
+    ...(native && subjects
+      ? {
+          findSubjects: (source: EditorSource, onProgress: (progress: number) => void) => nativeSubjects(source, onProgress),
+          stopFindingSubjects: (keep: readonly EditorSource[]) => nativeStopFindingSubjects(keep),
         }
       : {}),
     sounds: soundLibrary(options.sounds, browser, native),
@@ -290,6 +312,38 @@ async function nativeDropPreviewProxies(keep: readonly EditorSource[]): Promise<
     const code = (error as { code?: unknown } | null)?.code;
     if (code === 'UNIMPLEMENTED') previewProxiesRefused = true;
     else debugWarn('[composer dropPreviewProxies]', error);
+  }
+}
+
+/**
+ * [EditorMediaHost.findSubjects] on a phone: the composer's own search on the file itself, its
+ * progress events for this file passed on as they come. Null where the phone has nothing to look
+ * with - an Android app built without the segmenter, the iOS simulator - and the browser's search for
+ * a source with no file behind it, which only the page can read.
+ */
+async function nativeSubjects(source: EditorSource, onProgress: (progress: number) => void): Promise<FindSubjectsResult | null> {
+  if (!source.sourcePath) return await browserSubjects(source, onProgress);
+  const uri = source.sourcePath;
+  const listening = await VideoComposer.addListener('subjectsProgress', event => {
+    if (event.uri === uri) onProgress(event.progress);
+  });
+  try {
+    return await VideoComposer.findSubjects({ uri, ...(source.kind === 'image' ? { kind: 'image' as const } : {}) });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === 'unsupported' || code === 'UNIMPLEMENTED') return null;
+    throw error;
+  } finally {
+    void listening.remove();
+  }
+}
+
+/** [EditorMediaHost.stopFindingSubjects] on a phone, by the files the searches are of. Quiet, like a drop of copies. */
+async function nativeStopFindingSubjects(keep: readonly EditorSource[]): Promise<void> {
+  try {
+    await VideoComposer.stopFindingSubjects({ keep: keep.flatMap(source => (source.sourcePath ? [source.sourcePath] : [])) });
+  } catch (error) {
+    debugWarn('[composer stopFindingSubjects]', error);
   }
 }
 

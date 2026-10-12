@@ -52,7 +52,7 @@ interface Target {
   height: number;
 }
 
-interface Program {
+export interface Program {
   program: WebGLProgram;
   uniforms: Record<string, WebGLUniformLocation | null>;
 }
@@ -63,14 +63,14 @@ interface Program {
  * between black and white neighbours moves by a fifth of a level. Such a side is sampled sharp and
  * both passes are skipped.
  */
-const MIN_BLUR_PX = 0.25;
+export const MIN_BLUR_PX = 0.25;
 
 /**
  * The smallest sigma, in texels, a blur is run at. Halving stops before the sigma falls below this,
  * so a blur runs with a sigma of two to four texels: enough taps that the kernel is a Gaussian and
  * not a triangle, few enough that the heaviest one costs under thirty taps a pixel.
  */
-const MIN_LEVEL_SIGMA = 2;
+export const MIN_LEVEL_SIGMA = 2;
 
 /** The most taps either side of centre. Only reached by a frame too small to halve any further. */
 const MAX_TAPS = 64;
@@ -87,13 +87,13 @@ const BLACK: RGB = [0, 0, 0];
  * programs draw, so they read it through the same attribute location rather than keeping a buffer of
  * their own.
  */
-const FULL_FRAME_VERTEX = `#version 300 es
+export const FULL_FRAME_VERTEX = `#version 300 es
 in vec2 a_pos;
 void main() {
   gl_Position = vec4(a_pos * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
-const BLUR_FRAGMENT = `#version 300 es
+export const BLUR_FRAGMENT = `#version 300 es
 precision highp float;
 uniform sampler2D u_src;
 // The target's size in its own texels. The source is read at the same place in texture coordinates,
@@ -495,7 +495,7 @@ export class TransitionGl {
  * is a real, faint blur that the first and last moments of a blur transition ramp through, and
  * rounding it up would soften exactly the frames either side of the cut.
  */
-function levelSigma(sigma: number, texel: number, halved: boolean): number {
+export function levelSigma(sigma: number, texel: number, halved: boolean): number {
   if (!halved) return sigma;
   const already = (texel * texel - 1) / 12 + (texel * texel) / 6;
   // Halving stops while the sigma is still twice the texel, so what is left is never below
@@ -504,7 +504,7 @@ function levelSigma(sigma: number, texel: number, halved: boolean): number {
 }
 
 /** Taps either side of centre for a sigma in texels: three sigma, where the Gaussian has 0.3% left. */
-function taps(sigma: number): number {
+export function taps(sigma: number): number {
   return Math.min(MAX_TAPS, Math.max(1, Math.ceil(3 * sigma)));
 }
 
@@ -512,7 +512,7 @@ function taps(sigma: number): number {
  * Compiles and links one full-frame program, its quad attribute pinned to the painter's location.
  * Null for a context that refuses, with anything half made given back.
  */
-function link(gl: WebGL2RenderingContext, fragmentSource: string, position: number, uniformNames: readonly string[]): Program | null {
+export function link(gl: WebGL2RenderingContext, fragmentSource: string, position: number, uniformNames: readonly string[]): Program | null {
   const vertex = compile(gl, gl.VERTEX_SHADER, FULL_FRAME_VERTEX);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
   if (!vertex || !fragment) {

@@ -67,10 +67,10 @@ const sound = (id: string, startMs: number, over: Partial<EditAudioClip> = {}): 
 });
 
 describe('an audio effect layer in the manifest', () => {
-  it('is read back as it was saved, sliders and Slow and all, and is version 18', () => {
+  it('is read back as it was saved, sliders and Slow and all, and is version 18 or later', () => {
     const saved = withLayers(layer('a', 1000, 4000, { effectSettings: { intensity: 80 } }), layer('b', 5000, 9000, { effect: 'slowReverb', speed: 0.6, effectSettings: { room: 90 } }));
     const read = normaliseManifest(JSON.parse(JSON.stringify(saved)));
-    expect(MANIFEST_VERSION).toBe(18);
+    expect(MANIFEST_VERSION).toBeGreaterThanOrEqual(18);
     expect(read.audioEffects).toEqual(saved.audioEffects);
   });
 

@@ -7,6 +7,8 @@ import type { ComposeRect, ComposeTransition } from '../definitions';
 import { cameraAffine } from './camera-draw';
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
 import { INTERPOLATE_FRAMES_GLSL, interpolateFrames2d } from './frame-interpolation';
+import { Focus2d } from './focus-2d';
+import { FocusGl, type FocusDraw } from './focus-gl';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
 import { FlowEstimator, type FlowResult } from './optical-flow-gl';
 import { Transition2d } from './transition-2d';
@@ -154,6 +156,9 @@ export type LayerSource = HTMLVideoElement | HTMLCanvasElement | ImageBitmap | G
 /** Released copies kept for the next one, per painter: two held frames and one being made, plus one. */
 const MAX_SPARE_COPIES = 4;
 
+/** How far past the output's longer side a layer's frame is focused at most: see [Painter.focusWork]. */
+const FOCUS_WORK_SCALE = 1.5;
+
 export interface LayerDraw {
   /** Whatever the frame reader is holding - a `<video>` the renderer has already seeked. */
   source: LayerSource;
@@ -215,6 +220,19 @@ export interface LayerDraw {
    * every picture is drawn like that, always.
    */
   tween?: FrameTween | null;
+  /**
+   * The clip's FOCUS at this frame - which of its subjects are sharp and what becomes of the rest,
+   * `ComposeFocus` read at the frame's source time - or absent for none. See `focus-gl.ts`.
+   *
+   * Applied FIRST, to the source itself, before anything else here reads it: the picture the layer is
+   * cropped, fitted, placed, turned, graded and seen through the camera from is the focused one, as
+   * the contract orders. A synthesised frame's two frames are both focused, B with its own
+   * [FrameTween.focus] where it has one and with this one where it does not.
+   *
+   * Absent, null, or a focus with no blur, no grey and no dark takes exactly the path every layer took
+   * before this field existed, the source's own texture and the same bits.
+   */
+  focus?: FocusDraw | null;
 }
 
 /** Frame B of a synthesised frame, and how far towards it: see [LayerDraw.tween]. */
@@ -222,6 +240,8 @@ export interface FrameTween {
   source: LayerSource;
   /** 0..1: 0 is frame A alone, 1 is this frame alone. */
   weight: number;
+  /** Frame B's own focus, at its own source time; absent is the layer's. See [LayerDraw.focus]. */
+  focus?: FocusDraw | null;
 }
 
 export interface OverlayDraw {
@@ -355,6 +375,9 @@ export class Painter {
   /** Built the first time a frame has a transition in it, and never for a post that has none. */
   private transitionGl: TransitionGl | null = null;
   private transition2d: Transition2d | null = null;
+  /** Built the first time a layer has a focus, and never for a post that has none; null once a context refused it. */
+  private focusGl: FocusGl | null | undefined = undefined;
+  private focus2d: Focus2d | null = null;
   /** Where the 2D fallback makes a synthesised frame; built the first time it needs one. */
   private tweenSurface: HTMLCanvasElement | null = null;
   /** Textures of released [GpuFrame]s, for the next copy; see [copyFrame]. */
@@ -452,6 +475,8 @@ export class Painter {
     // Never built while the GPU path is up, but its frames are sized from the output if it were.
     this.transition2d?.dispose();
     this.transition2d = null;
+    this.focus2d?.dispose();
+    this.focus2d = null;
     return true;
   }
 
@@ -684,6 +709,8 @@ export class Painter {
     // painter that fell back to 2D mid-post would otherwise keep four frame-sized canvases alive.
     this.transition2d?.dispose();
     this.transition2d = null;
+    this.focus2d?.dispose();
+    this.focus2d = null;
     if (this.tweenSurface) {
       this.tweenSurface.width = 0;
       this.tweenSurface.height = 0;
@@ -701,6 +728,8 @@ export class Painter {
     this.textures.clear();
     this.transitionGl?.dispose();
     this.transitionGl = null;
+    this.focusGl?.dispose();
+    this.focusGl = undefined;
     this.flowEstimator?.dispose();
     this.flowEstimator = undefined;
     this.flows.length = 0;
@@ -717,6 +746,7 @@ export class Painter {
     this.textures.clear();
     this.spareTextures = [];
     this.transitionGl = null;
+    this.focusGl = undefined;
     // Its textures went with the context; the 2D path draws the cross-fade and needs none of it.
     this.flowEstimator = undefined;
     this.flows.length = 0;
@@ -793,6 +823,13 @@ export class Painter {
         return false;
       }
     }
+    // The focused picture in place of each frame, on the unit it was uploaded to, before anything
+    // reads it. The flow below was found between the frames as recorded, and they move the same way
+    // focused, so it serves either. False only where the focus programs would not build.
+    if (!this.focusLayerGl(gl, layer, tween)) {
+      gl.disable(gl.BLEND);
+      return false;
+    }
     // The pair's motion on units 2 and 3, where only the interpolation reads it - worked out before the
     // frame began (see prepareFlows). A pair without it is drawn as the cross-fade.
     const flow = tween ? this.keptFlow(layer.source, tween.source) : null;
@@ -836,6 +873,54 @@ export class Painter {
       gl.activeTexture(gl.TEXTURE0);
     }
     return true;
+  }
+
+  /**
+   * Binds the FOCUSED picture of the layer's frame on unit 0, and of frame B on unit 1 for a
+   * synthesised frame, where the layer has a focus that changes anything; see [LayerDraw.focus]. The
+   * frames' own textures are already uploaded and bound there, and stay what a layer with no focus
+   * is drawn from. False where the focus programs would not build, which the caller answers as it
+   * answers a source the shader refused: the frame goes to the 2D path, which draws a focus too.
+   */
+  private focusLayerGl(gl: WebGL2RenderingContext, layer: LayerDraw, tween: FrameTween | null): boolean {
+    const focusA = activeFocus(layer.focus);
+    const focusB = tween ? activeFocus(tween.focus === undefined ? layer.focus : tween.focus) : null;
+    if (!focusA && !focusB) return true;
+    const focus = this.focusGl === undefined ? (this.focusGl = FocusGl.create(gl, this.position)) : this.focusGl;
+    if (!focus) return false;
+    const work = this.focusWork(layer.sourceWidth, layer.sourceHeight);
+    const textureA = this.textures.get(layer.source);
+    if (focusA && textureA) {
+      const focused = focus.apply(textureA, layer.sourceWidth, layer.sourceHeight, focusA, work, 'a');
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, focused);
+    }
+    const textureB = tween ? this.textures.get(tween.source) : undefined;
+    if (focusB && textureB) {
+      const focused = focus.apply(textureB, layer.sourceWidth, layer.sourceHeight, focusB, work, 'b');
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, focused);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+    // apply() leaves unit 0 active and its own texture on it after a pass; put back the one the draw
+    // reads when only frame B was focused.
+    if (!focusA && textureA) {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, textureA);
+    }
+    return true;
+  }
+
+  /**
+   * The size a layer's frame is focused at: the source's own, or smaller where the source is larger
+   * than this painter ever draws it - one and a half times the output's longer side, which is room for
+   * a crop or a zoom into it before the focused picture softens. A 4K clip in a preview a few hundred
+   * pixels wide is focused at a fraction of its pixels, for the same picture on screen.
+   */
+  private focusWork(sourceWidth: number, sourceHeight: number): Frame {
+    const cap = Math.max(this.output.width, this.output.height) * FOCUS_WORK_SCALE;
+    const scale = Math.min(1, cap / Math.max(sourceWidth, sourceHeight));
+    return { width: Math.max(1, Math.round(sourceWidth * scale)), height: Math.max(1, Math.round(sourceHeight * scale)) };
   }
 
   /**
@@ -1105,10 +1190,18 @@ export class Painter {
       // exactly as a recorded frame would be - the same rectangles, the same filter, the same tints.
       const tween = activeTween(layer);
       const frameB = tween ? drawable2d(tween.source) : null;
-      const picture = tween && frameB ? this.interpolated2d(source, frameB, tween.weight, layer.sourceWidth, layer.sourceHeight) : source;
+      const recorded = tween && frameB ? this.interpolated2d(source, frameB, tween.weight, layer.sourceWidth, layer.sourceHeight) : source;
+      // Focused after the in-between frame is made rather than before, the contract's other order,
+      // which costs the fallback one focus a frame instead of two.
+      const focus = activeFocus(layer.focus);
+      const work = focus ? this.focusWork(layer.sourceWidth, layer.sourceHeight) : null;
+      const picture = focus && work ? (this.focus2d ?? (this.focus2d = new Focus2d())).apply(recorded, layer.sourceWidth, layer.sourceHeight, focus, work) : recorded;
+      // The focused picture is at its working size, so the part of the source the layer shows is read
+      // off it at that scale.
+      const k = picture === recorded || !work ? 1 : work.width / layer.sourceWidth;
       ctx.globalAlpha = layer.opacity;
       ctx.filter = this.cssFilter;
-      ctx.drawImage(picture, rects.sx, rects.sy, rects.sw, rects.sh, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
+      ctx.drawImage(picture, rects.sx * k, rects.sy * k, rects.sw * k, rects.sh * k, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
       ctx.filter = 'none';
       for (const tint of this.cssTints) {
         ctx.globalAlpha = layer.opacity;
@@ -1220,6 +1313,11 @@ function activeTween(layer: LayerDraw): FrameTween | null {
   const tween = layer.tween;
   if (!tween || !(tween.weight > 0)) return null;
   return tween.weight > 1 ? { source: tween.source, weight: 1 } : tween;
+}
+
+/** A focus worth drawing: one that softens, greys or darkens something. Null - the old path - otherwise. */
+function activeFocus(focus: FocusDraw | null | undefined): FocusDraw | null {
+  return focus && (focus.blur > 0 || focus.mono > 0 || focus.dim > 0) ? focus : null;
 }
 
 /**

@@ -1,0 +1,306 @@
+/*
+ * The Focus sheet: the subjects and the changes of focus on one tab, the look on the other.
+ *
+ * Budgeted against the compact sheet as the zoom sheet is: on Look, the 53px head, three 52px slider
+ * rows and the 48px switch come to 257px, under the 259px a compact sheet is held to, so the preview
+ * the subjects are tapped on keeps as much of the screen as it can. Subjects is shorter.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+.fs {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100%;
+  padding: 2px 0 6px;
+}
+
+/* No padding: the rows are the budget's 257px exactly, and the body's 8px would put it over. */
+.fs--look {
+  justify-content: flex-start;
+  padding: 0;
+}
+
+/* ------------------------------------------------------------------------------------ status */
+
+.fs__status {
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-text, #fff);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The progress of the search: a thin bar that fills from the left. */
+.fs__bar {
+  position: relative;
+  overflow: hidden;
+  height: 4px;
+  margin: 12px 20px 0;
+  border-radius: 2px;
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.fs__bar-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--ve-accent, #a6ff2e);
+  transform-origin: left center;
+  transition: transform 200ms linear;
+}
+
+/* -------------------------------------------------------------------------------------- rows */
+
+.fs__row {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+}
+
+/* One width for the three words, so the three sliders start at the same x. */
+.fs__word {
+  flex: 0 0 52px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fs__value {
+  flex: 0 0 40px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.fs__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+/* ------------------------------------------------------------------------------------ chips */
+
+/* The subjects scroll sideways when there are more than fit, as the toolbar's tools do. */
+.fs__chips {
+  gap: 8px;
+  height: 48px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.fs__chips::-webkit-scrollbar {
+  display: none;
+}
+
+/* The button is the 44px touch target; the pill inside is what shows - the zoom sheet's chips. */
+.fs__chip {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  cursor: pointer;
+  outline-offset: -2px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.fs__pill {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 44px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  font-size: 13px;
+  font-weight: 700;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+/* A subject's chip wears the colour it is outlined in on the preview: a ring off, a fill on. */
+.fs__pill--subject {
+  padding: 0;
+  width: 32px;
+  min-width: 32px;
+  box-shadow: inset 0 0 0 2px var(--fs-colour, #fff);
+}
+
+.fs__chip:active .fs__pill {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.fs__chip--on .fs__pill,
+.fs__chip--on:active .fs__pill {
+  background: #fff;
+  color: #000;
+}
+
+.fs__chip--on .fs__pill--subject {
+  background: var(--fs-colour, #fff);
+}
+
+/* ---------------------------------------------------------------------------------- changes */
+
+.fs__changes {
+  gap: 8px;
+  height: 48px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.fs__changes::-webkit-scrollbar {
+  display: none;
+}
+
+.fs__here {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px 0 10px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.fs__here ve-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.fs__change {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 32px;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+}
+
+.fs__change-time,
+.fs__change-remove {
+  display: grid;
+  place-items: center;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.fs__change-time {
+  padding: 0 4px 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.fs__change-remove {
+  width: 30px;
+}
+
+.fs__change-remove ve-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* ----------------------------------------------------------------------------------- switch */
+
+.fs__invert {
+  justify-content: space-between;
+  width: 100%;
+  height: 48px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.fs__invert:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+}
+
+.fs__invert-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* The volume sheet's switch, drawn the same so the editor has one switch. */
+.fs__switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--ve-raised-2, #3a3a3c);
+  transition: background-color 160ms ease-out;
+}
+
+.fs__switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 160ms ease-out;
+}
+
+.fs__switch--on {
+  background: var(--ve-accent, #a6ff2e);
+}
+
+.fs__switch--on .fs__switch-knob {
+  transform: translateX(18px);
+}
+
+/* -------------------------------------------------------------------------------------- hint */
+
+.fs__hint {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  text-align: center;
+}

@@ -143,12 +143,26 @@ import {
   setBackground as setBackgroundOp,
   setTrackLayoutAnimation,
   type LayoutMotions,
+  addFocusChange as addFocusChangeOp,
+  compileFocus,
+  defaultFocus,
+  focusChangesPicture,
+  focusEntryAt,
+  focusEntrySubjects,
+  patchClipFocus as patchClipFocusOp,
+  removeFocusChange as removeFocusChangeOp,
+  resolveFocusSubjects,
+  setClipFocus as setClipFocusOp,
+  setFocusSubjects as setFocusSubjectsOp,
+  type EditFocus,
+  type FocusSubjects,
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
-import type { AudioEffectCopy, EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, ToolbarMode, VolumeTarget } from './editor.types';
+import { FocusFrames } from '../video-composer/web/focus-frames';
+import type { AudioEffectCopy, EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, SubjectTrackState, ToolbarMode, VolumeTarget } from './editor.types';
 import { sameUrl } from './same-url';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
@@ -2705,6 +2719,173 @@ export class EditorStore {
     this.manifest.value = after;
     this.coalesced = { key, entry: this.past.value.length - 1 };
     return true;
+  }
+
+  /* ========================================================================================= */
+  /* Focus                                                                                     */
+  /* ========================================================================================= */
+
+  /**
+   * Every source's subjects as far as they have got, by clip key: see [SubjectTrackState]. Written by
+   * `EditorMedia`, which looks at a source once a focused segment plays it, and read by the Focus
+   * sheet and by the preview, which draws a focus only from a track that is `ready`.
+   */
+  readonly subjectTracks = signal<ReadonlyMap<string, SubjectTrackState>>(new Map());
+
+  /**
+   * The segment the Focus sheet is about: the selected one, or the one under the playhead - the crop
+   * tool's rule, for the crop tool's reason.
+   */
+  readonly focusClip = computed(() => this.selectedClip.value ?? slotAt(this.manifest.value, this.playheadMs.value)?.clip ?? null);
+
+  /** How far that segment's subjects have got, or null for a source nobody has looked at yet. */
+  readonly focusTrack = computed<SubjectTrackState | null>(() => {
+    const clip = this.focusClip.value;
+    return clip ? (this.subjectTracks.value.get(clip.clipKey) ?? null) : null;
+  });
+
+  /** The last [focusFrames] made for each segment, kept while what they were made from is the same. */
+  private focusMade = new Map<string, { focus: EditFocus; inMs: number; outMs: number; state: SubjectTrackState; frames: FocusFrames }>();
+
+  /**
+   * Each focused segment's focus as the preview draws it, by segment id: compiled against its source's
+   * track exactly as the render compiles it ([compileFocus]), and read frame by frame. A segment whose
+   * source has no track ready yet is drawn as it is until it has one.
+   *
+   * A segment's frames are kept from one manifest to the next while its focus, its trim and its track
+   * are the same objects, so a drag somewhere else on the timeline makes nothing new.
+   */
+  readonly focusFrames = computed<ReadonlyMap<string, FocusFrames>>(() => {
+    const manifest = this.manifest.value;
+    const tracks = this.subjectTracks.value;
+    const made = new Map<string, { focus: EditFocus; inMs: number; outMs: number; state: SubjectTrackState; frames: FocusFrames }>();
+    const frames = new Map<string, FocusFrames>();
+    for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+      const focus = clip.focus;
+      const state = tracks.get(clip.clipKey);
+      if (!focus || !focusChangesPicture(focus) || state?.status !== 'ready') continue;
+      const kept = this.focusMade.get(clip.id);
+      if (kept && kept.focus === focus && kept.inMs === clip.inMs && kept.outMs === clip.outMs && kept.state === state) {
+        made.set(clip.id, kept);
+        frames.set(clip.id, kept.frames);
+        continue;
+      }
+      const compiled = compileFocus(clip, state.result);
+      if (!compiled) continue;
+      const entry = { focus, inMs: clip.inMs, outMs: clip.outMs, state, frames: new FocusFrames(state.track, compiled) };
+      made.set(clip.id, entry);
+      frames.set(clip.id, entry.frames);
+    }
+    this.focusMade = made;
+    return frames;
+  });
+
+  /** Where `clip` is in its own footage at the playhead, or its first frame when the playhead is elsewhere. */
+  focusSourceMs(clip: EditClip): number {
+    const layer = this.previewLayers.value.find(candidate => candidate.clipId === clip.id);
+    return layer ? layer.sourceMs : clip.inMs;
+  }
+
+  /**
+   * Opens the Focus sheet on [focusClip], paused and selected, putting a focus on it first when it has
+   * none - the main subject sharp and the rest softened, which is what a customer tapping Focus came
+   * for. Nothing on a host that cannot look for subjects; the toolbar offers no Focus there.
+   */
+  openFocus(): void {
+    const clip = this.focusClip.value;
+    if (!clip || !this.host.media.findSubjects) return;
+    this.pause();
+    if (!this.isSelected({ kind: 'clip', id: clip.id })) this.select({ kind: 'clip', id: clip.id });
+    if (!clip.focus) this.commit('Focus', m => setClipFocusOp(m, clip.id, defaultFocus()));
+    this.openPanel('focus');
+  }
+
+  /** The look of the Focus sheet's segment: how soft, how grey, how dark, which way round. Coalesces a drag into one step. */
+  setFocusLook(patch: Partial<Pick<EditFocus, 'blur' | 'mono' | 'dim'>> & { invert?: boolean }, opts?: { coalesce?: CoalesceKey }): void {
+    const clip = this.focusClip.value;
+    if (!clip?.focus) return;
+    this.commitCoalesced('Focus', m => patchClipFocusOp(m, clip.id, patch), opts?.coalesce);
+  }
+
+  /**
+   * The subjects in focus at the playhead - the choice in effect there: the segment's own until its
+   * first change, a change's from its time on - with `subject` in or out of it. `all` puts every
+   * subject in, or, when every one is in already, takes them all out.
+   */
+  toggleFocusSubject(subject: number | 'all'): void {
+    const clip = this.focusClip.value;
+    const focus = clip?.focus;
+    const state = this.focusTrack.value;
+    if (!clip || !focus || state?.status !== 'ready') return;
+    const entry = focusEntryAt(focus, this.focusSourceMs(clip));
+    const current = resolveFocusSubjects(focusEntrySubjects(focus, entry), state.result);
+    const every = state.result.subjects.map(one => one.id);
+    let next: FocusSubjects;
+    if (subject === 'all') next = current.length === every.length ? [] : 'all';
+    else next = current.includes(subject) ? current.filter(id => id !== subject) : [...current, subject].sort((a, b) => a - b);
+    if (this.commit('Focus', m => setFocusSubjectsOp(m, clip.id, entry, next))) this.haptic('selection');
+  }
+
+  /** The ids in focus at the playhead, for the sheet's chips: the choice in effect there, as ids. */
+  readonly focusSubjectsNow = computed<readonly number[]>(() => {
+    const clip = this.focusClip.value;
+    const state = this.focusTrack.value;
+    if (!clip?.focus || state?.status !== 'ready') return [];
+    // Read so a scrub moves the chips onto the choice under the new playhead.
+    void this.playheadMs.value;
+    return resolveFocusSubjects(focusEntrySubjects(clip.focus, focusEntryAt(clip.focus, this.focusSourceMs(clip))), state.result);
+  });
+
+  /**
+   * A change of focus at the playhead, to the subjects in focus there now, for the customer to change
+   * next: the pull to whoever they tap. Says why when there is no room for one.
+   */
+  addFocusChangeAtPlayhead(): void {
+    const clip = this.focusClip.value;
+    const focus = clip?.focus;
+    if (!clip || !focus) return;
+    const at = Math.round(this.focusSourceMs(clip));
+    if (at <= clip.inMs || at >= clip.outMs) {
+      this.showToast('Move the playhead into the clip first');
+      this.haptic('warning');
+      return;
+    }
+    const subjects = focusEntrySubjects(focus, focusEntryAt(focus, at));
+    if (!this.commit('Change focus', m => addFocusChangeOp(m, clip.id, at, subjects))) {
+      this.showToast('This clip has as many focus changes as it can take');
+      this.haptic('warning');
+    }
+  }
+
+  /**
+   * Where source time `atMs` of segment `clipId` plays on the OUTPUT timeline, for a change of focus
+   * the sheet moves the playhead to: its slot's start, on its own layer, plus how far into the trim it
+   * is at the segment's speed. Null for a segment nobody has, or a time outside its trim.
+   */
+  focusChangeOutputMs(clipId: string, atMs: number): number | null {
+    const manifest = this.manifest.value;
+    const rows: { clips: EditClip[]; startMs: number }[] = [{ clips: manifest.clips, startMs: 0 }, ...manifest.videoTracks.map(track => ({ clips: track.clips, startMs: track.startMs }))];
+    for (const row of rows) {
+      const slot = timelineSlots({ clips: row.clips }).find(candidate => candidate.clip.id === clipId);
+      if (!slot) continue;
+      const clip = slot.clip;
+      if (atMs < clip.inMs || atMs > clip.outMs) return null;
+      return row.startMs + slot.startMs + (atMs - clip.inMs) / (clip.speed || 1);
+    }
+    return null;
+  }
+
+  /** Takes off the change of focus at `index`. */
+  removeFocusChange(index: number): void {
+    const clip = this.focusClip.value;
+    if (clip) this.commit('Remove focus change', m => removeFocusChangeOp(m, clip.id, index));
+  }
+
+  /** Takes the focus off the segment and closes the sheet: the footage as it is. */
+  removeFocus(): void {
+    const clip = this.focusClip.value;
+    if (clip) this.commit('Remove focus', m => setClipFocusOp(m, clip.id, null));
+    this.closePanel();
   }
 
   /* ========================================================================================= */

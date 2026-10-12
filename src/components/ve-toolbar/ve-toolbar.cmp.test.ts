@@ -232,8 +232,8 @@ describe('ve-toolbar', () => {
     await until('the clip row', () => label(bar) === 'Clip tools');
     expect(ids(bar)).not.toContain('speed');
     expect(ids(bar)).not.toContain('volume');
-    // Everything else a segment has, a picture has.
-    for (const id of ['split', 'transition', 'delete', 'duplicate', 'replace', 'crop', 'fit', 'filters', 'adjust']) {
+    // Everything else a segment has, a picture has - Focus included, a still's subjects being found as a video's are.
+    for (const id of ['split', 'transition', 'delete', 'duplicate', 'replace', 'crop', 'fit', 'filters', 'adjust', 'focus']) {
       expect(ids(bar)).toContain(id);
     }
 
@@ -244,7 +244,7 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'clip', id: 'seg-c' });
     await until('the video layer row', () => label(bar) === 'Video layer tools');
-    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'focus', 'start-here', 'replace', 'delete']);
   });
 
   it('shows the tools for whatever is selected, and a way back out of them', async () => {
@@ -266,7 +266,7 @@ describe('ve-toolbar', () => {
     // rectangle, and for a while it was the one segment that could not be told to.
     store.select({ kind: 'clip', id: 'seg-c' });
     await until('the video layer row', () => label(bar) === 'Video layer tools');
-    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'speed', 'volume', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'speed', 'volume', 'focus', 'start-here', 'replace', 'delete']);
     expect(tile(bar, 'delete').textContent).toContain('Remove');
 
     store.select({ kind: 'overlay', id: 'ov-text' });

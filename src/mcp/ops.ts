@@ -62,6 +62,7 @@ import {
   type EditAudioEffect,
   type EditClip,
   type EditFit,
+  type EditFocus,
   type EditManifest,
   type EditMusic,
   type EditOverlay,
@@ -70,10 +71,12 @@ import {
   type EditTransition,
   type EditVoiceover,
   type EditZoom,
+  type FocusSubjects,
   type OutputAspect,
   type TextAlign,
   type TextEffect,
 } from '../editor/edit-manifest';
+import { DEFAULT_FOCUS_BLUR, MAX_FOCUS_CHANGES, MAX_FOCUS_PULL_MS, normaliseFocusSubjects } from '../editor/focus';
 import { OVERLAY_ANIMATIONS, normaliseOverlayAnimation } from '../editor/motion';
 import { SOUND_EFFECTS, SOUND_EFFECT_SETTING_MAX, soundEffectPreset, type SoundEffectPreset } from '../editor/sound-effects';
 import { DEFAULT_TRANSITION_MS, TRANSITIONS, isTransitionKind } from '../editor/transitions';
@@ -127,6 +130,7 @@ import {
   replaceClipSource,
   resetClipFraming,
   setClipCrop,
+  setClipFocus,
   setClipFit,
   setClipRect,
   setClipRotation,
@@ -756,6 +760,57 @@ function stackEndRefusal(manifest: EditManifest, id: string, move: LayerMove): s
   return `"${id}" is already ${up ? 'on top' : 'at the bottom'} - ${why}`;
 }
 
+/**
+ * A clip's focus as an agent writes it, refused rather than quietly mended wherever the editor's own
+ * reading would change what was asked: a choice of subjects that is not "main", "all" or whole ids
+ * 1..255, a look outside 0..1, a change outside the clip's trim or with a pull past three seconds.
+ * What is left out takes the editor's default - the main subject, a blur of 0.5 - as the Focus
+ * sheet's first tap does.
+ */
+function readFocus(raw: Record<string, unknown>, clip: EditClip): EditFocus {
+  const subjectsOf = (value: unknown, path: string): FocusSubjects => {
+    if (value === 'main' || value === 'all') return value;
+    if (Array.isArray(value) && value.every(id => typeof id === 'number' && Number.isInteger(id) && id >= 1 && id <= 255)) return normaliseFocusSubjects(value)!;
+    throw new Error(`${path} must be "main", "all" or a list of subject ids (whole numbers 1..255), as findSubjects numbers them`);
+  };
+  const unitOf = (key: 'blur' | 'mono' | 'dim'): number | undefined => {
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'number' || !(value >= 0 && value <= 1)) throw new Error(`focus.${key} must be a number from 0 to 1`);
+    return value;
+  };
+  const focus: EditFocus = {
+    subjects: raw['subjects'] === undefined ? 'main' : subjectsOf(raw['subjects'], 'focus.subjects'),
+    blur: unitOf('blur') ?? DEFAULT_FOCUS_BLUR,
+  };
+  const mono = unitOf('mono');
+  if (mono) focus.mono = mono;
+  const dim = unitOf('dim');
+  if (dim) focus.dim = dim;
+  if (raw['invert'] !== undefined) {
+    if (typeof raw['invert'] !== 'boolean') throw new Error('focus.invert must be true or false');
+    if (raw['invert']) focus.invert = true;
+  }
+  const changes = raw['changes'];
+  if (changes !== undefined) {
+    if (!Array.isArray(changes)) throw new Error('focus.changes must be a list of {atMs, subjects, pullMs?}');
+    focus.changes = changes.map((change: unknown, i) => {
+      const path = `focus.changes[${i}]`;
+      if (!change || typeof change !== 'object' || Array.isArray(change)) throw new Error(`${path} must be an object {atMs, subjects, pullMs?}`);
+      const item = change as Record<string, unknown>;
+      const atMs = item['atMs'];
+      if (typeof atMs !== 'number' || !(atMs > clip.inMs && atMs < clip.outMs)) {
+        throw new Error(`${path}.atMs must be a time in the clip's own source, inside its trim (${clip.inMs}..${clip.outMs}ms)`);
+      }
+      const pull = item['pullMs'];
+      if (pull !== undefined && (typeof pull !== 'number' || !(pull >= 0 && pull <= MAX_FOCUS_PULL_MS))) throw new Error(`${path}.pullMs must be 0 to ${MAX_FOCUS_PULL_MS}ms`);
+      return { atMs, subjects: subjectsOf(item['subjects'], `${path}.subjects`), ...(pull !== undefined ? { pullMs: pull as number } : {}) };
+    });
+    if (focus.changes.length > MAX_FOCUS_CHANGES) throw new Error(`focus.changes may hold at most ${MAX_FOCUS_CHANGES} changes`);
+  }
+  return focus;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* The table                                                                                      */
 /* -------------------------------------------------------------------------------------------- */
@@ -812,6 +867,13 @@ const OPS: Record<string, Apply> = {
     requireClip(manifest, clipId);
     const raw = nullableObject(op, 'crop');
     return setClipCrop(manifest, clipId, raw === null ? null : readRect(raw, 'crop'));
+  },
+
+  setClipFocus: (manifest, op) => {
+    const clipId = str(op, 'clipId');
+    requireClip(manifest, clipId);
+    const raw = nullableObject(op, 'focus');
+    return setClipFocus(manifest, clipId, raw === null ? null : readFocus(raw, findClip(manifest, clipId)!));
   },
 
   setClipRect: (manifest, op) => {

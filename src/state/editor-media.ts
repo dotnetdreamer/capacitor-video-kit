@@ -8,7 +8,9 @@ import {
   audioTrackIdOfClip,
   defaultClipEdit,
   defaultPictureEdit,
+  focusChangesPicture,
   insertClip,
+  parseSubjectTrack,
   musicSpeed,
   musicWindow,
   replaceClipSource,
@@ -23,12 +25,13 @@ import {
 
 import { debugWarn } from '../host/debug';
 import type { CatalogueSound, EditorSource, PickedAudio, ResolvedEditorHost, SavedSound, SoundCategory } from '../host/host.types';
+import { resolve } from '../web-runtime/files';
 import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
 import { CopySources, copyGroups, copySoundKey, makeEffectCopy } from '../web-runtime/effect-copy';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
 import { buildPlan, type RenderPlan } from '../video-composer/web/plan';
-import { clipWaveKey, type AudioEffectCopy, type Filmstrip, type SoundReplaceTarget } from './editor.types';
+import { clipWaveKey, type AudioEffectCopy, type Filmstrip, type SoundReplaceTarget, type SubjectTrackState } from './editor.types';
 
 /** One filmstrip frame per second of source, the TikTok density at the default zoom. */
 const FILMSTRIP_STEP_MS = 1000;
@@ -214,6 +217,10 @@ export class EditorMedia {
   private readonly copiesAsked = new Set<string>();
   /** The sources whose copy has had its answer, a copy or none; what [whenCopied] waits on. */
   private readonly copiesAnswered = signal<ReadonlySet<string>>(new Set());
+  /** See [watchForSubjects]: one search at a time, and the sources one has been asked for. */
+  private subjectQueue: Promise<void> = Promise.resolve();
+  private readonly subjectsAsked = new Set<string>();
+  private stopWatchingSubjects: (() => void) | null = null;
   private destroyed = false;
 
   constructor(
@@ -276,6 +283,7 @@ export class EditorMedia {
 
     this.watchForCopies();
     this.watchForEffectCopies();
+    this.watchForSubjects();
   }
 
   /** Called by the shell when the editor leaves the document. */
@@ -293,6 +301,10 @@ export class EditorMedia {
     this.copySourcesMade?.clear();
     this.stopWatchingCopies?.();
     this.stopWatchingCopies = null;
+    this.stopWatchingSubjects?.();
+    this.stopWatchingSubjects = null;
+    // Footage nobody will focus now: its searches stop holding the phone's decoder.
+    void this.host.media.stopFindingSubjects?.call(this.host.media, []).catch(() => undefined);
     // Wakes every [whenCopied] still waiting, which resolves on finding this destroyed.
     this.copiesAnswered.value = new Set(this.copiesAnswered.peek());
   }
@@ -392,6 +404,87 @@ export class EditorMedia {
       wanted.push(source);
     }
     return wanted;
+  }
+
+  /* ========================================================================================= */
+  /* Subjects                                                                                  */
+  /* ========================================================================================= */
+
+  /**
+   * Asks the host for the subjects of every source a FOCUSED segment plays
+   * ([EditorMediaHost.findSubjects]), and puts how far each has got into [EditorStore.subjectTracks],
+   * where the Focus sheet shows it and the preview draws from it.
+   *
+   * It follows the MANIFEST, for the waveforms' reason: a focus arrives from the Focus sheet, from a
+   * template, from a draft reopened and from an undo, and watching the manifest covers all of them in
+   * one place. Each source is asked for once for the life of this object, whatever came of it - a
+   * stopped search excepted, which is asked again the next time a focus needs it - and one at a time,
+   * since every search holds a decoder and a phone's segmenter is one.
+   */
+  private watchForSubjects(): void {
+    if (!this.host.media.findSubjects) return;
+    this.stopWatchingSubjects = effect(() => {
+      // Read INTO something, for the reason [watchForCopies] gives: a source added, a focus put on.
+      const reads = this.store.manifest.value.clips.length + this.store.clips.value.length + this.store.subjectTracks.value.size;
+      if (reads >= 0) untracked(() => this.askForSubjects());
+    });
+  }
+
+  private askForSubjects(): void {
+    if (this.destroyed) return;
+    const manifest = this.store.manifest.peek();
+    const known = this.store.subjectTracks.peek();
+    for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+      if (!focusChangesPicture(clip.focus)) continue;
+      const key = clip.clipKey;
+      if (known.has(key) || this.subjectsAsked.has(key)) continue;
+      const source = this.store.clipByKey(key);
+      if (!source) continue;
+      this.subjectsAsked.add(key);
+      this.findSubjects(source);
+    }
+  }
+
+  /** One source's search, queued behind the others, and its track read once it is written. */
+  private findSubjects(source: EditorSource): void {
+    const find = this.host.media.findSubjects;
+    if (!find) return;
+    const key = source.key;
+    const file = (state: SubjectTrackState | null): void => {
+      if (this.destroyed) return;
+      const next = new Map(this.store.subjectTracks.peek());
+      if (state) next.set(key, state);
+      else next.delete(key);
+      this.store.subjectTracks.value = next;
+    };
+    file({ status: 'finding', progress: 0 });
+    this.subjectQueue = this.subjectQueue.then(async () => {
+      if (this.destroyed) return;
+      // A bar that moves a few hundred times on a long clip is a few hundred repaints of the sheet.
+      let shown = 0;
+      try {
+        const result = await find.call(this.host.media, source, progress => {
+          if (progress < 1 && progress - shown < 0.02) return;
+          shown = progress;
+          file({ status: 'finding', progress });
+        });
+        if (!result) {
+          file({ status: 'none', reason: 'unsupported' });
+          return;
+        }
+        // The page reads the track the way it reads any of its files: through the WebView's own server.
+        const bytes = await (await resolve(this.host.platform.fileUrl(result.uri))).arrayBuffer();
+        file({ status: 'ready', result, track: parseSubjectTrack(bytes) });
+      } catch (error) {
+        if ((error as { code?: unknown } | null)?.code === 'cancelled') {
+          this.subjectsAsked.delete(key);
+          file(null);
+          return;
+        }
+        debugWarn('[EditorMedia] subjects not found', key, error);
+        file({ status: 'none', reason: 'failed' });
+      }
+    });
   }
 
   /* ========================================================================================= */

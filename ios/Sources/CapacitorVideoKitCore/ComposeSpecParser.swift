@@ -234,7 +234,9 @@ enum ComposeSpecParser {
                     image: c.image,
                     // Already clamped where it was read, and never held to the frame the way `rect`
                     // is: a rectangle sliding in starts wholly off it. See `ComposeRectMotion`.
-                    rectMotion: c.rectMotion)
+                    rectMotion: c.rectMotion,
+                    // Already clamped where it was read too, and nil for one that changes nothing.
+                    focus: c.focus)
     }
 
     /// A decoded transition as the value the builder consumes. Every curve sample, mask number and
@@ -871,9 +873,11 @@ private struct ClipDTO: Decodable {
     /// Raw as well: `validate` is where a picture's speed and sound are overridden, beside the
     /// clamps those two fields get for every other clip.
     let image: Bool
+    /// Shape-checked and clamped by `FocusDTO`, or nil for no focus and for one that changes nothing.
+    let focus: ComposeFocus?
 
     private enum K: String, CodingKey {
-        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, rectMotion, image
+        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, rectMotion, image, focus
     }
 
     init(from decoder: Decoder) throws {
@@ -916,6 +920,102 @@ private struct ClipDTO: Decodable {
         // cannot fail: a value that is not a boolean reads as a video, the lenient reading `muted`
         // gets too.
         image = c.flag(.image, false)
+        // LAST, after `image`, where every parser reads it, so a clip broken somewhere else reports the
+        // same first failure it always did. Through `object`, the transitions' rule: absent or null is
+        // no focus, present and not an object fails as `focus`, and a failure inside it is spliced
+        // behind that name - `focus.atMs[3]` - before the clip loops put the clip's own path in front.
+        // Because this one reader reads a layer's clips and a transition's `from` too, the focus
+        // reaches all three, and refuses with their paths.
+        focus = try c.object(.focus, "focus", FocusDTO.self)?.focus
+    }
+}
+
+/// A clip's `focus`: `normaliseComposeFocus` in `src/editor/focus.ts` is the rule book, checked in its
+/// order - `uri`, then `atMs`, then each subject's `id` and `focus` in turn, then `blur`, `mono` and
+/// `dim` - and with its words, as leaf paths:
+///
+/// - not an object: `focus` (thrown by `object`, where the `DecodingError` surfaces).
+/// - `uri` absent or not a non-empty string: `uri`.
+/// - `atMs` absent, null or not an array: `atMs`; with no keys or more than `ComposeFocus.maxKeys`:
+///   `atMs` as well. The browser adds "must have 1 to 2000 keys" after that path; here the path stands
+///   alone, because `object` and the clip loops rebuild every error from its path, as they do for a
+///   `rectMotion` refused whole.
+/// - a time that is not a finite number, or less than the one before it: `atMs[i]`. Equal times are a
+///   step.
+/// - `subjects` absent, null or not an array: `subjects`; an entry that is not an object:
+///   `subjects[i]`; an id that is not a whole number 1...255, or names a subject twice: `subjects[i].id`;
+///   a `focus` that is not an array as long as `atMs`: `subjects[i].focus`; a value in it that is not a
+///   finite number: `subjects[i].focus[k]`.
+/// - a `blur`, `mono` or `dim` that is present and not a finite number: its name. Absent, or null, is 0.
+///
+/// Every focus value is CLAMPED to 0...1, `blur` to 0...`ComposeFocus.maxBlur`, `mono` and `dim` to
+/// 0...1, and a key this does not know is IGNORED - unlike a transition's `curves`, where an unknown key
+/// is a channel spelt wrong, here a key could only be one a later version reads. A focus whose blur,
+/// mono and dim are all 0 changes nothing, and is nil: the absent path.
+private struct FocusDTO: Decodable {
+    let focus: ComposeFocus?
+
+    init(from decoder: Decoder) throws {
+        // Not an object throws a DecodingError here, which `object` reports as `focus`.
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        func key(_ name: String) -> AnyKey { AnyKey(stringValue: name)! }
+
+        let uri = c.string(key("uri"))
+        if uri.isEmpty { throw SpecError("uri") }
+
+        guard c.has(key("atMs")), var times = try? c.nestedUnkeyedContainer(forKey: key("atMs")),
+              let n = times.count else { throw SpecError("atMs") }
+        guard n >= 1, n <= ComposeFocus.maxKeys else { throw SpecError("atMs") }
+        var atMs: [Double] = []
+        atMs.reserveCapacity(n)
+        // Bounded by `n` and not by `isAtEnd`, for the reason `CameraDTO.numbers` gives.
+        for i in 0..<n {
+            guard !times.isAtEnd, let t = try? times.decode(Double.self), t.isFinite else {
+                throw SpecError("atMs[\(i)]")
+            }
+            if i > 0 && t < atMs[i - 1] { throw SpecError("atMs[\(i)]") }
+            atMs.append(t)
+        }
+
+        guard c.has(key("subjects")), var list = try? c.nestedUnkeyedContainer(forKey: key("subjects")),
+              let count = list.count else { throw SpecError("subjects") }
+        var seen = Set<Int>()
+        var subjects: [ComposeFocusSubject] = []
+        for i in 0..<count {
+            guard !list.isAtEnd, let s = try? list.nestedContainer(keyedBy: AnyKey.self) else {
+                throw SpecError("subjects[\(i)]")
+            }
+            guard let raw = s.number(key("id")), raw == raw.rounded(.towardZero), raw >= 1, raw <= 255,
+                  !seen.contains(Int(raw)) else { throw SpecError("subjects[\(i)].id") }
+            let id = Int(raw)
+            seen.insert(id)
+            guard s.has(key("focus")), var levels = try? s.nestedUnkeyedContainer(forKey: key("focus")),
+                  levels.count == n else { throw SpecError("subjects[\(i)].focus") }
+            var focus: [Double] = []
+            focus.reserveCapacity(n)
+            for k in 0..<n {
+                guard !levels.isAtEnd, let v = try? levels.decode(Double.self), v.isFinite else {
+                    throw SpecError("subjects[\(i)].focus[\(k)]")
+                }
+                focus.append(min(1, max(0, v)))
+            }
+            subjects.append(ComposeFocusSubject(id: id, focus: focus))
+        }
+
+        func look(_ name: String, _ most: Double) throws -> Double {
+            guard c.has(key(name)) else { return 0 }
+            guard let v = c.number(key(name)) else { throw SpecError(name) }
+            return min(most, max(0, v))
+        }
+        let blur = try look("blur", ComposeFocus.maxBlur)
+        let mono = try look("mono", 1)
+        let dim = try look("dim", 1)
+        guard blur > 0 || mono > 0 || dim > 0 else {
+            focus = nil
+            return
+        }
+        focus = ComposeFocus(uri: uri, atMs: atMs, subjects: subjects, blur: blur, mono: mono, dim: dim,
+                             invert: c.flag(key("invert"), false))
     }
 }
 

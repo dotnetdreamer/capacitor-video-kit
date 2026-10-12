@@ -184,8 +184,10 @@ class VideoComposerPlugin : Plugin() {
         )
         JobRegistry.register(job)
         // The codecs are the render's: a preview copy being made stops, and is made again after it.
-        // Registered first, so the copy's queue already sees a render running when it looks.
+        // Registered first, so the copy's queue already sees a render running when it looks. A video
+        // being searched for subjects holds a decoder too, and gives way the same way.
         PreviewProxy.yieldToRender()
+        SubjectFinder.yieldToRender()
         call.resolve(JSObject().put("jobId", spec.jobId))
 
         // Asked for now, while the Activity is certainly visible: from API 31 a foreground service
@@ -258,6 +260,26 @@ class VideoComposerPlugin : Plugin() {
                 }
                 probes[clip.uri] = info.toProbedInput()
             }
+            // Every focused clip's subject track, read whole and every frame decoded now: one that
+            // cannot be read fails the post here, naming the clip, as footage that cannot be read
+            // does - and the render never meets a damaged frame half way through. After the footage,
+            // so a clip whose file and track are both gone is reported for its file, as it always was.
+            val subjectTracks = HashMap<String, SubjectTrack>()
+            for (clip in spec.clips + tails + spec.tracks.flatMap { it.clips }) {
+                val focus = clip.focus ?: continue
+                if (subjectTracks.containsKey(focus.uri)) continue
+                subjectTracks[focus.uri] = try {
+                    SubjectFinder.trackForRender(appContext, focus.uri)
+                } catch (e: Exception) {
+                    failJob(
+                        job,
+                        FailureCodes.UNREADABLE_INPUT,
+                        "the subject track of ${clip.key} cannot be read: ${ErrorMapping.describe(e)}",
+                        clipKey = clip.key,
+                    )
+                    return
+                }
+            }
             for (uri in listOfNotNull(spec.audio.music?.uri) + spec.audio.musicTracks.flatten().map { it.uri } + spec.audio.voiceover.map { it.uri }) {
                 if (probes.containsKey(uri)) continue
                 probes[uri] = try {
@@ -312,6 +334,7 @@ class VideoComposerPlugin : Plugin() {
             // spent now that they are bitmaps - see [withoutOverlayPixels].
             job.plan = RenderPlan.build(spec.withoutOverlayPixels(), probes)
             job.overlays = overlays
+            job.subjectTracks = subjectTracks
             main.post { startTransformer(job, overlays, relaxEncoder = false) }
         } catch (e: Exception) {
             Log.e(TAG, "pre-flight failed for ${job.jobId}", e)
@@ -342,6 +365,7 @@ class VideoComposerPlugin : Plugin() {
                 job.plan,
                 overlays,
                 job.lastFrameUs,
+                job.subjectTracks,
             )
             val transformer = CompositionBuilder
                 .newTransformer(appContext, job.plan, relaxEncoder, job.bytesWritten)
@@ -594,10 +618,14 @@ class VideoComposerPlugin : Plugin() {
         return job.plan.clips.getOrNull(if (index < 0) 0 else index)?.clip?.key
     }
 
-    /** The single place overlay bitmaps are handed back, on every terminal path. */
+    /**
+     * The single place overlay bitmaps are handed back, on every terminal path - and the subject
+     * tracks let go of, which are held exactly as long: a job is kept for a day after it ends.
+     */
     private fun disposeOverlays(job: JobRegistry.Job) {
         val overlays = job.overlays
         job.overlays = emptyList()
+        job.subjectTracks = emptyMap()
         overlays.forEach { it.recycle() }
     }
 
@@ -917,6 +945,78 @@ class VideoComposerPlugin : Plugin() {
                 call.reject(ErrorMapping.describe(e), FailureCodes.UNKNOWN)
             }
         }
+    }
+
+    /* ======================================================================================== */
+    /* findSubjects                                                                              */
+    /* ======================================================================================== */
+
+    /**
+     * The subjects of a video or a picture, followed through it and written into a subject track
+     * ([SubjectFinder]): the file a clip's focus names. Resolves at once, `cached`, from a track still
+     * in the cache. `fps` is brought into range rather than refused, as labelMedia's numbers are -
+     * 1..30, rounded, and absent or not a number Android's 10 - and a `kind` that is neither of the two
+     * is refused. Progress arrives as `subjectsProgress`, about four a second and a last 1. On
+     * [pluginScope]: the wait is a coroutine, the searches take their turn inside [SubjectFinder], and
+     * the frames are Media3's and ML Kit's own threads' work.
+     */
+    @PluginMethod
+    fun findSubjects(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        val kindName = call.getString("kind")
+        val kind = kindName?.let { MediaLabels.Kind.of(it) }
+        if (kindName != null && kind == null) {
+            call.reject("kind must be 'video' or 'image'", INVALID_SPEC)
+            return
+        }
+        val fps = SubjectFinder.fpsFor((call.data.opt("fps") as? Number)?.toDouble())
+        val throttle = SubjectFinder.ProgressThrottle()
+
+        pluginScope.launch {
+            try {
+                val result = SubjectFinder.find(context.applicationContext, uri, kind, fps) { progress ->
+                    if (throttle.offer(progress, android.os.SystemClock.elapsedRealtime())) {
+                        // The uri as it was asked, which is what the page matches the event to.
+                        emit("subjectsProgress", JSObject().put("uri", uri).put("progress", progress), retain = false)
+                    }
+                }
+                call.resolve(result.toJson())
+            } catch (e: SubjectFinder.UnreadableException) {
+                call.reject(e.message, FailureCodes.UNREADABLE_INPUT)
+            } catch (e: SubjectFinder.UnsupportedException) {
+                call.reject(e.message, FailureCodes.UNSUPPORTED)
+            } catch (e: SubjectFinder.StoppedException) {
+                call.reject(e.message, FailureCodes.CANCELLED)
+            } catch (e: Exception) {
+                // A video Media3 could not read is the file's failure; anything else - ML Kit, the
+                // cache folder - is not, and says so in the platform's own words.
+                val mapped = ErrorMapping.map(e)
+                val code = if (mapped.code == FailureCodes.UNREADABLE_INPUT) FailureCodes.UNREADABLE_INPUT else FailureCodes.UNKNOWN
+                call.reject(mapped.message, code)
+            }
+        }
+    }
+
+    /**
+     * Stops every search asked for and not finished whose uri is not among `keep`
+     * ([SubjectFinder.stopAllBut]); their `findSubjects` calls reject with `cancelled`. Absent `keep`
+     * stops them all. Answers at once with how many were stopped, and never rejects.
+     */
+    @PluginMethod
+    fun stopFindingSubjects(call: PluginCall) {
+        val keep = HashSet<String>()
+        val asked = call.data.opt("keep") as? org.json.JSONArray
+        if (asked != null) {
+            for (i in 0 until asked.length()) {
+                val uri = asked.optString(i, "")
+                if (uri.isNotEmpty()) keep += uri
+            }
+        }
+        call.resolve(JSObject().put("stopped", SubjectFinder.stopAllBut(keep)))
     }
 
     /* ======================================================================================== */

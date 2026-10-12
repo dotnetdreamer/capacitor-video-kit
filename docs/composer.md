@@ -150,6 +150,37 @@ still for a quarter of a second, and the copy it had plays until the new one lan
 is under the layer takes its copy away at once, and the sounds play as they are until the new one
 is made.
 
+**Focus is a mask, a blur and a mix, drawn the same way by every engine.** `ComposeClip.focus` keeps
+some of a clip's subjects sharp and softens, greys or darkens everything else. WHICH subjects, and when
+the focus moves from one to another, the editor works out for itself and sends as keys in the clip's
+source time, the way it sends a camera, so an engine only reads numbers off a line. WHERE each subject
+is comes from a subject track, the file `findSubjects` wrote for the clip's source
+([Finding the subjects in footage](media.md#finding-the-subjects-in-footage)): for every frame it
+looked at, a coarse grid over the picture, 320 cells on its long side, in which each cell names the
+subject on it or nobody. The eight steps that turn the grid and the keys into a picture are written
+down once, on `ComposeFocus` in `definitions.ts`, and every engine runs them: the mask is eased between
+cell centres, so an edge is soft across a cell rather than a staircase of them, and the blur is
+weighted by how far out of focus each pixel is, so a person's colour does not bleed into the softened
+world around them as a halo. Focus is the first thing done to a frame, so the grade, the crop, the
+camera, slow motion and a transition all take the focused picture as the footage. Android draws it as a
+Media3 GL effect ahead of the colour pass (`FocusEffect.kt`), iOS in its compositor (`FocusRender.swift`),
+and the web in WebGL2 with a canvas fallback (`focus-gl.ts`, `focus-2d.ts`). A clip without a focus is
+drawn by exactly the path it always was, decided once when the plan is built, and a subject track the
+render cannot read fails it as `unreadable_input` naming the clip, as footage that cannot be read does.
+
+**Subjects are found once per file, and kept.** `findSubjects` looks at 10 to 15 frames of every
+second of a video, which takes a while for a long clip, so its answer is a file in the app's cache
+named after the source and when it last changed: asking again answers at once, `cached` set, and the
+render host asks again before every render, in case the system has emptied the cache meanwhile. Each frame's mask is cut into its separate pieces, and a piece is matched to the
+subject it overlaps most in the frame before (by intersection over union, at least 0.2), so a subject
+keeps its id while it moves; one gone for more than a second is forgotten, so somebody new walking
+into the same place is somebody new. Specks are dropped, and the subjects are ranked by how much of
+the footage they are in and how large, so subject 1 is the footage's main subject on every engine.
+The same tracker runs in Kotlin, Swift and TypeScript (`subject-tracker.ts` is the reference), over
+three different segmenters: Vision, which from iOS 17 finds pets and things as well as people and
+gives each its own mask, and ML Kit and MediaPipe, which find only people and see two who touch as
+one.
+
 **Inputs are taken, not referenced.** `prepareJob` moves app-owned files and copies everything else
 into `filesDir/video-batches/<id>/`. A picker's `content://` grant dies with the Activity that got
 it. Only `cleanup` deletes a job folder.
@@ -175,5 +206,9 @@ of that sheet is `{ saved: false }`, not a failure.
 
 `labelMedia`: `invalid_spec`, `unreadable_input`, `unsupported` (web and the iOS simulator),
 `unknown`.
+
+`findSubjects`: `invalid_spec`, `unreadable_input`, `cancelled` (a search `stopFindingSubjects`
+stopped), `unsupported` (an Android app built without the segmenter, the iOS simulator, a browser where
+MediaPipe will not load), `unknown`.
 
 Publisher: `network`, `http`, `auth`, `server_rejected`, `file_missing`, `cancelled`, `unknown` - each with `phase`, an optional `httpStatus`, and `retryable`.

@@ -25,9 +25,10 @@ const CHUNK_BYTES = 1024 * 1024;
  * keeps its playable URLs for Edit again.
  *
  * Every place a spec names media is covered, because a blob left in any of them fails the render:
- * the base clips, every track's clips, each clip's `transitionIn.from`, the music and every
- * voiceover. One URL named several times - a split clip, a transition's outgoing side, the same
- * sound as music and as a take - is staged once.
+ * the base clips, every track's clips, each clip's `transitionIn.from`, the subject track each of
+ * those clips' `focus` names - the page's own search writes one as a blob, for a clip the page holds
+ * - the music and every voiceover. One URL named several times - a split clip, a transition's
+ * outgoing side, the same sound as music and as a take - is staged once.
  *
  * An input that cannot be staged rejects with a [RenderInputError] in the composer's own terms, and
  * `render` is never started: a blob that will not read - revoked, or empty - is `unreadable_input`,
@@ -74,8 +75,12 @@ export async function withNativeRenderInputs<T>(
 
   const stageClip = async (clip: ComposeClip): Promise<void> => {
     clip.uri = await nativeUri(clip.uri, clip.key);
+    if (clip.focus) clip.focus.uri = await nativeUri(clip.focus.uri, clip.key);
     const from = clip.transitionIn?.from;
-    if (from) from.uri = await nativeUri(from.uri, from.key);
+    if (from) {
+      from.uri = await nativeUri(from.uri, from.key);
+      if (from.focus) from.focus.uri = await nativeUri(from.focus.uri, from.key);
+    }
   };
 
   try {

@@ -28,6 +28,8 @@ import {
   type EditAdjust,
   type EditAudioEffect,
   type EditClip,
+  type EditFocus,
+  type FocusSubjects,
   type EditManifest,
   type EditMusic,
   type EditOverlay,
@@ -222,7 +224,16 @@ function describeClip(clip: EditClip): string {
     const turn = clip.rect.rotationDeg ? ` turned ${round(clip.rect.rotationDeg)} degrees` : '';
     parts.push(`placed at ${rect(clip.rect)}${turn}`);
   }
+  if (clip.focus) parts.push(describeFocus(clip.focus));
   return parts.join(', ');
+}
+
+/** A clip's focus as an agent would write it: who is sharp, the look, and each change and when. */
+function describeFocus(focus: EditFocus): string {
+  const who = (subjects: FocusSubjects): string => (subjects === 'main' ? 'the main subject' : subjects === 'all' ? 'every subject' : subjects.length === 0 ? 'nobody' : `subjects ${subjects.join(', ')}`);
+  const look = [`blur ${round(focus.blur)}`, ...(focus.mono ? [`mono ${round(focus.mono)}`] : []), ...(focus.dim ? [`dim ${round(focus.dim)}`] : [])].join(', ');
+  const changes = (focus.changes ?? []).map(change => `${who(change.subjects)} from ${time(change.atMs)} of the source`);
+  return `focus on ${who(focus.subjects)}${focus.invert ? ' (softened, the rest kept sharp)' : ''} (${look})${changes.length ? `, then ${changes.join(', then ')}` : ''}`;
 }
 
 function describeOverlay(overlay: EditOverlay, totalMs: number): string {

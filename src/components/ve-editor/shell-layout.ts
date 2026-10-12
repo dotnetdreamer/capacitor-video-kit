@@ -51,6 +51,11 @@ export const PANEL_LAYOUT: Readonly<Record<EditorPanel, 'compact' | 'tall'>> = {
    * is chosen by ear, and the sheet has nothing to show for one but its name.
    */
   audioEffects: 'compact',
+  /*
+   * Compact because the subjects are picked ON the picture: they are outlined on the preview and a tap
+   * on one puts it in or out of focus, so the preview has to stay on screen with the sheet.
+   */
+  focus: 'compact',
   /* The keyboard sits under this one and the sheet has to clear it. */
   text: 'tall',
   /* A scrolling grid of several hundred tiles, with a search field and a category bar. */

@@ -26,6 +26,7 @@ import {
   type EditRect,
 } from './edit-manifest';
 import { joinContinuousAudio, musicSpeed, overlayEndMs } from './edit-ops';
+import { compileFocus, type SubjectTrackRef } from './focus';
 import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { rasteriseOverlay } from './overlay-raster';
@@ -51,6 +52,15 @@ export interface ComposeSpecLimits {
    */
   maxBytes?: number | null;
 }
+
+/**
+ * The subject track of each clip key a focused segment plays, from `findSubjects`: what a segment's
+ * [EditClip.focus] is drawn from ([compileFocus]). A focused segment whose source has none here is
+ * sent with no focus - the footage as it is - which is what a platform with no segmenter can draw.
+ */
+export type SubjectTracksByKey = ReadonlyMap<string, SubjectTrackRef>;
+
+const NO_SUBJECT_TRACKS: SubjectTracksByKey = new Map();
 
 /** Thrown when a manifest names a clip the host has no file for. */
 export class MissingClipError extends Error {
@@ -93,6 +103,7 @@ const UNKNOWN_TRACK_END_MS = 3_600_000;
  *   renders (`DEFAULT_OUTPUT`), because every `wPx`/`hPx` is measured against it.
  * @param limits the host's size ceiling, written as `output.maxBytes` only when there is one, so a host with no upload
  *   limit sends exactly the spec it always sent.
+ * @param subjects the subject track of every clip key a focused segment plays (see [SubjectTracksByKey]).
  */
 export async function toComposeSpec(
   manifest: EditManifest,
@@ -100,6 +111,7 @@ export async function toComposeSpec(
   ids: ComposeSpecIds,
   raster: RasterContext,
   limits: ComposeSpecLimits = {},
+  subjects: SubjectTracksByKey = NO_SUBJECT_TRACKS,
 ): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
@@ -107,7 +119,7 @@ export async function toComposeSpec(
   // animated layer, and then every clip is sent exactly as it was before arrangements could move.
   const layout = compileLayoutMotions(manifest);
 
-  const clips: ComposeClip[] = baseClips(manifest, uriByKey, layout);
+  const clips: ComposeClip[] = baseClips(manifest, uriByKey, layout, subjects);
 
   // Resolved here beside the base clips rather than further down, so a layer whose footage the host
   // has no file for fails before the phone has spent a second drawing bitmaps for a render that was
@@ -117,7 +129,7 @@ export async function toComposeSpec(
     manifest.videoTracks.length > 0
       ? manifest.videoTracks.map(track => ({
           id: track.id,
-          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout)),
+          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, subjects)),
           startMs: Math.max(0, Math.round(track.startMs)),
           z: track.z,
           opacity: clamp(track.opacity, 0, 1),
@@ -303,7 +315,7 @@ export function toComposeSoundSpec(manifest: EditManifest, uriByKey: ReadonlyMap
   if (manifest.videoTracks.length > 0) {
     spec.tracks = manifest.videoTracks.map(track => ({
       id: track.id,
-      clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout)),
+      clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, NO_SUBJECT_TRACKS)),
       startMs: Math.max(0, Math.round(track.startMs)),
       z: track.z,
       opacity: clamp(track.opacity, 0, 1),
@@ -378,11 +390,12 @@ export function overlayMotionFor(overlay: EditOverlay, totalMs: number): Compose
  * trims in, and [transitionSpan] measured it the same way - so the editor's timeline and the render
  * agree about where every clip starts.
  */
-function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions): ComposeClip[] {
+function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions, subjects: SubjectTracksByKey = NO_SUBJECT_TRACKS): ComposeClip[] {
   const spans = transitionSpans(manifest.clips);
   // The outgoing side of a transition is spread from these, so it carries its clip's keys with it -
-  // keys that already run on through the stretch it plays under the next clip.
-  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout));
+  // keys that already run on through the stretch it plays under the next clip. Its focus too, whose
+  // keys are in the source's time and cover the whole of the segment's trim.
+  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, subjects));
   // A segment sent with more source than it has ([sourceStretch]) gives a transition that much more
   // of it too, so the overlap runs the output time it runs in the editor.
   const stretches = manifest.clips.map(sourceStretch);
@@ -414,10 +427,19 @@ function structuredCloneOf<T>(value: T): T {
  * and framing - and a second copy of this mapping is exactly how the two layers would quietly start
  * disagreeing about which rectangle or which fit a clip is drawn with.
  */
-function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions): ComposeClip {
+function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions, subjects: SubjectTracksByKey): ComposeClip {
   const uri = uriByKey.get(edit.clipKey);
   if (!uri) throw new MissingClipError(edit.clipKey);
-  if (edit.image) return pictureClip(edit, manifestFit, uri, layout);
+  const clip = edit.image ? pictureClip(edit, manifestFit, uri, layout) : videoClip(edit, manifestFit, uri, layout);
+  // Last, and only for a segment it changes, for the reason a crop is left off when it has none: a
+  // clip nobody focused is the clip this package has always sent, byte for byte.
+  const track = edit.focus ? subjects.get(edit.clipKey) : undefined;
+  const focus = track ? compileFocus(edit, track) : null;
+  if (focus) clip.focus = focus;
+  return clip;
+}
+
+function videoClip(edit: EditClip, manifestFit: EditFit, uri: string, layout: LayoutMotions): ComposeClip {
   const stretch = sourceStretch(edit);
   const clip: ComposeClip = {
     // The segment id, not the clip key: split and duplicate put several segments over one source,

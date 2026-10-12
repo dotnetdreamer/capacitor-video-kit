@@ -643,7 +643,7 @@ describe('a draft saved when effects were on the sounds', () => {
     expect(manifest.version).toBe(MANIFEST_VERSION);
     expect(manifest.audioEffects).toEqual([{ id: 'afx-sound-0', startMs: 1000, endMs: 6000, effect: 'megaphone', effectSettings: { intensity: 80 } }]);
     expect(findAudioClip(manifest, 'a')).not.toHaveProperty('effect');
-    expect(validated.content[0]?.text).toMatch(/Migrated from version 17 to 18\./);
+    expect(validated.content[0]?.text).toMatch(new RegExp(`Migrated from version 17 to ${MANIFEST_VERSION}\\.`));
     expect(validated.content[0]?.text).toContain('\n  0. "afx-sound-0" 1000ms (0:01.0)..6000ms (0:06.0), megaphone (effect "megaphone"; intensity 80, tone 50)');
 
     // A layer like any other, reached by the id the summary gave it.

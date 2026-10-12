@@ -18,6 +18,7 @@
 export type EditorIconName =
   | 'add'
   | 'animation-outline'
+  | 'aperture-outline'
   | 'arrow-back'
   | 'arrow-down-circle-outline'
   | 'arrow-down-outline'
@@ -98,6 +99,8 @@ export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
    */
   'animation-outline':
     '<circle cx="320" cy="256" r="112" fill="none" stroke="currentColor" stroke-width="32px"/><path d="M160 160a160 160 0 0 0 0 192M88 200a100 100 0 0 0 0 112" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="32px"/>',
+  'aperture-outline':
+    '<path d="M448 256c0-106-86-192-192-192S64 150 64 256s86 192 192 192 192-86 192-192Z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/><path d="M360 94.59V296M443.13 212.87 296 360M417.41 360H216M299.13 443.13l-144-144M152 416V216M68.87 299.13l144-144M94.59 152H288M212.87 68.87 360 216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'arrow-back': '<path d="M244 400 100 256l144-144M120 256h292" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="48px"/>',
   'arrow-down-circle-outline':
     '<path d="M176 262.62 256 342l80-79.38M256 330.97V170" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="M256 64C150 64 64 150 64 256s86 192 192 192 192-86 192-192S362 64 256 64Z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/>',

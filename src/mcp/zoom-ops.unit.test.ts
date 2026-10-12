@@ -200,6 +200,7 @@ describe('no op makes a zoom on a post that has none', () => {
     setClipMuted: [{ op: 'setClipMuted', clipId: 'a', muted: true }],
     setClipFit: [{ op: 'setClipFit', clipId: 'a', fit: 'cover' }],
     setClipCrop: [{ op: 'setClipCrop', clipId: 'a', crop: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 } }],
+    setClipFocus: [{ op: 'setClipFocus', clipId: 'a', focus: { subjects: 'all', blur: 0.7, mono: 0.5 } }],
     setClipRect: [{ op: 'setClipRect', clipId: 'd', rect: { x: 0.1, y: 0.1, w: 0.4, h: 0.4 } }],
     setClipRotation: [{ op: 'setClipRotation', clipId: 'd', rotationDeg: 15 }],
     resetClipFraming: [

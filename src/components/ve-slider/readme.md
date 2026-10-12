@@ -78,6 +78,7 @@ What it promises, which is what six sheets are written against:
  - [ve-animation-sheet](../ve-animation-sheet)
  - [ve-audio-effects-sheet](../ve-audio-effects-sheet)
  - [ve-filter-sheet](../ve-filter-sheet)
+ - [ve-focus-sheet](../ve-focus-sheet)
  - [ve-layout-sheet](../ve-layout-sheet)
  - [ve-opacity-sheet](../ve-opacity-sheet)
  - [ve-speed-sheet](../ve-speed-sheet)
@@ -92,6 +93,7 @@ graph TD;
   ve-animation-sheet --> ve-slider
   ve-audio-effects-sheet --> ve-slider
   ve-filter-sheet --> ve-slider
+  ve-focus-sheet --> ve-slider
   ve-layout-sheet --> ve-slider
   ve-opacity-sheet --> ve-slider
   ve-speed-sheet --> ve-slider

@@ -9,6 +9,7 @@ ext {
     kotlinxCoroutinesVersion = project.hasProperty('kotlinxCoroutinesVersion') ? rootProject.ext.kotlinxCoroutinesVersion : '1.10.2'
     mlkitImageLabelingVersion = project.hasProperty('mlkitImageLabelingVersion') ? rootProject.ext.mlkitImageLabelingVersion : '17.0.9'
     mlkitPlayServicesImageLabelingVersion = project.hasProperty('mlkitPlayServicesImageLabelingVersion') ? rootProject.ext.mlkitPlayServicesImageLabelingVersion : '16.0.8'
+    mlkitSegmentationSelfieVersion = project.hasProperty('mlkitSegmentationSelfieVersion') ? rootProject.ext.mlkitSegmentationSelfieVersion : '16.0.0-beta6'
 }
 
 buildscript {
@@ -51,6 +52,30 @@ if (!(labelingMode in ['true', 'false', 'playServices'])) {
 def imageLabeling = labelingMode != 'false'
 def playServicesLabeling = labelingMode == 'playServices'
 
+/*
+ * findSubjects' engine, ML Kit selfie segmentation - what a clip's focus is drawn from - comes in or
+ * stays out as the host picks with `videokitSubjects` in its variables.gradle (or
+ * `-PvideokitSubjects=...`):
+ *
+ *   true    the default: BUNDLED. A 250 KB model and the MediaPipe native library it runs on
+ *           (`libxeno_native.so`, its own: image labeling's does not serve it), which is the weight -
+ *           about 22 MB for each CPU a build carries (arm64-v8a; 16 MB for armeabi-v7a, 20 MB each
+ *           for x86 and x86_64), stored uncompressed and so about that much installed, and about
+ *           5.7 MB compressed for an arm64 phone's download from an app bundle (Google quotes 4.5 MB).
+ *           Answers offline from the first call, and on a phone without Play services. There is no
+ *           Play services form of it.
+ *   false   left out: findSubjects refuses as `unsupported`, as a browser without MediaPipe does. A
+ *           host that builds this way passes `subjects: false` to `composerMediaHost`, so the editor
+ *           does not offer Focus.
+ *
+ * The switch picks one of the two `SubjectSegmenter.kt` files.
+ */
+def subjectsMode = (project.findProperty('videokitSubjects') ?: true).toString()
+if (!(subjectsMode in ['true', 'false'])) {
+    throw new GradleException("videokitSubjects must be true or false, not '$subjectsMode'")
+}
+def subjects = subjectsMode == 'true'
+
 android {
     // One module, two Capacitor plugin classes. The Kotlin packages stay separate
     // (...videocomposer and ...publisher) because they share nothing but a file path.
@@ -81,6 +106,7 @@ android {
             java.srcDirs += !imageLabeling ? 'src/nolabeling/java'
                 : playServicesLabeling ? 'src/labelingplay/java'
                 : 'src/labeling/java'
+            java.srcDirs += subjects ? 'src/subjects/java' : 'src/nosubjects/java'
         }
     }
     testOptions {
@@ -129,6 +155,14 @@ dependencies {
         implementation "com.google.android.gms:play-services-mlkit-image-labeling:$mlkitPlayServicesImageLabelingVersion"
     } else if (imageLabeling) {
         implementation "com.google.mlkit:image-labeling:$mlkitImageLabelingVersion"
+    }
+
+    // --- VideoComposer: findSubjects ---
+    // ML Kit selfie segmentation, BUNDLED: the people a clip's focus keeps sharp, found offline from the
+    // first call. What it weighs, and how a host leaves it out, is under `subjectsMode` above. iOS needs
+    // nothing: Vision is part of the OS.
+    if (subjects) {
+        implementation "com.google.mlkit:segmentation-selfie:$mlkitSegmentationSelfieVersion"
     }
 
     testImplementation "junit:junit:$junitVersion"

@@ -1250,4 +1250,222 @@ class ComposeSpecParserTest {
             )
         }
     }
+
+    /* ------------------------------------------------------------------------------------- */
+    /* Focus                                                                                   */
+    /* ------------------------------------------------------------------------------------- */
+
+    /** A focus as the editor compiles one: subject 1 sharp, then subject 2 pulled in over half a second. */
+    private fun focusJson(): JSONObject = JSONObject(
+        """
+        { "uri": "file:///cache/subject-tracks/a.vkst",
+          "atMs": [0, 1000, 1500],
+          "subjects": [ { "id": 1, "focus": [1, 1, 0] }, { "id": 2, "focus": [0, 0, 1] } ],
+          "blur": 0.015, "mono": 0.4, "dim": 0.25, "invert": true }
+        """.trimIndent(),
+    )
+
+    private fun withFocus(focus: Any? = focusJson()): JSONObject = minimalJson().apply {
+        getJSONArray("clips").getJSONObject(0).put("focus", focus)
+    }
+
+    private fun expectInvalidFocus(path: String, mutate: JSONObject.() -> Unit) {
+        try {
+            ComposeSpecParser.parse(withFocus(focusJson().apply(mutate)))
+            fail("expected invalid_spec:$path")
+        } catch (e: SpecException) {
+            assertEquals(path, e.path)
+        }
+    }
+
+    @Test
+    fun `a focus is read whole, the last of the clip's fields`() {
+        val focus = ComposeSpecParser.parse(withFocus()).clips[0].focus!!
+        assertEquals("file:///cache/subject-tracks/a.vkst", focus.uri)
+        assertEquals(listOf(0.0, 1000.0, 1500.0), focus.atMs)
+        assertEquals(listOf(FocusSubject(1, listOf(1.0, 1.0, 0.0)), FocusSubject(2, listOf(0.0, 0.0, 1.0))), focus.subjects)
+        assertEquals(0.015f, focus.blur, 0f)
+        assertEquals(0.4f, focus.mono, 0f)
+        assertEquals(0.25f, focus.dim, 0f)
+        assertTrue(focus.invert)
+        // Everything else the clip says is read exactly as it was before the key existed.
+        assertEquals(ComposeSpecParser.parse(minimalJson()).clips[0], ComposeSpecParser.parse(withFocus()).clips[0].copy(focus = null))
+    }
+
+    @Test
+    fun `a clip with no focus, or a null one, keeps it absent`() {
+        assertNull(ComposeSpecParser.parse(minimalJson()).clips[0].focus)
+        assertNull(ComposeSpecParser.parse(withFocus(JSONObject.NULL)).clips[0].focus)
+    }
+
+    @Test
+    fun `a focus that changes nothing is dropped, which is the absent path`() {
+        fun parsed(mutate: JSONObject.() -> Unit) = ComposeSpecParser.parse(withFocus(focusJson().apply(mutate))).clips[0].focus
+        assertNull(parsed { put("blur", 0); put("mono", 0); put("dim", 0) })
+        assertNull(parsed { remove("blur"); remove("mono"); remove("dim") })
+        // Clamped first: a negative blur is none at all.
+        assertNull(parsed { put("blur", -0.2); remove("mono"); put("dim", JSONObject.NULL) })
+        // Any one of the three is enough to keep it.
+        assertEquals(0.5f, parsed { remove("blur"); put("mono", 0.5); remove("dim") }!!.mono, 0f)
+        assertEquals(0.3f, parsed { put("blur", 0); remove("mono"); put("dim", 0.3) }!!.dim, 0f)
+    }
+
+    @Test
+    fun `a focus's numbers are clamped rather than refused`() {
+        val focus = ComposeSpecParser.parse(
+            withFocus(
+                focusJson().apply {
+                    put("blur", 0.5)
+                    put("mono", 2)
+                    put("dim", -1)
+                    getJSONArray("subjects").getJSONObject(0).put("focus", numbers(1.5, -0.5, 0.25))
+                },
+            ),
+        ).clips[0].focus!!
+        assertEquals(ComposeSpecParser.MAX_FOCUS_BLUR.toFloat(), focus.blur, 0f)
+        assertEquals(1f, focus.mono, 0f)
+        assertEquals(0f, focus.dim, 0f)
+        assertEquals(listOf(1.0, 0.0, 0.25), focus.subjects[0].focus)
+    }
+
+    @Test
+    fun `a focus ignores keys it does not know, on itself and on a subject`() {
+        val focus = ComposeSpecParser.parse(
+            withFocus(
+                focusJson().apply {
+                    put("feather", 3)
+                    put("track", JSONObject().put("engine", "vision"))
+                    getJSONArray("subjects").getJSONObject(1).put("label", "the dog")
+                },
+            ),
+        ).clips[0].focus!!
+        assertEquals(ComposeSpecParser.parse(withFocus()).clips[0].focus, focus)
+    }
+
+    @Test
+    fun `only a real true inverts a focus`() {
+        fun inverted(value: Any?) = ComposeSpecParser.parse(withFocus(focusJson().put("invert", value))).clips[0].focus!!.invert
+        assertTrue(inverted(true))
+        assertFalse(inverted("true"))
+        assertFalse(inverted(1))
+        assertFalse(ComposeSpecParser.parse(withFocus(focusJson().apply { remove("invert") })).clips[0].focus!!.invert)
+    }
+
+    @Test
+    fun `equal times are a step and are kept, as two keys`() {
+        val focus = ComposeSpecParser.parse(
+            withFocus(
+                focusJson().apply {
+                    put("atMs", numbers(0.0, 1000.0, 1000.0))
+                },
+            ),
+        ).clips[0].focus!!
+        assertEquals(listOf(0.0, 1000.0, 1000.0), focus.atMs)
+    }
+
+    @Test
+    fun `a focus that is not one, or has no uri, is refused with its path`() {
+        expectInvalid("clips[0].focus") { getJSONArray("clips").getJSONObject(0).put("focus", "main") }
+        expectInvalid("clips[0].focus") { getJSONArray("clips").getJSONObject(0).put("focus", JSONArray()) }
+        expectInvalidFocus("clips[0].focus.uri") { remove("uri") }
+        expectInvalidFocus("clips[0].focus.uri") { put("uri", "") }
+        expectInvalidFocus("clips[0].focus.uri") { put("uri", 7) }
+    }
+
+    @Test
+    fun `missing or broken keys are refused, all of atMs before subjects`() {
+        expectInvalidFocus("clips[0].focus.atMs") { remove("atMs") }
+        expectInvalidFocus("clips[0].focus.atMs") { put("atMs", 0) }
+        expectInvalidFocus("clips[0].focus.subjects") { remove("subjects") }
+        expectInvalidFocus("clips[0].focus.subjects") { put("subjects", JSONObject()) }
+        // Both broken: the times are named, as the web's reader reads every one of them first.
+        expectInvalidFocus("clips[0].focus.atMs") { remove("atMs"); remove("subjects") }
+        expectInvalidFocus("clips[0].focus.atMs") { put("atMs", JSONArray()); remove("subjects") }
+        expectInvalidFocus("clips[0].focus.atMs[1]") { getJSONArray("atMs").put(1, -1); remove("subjects") }
+    }
+
+    @Test
+    fun `a focus with no keys or too many is refused, not truncated`() {
+        expectInvalidFocus("clips[0].focus.atMs") {
+            put("atMs", JSONArray())
+            put("subjects", JSONArray())
+        }
+        val many = ComposeSpecParser.MAX_FOCUS_KEYS + 1
+        expectInvalidFocus("clips[0].focus.atMs") {
+            put("atMs", JSONArray((0 until many).toList()))
+            put("subjects", JSONArray())
+        }
+        // Exactly the most is read.
+        val most = ComposeSpecParser.MAX_FOCUS_KEYS
+        val focus = ComposeSpecParser.parse(
+            withFocus(focusJson().put("atMs", JSONArray((0 until most).toList())).put("subjects", JSONArray())),
+        ).clips[0].focus!!
+        assertEquals(most, focus.atMs.size)
+    }
+
+    @Test
+    fun `a time that is not a finite number or goes back is refused with its index`() {
+        expectInvalidFocus("clips[0].focus.atMs[1]") { getJSONArray("atMs").put(1, "1000") }
+        expectInvalidFocus("clips[0].focus.atMs[2]") { getJSONArray("atMs").put(2, JSONObject.NULL) }
+        expectInvalidFocus("clips[0].focus.atMs[2]") { getJSONArray("atMs").put(2, 999) }
+    }
+
+    @Test
+    fun `a subject that is not one, or names an id it cannot, is refused`() {
+        expectInvalidFocus("clips[0].focus.subjects[1]") { getJSONArray("subjects").put(1, 2) }
+        expectInvalidFocus("clips[0].focus.subjects[0].id") { getJSONArray("subjects").getJSONObject(0).remove("id") }
+        expectInvalidFocus("clips[0].focus.subjects[0].id") { getJSONArray("subjects").getJSONObject(0).put("id", 1.5) }
+        expectInvalidFocus("clips[0].focus.subjects[0].id") { getJSONArray("subjects").getJSONObject(0).put("id", 0) }
+        expectInvalidFocus("clips[0].focus.subjects[0].id") { getJSONArray("subjects").getJSONObject(0).put("id", 256) }
+        expectInvalidFocus("clips[0].focus.subjects[0].id") { getJSONArray("subjects").getJSONObject(0).put("id", "1") }
+        // Named twice: the second is the one refused.
+        expectInvalidFocus("clips[0].focus.subjects[1].id") { getJSONArray("subjects").getJSONObject(1).put("id", 1) }
+        // A whole number written with a point is a whole number.
+        val focus = ComposeSpecParser.parse(
+            withFocus(focusJson().apply { getJSONArray("subjects").getJSONObject(1).put("id", 255.0) }),
+        ).clips[0].focus!!
+        assertEquals(255, focus.subjects[1].id)
+    }
+
+    @Test
+    fun `a subject's focus that is not one value per key, each a finite number, is refused`() {
+        expectInvalidFocus("clips[0].focus.subjects[0].focus") { getJSONArray("subjects").getJSONObject(0).remove("focus") }
+        expectInvalidFocus("clips[0].focus.subjects[0].focus") { getJSONArray("subjects").getJSONObject(0).put("focus", numbers(1.0, 0.0)) }
+        expectInvalidFocus("clips[0].focus.subjects[0].focus") { getJSONArray("subjects").getJSONObject(0).put("focus", 1) }
+        expectInvalidFocus("clips[0].focus.subjects[1].focus[2]") { getJSONArray("subjects").getJSONObject(1).getJSONArray("focus").put(2, "1") }
+    }
+
+    @Test
+    fun `a blur, mono or dim that is there and is not a number is refused`() {
+        expectInvalidFocus("clips[0].focus.blur") { put("blur", "0.01") }
+        expectInvalidFocus("clips[0].focus.mono") { put("mono", true) }
+        expectInvalidFocus("clips[0].focus.dim") { put("dim", JSONArray()) }
+        // The subjects are read before the three numbers.
+        expectInvalidFocus("clips[0].focus.subjects[0].id") {
+            put("blur", "x")
+            getJSONArray("subjects").getJSONObject(0).put("id", 0)
+        }
+    }
+
+    @Test
+    fun `a clip broken elsewhere reports that first, as it did before focus existed`() {
+        expectInvalid("clips[0].rect.w") {
+            getJSONArray("clips").getJSONObject(0).put("rect", rectJson(0.0, 0.0, 0.0, 1.0)).put("focus", "broken")
+        }
+    }
+
+    @Test
+    fun `a transition's tail and a layer's clip carry a focus of their own, with their own paths`() {
+        val tail = ComposeSpecParser.parse(
+            withTransition(transitionJson().apply { getJSONObject("from").put("focus", focusJson()) }),
+        ).clips[1].transitionIn!!.from
+        assertEquals(ComposeSpecParser.parse(withFocus()).clips[0].focus, tail.focus)
+        expectInvalidTransition("clips[1].transitionIn.from.focus.uri") {
+            getJSONObject("from").put("focus", focusJson().apply { remove("uri") })
+        }
+        val track = trackJson("pip", "b").apply {
+            getJSONArray("clips").getJSONObject(0).put("focus", focusJson().apply { getJSONArray("atMs").put(1, -5) })
+        }
+        expectInvalid("tracks[0].clips[0].focus.atMs[1]") { put("tracks", JSONArray().put(track)) }
+    }
 }

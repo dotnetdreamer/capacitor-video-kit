@@ -388,6 +388,11 @@ export const OP_REFERENCE: Record<string, string> = {
   setClipMuted: 'clipId, muted - drops this clip’s sound whatever its volume says.',
   setClipFit: 'clipId, fit ("contain" | "cover" | null) - null falls back to the post’s own fit.',
   setClipCrop: 'clipId, crop ({x,y,w,h} in 0..1 of the source frame, or null for all of it).',
+  setClipFocus:
+    'clipId, focus ({subjects?, blur?, mono?, dim?, invert?, changes?} or null) - keeps the clip\u2019s subjects sharp and ' +
+    'softens everything else: subjects "main" (the default), "all" or ids from findSubjects; blur, mono (grey) and dim 0..1, ' +
+    'blur 0.5 by default; invert softens the subjects instead; changes [{atMs, subjects, pullMs?}] pull focus at times of ' +
+    'the clip\u2019s own source, inside its trim. The app finds the subjects on the device when it renders.',
   setClipRect: 'clipId, rect ({x,y,w,h,rotationDeg?} on the output frame, or null for the whole frame).',
   setClipRotation: 'clipId, rotationDeg - clockwise, about the placement rectangle’s centre.',
   resetClipFraming: 'clipId - takes the crop, the rectangle and the per-clip fit back off.',

@@ -1,7 +1,8 @@
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 
-import { MissingClipError, toComposeSpec, type ComposeSpecIds, type EditManifest } from '../editor';
+import { MissingClipError, focusChangesPicture, toComposeSpec, type ComposeSpecIds, type EditManifest, type SubjectTrackRef, type SubjectTracksByKey } from '../editor';
 import { debugError } from '../host/debug';
+import { browserSubjects } from '../host/defaults';
 import {
   RenderFailedError,
   type EditorEncodeSupport,
@@ -236,10 +237,14 @@ export function composerRenderHost(options: ComposerRenderHostOptions = {}): Com
         if (uri) uriByKey.set(source.key, uri);
       }
       const { jobId, batchId } = renderIds(ids, log);
+      // Before the layers are drawn, and waited for: a search the editor started is joined, and one
+      // it never started - a template rendered without the editor ever opening - is made now.
+      const subjects = await subjectTracksFor(manifest, uriByKey, sources, log);
+      signal.throwIfAborted();
 
       let spec: ComposeSpec;
       try {
-        spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, request.raster, { maxBytes: request.maxBytes });
+        spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, request.raster, { maxBytes: request.maxBytes }, subjects);
       } catch (error) {
         /*
          * Refused before any segment id was handed out, so a missing clip already names the host's
@@ -285,6 +290,49 @@ export function composerRenderHost(options: ComposerRenderHostOptions = {}): Com
       await folders?.discard();
     },
   };
+}
+
+/**
+ * The subject track of every source a focused segment plays, from the composer's `findSubjects`: at
+ * once for a source the editor has already looked at - the composer keeps every track it made - and
+ * a search for one it has not. A source with no track to be had - no segmenter on this platform, a
+ * file the composer could not search - is left out and its focus goes with it, logged, rather than
+ * failing a render that can still be made: the footage is drawn as it is, which is what the preview
+ * on the same platform showed.
+ *
+ * On a phone, a source the page holds as a `blob:` URL is one the composer cannot open, so it was the
+ * page that looked at it for the preview (`composerMediaHost`), and the page answers here too, from
+ * the track it made then; that track is a `blob:` as well, which `withNativeRenderInputs` writes out
+ * with the clip.
+ */
+async function subjectTracksFor(
+  manifest: EditManifest,
+  uriByKey: ReadonlyMap<string, string>,
+  sources: readonly EditorSource[],
+  log: (message: string, error?: unknown) => void,
+): Promise<SubjectTracksByKey> {
+  const keys = new Set<string>();
+  for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+    if (focusChangesPicture(clip.focus)) keys.add(clip.clipKey);
+  }
+  const tracks = new Map<string, SubjectTrackRef>();
+  for (const key of keys) {
+    const uri = uriByKey.get(key);
+    if (!uri) continue;
+    const source = sources.find(candidate => candidate.key === key);
+    const picture = source?.kind === 'image';
+    try {
+      const found =
+        source && uri.startsWith('blob:') && Capacitor.isNativePlatform()
+          ? await browserSubjects(source, () => undefined)
+          : await VideoComposer.findSubjects({ uri, ...(picture ? { kind: 'image' as const } : {}) });
+      if (found) tracks.set(key, { uri: found.uri, subjects: found.subjects });
+      else log('[composerRenderHost] no subjects for a focused clip; it is drawn as it is');
+    } catch (error) {
+      log('[composerRenderHost] no subjects for a focused clip; it is drawn as it is', error);
+    }
+  }
+  return tracks;
 }
 
 /**
