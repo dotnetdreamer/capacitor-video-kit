@@ -32,9 +32,7 @@ See [platform behavior](docs/platforms.md) for encoding limits and background be
 From a checkout of this repository:
 
 ```sh
-npm install --ignore-scripts
-npm --prefix packages/angular install --ignore-scripts
-npm run build
+npm install
 npm run example
 ```
 

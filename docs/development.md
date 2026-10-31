@@ -188,8 +188,7 @@ exports map a published consumer reads, rather than against a path mapping that 
 ## Build and test
 
 ```sh
-npm install --ignore-scripts
-npm --prefix packages/angular install --ignore-scripts
+npm install        # also installs packages/angular through preinstall, then builds through prepare
 npm run build      # the package, then the three wrapper packages
 npm test           # vitest in a mock DOM, and Playwright Chromium for the components, both web
                    # render engines, and the file each of them produces
