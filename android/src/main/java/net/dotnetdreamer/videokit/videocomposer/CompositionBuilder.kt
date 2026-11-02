@@ -92,6 +92,8 @@ object CompositionBuilder {
          * [FocusEffect]. Empty for a post nobody focused, which is every post before focus existed.
          */
         subjectTracks: Map<String, SubjectTrack> = emptyMap(),
+        /** The matte track of every cut-out clip, by [Cutout.uri], as the pre-flight read them; see [CutoutEffect]. */
+        matteTracks: Map<String, MatteTrack> = emptyMap(),
     ): Composition {
         val output = plan.spec.output
 
@@ -173,7 +175,9 @@ object CompositionBuilder {
         //
         // A focused clip's effect is its own - its keys, its track and its place on the timeline - so a
         // new one is made for each, and only for a clip that has a focus; see [Focuses].
-        val focuses = Focuses(subjectTracks)
+        // A cut-out clip's alpha goes on straight where Media3's compositor blends it and premultiplied
+        // where it does not; see [CutoutEffect]. Both are decided here, once for the post.
+        val focuses = Focuses(subjectTracks, matteTracks, composited = plan.tracks.isNotEmpty() || plan.tails.isNotEmpty())
         val layers = plan.tracks.asReversed()
         for (track in layers) {
             sequences += layerSequence(track, plan.totalUs, output, grade, focuses, plan.camera)
@@ -677,10 +681,15 @@ object CompositionBuilder {
         // frame focused at its own source time, then the frame between them made. A new instance per
         // clip - its keys and its place on the timeline are its own - so Media3 rebuilds the chain at a
         // focused clip's cuts, and at nobody else's: a clip with no focus gets nothing here.
+        // A CUT-OUT clip's cutout goes after the grade and after slow motion: the contract has the
+        // cutout's guide be the graded picture, and the flow interpolator draws an opaque frame, so a
+        // frame it makes is cut out at its own source time. Before the geometry, which carries the alpha
+        // on. Premultiplied ahead of a transition's side, whose `over()` reads it so.
         val videoEffects: List<Effect> = listOfNotNull(
             focuses.effectFor(planned, startUs),
             grade,
             if (planned.slowed) SlowMotionEffect(startUs, startUs + planned.outDurUs, output.fps) else null,
+            focuses.cutoutFor(planned, startUs, throughTransition = transition != null),
         ) + geometry + listOfNotNull(
             camera?.takeIf { planned.zoomed }?.let { CameraTransformation(it) },
             transition,
@@ -870,7 +879,19 @@ object CompositionBuilder {
      * composition without the pre-flight: refused at once, rather than rendered as if nobody had asked
      * for a focus.
      */
-    private class Focuses(private val tracks: Map<String, SubjectTrack>) {
+    private class Focuses(
+        private val tracks: Map<String, SubjectTrack>,
+        private val mattes: Map<String, MatteTrack> = emptyMap(),
+        /** Whether the post goes through Media3's compositor: layers or transition tails. */
+        private val composited: Boolean = false,
+    ) {
+
+        /** [planned]'s cutout as an item starting at [startUs], or null for a clip with none. */
+        fun cutoutFor(planned: RenderPlan.PlannedClip, startUs: Long, throughTransition: Boolean): CutoutEffect? {
+            val cutout = planned.clip.cutout ?: return null
+            val track = checkNotNull(mattes[cutout.uri]) { "the matte track of ${planned.clip.key} was not read before the render" }
+            return CutoutEffect(cutout, track, FocusTiming.of(planned, startUs), premultiplied = throughTransition || !composited)
+        }
 
         /** [planned]'s focus as an item starting at [startUs] of its sequence, or null for a clip with none. */
         fun effectFor(planned: RenderPlan.PlannedClip, startUs: Long): FocusEffect? {

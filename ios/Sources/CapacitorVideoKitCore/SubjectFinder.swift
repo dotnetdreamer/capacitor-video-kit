@@ -84,9 +84,13 @@ enum SubjectFinder {
 
     /// Where the frames are decoded and looked at: one thread of its own, off the cooperative pool,
     /// because a search is minutes of blocking work for a long clip, and one search runs at a time.
-    private static let queue = DispatchQueue(label: "net.dotnetdreamer.videokit.subjects", qos: .userInitiated)
+    /// `findMatte`'s searches (`MatteFinder`) look on this same queue, so a matte search and a subject
+    /// search never look at frames at once - each holds a decoder and a segmenter - which is the one
+    /// lock Android's two finders share (`SubjectFinder.searches`).
+    static let queue = DispatchQueue(label: "net.dotnetdreamer.videokit.subjects", qos: .userInitiated)
 
-    private static func onSearchQueue<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+    /// `body` on `queue`, inside an autorelease pool: every search's looking, subjects' and mattes'.
+    static func onSearchQueue<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 continuation.resume(with: Result { try autoreleasepool { try body() } })
@@ -147,8 +151,9 @@ enum SubjectFinder {
                               fps: frames.fps, subjectKind: segmenter.subjectKind)
     }
 
-    /// A picture's pixel size as it stands upright, its EXIF orientation applied.
-    private static func uprightSize(_ source: CGImageSource) -> CGSize? {
+    /// A picture's pixel size as it stands upright, its EXIF orientation applied. A matte's grid is in
+    /// proportion to it too (`MatteFinder`).
+    static func uprightSize(_ source: CGImageSource) -> CGSize? {
         guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int,

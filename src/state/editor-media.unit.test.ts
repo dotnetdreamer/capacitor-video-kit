@@ -1,5 +1,20 @@
-import { MAX_LAYERS, MAX_VIDEO_TRACKS, PICTURE_CLIP_MS, PICTURE_SOURCE_MS, emptyManifest, type EditClip, type EditManifest } from '../editor';
+import {
+  MAX_LAYERS,
+  MAX_VIDEO_TRACKS,
+  PICTURE_CLIP_MS,
+  PICTURE_SOURCE_MS,
+  defaultCutout,
+  emptyManifest,
+  encodeMatteTrack,
+  matteKey,
+  setClipCutout,
+  setOverlayCutout,
+  type EditClip,
+  type EditManifest,
+} from '../editor';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { FindMatteResult } from '../video-composer/definitions';
 
 import { resolveEditorHost } from '../host/defaults';
 import type {
@@ -1145,6 +1160,152 @@ describe('EditorMedia', () => {
         media.dispose();
         await expect(waiting).resolves.toBeUndefined();
       });
+    });
+  });
+
+  /*
+   * A cutout's matte as an export needs it: there, or looked for once more, or the render refused -
+   * never a post with the background the customer took away. And the sheet's Try again.
+   */
+  describe('cutout mattes', () => {
+    const FOUND: FindMatteResult = { engine: 'mlkit', uri: 'file:///cache/matte-tracks/a.vkmt', cached: false, kind: 'video', target: 'subject', width: 2, height: 2, frames: 1, durationMs: 4000, coverage: 0.5 };
+    const TRACK = encodeMatteTrack({ width: 2, height: 2, times: [0], frames: [Uint8Array.of(255, 0, 255, 0)], meta: { engine: 'mlkit', kind: 'video', target: 'subject', durationMs: 4000, fps: 10, coverage: 0.5 } });
+
+    /** The page reading a track back, as it reads any file it is handed. */
+    beforeEach(() => {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(TRACK.slice().buffer)));
+      return () => vi.unstubAllGlobals();
+    });
+
+    /** Opens on a host whose matte searches answer `answers` in turn, and cuts clip `a` out. */
+    function cutOut(...answers: (FindMatteResult | Error | Promise<FindMatteResult>)[]): ReturnType<typeof vi.fn> {
+      const findMatte = vi.fn(async () => {
+        const answer = answers.shift();
+        if (answer instanceof Error) throw answer;
+        return answer ?? null;
+      });
+      open(fakeMedia({ findMatte }));
+      store.commit('Cutout', m => setClipCutout(m, 'a', defaultCutout()));
+      return findMatte;
+    }
+
+    const stateOfA = () => store.mattes.value.get(matteKey('a', 'subject'));
+
+    it('has nothing to wait for on a post with no cutout', async () => {
+      await expect(media.readyCutouts()).resolves.toBeUndefined();
+    });
+
+    it('looks once more where a search failed, and goes on once it has the matte', async () => {
+      const findMatte = cutOut(new Error('the segmenter broke'), FOUND);
+      await vi.waitFor(() => expect(stateOfA()).toMatchObject({ status: 'none', reason: 'failed' }));
+
+      await media.readyCutouts();
+      expect(findMatte).toHaveBeenCalledTimes(2);
+      expect(stateOfA()?.status).toBe('ready');
+    });
+
+    it('refuses the render as cutout, naming the source, when the second look fails too', async () => {
+      cutOut(new Error('the segmenter broke'), new Error('and again'));
+      await vi.waitFor(() => expect(stateOfA()?.status).toBe('none'));
+
+      const failure = await media.readyCutouts().catch((error: unknown) => error);
+      expect(failure).toMatchObject({ name: 'RenderFailedError', code: 'cutout', sourceKey: 'a' });
+    });
+
+    it('waits for a search still running', async () => {
+      let answer: (result: FindMatteResult) => void = () => undefined;
+      cutOut(new Promise<FindMatteResult>(resolve => (answer = resolve)));
+      let ready = false;
+      void media.readyCutouts().then(() => (ready = true));
+      await Promise.resolve();
+      expect(ready).toBe(false);
+
+      answer(FOUND);
+      await vi.waitFor(() => expect(ready).toBe(true));
+    });
+
+    it('refuses a cut-out post on a host that cannot look for mattes', async () => {
+      open(fakeMedia());
+      store.commit('Cutout', m => setClipCutout(m, 'a', defaultCutout()));
+
+      await expect(media.readyCutouts()).rejects.toMatchObject({ code: 'cutout' });
+    });
+
+    /* Drawing a photo once while its matte is looked for and again when it lands is the pass's dearest work, twice. */
+    it('leaves a cut-out photo as it was drawn while its matte is looked for, and stamps it once a search answers', async () => {
+      let answer: (result: FindMatteResult) => void = () => undefined;
+      const answered = new Promise<FindMatteResult>(resolve => (answer = resolve));
+      open(fakeMedia({ findMatte: vi.fn(() => answered) }));
+      const id = store.addImage('file:///photo.jpg', 'photo.jpg', 1)!;
+      store.commit('Cutout', m => setOverlayCutout(m, id, defaultCutout()));
+      const photo = () => store.manifest.value.overlays.find(overlay => overlay.id === id)!;
+      expect(store.photoMattePending(photo())).toBe(true);
+      expect(store.photoMatteStamp(photo())).toBe('');
+
+      answer({ ...FOUND, uri: 'file:///cache/matte-tracks/photo.vkmt', kind: 'image' });
+      await vi.waitFor(() => expect(store.photoMatteStamp(photo())).toBe('file:///cache/matte-tracks/photo.vkmt'));
+      expect(store.photoMattePending(photo())).toBe(false);
+    });
+
+    it('stamps a photo whose search failed, so it is drawn again, whole', async () => {
+      open(fakeMedia({ findMatte: vi.fn(async () => Promise.reject(new Error('the segmenter broke'))) }));
+      const id = store.addImage('file:///photo.jpg', 'photo.jpg', 1)!;
+      store.commit('Cutout', m => setOverlayCutout(m, id, defaultCutout()));
+      const photo = () => store.manifest.value.overlays.find(overlay => overlay.id === id)!;
+
+      await vi.waitFor(() => expect(store.photoMatteStamp(photo())).toBe('none'));
+      expect(store.photoMattePending(photo())).toBe(false);
+    });
+
+    /* The people segmenter reads a second of video in about one on a Galaxy A13, the subject one in about fifteen. */
+    it('keeps the people of a video to begin with, and whatever stands out of a picture', () => {
+      open(fakeMedia({ findMatte: vi.fn(async () => FOUND) }));
+      store.select({ kind: 'clip', id: 'a' });
+      store.openCutout();
+      expect(store.manifest.value.clips.find(c => c.id === 'a')?.cutout).toEqual({ target: 'people' });
+
+      store.load([{ key: 'p', fileName: 'p.jpg', kind: 'image' }], new Map([['p', 3000]]), { ...emptyManifest(), clips: [{ ...clip('p', 0, 3000), image: true }] });
+      store.select({ kind: 'clip', id: 'p' });
+      store.openCutout();
+      expect(store.manifest.value.clips[0]?.cutout).toEqual({});
+    });
+
+    /* Subject takes minutes on a cheap phone: the clip coming back whole for all of them undoes what was asked. */
+    it('keeps the cutout it had on the preview while the matte for a new choice is looked for, and changes over without a reveal', async () => {
+      let answer: (result: FindMatteResult) => void = () => undefined;
+      cutOut(FOUND, new Promise<FindMatteResult>(resolve => (answer = resolve)));
+      store.openPanel('cutout');
+      await vi.waitFor(() => expect(stateOfA()?.status).toBe('ready'));
+      expect(store.cutoutReveals.value.has('a')).toBe(true);
+
+      store.commit('Cutout', m => setClipCutout(m, 'a', { target: 'people' }));
+      await vi.waitFor(() => expect(store.mattes.value.get(matteKey('a', 'people'))?.status).toBe('finding'));
+      expect(store.cutoutFrames.value.get('a')?.cutout.uri).toBe(FOUND.uri);
+      store.cutoutReveals.value = new Map();
+
+      answer({ ...FOUND, target: 'people', uri: 'file:///cache/matte-tracks/people.vkmt' });
+      await vi.waitFor(() => expect(store.cutoutFrames.value.get('a')?.cutout.uri).toBe('file:///cache/matte-tracks/people.vkmt'));
+      expect(store.cutoutReveals.value.has('a')).toBe(false);
+    });
+
+    it('draws the clip whole once the search for a new choice fails, as the sheet says', async () => {
+      cutOut(FOUND, new Error('the segmenter broke'));
+      await vi.waitFor(() => expect(stateOfA()?.status).toBe('ready'));
+
+      store.commit('Cutout', m => setClipCutout(m, 'a', { target: 'people' }));
+      await vi.waitFor(() => expect(store.mattes.value.get(matteKey('a', 'people'))).toMatchObject({ status: 'none', reason: 'failed' }));
+      expect(store.cutoutFrames.value.has('a')).toBe(false);
+    });
+
+    it('looks again on Try again, for the subject the sheet is about', async () => {
+      const findMatte = cutOut(new Error('the segmenter broke'), FOUND);
+      store.select({ kind: 'clip', id: 'a' });
+      await vi.waitFor(() => expect(stateOfA()?.status).toBe('none'));
+
+      media.retryCutout();
+      expect(stateOfA()?.status).toBe('finding');
+      await vi.waitFor(() => expect(stateOfA()?.status).toBe('ready'));
+      expect(findMatte).toHaveBeenCalledTimes(2);
     });
   });
 });

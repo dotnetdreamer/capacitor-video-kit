@@ -64,6 +64,30 @@ export const INTERPOLATE_FRAMES_GLSL = `
 ${interpolationBody()}`;
 
 /**
+ * The same step over PREMULTIPLIED frames with an alpha of their own - a cut-out clip's, which the
+ * painter cuts out at each frame's own source time before the pair is mixed - as `interpolateFrames4`,
+ * returning the premultiplied RGBA. Made from the shared body's text, so the two can never move apart,
+ * and only its function: the uniforms and helpers it reads are the body's, which
+ * [INTERPOLATE_FRAMES_GLSL] declares ahead of it in the same program.
+ */
+export const INTERPOLATE_FRAMES4_GLSL = fourChannels(interpolationBody());
+
+function fourChannels(body: string): string {
+  const start = body.indexOf('vec3 interpolateFrames(');
+  if (start < 0) throw new Error('the frame interpolation body has no interpolateFrames to widen');
+  let fn = body.slice(start);
+  for (const [from, to] of [
+    ['vec3 interpolateFrames(', 'vec4 interpolateFrames4('],
+    ['vec3 blend = mix(SAMPLE(frameA, uv).rgb, SAMPLE(frameB, uv).rgb, w);', 'vec4 blend = mix(SAMPLE(frameA, uv), SAMPLE(frameB, uv), w);'],
+    ['vec3 warped = (wA * SAMPLE(frameA, pa).rgb + wB * SAMPLE(frameB, pb).rgb)', 'vec4 warped = (wA * SAMPLE(frameA, pa) + wB * SAMPLE(frameB, pb))'],
+  ] as const) {
+    if (!fn.includes(from)) throw new Error(`the frame interpolation body has changed: no "${from}" to widen`);
+    fn = fn.replace(from, to);
+  }
+  return fn;
+}
+
+/**
  * Which look the live preview draws a slowed clip with while it plays: the CROSS-FADE. Every export
  * follows the motion; the preview is a guide, and it has to stay real-time on the phone it runs on.
  *

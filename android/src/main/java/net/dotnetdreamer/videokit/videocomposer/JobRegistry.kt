@@ -77,6 +77,9 @@ object JobRegistry {
          */
         @Volatile var subjectTracks: Map<String, SubjectTrack> = emptyMap()
 
+        /** The matte track of every cut-out clip, read and checked in the pre-flight, by uri. */
+        @Volatile var matteTracks: Map<String, MatteTrack> = emptyMap()
+
         @Volatile var cancelRequested: Boolean = false
 
         /** One relaxed-settings retry is allowed when an encoder refuses our request. */

@@ -157,13 +157,39 @@ import {
   setFocusSubjects as setFocusSubjectsOp,
   type EditFocus,
   type FocusSubjects,
+  compileCutout,
+  cutoutTarget,
+  defaultCutout,
+  matteKey,
+  patchClipCutout as patchClipCutoutOp,
+  patchOverlayCutout as patchOverlayCutoutOp,
+  setClipCutout as setClipCutoutOp,
+  setOverlayCutout as setOverlayCutoutOp,
+  type CutoutPatch,
+  type EditCutout,
+  type MatteTarget,
+  type MatteTrack,
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
 import { FocusFrames } from '../video-composer/web/focus-frames';
-import type { AudioEffectCopy, EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, SubjectTrackState, ToolbarMode, VolumeTarget } from './editor.types';
+import { CutoutFrames } from '../video-composer/web/cutout-frames';
+import type {
+  AudioEffectCopy,
+  CutoutSubject,
+  EditorPanel,
+  EditorPlayer,
+  EditorSelection,
+  Filmstrip,
+  MatteState,
+  OverlayBitmap,
+  SoundReplaceTarget,
+  SubjectTrackState,
+  ToolbarMode,
+  VolumeTarget,
+} from './editor.types';
 import { sameUrl } from './same-url';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
@@ -2973,6 +2999,220 @@ export class EditorStore {
   }
 
   /* ========================================================================================= */
+  /* Cutout                                                                                    */
+  /* ========================================================================================= */
+
+  /**
+   * Every source's matte as far as it has got, by [matteKey] - the clip key or photo it is of, and
+   * what it keeps: see [MatteState]. Written by `EditorMedia`, which looks at a source once a segment
+   * or a photo with a cutout needs it, and read by the Cutout sheet, by the preview, which draws a
+   * cutout only from a matte that is `ready`, and by the rasteriser, for a photo.
+   */
+  readonly mattes = signal<ReadonlyMap<string, MatteState>>(new Map());
+
+  /**
+   * What the Cutout sheet is about: the selected photo layer, or the segment the Focus sheet would be
+   * about - the selected one, or the one under the playhead, the crop tool's rule. Null while any other
+   * layer is selected: text and stickers have no background to take away.
+   */
+  readonly cutoutSubject = computed<CutoutSubject | null>(() => {
+    const selection = this.selection.value;
+    if (selection?.kind === 'overlay') {
+      const overlay = this.manifest.value.overlays.find(candidate => candidate.id === selection.id);
+      return overlay?.kind === 'image' ? { kind: 'overlay', overlay } : null;
+    }
+    const clip = this.focusClip.value;
+    return clip ? { kind: 'clip', clip } : null;
+  });
+
+  /** The cutout of [cutoutSubject], or undefined where it has none. */
+  readonly subjectCutout = computed<EditCutout | undefined>(() => {
+    const subject = this.cutoutSubject.value;
+    return subject?.kind === 'clip' ? subject.clip.cutout : subject?.overlay.cutout;
+  });
+
+  /** How far the matte of [cutoutSubject] has got, for what its cutout keeps, or null for one nobody has looked at yet. */
+  readonly cutoutMatte = computed<MatteState | null>(() => {
+    const subject = this.cutoutSubject.value;
+    return subject ? (this.mattes.value.get(subjectMatteKey(subject)) ?? null) : null;
+  });
+
+  /**
+   * While the customer holds Compare in the Cutout sheet: the preview draws every segment and photo
+   * with its background, the edit untouched. Never part of the manifest, so never in a render.
+   */
+  readonly cutoutCompare = signal(false);
+
+  /**
+   * When each segment's or photo's cutout first had a matte to draw from, by its id, on
+   * `performance.now()`'s clock: the preview reveals the cutout over the moment after, the background
+   * giving way while a light runs round the subject. Only a matte that ARRIVES while the editor is open
+   * is revealed: a draft opened with its mattes already made shows its cutouts at once.
+   */
+  readonly cutoutReveals = signal<ReadonlyMap<string, number>>(new Map());
+
+  /**
+   * The offer to take a photo's background away, shown over the preview just after the photo went on
+   * as a layer and a subject was found standing out of it: which layer, and an id that tells one offer
+   * from the next. Null when there is none. It goes on its own after [CUTOUT_SUGGESTION_MS], when the
+   * customer does anything else with the layer, and when it is taken up.
+   */
+  readonly cutoutSuggestion = signal<{ overlayId: string; id: number } | null>(null);
+  private suggestionTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** The last [cutoutFrames] made for each segment, kept while what they were made from is the same. */
+  private cutoutMade = new Map<string, { cutout: EditCutout; state: MatteState; frames: CutoutFrames }>();
+
+  /**
+   * Each cut-out segment's cutout as the preview draws it, by segment id: compiled against its
+   * source's matte exactly as the render compiles it ([compileCutout]), and read frame by frame. A
+   * segment whose matte is not ready yet - or found nothing - is drawn as it is.
+   *
+   * Except while what it keeps has just been changed and the matte for it is still being looked for:
+   * the cutout from the matte it had stays on the preview meanwhile, rather than the whole clip coming
+   * back for as long as the search takes - which for Subject, on a cheap phone, is minutes. A render
+   * waits for the matte it asked for ([EditorMedia.readyCutouts]); this is the preview's alone.
+   *
+   * Kept from one manifest to the next while a segment's cutout and its matte are the same objects, so
+   * a drag elsewhere on the timeline makes nothing new.
+   */
+  readonly cutoutFrames = computed<ReadonlyMap<string, CutoutFrames>>(() => {
+    const manifest = this.manifest.value;
+    const mattes = this.mattes.value;
+    const made = new Map<string, { cutout: EditCutout; state: MatteState; frames: CutoutFrames }>();
+    const frames = new Map<string, CutoutFrames>();
+    for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+      const cutout = clip.cutout;
+      if (!cutout) continue;
+      const target = cutoutTarget(cutout);
+      const wanted = mattes.get(matteKey(clip.clipKey, target));
+      const state = !wanted || wanted.status === 'finding' ? mattes.get(matteKey(clip.clipKey, target === 'people' ? 'subject' : 'people')) : wanted;
+      if (state?.status !== 'ready') continue;
+      const kept = this.cutoutMade.get(clip.id);
+      if (kept && kept.cutout === cutout && kept.state === state) {
+        made.set(clip.id, kept);
+        frames.set(clip.id, kept.frames);
+        continue;
+      }
+      const compiled = compileCutout(clip, { uri: state.result.uri, coverage: state.result.coverage });
+      if (!compiled) continue;
+      const entry = { cutout, state, frames: new CutoutFrames(state.track, compiled) };
+      made.set(clip.id, entry);
+      frames.set(clip.id, entry.frames);
+    }
+    this.cutoutMade = made;
+    return frames;
+  });
+
+  /** The matte a photo's cutout is drawn from, read, or null while there is none ready: what the raster context hands the rasteriser. */
+  photoMatte(uri: string, target: MatteTarget): MatteTrack | null {
+    const state = this.mattes.peek().get(matteKey(uri, target));
+    return state?.status === 'ready' ? state.track : null;
+  }
+
+  /**
+   * What a photo's bitmap key carries for its matte (`overlayRasterKey`): the track's uri once it is
+   * ready, `none` once a search has found that there is none - so the bitmap is drawn again, cut out or
+   * whole, the moment either is known - and empty before. Empty for any layer without a cutout.
+   */
+  photoMatteStamp(overlay: EditOverlay): string {
+    if (overlay.kind !== 'image' || !overlay.cutout) return '';
+    const state = this.mattes.value.get(matteKey(overlay.uri, cutoutTarget(overlay.cutout)));
+    return state?.status === 'ready' ? state.result.uri : state?.status === 'none' ? 'none' : '';
+  }
+
+  /**
+   * Whether a photo's cutout is still waiting for its matte. The bitmap pass leaves such a photo as it
+   * last drew it, rather than drawing it once while the matte is looked for and again, cut out, when
+   * the stamp changes - which on a cheap phone is the dearest thing the pass does, twice.
+   */
+  photoMattePending(overlay: EditOverlay): boolean {
+    if (overlay.kind !== 'image' || !overlay.cutout || !this.host.media.findMatte) return false;
+    const state = this.mattes.peek().get(matteKey(overlay.uri, cutoutTarget(overlay.cutout)));
+    return !state || state.status === 'finding';
+  }
+
+  /**
+   * Opens the Cutout sheet on [cutoutSubject], paused and selected, putting a cutout on it first when it
+   * has none - its background taken away, which is what a customer tapping Cutout came for. On a host
+   * that cannot find a matte only for a subject that already has one, so it can be taken off.
+   */
+  openCutout(): void {
+    const subject = this.cutoutSubject.value;
+    if (!subject) return;
+    if (!this.host.media.findMatte && !(subject.kind === 'clip' ? subject.clip.cutout : subject.overlay.cutout)) return;
+    this.pause();
+    if (subject.kind === 'clip') {
+      if (!this.isSelected({ kind: 'clip', id: subject.clip.id })) this.select({ kind: 'clip', id: subject.clip.id });
+      // A video keeps its people to begin with, a picture whatever stands out. Measured on a Galaxy A13,
+      // the people segmenter looks at a second of video in about one, and the subject segmenter - made
+      // for still pictures - in about fifteen: a minute's clip would be a quarter of an hour. One tap
+      // on Subject still asks for it; a picture is looked at once, in a second or two.
+      if (!subject.clip.cutout) this.commit('Cutout', m => setClipCutoutOp(m, subject.clip.id, defaultCutout(subject.clip.image ? 'subject' : 'people')));
+    } else if (!subject.overlay.cutout) {
+      this.commit('Cutout', m => setOverlayCutoutOp(m, subject.overlay.id, defaultCutout()));
+    }
+    this.dismissCutoutSuggestion();
+    this.openPanel('cutout');
+    // A matte already made - the photo looked at as it went on, a source cut out before - is drawn at
+    // once, and revealed as if it had just arrived: the moment is the customer's tap, not the search.
+    const now = this.cutoutSubject.peek();
+    if (now && this.mattes.peek().get(subjectMatteKey(now))?.status === 'ready') this.revealCutouts([now.kind === 'clip' ? now.clip.id : now.overlay.id]);
+  }
+
+  /** The look of the sheet's subject's cutout: what it keeps, its edge, its fill, its line. Coalesces a drag into one step. */
+  setCutoutLook(patch: CutoutPatch, opts?: { coalesce?: CoalesceKey }): void {
+    const subject = this.cutoutSubject.value;
+    if (!subject) return;
+    if (subject.kind === 'clip') this.commitCoalesced('Cutout', m => patchClipCutoutOp(m, subject.clip.id, patch), opts?.coalesce);
+    else this.commitCoalesced('Cutout', m => patchOverlayCutoutOp(m, subject.overlay.id, patch), opts?.coalesce);
+  }
+
+  /** Gives the sheet's subject its background back, and closes the sheet. */
+  removeCutout(): void {
+    const subject = this.cutoutSubject.value;
+    if (subject?.kind === 'clip') this.commit('Remove cutout', m => setClipCutoutOp(m, subject.clip.id, null));
+    else if (subject) this.commit('Remove cutout', m => setOverlayCutoutOp(m, subject.overlay.id, null));
+    this.cutoutCompare.value = false;
+    this.closePanel();
+  }
+
+  /** Shows the offer to cut out photo layer `overlayId`; see [cutoutSuggestion]. */
+  suggestCutout(overlayId: string): void {
+    if (this.suggestionTimer) clearTimeout(this.suggestionTimer);
+    this.cutoutSuggestion.value = { overlayId, id: Date.now() };
+    this.suggestionTimer = setTimeout(() => this.dismissCutoutSuggestion(), CUTOUT_SUGGESTION_MS);
+  }
+
+  /** Takes the offer up: the photo selected, cut out, and the Cutout sheet open on it. */
+  acceptCutoutSuggestion(): void {
+    const suggestion = this.cutoutSuggestion.peek();
+    this.dismissCutoutSuggestion();
+    if (!suggestion || !this.manifest.peek().overlays.some(overlay => overlay.id === suggestion.overlayId)) return;
+    if (!this.isSelected({ kind: 'overlay', id: suggestion.overlayId })) this.select({ kind: 'overlay', id: suggestion.overlayId });
+    this.openCutout();
+    this.haptic('light');
+  }
+
+  dismissCutoutSuggestion(): void {
+    if (this.suggestionTimer) clearTimeout(this.suggestionTimer);
+    this.suggestionTimer = null;
+    this.cutoutSuggestion.value = null;
+  }
+
+  /**
+   * Starts the preview's reveal of each of `ids`' cutouts now: what `EditorMedia` calls when a matte
+   * one of them is waiting for arrives. Reveals over a second old are let go of on the way.
+   */
+  revealCutouts(ids: readonly string[]): void {
+    if (ids.length === 0) return;
+    const now = performance.now();
+    const next = new Map([...this.cutoutReveals.peek()].filter(([, at]) => now - at < 1000));
+    for (const id of ids) next.set(id, now);
+    this.cutoutReveals.value = next;
+  }
+
+  /* ========================================================================================= */
   /* Delete / duplicate, whatever is selected                                                  */
   /* ========================================================================================= */
 
@@ -3049,6 +3289,9 @@ export class EditorStore {
   dispose(): void {
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = null;
+    // The cutout offer's timer, for the toast's reason.
+    if (this.suggestionTimer) clearTimeout(this.suggestionTimer);
+    this.suggestionTimer = null;
     this.endAudition();
     this.player = null;
   }
@@ -3093,4 +3336,14 @@ function withAnimationPart(m: EditManifest, id: string, part: OverlayAnimationPa
   else if (part === 'loop') animation.loop = move as OverlayLoop;
   else animation[part] = move as OverlayMove;
   return patchOverlay(m, id, { animation });
+}
+
+/** How long the offer to cut a photo out stays over the preview: long enough to read and reach for. */
+const CUTOUT_SUGGESTION_MS = 6000;
+
+/** Where a Cutout subject's matte is filed in [EditorStore.mattes]: its clip key, or its photo, and what its cutout keeps. */
+export function subjectMatteKey(subject: CutoutSubject): string {
+  return subject.kind === 'clip'
+    ? matteKey(subject.clip.clipKey, cutoutTarget(subject.clip.cutout))
+    : matteKey(subject.overlay.uri, cutoutTarget(subject.overlay.cutout));
 }

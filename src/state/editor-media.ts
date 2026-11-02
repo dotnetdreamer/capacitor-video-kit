@@ -6,6 +6,12 @@ import {
   MUSIC_FADE_MS,
   PICTURE_SOURCE_MS,
   audioTrackIdOfClip,
+  cutoutTarget,
+  matteKey,
+  parseMatteTrack,
+  type ImageOverlay,
+  type MatteTarget,
+  type MatteTrack,
   defaultClipEdit,
   defaultPictureEdit,
   focusChangesPicture,
@@ -24,14 +30,20 @@ import {
 } from '../editor';
 
 import { debugWarn } from '../host/debug';
-import type { CatalogueSound, EditorSource, PickedAudio, ResolvedEditorHost, SavedSound, SoundCategory } from '../host/host.types';
+import { RenderFailedError, type CatalogueSound, type EditorSource, type PickedAudio, type ResolvedEditorHost, type SavedSound, type SoundCategory } from '../host/host.types';
 import { resolve } from '../web-runtime/files';
 import { isPictureSource, measurePicture, pictureThumbnail } from '../web-runtime/picture';
 import { CopySources, copyGroups, copySoundKey, makeEffectCopy } from '../web-runtime/effect-copy';
 import { extractPeaks, type Peaks } from '../web-runtime/waveform';
 import type { EditorStore } from './editor-store';
 import { buildPlan, type RenderPlan } from '../video-composer/web/plan';
-import { clipWaveKey, type AudioEffectCopy, type Filmstrip, type SoundReplaceTarget, type SubjectTrackState } from './editor.types';
+import { clipWaveKey, type AudioEffectCopy, type Filmstrip, type MatteState, type SoundReplaceTarget, type SubjectTrackState } from './editor.types';
+
+/**
+ * How much of a photo its subject has to cover for the editor to offer to take the background away
+ * as the photo goes on: less is a speck nobody meant, more is a photo that is all subject already.
+ */
+const SUGGEST_COVERAGE = { min: 0.03, max: 0.9 };
 
 /** One filmstrip frame per second of source, the TikTok density at the default zoom. */
 const FILMSTRIP_STEP_MS = 1000;
@@ -221,6 +233,12 @@ export class EditorMedia {
   private subjectQueue: Promise<void> = Promise.resolve();
   private readonly subjectsAsked = new Set<string>();
   private stopWatchingSubjects: (() => void) | null = null;
+  /** See [watchForMattes]: one search at a time, and the sources and targets one has been asked for. */
+  private matteQueue: Promise<void> = Promise.resolve();
+  private readonly mattesAsked = new Set<string>();
+  private stopWatchingMattes: (() => void) | null = null;
+  /** Each matte asked for, by [matteKey], settling with its track or null: what [whenMatte] waits on. */
+  private readonly matteWaits = new Map<string, Promise<MatteTrack | null>>();
   private destroyed = false;
 
   constructor(
@@ -284,6 +302,7 @@ export class EditorMedia {
     this.watchForCopies();
     this.watchForEffectCopies();
     this.watchForSubjects();
+    this.watchForMattes();
   }
 
   /** Called by the shell when the editor leaves the document. */
@@ -305,6 +324,10 @@ export class EditorMedia {
     this.stopWatchingSubjects = null;
     // Footage nobody will focus now: its searches stop holding the phone's decoder.
     void this.host.media.stopFindingSubjects?.call(this.host.media, []).catch(() => undefined);
+    this.stopWatchingMattes?.();
+    this.stopWatchingMattes = null;
+    // And footage nobody will cut out, for the same reason.
+    void this.host.media.stopFindingMattes?.call(this.host.media, []).catch(() => undefined);
     // Wakes every [whenCopied] still waiting, which resolves on finding this destroyed.
     this.copiesAnswered.value = new Set(this.copiesAnswered.peek());
   }
@@ -485,6 +508,207 @@ export class EditorMedia {
         file({ status: 'none', reason: 'failed' });
       }
     });
+  }
+
+  /* ========================================================================================= */
+  /* Mattes                                                                                    */
+  /* ========================================================================================= */
+
+  /**
+   * Asks the host for the matte of every source a segment or a photo with a cutout needs, for what
+   * each keeps ([EditorMediaHost.findMatte]), and puts how far each has got into [EditorStore.mattes],
+   * where the Cutout sheet shows it, the preview draws from it and the rasteriser cuts photos out with
+   * it - the subjects' arrangement: it follows the MANIFEST, so a cutout from the sheet, a draft, a
+   * template or an undo are all covered; each source and target is asked for once for the life of this
+   * object, a stopped search excepted; and one at a time, behind each other.
+   */
+  private watchForMattes(): void {
+    if (!this.host.media.findMatte) return;
+    this.stopWatchingMattes = effect(() => {
+      // Read INTO something, for the reason [watchForCopies] gives.
+      const manifest = this.store.manifest.value;
+      const reads = manifest.clips.length + manifest.overlays.length + this.store.clips.value.length + this.store.mattes.value.size;
+      if (reads >= 0) untracked(() => this.askForMattes());
+    });
+  }
+
+  private askForMattes(): void {
+    if (this.destroyed) return;
+    const known = this.store.mattes.peek();
+    for (const { name, source, target } of this.wantedMattes()) {
+      if (!known.has(name) && !this.mattesAsked.has(name)) this.findMatte(name, source, target);
+    }
+  }
+
+  /** Every matte the manifest's cutouts are drawn from, once each: its [matteKey], what it is of and what it keeps. */
+  private wantedMattes(): { name: string; source: EditorSource; target: MatteTarget }[] {
+    const manifest = this.store.manifest.peek();
+    const wanted = new Map<string, { name: string; source: EditorSource; target: MatteTarget }>();
+    for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+      if (!clip.cutout) continue;
+      const target = cutoutTarget(clip.cutout);
+      const name = matteKey(clip.clipKey, target);
+      const source = this.store.clipByKey(clip.clipKey);
+      if (source && !wanted.has(name)) wanted.set(name, { name, source, target });
+    }
+    for (const overlay of manifest.overlays) {
+      if (overlay.kind !== 'image' || !overlay.cutout) continue;
+      const target = cutoutTarget(overlay.cutout);
+      const name = matteKey(overlay.uri, target);
+      if (!wanted.has(name)) wanted.set(name, { name, source: this.photoSource(overlay), target });
+    }
+    return [...wanted.values()];
+  }
+
+  /**
+   * Makes sure every cutout on the post has its matte before the post is rendered: waits for a search
+   * still running, looks once more where one failed, and rejects with a `RenderFailedError` (`cutout`)
+   * naming the source while one still has none - so a render never posts a background the customer
+   * took away, which drawing it whole would. A search that found nothing to keep is an answer rather
+   * than a failure: the preview drew that source whole, and the render does the same.
+   *
+   * A host that cannot look for mattes at all fails a post with a cutout the same way. The Cutout sheet
+   * there says so, and takes the cutout off.
+   */
+  async readyCutouts(): Promise<void> {
+    for (const { name, source, target } of this.wantedMattes()) {
+      const before = this.store.mattes.peek().get(name);
+      if ((before?.status === 'none' && before.reason === 'failed') || (!before && !this.mattesAsked.has(name))) this.findMatte(name, source, target);
+      if (this.store.mattes.peek().get(name)?.status === 'finding') await this.matteWaits.get(name);
+      if (this.store.mattes.peek().get(name)?.status !== 'ready') {
+        throw new RenderFailedError('cutout', `No matte for ${source.fileName || source.key} (${target})`, source.key);
+      }
+    }
+  }
+
+  /**
+   * Looks again for the matte of the Cutout sheet's subject after a search that failed: the sheet's Try
+   * again. Nothing for a matte that is ready, still being looked for, or one this host cannot make.
+   */
+  retryCutout(): void {
+    if (this.destroyed) return;
+    const subject = this.store.cutoutSubject.peek();
+    if (!subject) return;
+    const cutout = subject.kind === 'clip' ? subject.clip.cutout : subject.overlay.cutout;
+    if (!cutout) return;
+    const target = cutoutTarget(cutout);
+    const name = matteKey(subject.kind === 'clip' ? subject.clip.clipKey : subject.overlay.uri, target);
+    const state = this.store.mattes.peek().get(name);
+    if (state?.status !== 'none' || state.reason !== 'failed') return;
+    const source = subject.kind === 'clip' ? this.store.clipByKey(subject.clip.clipKey) : this.photoSource(subject.overlay);
+    if (source) this.findMatte(name, source, target);
+  }
+
+  /**
+   * A photo layer as the host reads a source: its file, which on a phone is the path the picker
+   * handed over and in a page the URL it is shown by.
+   */
+  private photoSource(overlay: ImageOverlay): EditorSource {
+    return { key: overlay.uri, fileName: overlay.fileName, kind: 'image', sourcePath: overlay.uri, playbackUrl: this.host.platform.fileUrl(overlay.uri) };
+  }
+
+  /**
+   * The matte filed as `name` once it has settled - its track, or null for none - asking for it first
+   * when nobody has: what the rasteriser waits on for a photo, so a render drawn while the photo is
+   * still being looked at waits for its cutout rather than posting its background.
+   */
+  whenMatte(source: EditorSource, target: MatteTarget): Promise<MatteTrack | null> {
+    const name = matteKey(source.key, target);
+    const state = this.store.mattes.peek().get(name);
+    if (state?.status === 'ready') return Promise.resolve(state.track);
+    if (state?.status === 'none') return Promise.resolve(null);
+    if (!this.mattesAsked.has(name)) this.findMatte(name, source, target);
+    return this.matteWaits.get(name) ?? Promise.resolve(null);
+  }
+
+  /** The matte of the photo at `uri`, keeping `target`, once it has settled: what the raster context hands the rasteriser ([RasterContext.matte]). */
+  photoMatteAt(uri: string, target: MatteTarget): Promise<MatteTrack | null> {
+    return this.whenMatte({ key: uri, fileName: '', kind: 'image', sourcePath: uri, playbackUrl: this.host.platform.fileUrl(uri) }, target);
+  }
+
+  /** One source's search, queued behind the others, and its track read once it is written. */
+  private findMatte(name: string, source: EditorSource, target: MatteTarget): void {
+    const find = this.host.media.findMatte;
+    if (!find) return;
+    this.mattesAsked.add(name);
+    const file = (state: MatteState | null): void => {
+      if (this.destroyed) return;
+      const next = new Map(this.store.mattes.peek());
+      if (state) next.set(name, state);
+      else next.delete(name);
+      this.store.mattes.value = next;
+    };
+    file({ status: 'finding', stage: 'looking', progress: 0 });
+    let settle: (track: MatteTrack | null) => void = () => undefined;
+    this.matteWaits.set(name, new Promise(resolve => (settle = resolve)));
+    this.matteQueue = this.matteQueue.then(async () => {
+      if (this.destroyed) return settle(null);
+      // A bar that moves a few hundred times on a long clip is a few hundred repaints of the sheet.
+      let shown = -1;
+      let shownStage = '';
+      try {
+        const result = await find.call(this.host.media, source, target, (stage, progress) => {
+          if (stage === shownStage && progress < 1 && progress - shown < 0.02) return;
+          shown = progress;
+          shownStage = stage;
+          file({ status: 'finding', stage, progress });
+        });
+        if (!result) {
+          file({ status: 'none', reason: 'unsupported' });
+          return settle(null);
+        }
+        // The page reads the track the way it reads any of its files: through the WebView's own server.
+        const track = parseMatteTrack(await (await resolve(this.host.platform.fileUrl(result.uri))).arrayBuffer());
+        // A segment already cut out from the matte it kept before (see [EditorStore.cutoutFrames]) changes
+        // over as it is: a reveal starts from the whole clip, and would flash the background back first.
+        const cutAlready = this.store.cutoutFrames.peek();
+        file({ status: 'ready', result, track });
+        settle(track);
+        // Watched arrive: the customer is in the Cutout sheet, waiting for exactly this.
+        if (this.store.panel.peek() === 'cutout') this.store.revealCutouts(this.waitingFor(name).filter(id => !cutAlready.has(id)));
+      } catch (error) {
+        settle(null);
+        if ((error as { code?: unknown } | null)?.code === 'cancelled') {
+          this.mattesAsked.delete(name);
+          this.matteWaits.delete(name);
+          file(null);
+          return;
+        }
+        debugWarn('[EditorMedia] matte not found', name, error);
+        file({ status: 'none', reason: 'failed' });
+      }
+    });
+  }
+
+  /** The ids of every segment and photo whose cutout is drawn from the matte filed as `name`. */
+  private waitingFor(name: string): string[] {
+    const manifest = this.store.manifest.peek();
+    const ids: string[] = [];
+    for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+      if (clip.cutout && matteKey(clip.clipKey, cutoutTarget(clip.cutout)) === name) ids.push(clip.id);
+    }
+    for (const overlay of manifest.overlays) {
+      if (overlay.kind === 'image' && overlay.cutout && matteKey(overlay.uri, cutoutTarget(overlay.cutout)) === name) ids.push(overlay.id);
+    }
+    return ids;
+  }
+
+  /**
+   * Looks for the subject of a photo just laid on as a layer - a picture costs a moment - and offers to
+   * take its background away when one stands out, while the photo is still the one selected and has no
+   * cutout yet. The matte it finds is the one a tap on the offer draws from, so that tap answers at once.
+   */
+  private async suggestCutout(overlayId: string): Promise<void> {
+    if (!this.host.media.findMatte) return;
+    const overlay = this.store.manifest.peek().overlays.find(candidate => candidate.id === overlayId);
+    if (overlay?.kind !== 'image' || overlay.cutout) return;
+    const track = await this.whenMatte(this.photoSource(overlay), 'subject');
+    if (this.destroyed || !track) return;
+    const coverage = track.meta?.coverage ?? 0;
+    if (coverage < SUGGEST_COVERAGE.min || coverage > SUGGEST_COVERAGE.max) return;
+    const now = this.store.manifest.peek().overlays.find(candidate => candidate.id === overlayId);
+    if (now?.kind !== 'image' || now.cutout || !this.store.isSelected({ kind: 'overlay', id: overlayId })) return;
+    this.store.suggestCutout(overlayId);
   }
 
   /* ========================================================================================= */
@@ -1192,7 +1416,8 @@ export class EditorMedia {
       if (!picked) return;
 
       this.landOpenTextEdit();
-      this.store.addImage(picked.uri, picked.fileName || 'Photo', picked.aspect);
+      const id = this.store.addImage(picked.uri, picked.fileName || 'Photo', picked.aspect);
+      if (id) void this.suggestCutout(id);
     } finally {
       this.busy.value = false;
     }

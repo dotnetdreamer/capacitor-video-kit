@@ -8,6 +8,8 @@ import type {
   DropPreviewProxiesResult,
   ExtractAudioOptions,
   ExtractAudioResult,
+  FindMatteOptions,
+  FindMatteResult,
   FindSubjectsOptions,
   FindSubjectsResult,
   ListSoundsResult,
@@ -56,6 +58,8 @@ const kit = vi.hoisted(() => {
   });
   return {
     native: false,
+    /** What `Capacitor.getPlatform()` says. */
+    platform: 'android',
     real: false,
     fakeBrowserHost,
     browsers: [] as ReturnType<typeof fakeBrowserHost>[],
@@ -73,6 +77,7 @@ const kit = vi.hoisted(() => {
       startVoiceRecording: vi.fn<() => Promise<void>>(),
       stopVoiceRecording: vi.fn<() => Promise<VoiceRecordingResult>>(),
       findSubjects: vi.fn<(options: FindSubjectsOptions) => Promise<FindSubjectsResult>>(),
+      findMatte: vi.fn<(options: FindMatteOptions) => Promise<FindMatteResult>>(),
       stopFindingSubjects: vi.fn<(options: StopFindingSubjectsOptions) => Promise<StopFindingSubjectsResult>>(),
       addListener: vi.fn<(event: string, listener: (event: SubjectsProgressEvent) => void) => Promise<{ remove: () => Promise<void> }>>(),
     },
@@ -80,7 +85,7 @@ const kit = vi.hoisted(() => {
 });
 
 vi.mock('@capacitor/core', () => ({
-  Capacitor: { isNativePlatform: () => kit.native },
+  Capacitor: { isNativePlatform: () => kit.native, getPlatform: () => kit.platform },
   registerPlugin: () => kit.composer,
   WebPlugin: class {},
 }));
@@ -129,6 +134,7 @@ function coded(code: string): Error {
 
 beforeEach(() => {
   kit.native = false;
+  kit.platform = 'android';
   kit.real = false;
   kit.browsers.length = 0;
   for (const call of Object.values(kit.composer)) call.mockReset();
@@ -909,6 +915,45 @@ describe("the composer's sound library on a phone", () => {
     kit.composer.deleteSound.mockResolvedValue(undefined);
     await library().remove('s1');
     expect(kit.composer.deleteSound).toHaveBeenCalledWith({ id: 's1' });
+  });
+});
+
+describe('looking for a matte on a phone', () => {
+  const STAGED = 'file:///app/tmp/videokit-render-inputs/1.jpg';
+  const FOUND: FindMatteResult = { engine: 'mlkit', uri: 'file:///app/cache/matte-tracks/p.vkmt', cached: false, kind: 'image', target: 'subject', width: 683, height: 1024, frames: 1, durationMs: 0, coverage: 0.4 };
+
+  beforeEach(() => {
+    kit.native = true;
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(['JPEG'], { type: 'image/jpeg' }) })));
+    kit.composer.stageRenderInput.mockResolvedValue({ uri: STAGED });
+    kit.composer.releaseRenderInputs.mockResolvedValue(undefined);
+    kit.composer.addListener.mockResolvedValue({ remove: async () => undefined });
+    kit.composer.findMatte.mockResolvedValue(FOUND);
+  });
+
+  /* The editor's default picker reads a photo in as a blob, which a native call cannot open: every photo search once failed. */
+  it('writes a photo the page holds out as a file for the search, and deletes the file after', async () => {
+    const photo: EditorSource = { key: 'blob:capacitor://localhost/p', fileName: 'p.jpg', kind: 'image', sourcePath: 'blob:capacitor://localhost/p' };
+
+    await expect(build().host.findMatte?.(photo, 'subject', () => undefined)).resolves.toEqual(FOUND);
+    expect(kit.composer.findMatte).toHaveBeenCalledWith({ uri: STAGED, target: 'subject', kind: 'image' });
+    expect(kit.composer.releaseRenderInputs).toHaveBeenCalledWith({ uris: [STAGED] });
+  });
+
+  it('searches a file where it is, staging nothing', async () => {
+    await build().host.findMatte?.(CLIP, 'people', () => undefined);
+
+    expect(kit.composer.findMatte).toHaveBeenCalledWith({ uri: CLIP.sourcePath, target: 'people' });
+    expect(kit.composer.stageRenderInput).not.toHaveBeenCalled();
+  });
+
+  /* Vision is the iOS engine: an iPhone is offered Cutout as an Android phone is, through the composer. */
+  it('looks on an iPhone with the composer, as on Android', async () => {
+    kit.platform = 'ios';
+
+    await build().host.findMatte?.(CLIP, 'subject', () => undefined);
+
+    expect(kit.composer.findMatte).toHaveBeenCalledWith({ uri: CLIP.sourcePath, target: 'subject' });
   });
 });
 

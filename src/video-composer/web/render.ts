@@ -5,13 +5,15 @@ import { overlayMotionAt } from '../../editor/motion';
 import { lookAt } from '../../editor/transitions';
 import { parseSubjectTrack, type SubjectTrack } from '../../editor/subject-track';
 import { describe, resolve } from '../../web-runtime/files';
-import type { ComposeClip, ComposeFailureCode, ComposeFocus, ComposeOutput, ComposeRect, ComposeSpec } from '../definitions';
+import type { ComposeClip, ComposeCutout, ComposeFailureCode, ComposeFocus, ComposeOutput, ComposeRect, ComposeSpec } from '../definitions';
 
 import { mixdown } from './audio';
 import { throughCamera } from './camera-draw';
 import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
 import { FocusFrames } from './focus-frames';
+import { CutoutFrames } from './cutout-frames';
+import { parseMatteTrack, type MatteTrack } from '../../editor/matte-track';
 import { pictureDest } from './geometry';
 import { decodeImage, FrameReader, probeMedia, probePicture, readFrameTimes, StillReader, type SourceReader } from './media';
 import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from './painter';
@@ -115,6 +117,8 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   // Read before anything is drawn, like the probes, so a subject track that is not there fails the
   // render before a frame of it is encoded.
   const focus = await loadFocus(spec, options.signal);
+  // And every matte track, for the same reason, each frame of it decoded once now.
+  const cutouts = await loadCutouts(spec, options.signal);
   options.onProgress(0.02);
 
   const mix = await guard(() => mixdown(plan, options.signal), 'unknown');
@@ -149,7 +153,7 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   );
 
   try {
-    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, focus, options);
+    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, focus, cutouts, options);
     const { blob, hasAudio, mimeType } = await guard(() => sink.finish(), 'muxer');
     // The finished file, measured once more: the running count leaves out the container's boxes and
     // the sound, which is only encoded now. A file over the ceiling is dropped here, before anything
@@ -189,6 +193,7 @@ async function drawEveryFrame(
   layers: LayerReaders,
   overlays: OverlayBitmaps,
   focus: ClipFocus,
+  cutouts: ClipCutouts,
   options: RenderOptions,
 ): Promise<Blob | null> {
   const fps = plan.output.fps;
@@ -236,7 +241,7 @@ async function drawEveryFrame(
     const baseRect = base ? rectAt(base.clip, atUs) : undefined;
     const baseJob =
       base && !hidden(baseRect, plan.output)
-        ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0, null, baseRect, focus)
+        ? layerDraw(layers, BASE_READER, base, atUs - (plan.prefixOutUs[baseIndex] ?? 0), frameSeconds, WHOLE_FRAME, 1, base.clip.rect?.rotationDeg ?? 0, null, baseRect, focus, cutouts)
         : null;
     // Inside a transition's window the base clip is its INCOMING side, and the outgoing clip's
     // tail - read from its own element, drawn the way the base clip it continues was drawn - is
@@ -260,6 +265,7 @@ async function drawEveryFrame(
             null,
             tailRect,
             focus,
+            cutouts,
           )
         : null;
     // Never on a frame that asked for a tail: the last window has closed by the time this is true.
@@ -291,7 +297,7 @@ async function drawEveryFrame(
       // its picture comes out at rather than staying its whole rectangle: bars inside a layer are
       // opaque black over the picture beneath it. See [pictureDest].
       const run = () =>
-        layerDraw(layers, slot, clip, atUs - placement.startUs, frameSeconds, dest, track.opacity, placement.rect.rotationDeg ?? 0, plan.output.width / plan.output.height, undefined, focus);
+        layerDraw(layers, slot, clip, atUs - placement.startUs, frameSeconds, dest, track.opacity, placement.rect.rotationDeg ?? 0, plan.output.width / plan.output.height, undefined, focus, cutouts);
       const before = busy.get(slot);
       const job = before ? before.then(run, run) : run();
       busy.set(slot, job);
@@ -393,6 +399,8 @@ async function layerDraw(
   framingRect: ComposeRect | undefined = clip.clip.rect,
   /** Each focused clip's frames of focus; see [loadFocus]. */
   focus: ClipFocus = NO_FOCUS,
+  /** Each cut-out clip's frames of cutout; see [loadCutouts]. */
+  cutouts: ClipCutouts = NO_CUTOUTS,
 ): Promise<LayerDraw | null> {
   const reader = await layers.reader(layerId, clip.clip);
   const seconds = sourceTimeUs(clip, Math.max(0, offsetUs)) / 1_000_000;
@@ -421,7 +429,55 @@ async function layerDraw(
   // from; both are focused with it, which is the contract's focusing of the frame made.
   const frames = clip.clip.focus ? focus.get(clip.clip.focus) : undefined;
   if (frames) draw.focus = focusAt(frames, seconds * 1000, clip.clip.key);
+  // And its cutout, at the same instant, by the same rule.
+  const cut = clip.clip.cutout ? cutouts.get(clip.clip.cutout) : undefined;
+  if (cut) draw.cutout = cutoutAt(cut, seconds * 1000, clip.clip.key);
   return draw;
+}
+
+/** The frames of every cutout in a spec, by the cutout itself, for [ClipFocus]'s reason. */
+type ClipCutouts = ReadonlyMap<ComposeCutout, CutoutFrames>;
+
+const NO_CUTOUTS: ClipCutouts = new Map();
+
+/**
+ * Reads the matte track of every clip that has a cutout, once per file however many clips share it,
+ * decodes each of its frames once, and pairs each clip with the frames of its cutout. Empty for a spec
+ * with none, which reads nothing. A track that cannot be read - or has a frame that does not decode -
+ * fails the render as `unreadable_input` before a frame is encoded, naming the first clip that needed
+ * it, as footage that cannot be read does.
+ */
+async function loadCutouts(spec: ComposeSpec, signal: AbortSignal): Promise<ClipCutouts> {
+  const tails = spec.clips.flatMap(clip => (clip.transitionIn ? [clip.transitionIn.from] : []));
+  const cut = [...spec.clips, ...tails, ...(spec.tracks ?? []).flatMap(track => track.clips)].filter(clip => clip.cutout);
+  if (cut.length === 0) return NO_CUTOUTS;
+  const tracks = new Map<string, MatteTrack>();
+  const out = new Map<ComposeCutout, CutoutFrames>();
+  for (const clip of cut) {
+    throwIfAborted(signal);
+    const cutout = clip.cutout!;
+    let track = tracks.get(cutout.uri);
+    if (!track) {
+      try {
+        track = parseMatteTrack(await (await resolve(cutout.uri)).arrayBuffer());
+        track.checkFrames();
+      } catch (error) {
+        throw new RenderFailure('unreadable_input', `matte track: ${describe(error)}`, clip.key);
+      }
+      tracks.set(cutout.uri, track);
+    }
+    out.set(cutout, new CutoutFrames(track, cutout));
+  }
+  return out;
+}
+
+/** The cutout at a source instant; every frame was decoded before the render began, so this cannot meet a damaged one. */
+function cutoutAt(frames: CutoutFrames, sourceMs: number, clipKey: string) {
+  try {
+    return frames.at(sourceMs);
+  } catch (error) {
+    throw new RenderFailure('unreadable_input', `matte track: ${describe(error)}`, clipKey);
+  }
 }
 
 /**

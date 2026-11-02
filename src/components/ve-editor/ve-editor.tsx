@@ -243,7 +243,7 @@ export class VeEditor {
     const store = this.store;
     this.clockNow = computed(() => formatClock(store.playheadMs.value));
     this.media = new EditorMedia(this.store, host);
-    this.bitmaps = new OverlayBitmaps(this.store, host);
+    this.bitmaps = new OverlayBitmaps(this.store, host, (uri, target) => this.media.photoMatteAt(uri, target));
     this.confirm = new EditorConfirm(host.platform);
     this.ctx = { store: this.store, media: this.media };
     this.sheetDrag = new SheetDragger(this.store, this.openSheetSlot);
@@ -837,6 +837,10 @@ export class VeEditor {
      */
     const abandoned = () => this.destroyed || abort.signal.aborted;
     try {
+      // Every cutout's matte first, waited for or looked for again: a photo's is drawn into its bitmap
+      // below, and a render must never post a background the customer took away (see readyCutouts).
+      await this.media.readyCutouts();
+      if (abandoned()) return;
       // What makes `EditorRenderHost.render`'s side of the bargain true: every layer has been drawn
       // before the host is asked for a file. In the common case the pass has already run and this
       // resolves in a microtask; the case it is here for is Next tapped in the same turn as a
@@ -1083,6 +1087,8 @@ export class VeEditor {
           </button>
         ) : null}
 
+        {this.renderCutoutOffer(ctx)}
+
         {/* Unconditional: the pill comes and goes inside it, and the live region has to be here
             before the message is, or a screen reader has nothing it was already watching. */}
         <ve-toast key="toast" ctx={ctx} />
@@ -1184,9 +1190,29 @@ export class VeEditor {
         return <ve-focus-sheet key="focus" class="ve__sheet" ctx={ctx} />;
       case 'slip':
         return <ve-slip-sheet key="slip" class="ve__sheet" ctx={ctx} />;
+      case 'cutout':
+        return <ve-cutout-sheet key="cutout" class="ve__sheet" ctx={ctx} />;
       default:
         return <ve-toolbar key="toolbar" class="ve__toolbar" ctx={ctx} />;
     }
+  }
+
+  /**
+   * The offer to take a photo's background away, over the bottom of the stage where the toast sits,
+   * just after a photo went on as a layer and its subject was found standing out of it
+   * ([EditorStore.cutoutSuggestion]). Unlike the toast it takes a tap, which is the whole of it: the
+   * photo is cut out and the Cutout sheet opens on it. It goes on its own after a few seconds; a sheet
+   * opened over the stage takes it with it.
+   */
+  private renderCutoutOffer(ctx: EditorContext) {
+    const offer = ctx.store.cutoutSuggestion.value;
+    if (!offer || ctx.store.panel.value) return null;
+    return (
+      <button type="button" key={`cutout-offer-${offer.id}`} class="ve__offer" onClick={() => ctx.store.acceptCutoutSuggestion()}>
+        <ve-icon name="cutout-outline"></ve-icon>
+        <span>Remove background</span>
+      </button>
+    );
   }
 
   /**
@@ -1288,7 +1314,7 @@ function withPictureKinds(sources: EditorSource[], manifest: EditManifest | unde
 }
 
 /** The codes the editor has a sentence for; anything else is the blank apology. */
-const RENDER_FAILURE_CODES: readonly RenderFailureCode[] = ['no_space', 'unreadable_input', 'too_large', 'unknown'];
+const RENDER_FAILURE_CODES: readonly RenderFailureCode[] = ['no_space', 'unreadable_input', 'too_large', 'cutout', 'unknown'];
 
 /**
  * The failure's own code, or `unknown` for anything that does not carry one.

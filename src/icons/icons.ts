@@ -46,10 +46,12 @@ export type EditorIconName =
   | 'create-outline'
   | 'crop-outline'
   | 'cut-outline'
+  | 'cutout-outline'
   | 'disc-outline'
   | 'download-outline'
   | 'duplicate-outline'
   | 'expand-outline'
+  | 'eye-outline'
   | 'female-outline'
   | 'grid-outline'
   | 'happy'
@@ -148,6 +150,13 @@ export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
     '<path d="M144 48v272a48 48 0 0 0 48 48h272" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="M368 304V192a48 48 0 0 0-48-48H208M368 368v96M144 144H48" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'cut-outline':
     '<circle cx="104" cy="152" r="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><circle cx="104" cy="360" r="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><path d="m157 175-11 15 37 15s3.46-6.42 7-10Z" fill="none" stroke="currentColor" stroke-linecap="square" stroke-miterlimit="10" stroke-width="32px"/><path d="M154.17 334.43 460 162c-2.5-6.7-28-12-64-4-29.12 6.47-121.16 29.05-159.16 56.05C205.85 236.06 227 272 192 298c-25.61 19-44.43 22.82-44.43 22.82ZM344.47 278.24 295 306.67c14.23 6.74 65.54 33.27 117 36.33 14.92.89 30 .39 39-6Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32px"/><circle cx="256" cy="240" r="32" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/>',
+  /*
+   * Not an Ionicon - it has nothing for a subject lifted out of its picture - and drawn in the
+   * transition glyphs' grammar: the 512 box, a 32px stroke, round caps. A person, and the four corners
+   * of the frame they have been taken out of, which is what Cutout does to a clip or a photo.
+   */
+  'cutout-outline':
+    '<path d="M96 176v-48a32 32 0 0 1 32-32h48M336 96h48a32 32 0 0 1 32 32v48M416 336v48a32 32 0 0 1-32 32h-48M176 416h-48a32 32 0 0 1-32-32v-48" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><circle cx="256" cy="200" r="56" fill="none" stroke="currentColor" stroke-width="32px"/><path d="M160 360c12-50 50-80 96-80s84 30 96 80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="32px"/>',
   'disc-outline':
     '<circle cx="256" cy="256" r="208" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/><circle cx="256" cy="256" r="96" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/><circle cx="256" cy="256" r="32"/>',
   'download-outline':
@@ -156,6 +165,8 @@ export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
     '<rect width="336" height="336" x="128" y="128" rx="57" ry="57" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="32px"/><path d="m383.5 128 .5-24a56.16 56.16 0 0 0-56-56H112a64.19 64.19 0 0 0-64 64v216a56.16 56.16 0 0 0 56 56h24M296 216v160M376 296H216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
   'expand-outline':
     '<path d="M432 320v112H320M421.8 421.77 304 304M80 192V80h112M90.2 90.23 208 208M320 80h112v112M421.77 90.2 304 208M192 432H80V320M90.23 421.8 208 304" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  'eye-outline':
+    '<path d="M255.66 112c-77.94 0-157.89 45.11-220.83 135.33a16 16 0 0 0-.27 17.77C82.92 340.8 161.8 400 255.66 400c92.84 0 173.34-59.38 221.79-135.25a16.14 16.14 0 0 0 0-17.47C428.89 172.28 347.8 112 255.66 112Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><circle cx="256" cy="256" r="80" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/>',
   'female-outline':
     '<circle cx="256" cy="184" r="152" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32" d="M256 336v144M314 416H198"/>',
   'grid-outline':

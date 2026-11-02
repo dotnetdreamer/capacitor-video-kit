@@ -51,6 +51,9 @@ import { PresentedFrames } from './presented-frames';
 /** The most device pixels a preview is worth. A 4K post composited at 4K for a 400px box is waste. */
 const MAX_PIXEL_RATIO = 2;
 
+/** How long a cutout's reveal takes: the background giving way while a light runs round the subject. */
+const CUTOUT_REVEAL_MS = 900;
+
 /**
  * How long the OTHER layers are held back for one that is between sources, before the frame is
  * drawn without it.
@@ -577,7 +580,8 @@ export class PreviewCanvas {
     // Every layer made below - the base, a transition's two sides, each extra track - in focus where
     // its clip has one, after its slow motion, whose two frames are then both focused.
     const moving = this.slowMotion(now, cropping);
-    const slowed: SlowMotion = (layer, video, draw) => this.focused(layer, video, moving(layer, video, draw));
+    // And cut out where its clip has a cutout, after its focus, as the contract orders them.
+    const slowed: SlowMotion = (layer, video, draw) => this.cut(layer, video, this.focused(layer, video, moving(layer, video, draw)), now);
 
     const draws: (LayerDraw | TransitionDraw)[] = [];
     // How many layers the POST says are on screen, whether or not their elements can supply one.
@@ -741,15 +745,52 @@ export class PreviewCanvas {
   private focused(layer: PreviewVideoLayer, video: PreviewSource, draw: LayerDraw): LayerDraw {
     const frames = this.store.focusFrames.value.get(layer.clipId);
     if (!frames) return draw;
-    const element = video instanceof ClipMedia ? (video.isPicture ? null : video.element) : video;
-    const clip = element ? null : findClip(this.store.manifest.value, layer.clipId);
-    const sourceMs = element ? element.currentTime * 1000 : layer.sourceMs - (clip?.inMs ?? 0);
     try {
-      return { ...draw, focus: frames.at(sourceMs) };
+      return { ...draw, focus: frames.at(this.keyedSourceMs(layer, video)) };
     } catch {
       // A track frame that will not decode: the clip is drawn as it is rather than not at all.
       return draw;
     }
+  }
+
+  /**
+   * `draw` with its clip's cutout at the frame its element shows, where the clip has a cutout with a
+   * matte ready ([EditorStore.cutoutFrames]); the very object otherwise, and while the customer holds
+   * Compare ([EditorStore.cutoutCompare]). A cutout whose matte has just arrived is revealed over
+   * [CUTOUT_REVEAL_MS] ([EditorStore.cutoutReveals]), and this asks for the next frame until it has
+   * been, so the reveal plays with the preview paused, which is how a customer cutting a clip out
+   * watches it.
+   */
+  private cut(layer: PreviewVideoLayer, video: PreviewSource, draw: LayerDraw, now: number): LayerDraw {
+    if (this.store.cutoutCompare.value) return draw;
+    const frames = this.store.cutoutFrames.value.get(layer.clipId);
+    if (!frames) return draw;
+    let cutout;
+    try {
+      cutout = frames.at(this.keyedSourceMs(layer, video));
+    } catch {
+      // A matte frame that will not decode: the clip is drawn as it is rather than not at all.
+      return draw;
+    }
+    const since = this.store.cutoutReveals.value.get(layer.clipId);
+    if (since !== undefined && now - since < CUTOUT_REVEAL_MS) {
+      const t = Math.max(0, (now - since) / CUTOUT_REVEAL_MS);
+      // Out of the picture slowly, then quickly, then settling: an ease in and out.
+      cutout.reveal = t * t * (3 - 2 * t);
+      this.request();
+    }
+    return { ...draw, cutout };
+  }
+
+  /**
+   * The source time a clip's keys are read at for the frame its element shows: a video's element's
+   * own clock - the frame on screen, which the playhead can run a tick ahead of - and a picture's how
+   * far into its segment the playhead is, the time its keys run on.
+   */
+  private keyedSourceMs(layer: PreviewVideoLayer, video: PreviewSource): number {
+    const element = video instanceof ClipMedia ? (video.isPicture ? null : video.element) : video;
+    const clip = element ? null : findClip(this.store.manifest.value, layer.clipId);
+    return element ? element.currentTime * 1000 : layer.sourceMs - (clip?.inMs ?? 0);
   }
 
   /**

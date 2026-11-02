@@ -126,6 +126,7 @@ Type: `Promise<void>`
  - [ve-audio-effects-sheet](../ve-audio-effects-sheet)
  - [ve-background-sheet](../ve-background-sheet)
  - [ve-crop-sheet](../ve-crop-sheet)
+ - [ve-cutout-sheet](../ve-cutout-sheet)
  - [ve-effects-sheet](../ve-effects-sheet)
  - [ve-filter-sheet](../ve-filter-sheet)
  - [ve-focus-sheet](../ve-focus-sheet)
@@ -155,6 +156,7 @@ graph TD;
   ve-audio-effects-sheet --> ve-sheet
   ve-background-sheet --> ve-sheet
   ve-crop-sheet --> ve-sheet
+  ve-cutout-sheet --> ve-sheet
   ve-effects-sheet --> ve-sheet
   ve-filter-sheet --> ve-sheet
   ve-focus-sheet --> ve-sheet

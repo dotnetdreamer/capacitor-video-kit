@@ -10,6 +10,7 @@ ext {
     mlkitImageLabelingVersion = project.hasProperty('mlkitImageLabelingVersion') ? rootProject.ext.mlkitImageLabelingVersion : '17.0.9'
     mlkitPlayServicesImageLabelingVersion = project.hasProperty('mlkitPlayServicesImageLabelingVersion') ? rootProject.ext.mlkitPlayServicesImageLabelingVersion : '16.0.8'
     mlkitSegmentationSelfieVersion = project.hasProperty('mlkitSegmentationSelfieVersion') ? rootProject.ext.mlkitSegmentationSelfieVersion : '16.0.0-beta6'
+    mlkitSubjectSegmentationVersion = project.hasProperty('mlkitSubjectSegmentationVersion') ? rootProject.ext.mlkitSubjectSegmentationVersion : '16.0.0-beta1'
 }
 
 buildscript {
@@ -76,6 +77,26 @@ if (!(subjectsMode in ['true', 'false'])) {
 }
 def subjects = subjectsMode == 'true'
 
+/*
+ * findMatte's engine for `subject` - what a clip's or a photo's Cutout keeps when it keeps whatever
+ * stands out, people, pets and things - is ML Kit's subject segmentation from Google Play services, in
+ * or out as the host picks with `videokitCutout` (or `-PvideokitCutout=...`):
+ *
+ *   true    the default: about 200 KB in the app, and Play services downloads the model, once per
+ *           phone, which the kit asks for when the plugin loads and a search waits for, reporting it
+ *           as `preparing`. On a phone without Play services, Cutout keeps people, with the selfie
+ *           segmenter above. There is no bundled form of it.
+ *   false   left out: Cutout keeps people where the selfie segmenter is in the build, and is not
+ *           offered where neither is.
+ *
+ * The switch picks one of the two `MatteSegmenter.kt` files.
+ */
+def cutoutMode = (project.findProperty('videokitCutout') ?: true).toString()
+if (!(cutoutMode in ['true', 'false'])) {
+    throw new GradleException("videokitCutout must be true or false, not '$cutoutMode'")
+}
+def cutout = cutoutMode == 'true'
+
 android {
     // One module, two Capacitor plugin classes. The Kotlin packages stay separate
     // (...videocomposer and ...publisher) because they share nothing but a file path.
@@ -107,6 +128,7 @@ android {
                 : playServicesLabeling ? 'src/labelingplay/java'
                 : 'src/labeling/java'
             java.srcDirs += subjects ? 'src/subjects/java' : 'src/nosubjects/java'
+            java.srcDirs += cutout ? 'src/cutout/java' : 'src/nocutout/java'
         }
     }
     testOptions {
@@ -163,6 +185,13 @@ dependencies {
     // nothing: Vision is part of the OS.
     if (subjects) {
         implementation "com.google.mlkit:segmentation-selfie:$mlkitSegmentationSelfieVersion"
+    }
+
+    // --- VideoComposer: findMatte ---
+    // ML Kit subject segmentation from Play services: the subject a Cutout keeps when it keeps whatever
+    // stands out. What it weighs, and how a host leaves it out, is under `cutoutMode` above.
+    if (cutout) {
+        implementation "com.google.android.gms:play-services-mlkit-subject-segmentation:$mlkitSubjectSegmentationVersion"
     }
 
     testImplementation "junit:junit:$junitVersion"

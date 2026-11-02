@@ -125,6 +125,38 @@ struct ComposeClip: Sendable {
     /// with no focus reaches the compositor with nothing to test but a nil. Declared LAST, after
     /// `rectMotion`, for `rectMotion`'s reason, and read last on the wire too.
     var focus: ComposeFocus? = nil
+    /// The footage's background taken away - `ComposeCutout` in `definitions.ts`, whose drawing
+    /// contract `CutoutRender` implements. nil is the footage as it is, which is every spec written
+    /// before the key, and the builder decides that ONCE per clip it lays. Declared after `focus`, and
+    /// read after it on the wire, for `focus`'s reason: last on the clip in every parser.
+    var cutout: ComposeCutout? = nil
+}
+
+/// A clip's cutout as the parser leaves it: `uri` non-empty, `soft` held to 0...1, `shift` to -1...1,
+/// every colour channel to 0...1, and an outline only where its width, held to 0...`maxOutline`, is
+/// above 0 - an outline of no width is dropped, as every parser drops it.
+struct ComposeCutout: Sendable {
+    /// `MAX_CUTOUT_OUTLINE`, `CUTOUT_RADIUS` and `CUTOUT_EPSILON` from `definitions.ts`.
+    static let maxOutline = 0.04
+    static let radius = 2
+    static let epsilon = 0.004
+
+    /// The matte track `findMatte` wrote for this clip's source.
+    let uri: String
+    /// 0...1: step 6's softness, `h = 0.06 + 0.44 * soft`.
+    let soft: Double
+    /// -1...1: where the edge sits, `t = 0.5 - 0.25 * shift`.
+    let shift: Double
+    /// What shows where the background was, or nil for nothing: the clip is transparent there.
+    let fill: ComposeRGB?
+    let outline: ComposeCutoutOutline?
+}
+
+/// A cutout's line round its subject: its colour, and how far past the subject it reaches, a fraction of
+/// the oriented source's shorter side, above 0.
+struct ComposeCutoutOutline: Sendable {
+    let color: ComposeRGB
+    let width: Double
 }
 
 /// A clip's focus as the parser leaves it: `atMs` finite and non-decreasing, 1...`maxKeys` of them,
@@ -574,11 +606,18 @@ struct ComposeSpec: Sendable {
     }
 
     /// The name of every file the render opens, as the spec gives it: `everyClip`'s, the subject track
-    /// each focused clip is drawn from, the music's and each voiceover take's. `RetainedMedia.sweep`
-    /// keeps what a render in progress reads through `JobRegistry.liveInputURIs`.
+    /// each focused clip is drawn from, the matte track each cut-out clip is drawn from, the music's and
+    /// each voiceover take's. `RetainedMedia.sweep` keeps what a render in progress reads through
+    /// `JobRegistry.liveInputURIs`.
     var inputURIs: [String] {
-        everyClip.map(\.uri) + everyClip.compactMap { $0.focus?.uri } + (audio.music.map { [$0.uri] } ?? []) +
-            audio.musicTracks.flatMap { $0.map(\.uri) } + audio.voiceover.map(\.uri)
+        let clips = everyClip
+        var uris: [String] = clips.map(\.uri)
+        uris += clips.compactMap { $0.focus?.uri }
+        uris += clips.compactMap { $0.cutout?.uri }
+        uris += audio.music.map { [$0.uri] } ?? []
+        uris += audio.musicTracks.flatMap { $0.map(\.uri) }
+        uris += audio.voiceover.map(\.uri)
+        return uris
     }
 }
 

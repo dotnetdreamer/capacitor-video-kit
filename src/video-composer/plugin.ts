@@ -17,6 +17,8 @@ import type {
   EncodeSupport,
   ExtractAudioOptions,
   ExtractAudioResult,
+  FindMatteOptions,
+  FindMatteResult,
   FindSubjectsOptions,
   FindSubjectsResult,
   GalleryAccessOptions,
@@ -61,9 +63,12 @@ import type {
   StageRenderInputOptions,
   StageRenderInputResult,
   StartVoiceRecordingOptions,
+  StopFindingMattesOptions,
+  StopFindingMattesResult,
   StopFindingSubjectsOptions,
   StopFindingSubjectsResult,
   SubjectsProgressEvent,
+  MatteProgressEvent,
   SystemInsetsResult,
   ThumbnailsOptions,
   ThumbnailsResult,
@@ -177,6 +182,37 @@ export interface VideoComposerPlugin {
    * Never rejects.
    */
   stopFindingSubjects(options?: StopFindingSubjectsOptions): Promise<StopFindingSubjectsResult>;
+
+  /**
+   * Takes the background away from a video or a picture: finds its subject - whatever stands out of
+   * the picture, or only the people ([FindMatteOptions.target]) - frame by frame, and writes how sure
+   * it is of every cell into a matte track: the file a clip's `cutout` names ([ComposeCutout.uri]) and
+   * the editor's preview reads. On the device, with nothing sent anywhere: ML Kit's subject
+   * segmentation from Google Play services on Android, and its selfie segmentation, which the kit
+   * bundles, for people and on a phone with no Play services; Apple's Vision on iOS, its foreground
+   * instance mask from iOS 17 for whatever stands out and its person segmentation for people and on
+   * iOS 16; MediaPipe's selfie segmenter in a browser, which finds people.
+   *
+   * Every frame of a video is looked at, [FindMatteOptions.fps] of them a second, so a long clip takes
+   * a while, and progress arrives as `matteProgress` meanwhile - first `preparing` while Android
+   * downloads its segmenter into Play services, which happens once per phone. The answer is kept in the
+   * app's cache, keyed by the file, when it last changed and what it keeps, so asking again answers at
+   * once with `cached` set.
+   *
+   * Rejects `invalid_spec` without a `uri`, or with a `kind` or `target` it does not know,
+   * `unreadable_input` for a file that will not open or has no picture, `cancelled` for a search
+   * [stopFindingMattes] stopped, and `unsupported` where there is no segmenter - an Android app built
+   * without one, the iOS simulator, whose Vision cannot run the segmenters, a browser where MediaPipe
+   * will not load. Footage where nothing stands out resolves with a `coverage` of 0.
+   */
+  findMatte(options: FindMatteOptions): Promise<FindMatteResult>;
+
+  /**
+   * Stops every search [findMatte] is running or has waiting whose `uri` is not among `keep`, for a
+   * page that has moved on: their calls reject with `cancelled`, and a track half made is not kept.
+   * Never rejects.
+   */
+  stopFindingMattes(options?: StopFindingMattesOptions): Promise<StopFindingMattesResult>;
 
   /**
    * Pulls a video's audio track out into a file of its own and, by default, keeps it in the sound
@@ -568,6 +604,7 @@ export interface VideoComposerPlugin {
   addListener(eventName: 'completed', listener: (event: ComposeCompletedEvent) => void): Promise<PluginListenerHandle>;
   addListener(eventName: 'failed', listener: (event: ComposeFailedEvent) => void): Promise<PluginListenerHandle>;
   addListener(eventName: 'subjectsProgress', listener: (event: SubjectsProgressEvent) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: 'matteProgress', listener: (event: MatteProgressEvent) => void): Promise<PluginListenerHandle>;
 
   removeAllListeners(): Promise<void>;
 }

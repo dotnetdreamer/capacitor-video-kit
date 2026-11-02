@@ -455,6 +455,9 @@ export class VeToolbar {
         // the clip row. It selects the segment under the playhead itself, exactly as Edit does.
         { id: 'crop', label: 'Crop', icon: 'crop-outline', run: () => store.openCrop() },
         ...zoom,
+        // Hunted for by name as Crop is, so beside it on the root row too: it takes the segment under
+        // the playhead, as Crop and Edit do.
+        ...this.cutoutTile(),
         {
           id: 'layout',
           label: 'Layout',
@@ -542,7 +545,9 @@ export class VeToolbar {
     const tiles: ToolTile[] = [
       // Labelled Cut: the tool cuts the segment in two at the playhead. `split` stays its id.
       { id: 'split', label: 'Cut', icon: 'cut-outline', run: () => store.splitAtPlayhead() },
+      // Cutout after the three that time a segment, Trim beside Cut, rather than in among them.
       ...(picture ? [] : [this.slipTile(), this.speedTile()]),
+      ...this.cutoutTile(),
       {
         id: 'transition',
         label: 'Transition',
@@ -600,6 +605,17 @@ export class VeToolbar {
     const store = this.ctx.store;
     if (!store.host.media.findSubjects) return [];
     return [{ id: 'focus', label: 'Focus', icon: 'aperture-outline', run: () => store.openFocus() }];
+  }
+
+  /**
+   * Cutout: the background taken away from a segment, a picture on the timeline or a photo layer. Left
+   * out on a host that cannot find a matte, rather than dimmed, because there it is never rather than
+   * not now - unless what is selected already has a cutout, made elsewhere, which the sheet takes off.
+   */
+  private cutoutTile(): ToolTile[] {
+    const store = this.ctx.store;
+    if (!store.host.media.findMatte && !store.subjectCutout.value) return [];
+    return [{ id: 'cutout', label: 'Cutout', icon: 'cutout-outline', run: () => store.openCutout() }];
   }
 
   /**
@@ -671,6 +687,8 @@ export class VeToolbar {
       collapse: this.deselect('Close video layer tools'),
       tiles: [
         { id: 'layout', label: 'Layout', icon: 'grid-outline', run: () => store.openPanel('layout') },
+        // Second, after Layout: a cutout is what puts a person on a layer over another video.
+        ...this.cutoutTile(),
         { id: 'crop', label: 'Crop', icon: 'crop-outline', run: () => store.openCrop() },
         // Fill or fit, on the layer row as well as the base one. A layer whose rectangle is not its
         // source's shape is drawn `contain` inside it, and until this tile existed there was no way
@@ -734,6 +752,9 @@ export class VeToolbar {
         run: () => store.openPanel('effects'),
       });
     }
+    // First on a photo's row: taking its background away is what a photo laid over a video is most
+    // often there for.
+    if (kind === 'image') tiles.push(...this.cutoutTile());
     // Every kind of layer: text, stickers and photos get the whole In / Out / Loop catalogue, and an
     // effect a fade in and a fade out, which is all of a move a full-frame picture can show. Beside
     // the tools that make the layer what it is and ahead of the ones that move it in time or in the

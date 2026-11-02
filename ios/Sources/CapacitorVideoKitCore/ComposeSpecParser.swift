@@ -236,7 +236,9 @@ enum ComposeSpecParser {
                     // is: a rectangle sliding in starts wholly off it. See `ComposeRectMotion`.
                     rectMotion: c.rectMotion,
                     // Already clamped where it was read too, and nil for one that changes nothing.
-                    focus: c.focus)
+                    focus: c.focus,
+                    // The same: clamped where it was read, its outline nil where it had no width.
+                    cutout: c.cutout)
     }
 
     /// A decoded transition as the value the builder consumes. Every curve sample, mask number and
@@ -875,9 +877,11 @@ private struct ClipDTO: Decodable {
     let image: Bool
     /// Shape-checked and clamped by `FocusDTO`, or nil for no focus and for one that changes nothing.
     let focus: ComposeFocus?
+    /// Shape-checked and clamped by `CutoutDTO`, or nil for no cutout.
+    let cutout: ComposeCutout?
 
     private enum K: String, CodingKey {
-        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, rectMotion, image, focus
+        case key, uri, inMs, outMs, speed, volume, muted, fit, crop, rect, rectMotion, image, focus, cutout
     }
 
     init(from decoder: Decoder) throws {
@@ -927,6 +931,62 @@ private struct ClipDTO: Decodable {
         // Because this one reader reads a layer's clips and a transition's `from` too, the focus
         // reaches all three, and refuses with their paths.
         focus = try c.object(.focus, "focus", FocusDTO.self)?.focus
+        // After `focus`, last of all, where every parser reads it (`ComposeClip.cutout`), and through
+        // `object` for the same rules: absent or null is no cutout, present and not an object fails as
+        // `cutout`, and a failure inside it - `cutout.outline.width` - is spliced behind that name.
+        cutout = try c.object(.cutout, "cutout", CutoutDTO.self)?.cutout
+    }
+}
+
+/// A clip's `cutout`: `normaliseComposeCutout` in `src/editor/cutout.ts` is the rule book, checked in its
+/// order - `uri`, `soft`, `shift`, `fill`, then the outline's `color` and `width` - with its words as leaf
+/// paths, which is also Android's `parseCutout`:
+///
+/// - not an object: `cutout` (thrown by `object`, where the `DecodingError` surfaces).
+/// - `uri` absent or not a non-empty string: `uri`.
+/// - a `soft` or `shift` that is present and not a finite number: its name. Absent, or null, is 0.
+/// - a `fill` that is present and not exactly three finite numbers: `fill`.
+/// - an `outline` that is present and not an object: `outline`; its `color` absent or not three finite
+///   numbers: `outline.color`; its `width` absent or not a finite number: `outline.width`.
+///
+/// CLAMPED: `soft` to 0...1, `shift` to -1...1, every channel to 0...1, an outline's width to
+/// 0...`ComposeCutout.maxOutline` - and an outline whose width is then 0 is DROPPED. A key this does not
+/// know is IGNORED, on the cutout and on its outline alike.
+private struct CutoutDTO: Decodable {
+    let cutout: ComposeCutout
+
+    init(from decoder: Decoder) throws {
+        // Not an object throws a DecodingError here, which `object` reports as `cutout`.
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        func key(_ name: String) -> AnyKey { AnyKey(stringValue: name)! }
+
+        let uri = c.string(key("uri"))
+        if uri.isEmpty { throw SpecError("uri") }
+
+        func amount(_ name: String, _ lowest: Double, _ highest: Double) throws -> Double {
+            guard c.has(key(name)) else { return 0 }
+            guard let v = c.number(key(name)) else { throw SpecError(name) }
+            return min(highest, max(lowest, v))
+        }
+        let soft = try amount("soft", 0, 1)
+        let shift = try amount("shift", -1, 1)
+
+        let fill = try c.rgb(key("fill"), "fill").map { ComposeRGB(r: $0[0], g: $0[1], b: $0[2]) }
+
+        var outline: ComposeCutoutOutline?
+        if c.has(key("outline")) {
+            guard let line = try? c.nestedContainer(keyedBy: AnyKey.self, forKey: key("outline")) else {
+                throw SpecError("outline")
+            }
+            // `rgb` answers nil for a colour that is not there, which here is a colour that is wrong.
+            guard let color = try line.rgb(key("color"), "outline.color") else { throw SpecError("outline.color") }
+            guard let width = line.number(key("width")) else { throw SpecError("outline.width") }
+            let held = min(ComposeCutout.maxOutline, max(0, width))
+            if held > 0 {
+                outline = ComposeCutoutOutline(color: ComposeRGB(r: color[0], g: color[1], b: color[2]), width: held)
+            }
+        }
+        cutout = ComposeCutout(uri: uri, soft: soft, shift: shift, fill: fill, outline: outline)
     }
 }
 

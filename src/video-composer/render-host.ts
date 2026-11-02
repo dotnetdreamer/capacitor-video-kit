@@ -1,8 +1,21 @@
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 
-import { MissingClipError, focusChangesPicture, toComposeSpec, type ComposeSpecIds, type EditManifest, type SubjectTrackRef, type SubjectTracksByKey } from '../editor';
+import {
+  MissingClipError,
+  cutoutTarget,
+  focusChangesPicture,
+  matteKey,
+  toComposeSpec,
+  type ComposeSpecIds,
+  type EditManifest,
+  type MatteRef,
+  type MatteTarget,
+  type MattesByKey,
+  type SubjectTrackRef,
+  type SubjectTracksByKey,
+} from '../editor';
 import { debugError } from '../host/debug';
-import { browserSubjects } from '../host/defaults';
+import { browserMatte, browserSubjects } from '../host/defaults';
 import {
   RenderFailedError,
   type EditorEncodeSupport,
@@ -241,10 +254,13 @@ export function composerRenderHost(options: ComposerRenderHostOptions = {}): Com
       // it never started - a template rendered without the editor ever opening - is made now.
       const subjects = await subjectTracksFor(manifest, uriByKey, sources, log);
       signal.throwIfAborted();
+      // The mattes the same way, after the subjects: one search at a time is all a phone runs.
+      const mattes = await mattesFor(manifest, uriByKey, sources, log);
+      signal.throwIfAborted();
 
       let spec: ComposeSpec;
       try {
-        spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, request.raster, { maxBytes: request.maxBytes }, subjects);
+        spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, request.raster, { maxBytes: request.maxBytes }, subjects, mattes);
       } catch (error) {
         /*
          * Refused before any segment id was handed out, so a missing clip already names the host's
@@ -333,6 +349,50 @@ async function subjectTracksFor(
     }
   }
   return tracks;
+}
+
+/**
+ * The matte track of every source a cut-out segment plays, for what each keeps, from the composer's
+ * `findMatte` - [subjectTracksFor]'s arrangement: at once for a source the editor has already looked
+ * at, a search for one it has not, and the page's own answer for a source the page holds as a
+ * `blob:`. A source with no matte to be had fails the render as `cutout`, naming the source, where a
+ * focus without subjects is drawn as it is: a cutout drawn whole would post the very background the
+ * customer took away, and the editor offers trying again, which looks again.
+ *
+ * A photo layer's cutout is not here: it is drawn into the layer's bitmap, from the matte the
+ * editor's raster context hands the rasteriser.
+ */
+async function mattesFor(
+  manifest: EditManifest,
+  uriByKey: ReadonlyMap<string, string>,
+  sources: readonly EditorSource[],
+  log: (message: string, error?: unknown) => void,
+): Promise<MattesByKey> {
+  const wanted = new Map<string, { key: string; target: MatteTarget }>();
+  for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
+    if (!clip.cutout) continue;
+    const target = cutoutTarget(clip.cutout);
+    wanted.set(matteKey(clip.clipKey, target), { key: clip.clipKey, target });
+  }
+  const mattes = new Map<string, MatteRef>();
+  for (const [name, { key, target }] of wanted) {
+    const uri = uriByKey.get(key);
+    if (!uri) continue;
+    const source = sources.find(candidate => candidate.key === key);
+    const picture = source?.kind === 'image';
+    let found: Awaited<ReturnType<typeof browserMatte>> = null;
+    try {
+      found =
+        source && uri.startsWith('blob:') && Capacitor.isNativePlatform()
+          ? await browserMatte(source, target, () => undefined)
+          : await VideoComposer.findMatte({ uri, target, ...(picture ? { kind: 'image' as const } : {}) });
+    } catch (error) {
+      log('[composerRenderHost] no matte for a cut-out clip', error);
+    }
+    if (!found) throw new RenderFailedError('cutout', `No matte for the cut-out clip ${key} (${target})`, key);
+    mattes.set(name, { uri: found.uri, coverage: found.coverage });
+  }
+  return mattes;
 }
 
 /**

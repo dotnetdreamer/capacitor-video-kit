@@ -231,6 +231,14 @@ export interface ComposeClip {
    * was. Last on the clip, after `image`, in every parser.
    */
   focus?: ComposeFocus;
+  /**
+   * The footage's background taken away, so that what is under the clip shows where it was - or a
+   * colour does: see [ComposeCutout]. Absent is the footage as it is, which is every spec written
+   * before this key, and every engine decides that ONCE, when it builds its plan, so a clip with no
+   * cutout is drawn by exactly the path it always was. Last on the clip, after `focus`, in every
+   * parser.
+   */
+  cutout?: ComposeCutout;
 }
 
 /**
@@ -323,6 +331,117 @@ export const MAX_FOCUS_KEYS = 2000;
  * the frame.
  */
 export const MAX_FOCUS_BLUR = 0.1;
+
+/**
+ * A clip's background taken away: what its subject is, frame by frame, comes from a matte track, and
+ * everything else becomes transparent - so the layers under the clip show there, or the canvas does
+ * on the base track - or is filled with a colour.
+ *
+ * WHERE THE SUBJECT COMES FROM. [uri] is a matte track: the file `findMatte` wrote for THIS clip's
+ * source (see [MATTE_TRACK_MAGIC] for its layout). It holds, for frames of the source at times of its
+ * own, a grid of `W` x `H` cells over the ORIENTED source frame, each cell how sure the segmenter was
+ * that it is the subject, 0..255. It is coarse on purpose - a video's is [MATTE_GRID] cells on its
+ * longer side - and what puts the edge back on the subject's real outline is the refinement below,
+ * which takes it from the frame itself.
+ *
+ * DRAWING IT, for a frame `C` of the clip at SOURCE time `s` (ms) - the oriented source frame, `Ws` x
+ * `Hs`, gamma-encoded RGB, AFTER its focus and its grade (see below) - with the luma of a colour
+ * `Y = 0.2126 R + 0.7152 G + 0.0722 B`:
+ *
+ *   1. The track's frames either side: exactly as [ComposeFocus] step 1 - `i`, `i + 1` and the weight
+ *      `w`; the first frame holding before it, the last after it, and one frame (a picture's) at every
+ *      `s`.
+ *   2. Each cell's `m = ((1 - w) * M[i] + w * M[i + 1]) / 255`.
+ *   3. THE GUIDE: each cell's `y`, the mean of the frame's `Y` over the cell's footprint - the
+ *      `Ws / W` by `Hs / H` pixels it covers.
+ *   4. THE REFINEMENT, a guided filter (He, Sun and Tang) on the grid. With `mean(x)` the mean of `x`
+ *      over the `(2R + 1)` by `(2R + 1)` cells centred on a cell, R = [CUTOUT_RADIUS], a cell past the
+ *      grid's edge read as the nearest edge cell: `a = (mean(y * m) - mean(y) * mean(m)) /
+ *      (mean(y * y) - mean(y)^2 + E)`, E = [CUTOUT_EPSILON], and `b = mean(m) - a * mean(y)`; then
+ *      `A = mean(a)` and `B = mean(b)`.
+ *   5. AT A PIXEL: `A` and `B` interpolated bilinearly between cell centres, the grid's edges clamped -
+ *      exactly as [ComposeFocus] step 4 - and `q = clamp(A * Y + B, 0, 1)` with the pixel's own `Y`.
+ *      This is what follows a strand of hair the grid is far too coarse to hold.
+ *   6. THE EDGE: `t = 0.5 - 0.25 * shift`, `h = 0.06 + 0.44 * soft`, and the subject's alpha
+ *      `a0 = smoothstep(t - h, t + h, q) * a`, `a` the frame's own alpha at the pixel - 1 for footage,
+ *      less where a picture has transparent parts, which are never the subject. A [shift] above 0
+ *      takes the edge out past the subject and one below 0 in, which trims away a fringe of what was
+ *      behind it.
+ *   7. THE OUTLINE, when there is one: `D`, the grid's `m` Gaussian-blurred with sigma `S =
+ *      outline.width * min(W, H) / 1.55` cells - the outline's width in cells, over the distance at
+ *      which a blurred edge falls to 6% - its edges clamped, and read at the pixel as in step 5. The
+ *      line's own alpha is `o = smoothstep(0.06 - d, 0.06 + d, D)` with `d = 0.04 / max(1, S)`, and
+ *      the subject lies over it: `a1 = a0 + (1 - a0) * o`, and the colour is
+ *      `(C * a0 + L * (1 - a0) * o) / a1` where `a1 > 0`, `L` the outline's colour. With no outline
+ *      `a1 = a0` and the colour is `C`.
+ *   8. THE FILL, when there is one: the colour becomes `mix(F, colour, a1)` and the alpha 1.
+ *
+ * A picture's own alpha is in `a0` and nowhere after it, so an outline is drawn round what shows of
+ * the subject even where it runs over transparent parts, and a fill fills them.
+ *
+ * What comes out is the clip's frame from then on, its colour STRAIGHT and its alpha the step's, which
+ * each engine carries on premultiplied or not, as its own pipeline needs: the crop, the fit, the
+ * rectangle and its turn, the camera, and the blend over whatever is under the clip. On the base
+ * track that is the canvas, so a base clip's transparent parts are the canvas colour, as its
+ * letterbox bars are. A TRANSITION mixes two whole pictures: each side is its clip drawn over the
+ * canvas first.
+ *
+ * WHERE IN THE PIPELINE. After the clip's focus and its grade - so the guide is the graded picture,
+ * and a fill and an outline are colours the grade never touches, as a caption's are - and before
+ * everything else. A frame a slowed clip makes between two source frames is cut out as the footage at
+ * the instant it stands for: either each source frame is cut out at its own source time before the
+ * frame between them is made, or the frame made is cut out at its own source time.
+ *
+ * Engines may take `y` from any average of the pixels round a cell's centre at least half a cell
+ * wide, may approximate the box means and the Gaussian as they approximate a focus's blur, and may
+ * work at less than the source's size where the frame is drawn smaller than that; the matte's
+ * interpolation, the refinement's arithmetic and the edge may not be approximated. Where a GPU cannot
+ * hold the refinement's numbers (no float targets) an engine skips steps 3 and 4 and reads `q` as `m`
+ * interpolated at the pixel.
+ *
+ * Each parser REFUSES, as shape errors with the path that broke: a cutout that is not an object, a
+ * [uri] that is not a non-empty string, a [soft] or [shift] that is present and not a finite number, a
+ * [fill] that is present and not three finite numbers, an [outline] that is present and not an object,
+ * or whose `color` is not three finite numbers or whose `width` is not a finite number. It CLAMPS
+ * [soft] to 0..1, [shift] to -1..1, every colour channel to 0..1 and an outline's width to
+ * 0..[MAX_CUTOUT_OUTLINE], DROPS an outline of width 0, and IGNORES keys it does not know. A matte
+ * track that cannot be read when the render needs it - missing, not a matte track, a frame that does
+ * not decode - fails the render as `unreadable_input` naming the clip, exactly as footage that cannot
+ * be read does.
+ */
+export interface ComposeCutout {
+  /** The matte track `findMatte` wrote for this clip's source: `file://` on a phone, `blob:` in a page. */
+  uri: string;
+  /** How soft the edge is, 0..1: step 6's `h`. Absent is 0, an edge as crisp as the refinement leaves it. */
+  soft?: number;
+  /** Where the edge sits, -1..1: below 0 in towards the subject, above 0 out. Absent is 0. */
+  shift?: number;
+  /** What shows where the background was, 0..1 RGB. Absent is nothing: the clip is transparent there. */
+  fill?: [number, number, number];
+  /** A line round the subject, the look of a sticker cut out of a photo. Absent is none. */
+  outline?: ComposeCutoutOutline;
+}
+
+/** A cutout's outline: its colour, and how wide it is. */
+export interface ComposeCutoutOutline {
+  /** 0..1 RGB. */
+  color: [number, number, number];
+  /** How far past the subject the line reaches, a fraction of the oriented source's shorter side. */
+  width: number;
+}
+
+/** The refinement's window: `2 * R + 1` cells across ([ComposeCutout] step 4). */
+export const CUTOUT_RADIUS = 2;
+
+/**
+ * The refinement's regularisation ([ComposeCutout] step 4), in luma squared. Smaller follows the
+ * frame's edges more closely and lets more of its texture into the matte; this is a contrast of about
+ * 6% of the luma range, below which an edge in the frame is taken for texture rather than outline.
+ */
+export const CUTOUT_EPSILON = 0.004;
+
+/** The widest outline, a fraction of the source's shorter side: 43 pixels of 1080p footage. */
+export const MAX_CUTOUT_OUTLINE = 0.04;
 
 /**
  * How one base clip gives way to the next.
@@ -1854,6 +1973,143 @@ export const MAX_SUBJECTS = 8;
  */
 export const SUBJECT_TRACK_MAGIC = 'VKST';
 export const SUBJECT_TRACK_VERSION = 1;
+
+/* -------------------------------------------------------------------------------------------- */
+/* Mattes                                                                                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * What a matte keeps: `subject`, whatever stands out of the picture - people, pets, things - or
+ * `people` and nothing else. An engine that finds only people answers `people` whichever was asked
+ * ([FindMatteResult.target] says which it did).
+ */
+export type MatteTarget = 'subject' | 'people';
+
+/**
+ * What made a matte: Google's ML Kit on Android - its subject segmentation, from Google Play services,
+ * for `subject`, and its selfie segmentation, which the kit bundles, for `people` and where Play
+ * services has no subject segmenter - Apple's Vision on iOS - its foreground instance mask from iOS 17
+ * for `subject`, and its person segmentation for `people` and on iOS 16 - and MediaPipe's selfie
+ * segmenter in a browser, which finds people.
+ */
+export type MatteEngine = 'mlkit' | 'vision' | 'mediapipe';
+
+/** A video or picture whose background is to be taken away. */
+export interface FindMatteOptions {
+  /** `file://`, `content://` or an absolute path on a phone; in a browser any URL the page can read. */
+  uri: string;
+  /** What the file holds. Absent is read off the file, as [LabelMediaOptions.kind] is. */
+  kind?: 'video' | 'image';
+  /** What to keep. Absent is `subject`. */
+  target?: MatteTarget;
+  /**
+   * How many frames a second of a video are looked at, 1 to 30. Absent is the engine's own: 10, and
+   * 15 for `people` on Android and iOS, whose segmenters are quicker. Between two frames looked at the
+   * matte moves in a straight line ([ComposeCutout] step 2), which the refinement then pulls back onto
+   * the frame's own edges.
+   */
+  fps?: number;
+}
+
+export interface FindMatteResult {
+  engine: MatteEngine;
+  /**
+   * The matte track: a file in the app's cache on a phone (`file://`), a `blob:` URL in a page. It is
+   * what [ComposeCutout.uri] names, and the editor's preview reads it too. A phone's cache may be
+   * emptied by the system: ask again before a render, which answers at once from a track still there.
+   */
+  uri: string;
+  /** The track was already there from an earlier call, and nothing was looked at. */
+  cached: boolean;
+  /** Whether the file was read as a picture or as a video. */
+  kind: 'video' | 'image';
+  /** What the track keeps: `people` where the engine finds only people, whatever was asked. */
+  target: MatteTarget;
+  /** The track's grid, in cells, over the oriented frame: [MATTE_GRID] on a video's longer side. */
+  width: number;
+  height: number;
+  /** How many frames were looked at: one for a picture. */
+  frames: number;
+  /** How long the source is, ms: 0 for a picture. */
+  durationMs: number;
+  /**
+   * How much of the frame the subject covers, 0..1, averaged over the frames: 0 is footage in which
+   * nothing stood out, whose cutout would take everything away.
+   */
+  coverage: number;
+  /** Where the subject is over the whole footage, 0..1 of the oriented frame, top-left origin. Absent with a `coverage` of 0. */
+  box?: ComposeRect;
+}
+
+/** Searches to keep when the others are stopped: see `stopFindingMattes`. */
+export interface StopFindingMattesOptions {
+  /** The `uri` of every search to let run. Absent stops all of them. */
+  keep?: string[];
+}
+
+export interface StopFindingMattesResult {
+  /** How many searches were stopped. */
+  stopped: number;
+}
+
+/**
+ * Where a `findMatte` is: `preparing` while the engine itself is being got ready - Android downloading
+ * the subject segmenter into Google Play services, the first time any app on the phone asks; iOS never
+ * says it, Vision's models coming with the system - and `looking` while the frames are.
+ */
+export type MatteStage = 'preparing' | 'looking';
+
+/** How far a `findMatte` has got, a few times a second while it runs. */
+export interface MatteProgressEvent {
+  /** The `uri` the search was asked for, as it was asked. */
+  uri: string;
+  /** The `target` it was asked for. */
+  target: MatteTarget;
+  stage: MatteStage;
+  /** 0..1 of the stage: of the download while `preparing`, of the frames to look at while `looking`. */
+  progress: number;
+}
+
+/**
+ * The longer side of a video's matte track grid, in cells: about 4 output pixels of a 1080x1920 post
+ * each, which the refinement brings down to the frame's own pixels ([ComposeCutout] step 5). The other
+ * side is in proportion, rounded, at least 1.
+ */
+export const MATTE_GRID = 512;
+
+/** The longer side of a picture's grid, which is looked at once and can afford more. */
+export const MATTE_PICTURE_GRID = 1024;
+
+/**
+ * A matte track, the file `findMatte` writes, starts with these four bytes (`VKMT`).
+ *
+ * LAYOUT, every integer little-endian - the subject track's ([SUBJECT_TRACK_MAGIC]) but for what a
+ * cell holds and how a frame is coded:
+ *
+ *   offset 0   4 bytes  magic, ASCII `VKMT`
+ *          4   u8       version, [MATTE_TRACK_VERSION]
+ *          5   u8       flags, 0
+ *          6   u16      W, the grid's columns
+ *          8   u16      H, the grid's rows
+ *         10   u16      0
+ *         12   u32      F, the frames, at least 1
+ *         16   u32      J, the bytes of the JSON that follows
+ *         20   J bytes  UTF-8 JSON: `{ engine, kind, target, durationMs, fps, coverage, box }` - the
+ *                       [FindMatteResult] fields of the same names. A renderer skips it.
+ *     20 + J   u32 * F  each frame's source time, ms, strictly increasing
+ *              u32 * F  each frame's offset into the data that follows, non-decreasing
+ *              data     the frames, each running to the next one's offset (the last to the end)
+ *
+ * A FRAME is the W x H cells, row by row from the top-left, each how sure the segmenter was that it is
+ * the subject, 0..255, coded as packets until the cells are filled. A packet starts with an unsigned
+ * LEB128 varint `n`: `n >>> 1` is a count of at least one, and the low bit says what follows - 1, a
+ * RUN, one byte to repeat that many times; 0, that many LITERAL bytes. A matte is mostly the two ends,
+ * whose long runs cost a few bytes, and the soft edge between them a byte a cell. A reader refuses a
+ * file whose magic or version it does not know, whose W, H or F is 0, whose W * H is over 4,194,304
+ * cells, whose tables run past its end or go back, and a frame whose packets do not fill it exactly.
+ */
+export const MATTE_TRACK_MAGIC = 'VKMT';
+export const MATTE_TRACK_VERSION = 1;
 
 export interface StartVoiceRecordingOptions {
   /**

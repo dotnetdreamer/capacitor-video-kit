@@ -1,4 +1,5 @@
 import { MAX_AUDIO_EFFECTS, type FilterOp } from '../video-composer/definitions';
+import { normaliseCutout } from './cutout';
 import { focusChangesPicture, normaliseFocus } from './focus';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
@@ -19,7 +20,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 19;
+export const MANIFEST_VERSION = 20;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -156,6 +157,17 @@ export interface EditClip {
    * trim, so a trim moves the footage under the changes and not the changes under the footage.
    */
   focus?: EditFocus;
+  /**
+   * The footage's background taken away: its subject kept and everything else see-through, or filled
+   * with a colour. Absent is the footage as it is, which is every segment of every manifest written
+   * before version 20, and absent is what [toComposeSpec] turns into a clip with no `cutout` on the
+   * wire.
+   *
+   * On the SEGMENT, as a focus is, so a split can cut one half out and not the other; the matte it is
+   * drawn from is the source's, found once by `findMatte` for every segment over it that keeps the
+   * same thing.
+   */
+  cutout?: EditCutout;
 }
 
 /**
@@ -195,6 +207,35 @@ export interface EditFocusChange {
   subjects: FocusSubjects;
   /** Source ms the pull takes; absent is `DEFAULT_FOCUS_PULL_MS`, 0 a cut. */
   pullMs?: number;
+}
+
+/**
+ * A background taken away: see [EditClip.cutout] and [ImageOverlay.cutout]. Every key is optional and
+ * none is stored that says nothing, so a new cutout is `{}` - whatever stands out kept, the rest
+ * see-through, the edge as the matte's refinement leaves it.
+ */
+export interface EditCutout {
+  /** Only people are kept. Absent keeps whatever stands out of the picture: people, pets, things. */
+  target?: 'people';
+  /** How soft the edge is, 0..1. Absent is 0, and 0 is never stored. */
+  soft?: number;
+  /** Where the edge sits, -1..1: below 0 in towards the subject, above 0 out. Absent is 0, never stored. */
+  shift?: number;
+  /**
+   * `#rrggbb` behind the subject, on a clip. Absent is see-through: the layers under the clip show, or
+   * the canvas does under a base clip. A photo layer takes no fill, which would make it a card again.
+   */
+  fill?: string;
+  /** A line round the subject: a sticker cut out of a photo. Absent is none. */
+  outline?: EditCutoutOutline;
+  /** A soft shadow under the subject, on a photo layer: it lifts a sticker off the video. A clip takes none. */
+  shadow?: true;
+}
+
+/** A cutout's outline: `#rrggbb`, and how wide, 0..1 of the widest (`MAX_CUTOUT_OUTLINE`). */
+export interface EditCutoutOutline {
+  color: string;
+  width: number;
 }
 
 /** A transition between two base clips: which one, and how long the customer asked for it to run. */
@@ -346,6 +387,13 @@ export interface ImageOverlay extends OverlayCommon {
   fileName: string;
   /** Natural width / height, so a layout never has to wait for the photo to decode. */
   aspect: number;
+  /**
+   * The photo's background taken away, drawn into the layer's own bitmap - which is why it renders the
+   * same on every platform: the native side only ever places a PNG, and this one has transparent parts.
+   * Absent is the photo as it is, every layer of every manifest written before version 20. A layer
+   * keeps no `fill`.
+   */
+  cutout?: EditCutout;
 }
 
 /**
@@ -1880,6 +1928,11 @@ export function emptyManifest(): EditManifest {
  * manifest: a version-18 segment has no `focus`, which is the footage as it is, and [toComposeSpec]
  * sends it with none - byte for byte the spec version 18 produced. Bumped because an older build
  * reading a version-19 draft shows every focused clip sharp from edge to edge.
+ *
+ * Version 19 to version 20 adds a segment's [EditClip.cutout] and a photo layer's
+ * [ImageOverlay.cutout], and nothing is written into an older manifest: a version-19 segment or photo
+ * has none, which is the footage as it is. Bumped because an older build reading a version-20 draft
+ * shows every cut-out clip and photo with its background back.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1931,8 +1984,16 @@ export function normaliseManifest(input: unknown): EditManifest {
         switch (o.kind) {
           case 'sticker':
             return { ...common, kind: 'sticker', emoji: o.emoji ?? null, assetId: o.assetId ?? null };
-          case 'image':
-            return { ...common, kind: 'image', uri: String(o.uri), fileName: String(o.fileName ?? ''), aspect: num(o.aspect, 1) };
+          case 'image': {
+            const image: ImageOverlay = { ...common, kind: 'image', uri: String(o.uri), fileName: String(o.fileName ?? ''), aspect: num(o.aspect, 1) };
+            // A layer's fill would make it a card again: it is a clip's look only.
+            const cutout = normaliseCutout(o.cutout);
+            if (cutout) {
+              delete cutout.fill;
+              image.cutout = cutout;
+            }
+            return image;
+          }
           case 'effect':
             return { ...common, kind: 'effect', effectId: String(o.effectId) };
           default: {
@@ -2282,7 +2343,7 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
     // A cropped or reframed clip is a different picture from the file on disk, however little else
     // was done to it, so it has to go through the renderer rather than be posted as it is - and so is
     // one whose world has been softened around its subject.
-    return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted && !isClipFramed(clip, manifest.fit) && !focusChangesPicture(clip.focus);
+    return untrimmed && clip.speed === 1 && clip.volume === 1 && !clip.muted && !isClipFramed(clip, manifest.fit) && !focusChangesPicture(clip.focus) && !clip.cutout;
   });
 }
 
@@ -2545,6 +2606,12 @@ function readClips(value: unknown, usedIds: Set<string>, base: boolean): EditCli
     }
     const focus = normaliseFocus(c?.focus);
     if (focus) clip.focus = focus;
+    // A shadow is a photo layer's look, and a clip has none.
+    const cutout = normaliseCutout(c?.cutout);
+    if (cutout) {
+      delete cutout.shadow;
+      clip.cutout = cutout;
+    }
     return clip;
   });
 }

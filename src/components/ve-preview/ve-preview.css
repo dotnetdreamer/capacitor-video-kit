@@ -210,6 +210,45 @@
   -webkit-user-drag: none;
 }
 
+/*
+ * A photo's cutout landing (PhotoReveals): the photo as it was, over the cut-out one, eased out of the
+ * picture while a light rises and falls round what is kept - the canvas's reveal for a clip, its
+ * timing and its glow (`CUTOUT_REVEAL_MS`, cutout-gl.ts's GLOW), in three images.
+ *
+ * The light is a copy of the cut-out photo with the glow drawn round it once, faded in and out: an
+ * animated drop-shadow is drawn again every frame, which on a Galaxy A13 took frames of 80 to 100 ms
+ * through the first half of the reveal, where fading a layer costs the compositor nothing.
+ */
+.pv__layer--ghost {
+  animation: pv-ghost-out 900ms cubic-bezier(0.45, 0, 0.55, 1) forwards;
+}
+
+.pv__layer--glow {
+  opacity: 0;
+  filter: drop-shadow(0 0 5px rgba(209, 237, 255, 0.95));
+  will-change: opacity;
+  animation: pv-cut-glow 900ms linear;
+}
+
+@keyframes pv-ghost-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes pv-cut-glow {
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pv__layer--ghost,
+  .pv__layer--glow {
+    display: none;
+  }
+}
+
 /* ----------------------------------------------------------------------------- text placeholder */
 
 /*

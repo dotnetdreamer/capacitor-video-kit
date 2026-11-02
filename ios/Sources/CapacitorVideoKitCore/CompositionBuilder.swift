@@ -69,6 +69,9 @@ private struct TimelineEntry {
     /// The clip's focus with its subject track and its time mapping, or nil for every clip with no
     /// focus. Attached once every clip's footage has been opened (`build`), which is why it is a `var`.
     var focus: FocusClip? = nil
+    /// The clip's cutout with its matte track and its time mapping, or nil for every clip with no
+    /// cutout. Attached after the focus, for the same reason (`build`).
+    var cutout: CutoutClip? = nil
 }
 
 /// One video layer's clips after they have been placed, and what the instructions need to draw it.
@@ -636,6 +639,26 @@ enum CompositionBuilder {
             for index in layers.indices.dropFirst() { layers[index] = try focused(layers[index]) }
         }
 
+        // CUTOUT, by the same arrangement, after every focus: each cut-out clip's matte track read once
+        // per file, in `everyClip`'s order, and attached to every entry it is laid for - the base, the
+        // transitions' tails, the layers. That is Android's order too - every subject track, then every
+        // matte track - so a post broken in both names the same clip on both. A track that will not read,
+        // or a frame of it a clip can reach that will not decode, fails the build as `unreadable_input`
+        // naming the clip. A spec with no cutout reads nothing and changes nothing here.
+        let mattes = try CutoutTracks.load(spec)
+        if !mattes.isEmpty {
+            func cut(_ layer: LayerTimeline) throws -> LayerTimeline {
+                LayerTimeline(isBase: layer.isBase, z: layer.z, opacity: layer.opacity,
+                              entries: try layer.entries.map { try cuttingOut($0, mattes) })
+            }
+            layers[0] = try cut(layers[0])
+            windows = try windows.map { w in
+                TransitionWindow(entry: w.entry, startMs: w.startMs, durMs: w.durMs,
+                                 tail: try cuttingOut(w.tail, mattes), transition: w.transition)
+            }
+            for index in layers.indices.dropFirst() { layers[index] = try cut(layers[index]) }
+        }
+
         if let music = spec.audio.music,
            let p = try await addMusic(music, to: comp, total: total, batchId: spec.batchId) {
             params.append(p)
@@ -1059,7 +1082,9 @@ enum CompositionBuilder {
                   // keys are output time, so every instruction cut from this clip reads them alike.
                   rectMotion: e.clip.rectMotion,
                   // One per entry, shared by every instruction cut from it, as `slow` is.
-                  focus: e.focus)
+                  focus: e.focus,
+                  // The same.
+                  cutout: e.cutout)
     }
 
     /// `e` with its `FocusClip` attached when its clip has a focus, its track read already in `tracks`;
@@ -1069,6 +1094,16 @@ enum CompositionBuilder {
         guard let focus = e.clip.focus, let track = tracks[focus.uri] else { return e }
         var entry = e
         entry.focus = try FocusClip(clip: e.clip, focus: focus, track: track, inserted: e.inserted, placed: e.range)
+        return entry
+    }
+
+    /// `e` with its `CutoutClip` attached when its clip has a cutout, its track read already in `tracks`;
+    /// `e` as it is otherwise. Throws `BuildError.unreadable` naming the clip for a frame of the track the
+    /// clip can reach that does not decode.
+    private static func cuttingOut(_ e: TimelineEntry, _ tracks: [String: MatteTrack]) throws -> TimelineEntry {
+        guard let cutout = e.clip.cutout, let track = tracks[cutout.uri] else { return e }
+        var entry = e
+        entry.cutout = try CutoutClip(clip: e.clip, cutout: cutout, track: track, inserted: e.inserted, placed: e.range)
         return entry
     }
 
@@ -1089,7 +1124,10 @@ enum CompositionBuilder {
                                               // moves on through the window as that clip would have.
                                               rectMotion: w.tail.clip.rectMotion,
                                               // Its own focus, in its own source's time.
-                                              focus: w.tail.focus),
+                                              focus: w.tail.focus,
+                                              // And its own cutout: each side of a transition is its
+                                              // clip drawn over the canvas (`wholeFrame`).
+                                              cutout: w.tail.cutout),
                               startUs: w.startMs * 1000,
                               durationUs: w.durMs * 1000,
                               curves: t.curves,

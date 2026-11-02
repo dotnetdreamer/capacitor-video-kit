@@ -31,6 +31,8 @@ interface DrawnRaster {
   raster: RasterisedOverlay;
   frameW: number;
   frameH: number;
+  /** A cut-out photo's bitmap without its cutout, for Compare ([OverlayBitmap.whole]). */
+  whole?: RasterisedOverlay;
 }
 
 /**
@@ -58,7 +60,7 @@ export class OverlayBitmaps {
   get rasterContext(): RasterContext {
     const width = this.store.outputWidth.value;
     if (!this.context || this.context.output.width !== width) {
-      this.context = createEditorRasterContext(this.host, this.store.manifest.value.output);
+      this.context = this.withMatte(createEditorRasterContext(this.host, this.store.manifest.value.output));
     }
     return this.context;
   }
@@ -76,7 +78,15 @@ export class OverlayBitmaps {
   private readonly work = computed(() => ({
     overlays: this.store.manifest.value.overlays,
     width: this.store.outputWidth.value,
+    mattes: this.matteStamps.value,
   }));
+
+  /**
+   * Every layer's matte stamp ([EditorStore.photoMatteStamp]), as one string - so a matte ARRIVING
+   * wakes a pass, which draws the photo again cut out, while the progress a search reports on its way
+   * there, which leaves every stamp as it was, wakes nothing.
+   */
+  private readonly matteStamps = computed(() => this.store.manifest.value.overlays.map(overlay => this.store.photoMatteStamp(overlay)).join('\n'));
 
   private busy = false;
   private rerun = false;
@@ -98,6 +108,11 @@ export class OverlayBitmaps {
   constructor(
     private readonly store: EditorStore,
     private readonly host: ResolvedEditorHost,
+    /**
+     * A photo's matte once it has settled, for a photo with a cutout ([RasterContext.matte]): the
+     * editor's media layer, which runs the searches. Absent, every photo is drawn whole.
+     */
+    private readonly matte?: RasterContext['matte'],
   ) {
 
     /*
@@ -158,11 +173,11 @@ export class OverlayBitmaps {
    */
   renderContext(output: EditOutput): RasterContext {
     return {
-      ...createEditorRasterContext(this.host, output),
+      ...this.withMatte(createEditorRasterContext(this.host, output)),
       drawn: (overlay) => {
         if (overlay.kind === 'text' || (overlay.kind === 'sticker' && overlay.emoji)) return null;
         const bitmap = this.store.bitmaps.value.get(overlay.id);
-        if (!bitmap || bitmap.key !== overlayRasterKey(overlay, output.width)) return null;
+        if (!bitmap || bitmap.key !== overlayRasterKey(overlay, output.width, this.store.photoMatteStamp(overlay))) return null;
         if (bitmap.frameW !== output.width || bitmap.frameH !== output.height) return null;
         // The key rounds the scale to a thousandth, but photos and stickers are drawn at the exact
         // one, so a bitmap from a scale a hair away is a pixel off what the render would draw.
@@ -170,6 +185,11 @@ export class OverlayBitmaps {
         return { png: bitmap.png, wPx: bitmap.wPx, hPx: bitmap.hPx };
       },
     };
+  }
+
+  /** `context` with this editor's photo mattes, where it has a way to them. */
+  private withMatte(context: RasterContext): RasterContext {
+    return this.matte ? { ...context, matte: this.matte } : context;
   }
 
   private schedule(): void {
@@ -205,7 +225,7 @@ export class OverlayBitmaps {
     this.forgetRemoved(new Set(overlays.map((overlay) => overlay.id)));
 
     const width = this.store.outputWidth.value;
-    const layers: StaleLayer[] = overlays.map((overlay) => ({ overlay, key: overlayRasterKey(overlay, width) }));
+    const layers: StaleLayer[] = overlays.map((overlay) => ({ overlay, key: overlayRasterKey(overlay, width, this.store.photoMatteStamp(overlay)) }));
     for (const { overlay, key } of layers) {
       if (this.seenKeys.get(overlay.id) !== key) {
         this.seenKeys.set(overlay.id, key);
@@ -214,8 +234,10 @@ export class OverlayBitmaps {
     }
 
     const bitmaps = this.store.bitmaps.value;
+    // A photo whose cutout is waiting for its matte stays as it is: the matte landing changes its stamp,
+    // and that pass draws it once, cut out (see [EditorStore.photoMattePending]).
     const stale = layers
-      .filter(({ overlay, key }) => bitmaps.get(overlay.id)?.key !== key && this.failedKeys.get(overlay.id) !== key)
+      .filter(({ overlay, key }) => bitmaps.get(overlay.id)?.key !== key && this.failedKeys.get(overlay.id) !== key && !this.store.photoMattePending(overlay))
       .sort((a, b) => (this.changedAt.get(b.overlay.id) ?? 0) - (this.changedAt.get(a.overlay.id) ?? 0));
 
     for (const { overlay, key } of stale) {
@@ -245,13 +267,12 @@ export class OverlayBitmaps {
       const context = this.rasterContext;
       const { width: frameW, height: frameH } = context.output;
       const drawn: DrawnRaster = { raster: await rasteriseOverlay(overlay, context), frameW, frameH };
-      this.failedKeys.delete(overlay.id);
-      this.recent.set(key, drawn);
-      while (this.recent.size > RECENT_BITMAPS) {
-        const oldest = this.recent.keys().next().value;
-        if (oldest === undefined) break;
-        this.recent.delete(oldest);
+      if (overlay.kind === 'image' && overlay.cutout) {
+        const whole = await this.wholePhoto(overlay, context);
+        if (whole) drawn.whole = whole;
       }
+      this.failedKeys.delete(overlay.id);
+      this.remember(key, drawn);
       return drawn;
     } catch (error) {
       // One layer that cannot be drawn must not take the others down with it; it keeps whatever
@@ -262,17 +283,49 @@ export class OverlayBitmaps {
     }
   }
 
+  /**
+   * A cut-out photo drawn without its cutout, for Compare: the bitmap the photo had before it was cut
+   * out, still among the [recent] ones whenever it was on screen a moment ago, and drawn once otherwise -
+   * a draft opened with its cutouts made. Null where it cannot be drawn: Compare then shows the cutout.
+   */
+  private async wholePhoto(overlay: Extract<EditOverlay, { kind: 'image' }>, context: RasterContext): Promise<RasterisedOverlay | null> {
+    const { cutout: _cutout, ...whole } = overlay;
+    const { width: frameW, height: frameH } = context.output;
+    const key = overlayRasterKey(whole, frameW);
+    const kept = this.recent.get(key);
+    if (kept && kept.frameW === frameW && kept.frameH === frameH) return kept.raster;
+    try {
+      const raster = await rasteriseOverlay(whole, context);
+      this.remember(key, { raster, frameW, frameH });
+      return raster;
+    } catch (error) {
+      debugWarn('[OverlayBitmap] could not draw the photo whole', overlay.id, error);
+      return null;
+    }
+  }
+
+  /** Files a drawn bitmap among the [recent] ones, the least recently used let go of past [RECENT_BITMAPS]. */
+  private remember(key: string, drawn: DrawnRaster): void {
+    this.recent.delete(key);
+    this.recent.set(key, drawn);
+    while (this.recent.size > RECENT_BITMAPS) {
+      const oldest = this.recent.keys().next().value;
+      if (oldest === undefined) break;
+      this.recent.delete(oldest);
+    }
+  }
+
   /** @param drawn the layer as it was when its bitmap was drawn, which may be older than now. */
-  private write(drawn: EditOverlay, { raster, frameW, frameH }: DrawnRaster, key: string): void {
+  private write(drawn: EditOverlay, { raster, frameW, frameH, whole }: DrawnRaster, key: string): void {
     const id = drawn.id;
     const current = this.store.manifest.value.overlays.find((overlay) => overlay.id === id);
     // Deleted while it was being drawn.
     if (!current) return;
     // An undo during the draw can have put the layer back to the look its existing bitmap was drawn
     // for; the bitmap just finished is for a state that no longer exists and must not replace it.
-    if (this.store.bitmaps.value.get(id)?.key === overlayRasterKey(current, this.store.outputWidth.value)) return;
+    if (this.store.bitmaps.value.get(id)?.key === overlayRasterKey(current, this.store.outputWidth.value, this.store.photoMatteStamp(current))) return;
 
-    const bitmap: OverlayBitmap = { ...raster, key, scale: drawn.scale, frameW, frameH };
+    const bitmap: OverlayBitmap = { ...raster, key, scale: drawn.scale, frameW, frameH, ...(whole ? { whole } : {}) };
     // A signal write repaints the preview by itself, even this far after an image load resolved.
     this.store.bitmaps.value = new Map(this.store.bitmaps.value).set(id, bitmap);
   }

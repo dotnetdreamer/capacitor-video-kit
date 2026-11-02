@@ -153,13 +153,20 @@ struct EditLayer {
     /// from the same timeline entry, as `slow` is.
     let focus: FocusClip?
 
+    /// The clip's cutout - its background taken away - with its matte track and its time mapping, or nil
+    /// for every clip without one, which then reaches `placedPicture` with nothing to test but this nil.
+    /// Shared, as one instance, by every layer cut from the same timeline entry, as `focus` is.
+    let cutout: CutoutClip?
+
     init(trackID: CMPersistentTrackID, orientation: CGImagePropertyOrientation, fit: Fit,
          crop: ComposeRect?, rect: ComposePlacement?, opacity: Double, render: CGSize,
-         slow: SlowClip? = nil, rectMotion: ComposeRectMotion? = nil, focus: FocusClip? = nil) {
+         slow: SlowClip? = nil, rectMotion: ComposeRectMotion? = nil, focus: FocusClip? = nil,
+         cutout: CutoutClip? = nil) {
         self.trackID = trackID
         self.slow = slow
         self.motion = rectMotion
         self.focus = focus
+        self.cutout = cutout
         self.orientation = orientation
         self.fit = fit
         self.crop = crop
@@ -522,7 +529,7 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         return CIImage(cvPixelBuffer: src, options: [.colorSpace: NSNull()])
     }
 
-    /// One layer's picture, oriented, focused, graded and placed, TRANSPARENT everywhere it does not reach -
+    /// One layer's picture, oriented, focused, graded, cut out and placed, TRANSPARENT everywhere it does not reach -
     /// exactly what every layer of every frame has always been drawn as - or nil when there is no
     /// picture to place at all. `src` is what `sourcePicture` answered.
     ///
@@ -564,6 +571,15 @@ final class EditCompositor: NSObject, AVVideoCompositing, @unchecked Sendable {
         // grading the blend afterwards give the same pixels. What differs is only the black
         // underneath, and leaving that ungraded is the whole point.
         pic = plan.colorMatrix.apply(to: pic)
+        // CUTOUT, after the focus and the grade and before everything else (`ComposeCutout`): its guide is
+        // the graded picture, and its fill and outline are colours the grade never touches. What it
+        // answers is transparent where the background was, and the crop, the fit, the turn, the camera,
+        // the opacity and a transition's side carry that on - the canvas shows through on the base track,
+        // the layers under it on a layer. A slowed clip's synthesised frame is cut out at the source instant
+        // it stands for. nil - every clip without a cutout - skips it.
+        if let cutout = layer.cutout {
+            pic = cutout.cutOut(pic, atUs: tUs, context: ci)
+        }
         // The crop is the one step that genuinely cannot move: it decides which pixels the fit
         // is measuring, so it happens inside `placed` and ahead of everything. Both it and
         // `dst` are nil for a clip that fills the frame, which is every spec written before

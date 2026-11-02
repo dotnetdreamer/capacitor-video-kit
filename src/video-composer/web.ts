@@ -17,8 +17,11 @@ import type {
   ComposeSpec,
   ExtractAudioOptions,
   ExtractAudioResult,
+  FindMatteOptions,
+  FindMatteResult,
   FindSubjectsOptions,
   FindSubjectsResult,
+  MatteStage,
   GalleryAccessResult,
   GalleryThumbnailResult,
   JobIdOptions,
@@ -46,6 +49,8 @@ import type {
   SaveToDownloadsResult,
   StageRenderInputResult,
   StartVoiceRecordingOptions,
+  StopFindingMattesOptions,
+  StopFindingMattesResult,
   StopFindingSubjectsOptions,
   StopFindingSubjectsResult,
   SweepMediaOptions,
@@ -63,6 +68,7 @@ import { labelMediaInBrowser, LabelingUnavailableError, LabelingUnreadableError 
 import { probeMedia } from './web/media';
 import { validateSpec } from './web/spec';
 import { findSubjectsInBrowser, stopFindingSubjectsInBrowser, SubjectsCancelledError, SubjectsUnavailableError, SubjectsUnreadableError } from './web/subjects';
+import { findMatteInBrowser, stopFindingMattesInBrowser } from './web/mattes';
 import { thumbnails as cutThumbnails } from './web/thumbnails';
 import { startVoiceRecording, stopVoiceRecording, VoiceError } from './web/voice';
 
@@ -191,6 +197,42 @@ export class VideoComposerWeb extends WebPlugin implements VideoComposerPlugin {
 
   async stopFindingSubjects(options?: StopFindingSubjectsOptions): Promise<StopFindingSubjectsResult> {
     return { stopped: stopFindingSubjectsInBrowser(options?.keep ?? []) };
+  }
+
+  /**
+   * MediaPipe's selfie segmenter over the file's frames, kept soft (`web/mattes.ts`): the engine and
+   * the files `findSubjects` uses, so it keeps people whatever `target` asks, and says so. The refusals
+   * are the phones'.
+   */
+  async findMatte(options: FindMatteOptions): Promise<FindMatteResult> {
+    const uri = required(options?.uri, 'uri');
+    if (options.kind !== undefined && options.kind !== 'video' && options.kind !== 'image') {
+      throw coded("kind must be 'video' or 'image'", 'invalid_spec');
+    }
+    if (options.target !== undefined && options.target !== 'subject' && options.target !== 'people') {
+      throw coded("target must be 'subject' or 'people'", 'invalid_spec');
+    }
+    const target = options.target ?? 'subject';
+    // A few times a second, as the phones send it, and once at the end of each stage.
+    let sentAt = 0;
+    const progress = (stage: MatteStage, value: number): void => {
+      const now = performance.now();
+      if (value < 1 && now - sentAt < 250) return;
+      sentAt = now;
+      this.notifyListeners('matteProgress', { uri, target, stage, progress: Math.min(1, Math.max(0, value)) });
+    };
+    try {
+      return await findMatteInBrowser({ ...options, uri }, progress);
+    } catch (error) {
+      if (error instanceof SubjectsUnavailableError) throw coded(error.message, 'unsupported');
+      if (error instanceof SubjectsUnreadableError) throw coded(error.message, 'unreadable_input');
+      if (error instanceof SubjectsCancelledError) throw coded(error.message, 'cancelled');
+      throw coded(describe(error), 'unknown');
+    }
+  }
+
+  async stopFindingMattes(options?: StopFindingMattesOptions): Promise<StopFindingMattesResult> {
+    return { stopped: stopFindingMattesInBrowser(options?.keep ?? []) };
   }
 
   /*

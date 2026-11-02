@@ -129,7 +129,35 @@ data class Clip(
      * built exactly as it was.
      */
     val focus: Focus? = null,
+    /**
+     * The footage's background taken away - see [Cutout]. Null is the footage as it is, every spec
+     * written before the key, and the builder asks this once, when it builds the clip's item. Last in
+     * the list, after the focus, as the parser reads it.
+     */
+    val cutout: Cutout? = null,
 )
+
+/**
+ * A clip's background taken away - the Kotlin mirror of `ComposeCutout`, whose doc comment in
+ * definitions.ts is the NORMATIVE drawing contract; [CutoutEffect] draws it. Lists rather than arrays
+ * for [Focus]'s reason: a transition's tail carries the outgoing clip's cutout, and the two clips are
+ * compared as data. Every number already holds its clamped value, and an outline of no width never
+ * gets this far.
+ */
+data class Cutout(
+    /** The matte track `findMatte` wrote for this clip's source. */
+    val uri: String,
+    /** 0..1: step 6's softness. */
+    val soft: Float,
+    /** -1..1: where the edge sits. */
+    val shift: Float,
+    /** 0..1 RGB behind the subject, or null for see-through. */
+    val fill: List<Float>?,
+    val outline: CutoutOutline?,
+)
+
+/** A cutout's line round its subject: 0..1 RGB, and how far past it the line reaches, a fraction of the source's shorter side. */
+data class CutoutOutline(val color: List<Float>, val width: Double)
 
 /**
  * Which of a clip's subjects are in focus over its footage, and what happens to everything else - the

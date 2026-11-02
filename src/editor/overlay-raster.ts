@@ -19,8 +19,11 @@ import {
   type TextEffect,
   type TextOverlay,
 } from './edit-manifest';
+import { MAX_CUTOUT_OUTLINE } from '../video-composer/definitions';
+import { MIN_CUTOUT_COVERAGE, cutoutTarget } from './cutout';
+import { cutoutPhotoInWorker } from './cutout-worker';
 import { drawEffect, effectRasterScale } from './effects';
-import type { RasterContext, RasterisedOverlay, TextStyleSpec } from './raster-context';
+import type { RasterContext, RasterisedOverlay, RasterMatte, TextStyleSpec } from './raster-context';
 
 export interface TextOverlayStyle {
   text: string;
@@ -181,8 +184,12 @@ export async function rasteriseOverlay(overlay: EditOverlay, ctx: RasterContext,
  * purpose - they never change the bitmap - so dragging a layer never redraws it. The scale is
  * rounded so a pinch that settles within a thousandth reuses what is there. An effect's key has no
  * scale at all: it always covers the whole frame.
+ *
+ * A photo with a cutout adds its look and `matte`, which names the matte it is drawn from - the
+ * track's uri, or empty while it is being looked for, when the photo is drawn whole - so the bitmap is
+ * drawn again the moment the matte arrives. A photo with no cutout has the key it always had.
  */
-export function overlayRasterKey(overlay: EditOverlay, outputWidth: number = DEFAULT_OUTPUT.width): string {
+export function overlayRasterKey(overlay: EditOverlay, outputWidth: number = DEFAULT_OUTPUT.width, matte = ''): string {
   const scale = Math.round(overlay.scale * 1000) / 1000;
   // The frame's WIDTH, because that is what every layer's size is a fraction of: the same sticker
   // at the same scale is 245px across a 720 post and 734px across a 4K one. Without it here, a
@@ -194,8 +201,12 @@ export function overlayRasterKey(overlay: EditOverlay, outputWidth: number = DEF
       return JSON.stringify(['text', overlay.text, overlay.styleId, overlay.color, overlay.effect, overlay.align, scale, frame]);
     case 'sticker':
       return JSON.stringify(['sticker', overlay.emoji, overlay.assetId, scale, frame]);
-    case 'image':
-      return JSON.stringify(['image', overlay.uri, scale, frame]);
+    case 'image': {
+      const cutout = overlay.cutout;
+      if (!cutout) return JSON.stringify(['image', overlay.uri, scale, frame]);
+      const look = [cutoutTarget(cutout), cutout.soft ?? 0, cutout.shift ?? 0, cutout.outline?.color ?? '', cutout.outline?.width ?? 0, !!cutout.shadow];
+      return JSON.stringify(['image', overlay.uri, scale, frame, look, matte]);
+    }
     case 'effect':
       // An effect is the whole frame at any size: it carries no bitmap of its own to redraw.
       return JSON.stringify(['effect', overlay.effectId]);
@@ -661,9 +672,61 @@ async function rasteriseImage(overlay: ImageOverlay, ctx: RasterContext, detail:
   const image = await loadImage(url);
   const width = ctx.output.width * OVERLAY_BASE.image * layerScale(overlay.scale);
   const aspect = intrinsicAspect(image, url) ?? (overlay.aspect > 0 && Number.isFinite(overlay.aspect) ? overlay.aspect : 1);
+  const cutout = overlay.cutout;
+  const matte = cutout && ctx.matte ? await ctx.matte(overlay.uri, cutoutTarget(cutout)) : null;
+  // A matte in which nothing stood out would take the whole photo away: the photo stays whole, as it
+  // does while the matte is still being looked for.
+  if (cutout && matte && (matte.meta?.coverage ?? 1) >= MIN_CUTOUT_COVERAGE) {
+    const cut = await drawCutoutPhoto(image, width, width / aspect, ctx, detail, cutout, matte);
+    if (cut) return cut;
+  }
   // Not trimmed: a photo's frame is the photo, and a customer who has a picture with transparent
   // edges put it there on purpose - cropping it would silently change the picture they chose.
   return drawImageLayer(image, width, width / aspect, ctx, false, detail);
+}
+
+/** How soft a cut-out photo's shadow is, and how far it falls, as fractions of the photo's shorter side. */
+const SHADOW_BLUR = 0.035;
+const SHADOW_DROP = 0.018;
+const SHADOW_COLOR = 'rgba(0, 0, 0, 0.42)';
+
+/**
+ * A photo with its background taken away ([ImageOverlay.cutout]), drawn by [cutoutPhoto] - in a worker
+ * where the page can run one - and trimmed to the subject, so the box the editor draws round the layer
+ * is the subject's. Null where the photo's pixels cannot be read - a canvas another origin's image has
+ * tainted - and the photo is then drawn whole.
+ */
+function drawCutoutPhoto(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+  ctx: RasterContext,
+  detail: number,
+  cutout: NonNullable<ImageOverlay['cutout']>,
+  matte: RasterMatte,
+): Promise<RasterisedOverlay | null> {
+  const wPx = Math.max(1, Math.round(width));
+  const hPx = Math.max(1, Math.round(height));
+  const outline = cutout.outline && cutout.outline.width > 0 ? cutout.outline : null;
+  return cutoutPhotoInWorker(image, {
+    wPx,
+    hPx,
+    k: bitmapRatio(wPx, hPx, ctx, detail),
+    // A copy of just the cells: the frame can be a view into the whole track, and this goes to a worker.
+    cells: matte.frame(0).slice(),
+    matteWidth: matte.width,
+    matteHeight: matte.height,
+    soft: cutout.soft ?? 0,
+    shift: cutout.shift ?? 0,
+    outline: outline ? { color: cssRgb(outline.color), width: outline.width * MAX_CUTOUT_OUTLINE } : null,
+    shadow: cutout.shadow ? { blur: SHADOW_BLUR, drop: SHADOW_DROP, color: SHADOW_COLOR } : null,
+  });
+}
+
+/** `#rrggbb` as the three 0..1 channels [cutoutPixels] takes. */
+function cssRgb(colour: string): [number, number, number] {
+  const channel = (at: number): number => parseInt(colour.slice(at, at + 2), 16) / 255;
+  return [channel(1), channel(3), channel(5)];
 }
 
 /**

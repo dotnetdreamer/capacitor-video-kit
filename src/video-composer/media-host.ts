@@ -1,7 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 
 import { debugWarn } from '../host/debug';
-import { browserMediaHost, browserSubjects, mediaDuration, withoutExtension } from '../host/defaults';
+import { browserMatte, browserMediaHost, browserSubjects, mediaDuration, withoutExtension } from '../host/defaults';
 import type {
   EditorMediaHost,
   EditorSoundCatalogue,
@@ -15,7 +15,7 @@ import type {
 import { readVoiceTake } from '../host/read-file';
 import { webViewUrl } from '../host/web-view-url';
 
-import type { FindSubjectsResult } from './definitions';
+import type { FindMatteResult, FindSubjectsResult, MatteStage, MatteTarget } from './definitions';
 import { VideoComposer } from './index';
 import { withNativeFile } from './render-inputs';
 
@@ -117,6 +117,13 @@ export interface ComposerMediaHostOptions {
    * so that Focus is not a tool whose sheet only says the phone cannot do it.
    */
   subjects?: false;
+
+  /**
+   * Taking a clip's or a photo's background away ([EditorMediaHost.findMatte]). Left out, the
+   * composer's own segmenters on Android and iOS and MediaPipe's in a page; `false` is none anywhere,
+   * and the toolbar does not offer Cutout.
+   */
+  cutout?: false;
 }
 
 /**
@@ -145,10 +152,15 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
   const native = Capacitor.isNativePlatform();
   const voice = options.voice ?? (native ? nativeVoice() : false);
   const subjects = options.subjects !== false;
+  const cutout = options.cutout !== false;
   const { pickMedia, ...browserMembers } = browser;
   if (!subjects) {
     delete browserMembers.findSubjects;
     delete browserMembers.stopFindingSubjects;
+  }
+  if (!cutout) {
+    delete browserMembers.findMatte;
+    delete browserMembers.stopFindingMattes;
   }
 
   return {
@@ -168,6 +180,12 @@ export function composerMediaHost(options: ComposerMediaHostOptions = {}): Edito
       ? {
           findSubjects: (source: EditorSource, onProgress: (progress: number) => void) => nativeSubjects(source, onProgress),
           stopFindingSubjects: (keep: readonly EditorSource[]) => nativeStopFindingSubjects(keep),
+        }
+      : {}),
+    ...(native && cutout
+      ? {
+          findMatte: (source: EditorSource, target: MatteTarget, onProgress: (stage: MatteStage, progress: number) => void) => nativeMatte(source, target, onProgress),
+          stopFindingMattes: (keep: readonly EditorSource[]) => nativeStopFindingMattes(keep),
         }
       : {}),
     sounds: soundLibrary(options.sounds, browser, native),
@@ -335,6 +353,43 @@ async function nativeSubjects(source: EditorSource, onProgress: (progress: numbe
     throw error;
   } finally {
     void listening.remove();
+  }
+}
+
+/**
+ * [EditorMediaHost.findMatte] on a phone: the composer's own search on the file itself, its progress
+ * events for this file and target passed on as they come. Null where the phone has nothing to look
+ * with - an Android app built with neither segmenter - and the browser's search for a source with no
+ * file behind it, which only the page can read.
+ */
+async function nativeMatte(source: EditorSource, target: MatteTarget, onProgress: (stage: MatteStage, progress: number) => void): Promise<FindMatteResult | null> {
+  if (!source.sourcePath) return await browserMatte(source, target, onProgress);
+  // A photo layer the editor's default picker read in - and one a draft brought back - is a `blob:`
+  // URL the page holds, which no native call can open: it is written out as a file for the search,
+  // which reads it once, and the file is deleted after (withNativeFile). Before that the search was
+  // handed the blob's name and failed, every time, so no photo was ever cut out on a phone.
+  return await withNativeFile(source.sourcePath, async uri => {
+    const listening = await VideoComposer.addListener('matteProgress', event => {
+      if (event.uri === uri && event.target === target) onProgress(event.stage, event.progress);
+    });
+    try {
+      return await VideoComposer.findMatte({ uri, target, ...(source.kind === 'image' ? { kind: 'image' as const } : {}) });
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code === 'unsupported' || code === 'UNIMPLEMENTED') return null;
+      throw error;
+    } finally {
+      void listening.remove();
+    }
+  });
+}
+
+/** [EditorMediaHost.stopFindingMattes] on a phone, by the files the searches are of. Quiet, like a drop of copies. */
+async function nativeStopFindingMattes(keep: readonly EditorSource[]): Promise<void> {
+  try {
+    await VideoComposer.stopFindingMattes({ keep: keep.flatMap(source => (source.sourcePath ? [source.sourcePath] : [])) });
+  } catch (error) {
+    debugWarn('[composer stopFindingMattes]', error);
   }
 }
 

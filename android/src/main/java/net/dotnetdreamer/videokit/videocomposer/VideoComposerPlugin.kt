@@ -125,6 +125,7 @@ class VideoComposerPlugin : Plugin() {
         RenderNotification.ensureChannel(appContext)
         // labelMedia's model, where it comes from Play services, on its way before anything asks.
         SceneLabeler.prepare(appContext)
+        MatteSegmenter.prepare(appContext)
         pluginScope.launch {
             JobFolders.sweep(appContext, System.currentTimeMillis())
             JobRegistry.sweep(android.os.SystemClock.elapsedRealtime())
@@ -188,6 +189,7 @@ class VideoComposerPlugin : Plugin() {
         // being searched for subjects holds a decoder too, and gives way the same way.
         PreviewProxy.yieldToRender()
         SubjectFinder.yieldToRender()
+        MatteFinder.yieldToRender()
         call.resolve(JSObject().put("jobId", spec.jobId))
 
         // Asked for now, while the Activity is certainly visible: from API 31 a foreground service
@@ -280,6 +282,18 @@ class VideoComposerPlugin : Plugin() {
                     return
                 }
             }
+            // And every cut-out clip's matte track, by the same rule.
+            val matteTracks = HashMap<String, MatteTrack>()
+            for (clip in spec.clips + tails + spec.tracks.flatMap { it.clips }) {
+                val cutout = clip.cutout ?: continue
+                if (matteTracks.containsKey(cutout.uri)) continue
+                matteTracks[cutout.uri] = try {
+                    MatteFinder.trackForRender(appContext, cutout.uri)
+                } catch (e: Exception) {
+                    failJob(job, FailureCodes.UNREADABLE_INPUT, "the matte track of ${clip.key} cannot be read: ${ErrorMapping.describe(e)}", clipKey = clip.key)
+                    return
+                }
+            }
             for (uri in listOfNotNull(spec.audio.music?.uri) + spec.audio.musicTracks.flatten().map { it.uri } + spec.audio.voiceover.map { it.uri }) {
                 if (probes.containsKey(uri)) continue
                 probes[uri] = try {
@@ -335,6 +349,7 @@ class VideoComposerPlugin : Plugin() {
             job.plan = RenderPlan.build(spec.withoutOverlayPixels(), probes)
             job.overlays = overlays
             job.subjectTracks = subjectTracks
+            job.matteTracks = matteTracks
             main.post { startTransformer(job, overlays, relaxEncoder = false) }
         } catch (e: Exception) {
             Log.e(TAG, "pre-flight failed for ${job.jobId}", e)
@@ -366,6 +381,7 @@ class VideoComposerPlugin : Plugin() {
                 overlays,
                 job.lastFrameUs,
                 job.subjectTracks,
+                job.matteTracks,
             )
             val transformer = CompositionBuilder
                 .newTransformer(appContext, job.plan, relaxEncoder, job.bytesWritten)
@@ -1017,6 +1033,75 @@ class VideoComposerPlugin : Plugin() {
             }
         }
         call.resolve(JSObject().put("stopped", SubjectFinder.stopAllBut(keep)))
+    }
+
+    /* ======================================================================================== */
+    /* findMatte                                                                                 */
+    /* ======================================================================================== */
+
+    /**
+     * A video's or a picture's subject, kept soft and written into a matte track ([MatteFinder]): the
+     * file a clip's cutout names. Resolves at once, `cached`, from a track still in the cache. `fps` is
+     * brought into range rather than refused; a `kind` or `target` it does not know is refused. Progress
+     * arrives as `matteProgress` - `preparing` while Play services downloads the subject segmenter, then
+     * `looking` - about four a second and the last of each stage.
+     */
+    @PluginMethod
+    fun findMatte(call: PluginCall) {
+        val uri = call.getString("uri")
+        if (uri.isNullOrEmpty()) {
+            call.reject("uri is required", INVALID_SPEC)
+            return
+        }
+        val kindName = call.getString("kind")
+        val kind = kindName?.let { MediaLabels.Kind.of(it) }
+        if (kindName != null && kind == null) {
+            call.reject("kind must be 'video' or 'image'", INVALID_SPEC)
+            return
+        }
+        val target = call.getString("target") ?: "subject"
+        if (target != "subject" && target != "people") {
+            call.reject("target must be 'subject' or 'people'", INVALID_SPEC)
+            return
+        }
+        val fps = MatteFinder.fpsFor((call.data.opt("fps") as? Number)?.toDouble(), target)
+        val throttle = MatteFinder.ProgressThrottle()
+
+        pluginScope.launch {
+            try {
+                val result = MatteFinder.find(context.applicationContext, uri, kind, target, fps) { stage, progress ->
+                    if (throttle.offer(stage, progress, android.os.SystemClock.elapsedRealtime())) {
+                        // The uri and target as they were asked, which is what the page matches the event to.
+                        emit("matteProgress", JSObject().put("uri", uri).put("target", target).put("stage", stage).put("progress", progress), retain = false)
+                    }
+                }
+                call.resolve(result.toJson())
+            } catch (e: MatteFinder.UnreadableException) {
+                call.reject(e.message, FailureCodes.UNREADABLE_INPUT)
+            } catch (e: MatteFinder.UnsupportedException) {
+                call.reject(e.message, FailureCodes.UNSUPPORTED)
+            } catch (e: MatteFinder.StoppedException) {
+                call.reject(e.message, FailureCodes.CANCELLED)
+            } catch (e: Exception) {
+                val mapped = ErrorMapping.map(e)
+                val code = if (mapped.code == FailureCodes.UNREADABLE_INPUT) FailureCodes.UNREADABLE_INPUT else FailureCodes.UNKNOWN
+                call.reject(mapped.message, code)
+            }
+        }
+    }
+
+    /** Stops every matte search not among `keep` ([MatteFinder.stopAllBut]). Never rejects. */
+    @PluginMethod
+    fun stopFindingMattes(call: PluginCall) {
+        val keep = HashSet<String>()
+        val asked = call.data.opt("keep") as? org.json.JSONArray
+        if (asked != null) {
+            for (i in 0 until asked.length()) {
+                val uri = asked.optString(i, "")
+                if (uri.isNotEmpty()) keep += uri
+            }
+        }
+        call.resolve(JSObject().put("stopped", MatteFinder.stopAllBut(keep)))
     }
 
     /* ======================================================================================== */

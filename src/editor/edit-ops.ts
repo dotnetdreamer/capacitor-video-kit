@@ -31,6 +31,8 @@ import {
   type EditAudioClip,
   type EditAudioTrack,
   type EditFit,
+  type EditCutout,
+  type EditCutoutOutline,
   type EditFocus,
   type EditManifest,
   type EditMusic,
@@ -44,6 +46,7 @@ import {
   type FocusSubjects,
   type LayoutAnimation,
 } from './edit-manifest';
+import { normaliseCutout, sameCutout } from './cutout';
 import { MAX_FOCUS_CHANGES, normaliseFocus, sameFocus } from './focus';
 import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
@@ -191,8 +194,8 @@ export function trackIdOfClip(manifest: EditManifest, clipId: string): string | 
 export function patchClip(
   manifest: EditManifest,
   clipId: string,
-  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image' | 'focus'>> &
-    ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null; focus?: EditFocus | null },
+  patch: Partial<Omit<EditClip, 'id' | 'crop' | 'rect' | 'fit' | 'transitionIn' | 'image' | 'focus' | 'cutout'>> &
+    ClipFramingPatch & { transitionIn?: EditTransition | null; image?: true | null; focus?: EditFocus | null; cutout?: EditCutout | null },
 ): EditManifest {
   const current = findClip(manifest, clipId);
   if (!current) return manifest;
@@ -208,6 +211,13 @@ export function patchClip(
     const focus = patch.focus ? normaliseFocus(patch.focus) : undefined;
     if (focus) next.focus = focus;
     else delete next.focus;
+  }
+  if ('cutout' in patch) {
+    const cutout = patch.cutout ? normaliseCutout(patch.cutout) : undefined;
+    // A shadow is a photo layer's look; a clip has none to keep.
+    if (cutout) delete cutout.shadow;
+    if (cutout) next.cutout = sameCutout(cutout, current.cutout) ? current.cutout! : cutout;
+    else delete next.cutout;
   }
   if (sameClip(current, next)) return manifest;
   if (manifest.clips.some(clip => clip.id === clipId)) {
@@ -513,6 +523,61 @@ function focusForNewSource(focus: EditFocus): EditFocus {
   const next: EditFocus = { ...focus, subjects: Array.isArray(focus.subjects) ? 'main' : focus.subjects };
   delete next.changes;
   return next;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Cutout                                                                                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * A change to a cutout's look: each key given is set, and a `null` takes it off - `fill: null` is
+ * see-through again, `outline: null` no line - while every key not given is left as it was.
+ */
+export interface CutoutPatch {
+  target?: 'subject' | 'people';
+  soft?: number;
+  shift?: number;
+  fill?: string | null;
+  outline?: EditCutoutOutline | null;
+  shadow?: boolean;
+}
+
+/** `cutout` with `patch` applied, held to what the manifest keeps ([normaliseCutout]). */
+function patchedCutout(cutout: EditCutout, patch: CutoutPatch): EditCutout {
+  const next: Record<string, unknown> = { ...cutout };
+  if (patch.target !== undefined) next['target'] = patch.target === 'people' ? 'people' : undefined;
+  if (patch.soft !== undefined) next['soft'] = patch.soft;
+  if (patch.shift !== undefined) next['shift'] = patch.shift;
+  if (patch.fill !== undefined) next['fill'] = patch.fill ?? undefined;
+  if (patch.outline !== undefined) next['outline'] = patch.outline ?? undefined;
+  if (patch.shadow !== undefined) next['shadow'] = patch.shadow || undefined;
+  return normaliseCutout(next) ?? {};
+}
+
+/** A segment's cutout, or `null` to take it off and give the footage its background back. */
+export function setClipCutout(manifest: EditManifest, clipId: string, cutout: EditCutout | null): EditManifest {
+  return patchClip(manifest, clipId, { cutout });
+}
+
+/** A segment's cutout with `patch` applied; nothing for a segment that has none. */
+export function patchClipCutout(manifest: EditManifest, clipId: string, patch: CutoutPatch): EditManifest {
+  const cutout = findClip(manifest, clipId)?.cutout;
+  if (!cutout) return manifest;
+  return patchClip(manifest, clipId, { cutout: patchedCutout(cutout, patch) });
+}
+
+/** A photo layer's cutout, or `null` to take it off. Nothing for a layer that is not a photo. */
+export function setOverlayCutout(manifest: EditManifest, overlayId: string, cutout: EditCutout | null): EditManifest {
+  const overlay = findOverlay(manifest, overlayId);
+  if (!overlay || overlay.kind !== 'image') return manifest;
+  return patchOverlay(manifest, overlayId, { cutout: cutout ?? undefined });
+}
+
+/** A photo layer's cutout with `patch` applied; nothing for one that has none. */
+export function patchOverlayCutout(manifest: EditManifest, overlayId: string, patch: CutoutPatch): EditManifest {
+  const overlay = findOverlay(manifest, overlayId);
+  if (!overlay || overlay.kind !== 'image' || !overlay.cutout) return manifest;
+  return patchOverlay(manifest, overlayId, { cutout: patchedCutout(overlay.cutout, patch) });
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -1076,6 +1141,8 @@ export function patchOverlay(manifest: EditManifest, id: string, patch: Partial<
   // The same moves handed in again as a new object - a sheet re-picking the preset it is showing -
   // are the same animation, and so no change and no undo step.
   if (next.animation && current.animation && sameOverlayAnimation(next.animation, current.animation)) next.animation = current.animation;
+  // And a cutout that says the same thing, for the same reason.
+  if (next.kind === 'image' && current.kind === 'image' && next.cutout && sameCutout(next.cutout, current.cutout)) next.cutout = current.cutout;
   if (sameFields(current, next)) return manifest;
   return {
     ...manifest,
@@ -1190,6 +1257,16 @@ function normaliseLayer<T extends EditOverlay>(overlay: T): T {
   const animation = normaliseOverlayAnimation(overlay.animation);
   if (animation) layer.animation = animation;
   else delete layer.animation;
+  // A photo's cutout, by the same rule, and none on any other kind: text and stickers have no
+  // background to take away. A layer keeps no fill, which would make it a card again.
+  const held = layer as EditOverlay & { cutout?: EditCutout | null };
+  const cutout = overlay.kind === 'image' ? normaliseCutout(held.cutout) : undefined;
+  if (cutout) {
+    delete cutout.fill;
+    held.cutout = cutout;
+  } else {
+    delete held.cutout;
+  }
   return layer;
 }
 
@@ -2227,7 +2304,8 @@ function sameClip(a: EditClip, b: EditClip): boolean {
     sameRect(a.rect, b.rect) &&
     sameTransition(a.transitionIn, b.transitionIn) &&
     !!a.image === !!b.image &&
-    sameFocus(a.focus, b.focus)
+    sameFocus(a.focus, b.focus) &&
+    sameCutout(a.cutout, b.cutout)
   );
 }
 

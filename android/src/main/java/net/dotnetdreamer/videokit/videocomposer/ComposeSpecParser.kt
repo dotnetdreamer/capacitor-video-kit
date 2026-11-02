@@ -216,6 +216,7 @@ object ComposeSpecParser {
             // Last of the clip's fields, as every parser reads it, so a clip broken somewhere else
             // reports the same first failure it always did.
             focus = parseFocus(o.opt("focus"), "$path.focus"),
+            cutout = parseCutout(o.opt("cutout"), "$path.cutout"),
         )
     }
 
@@ -290,6 +291,42 @@ object ComposeSpecParser {
             dim = dim,
             invert = o.opt("invert") == true,
         )
+    }
+
+    /**
+     * A clip's cutout, or null for none - by the rules `ComposeCutout` states for every parser, check for
+     * check and in the order of `normaliseComposeCutout` in `src/editor/cutout.ts`: `uri`, `soft`,
+     * `shift`, `fill`, then the outline's `color` and `width`. REFUSED, as shape errors naming the part:
+     * not an object, an empty or missing `uri`, a `soft` or `shift` there and not a finite number, a
+     * `fill` not three finite numbers, an `outline` not an object or whose `color` is not three finite
+     * numbers or whose `width` is not a finite number. CLAMPED: `soft` to 0..1, `shift` to -1..1, every
+     * channel to 0..1, an outline's width to 0..[MAX_CUTOUT_OUTLINE]; one of no width is DROPPED. Keys
+     * it does not know are ignored.
+     */
+    private fun parseCutout(value: Any?, path: String): Cutout? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val uri = (o.opt("uri") as? String)?.takeIf { it.isNotEmpty() } ?: throw SpecException("$path.uri")
+        fun amount(key: String, min: Double, max: Double): Float = when (val raw = o.opt(key)) {
+            null, JSONObject.NULL -> 0f
+            else -> (finiteNumber(raw) ?: throw SpecException("$path.$key")).coerceIn(min, max).toFloat()
+        }
+        val soft = amount("soft", 0.0, 1.0)
+        val shift = amount("shift", -1.0, 1.0)
+        fun rgb(raw: Any?, at: String): List<Float> {
+            val array = raw as? JSONArray ?: throw SpecException(at)
+            if (array.length() != 3) throw SpecException(at)
+            return (0 until 3).map { (finiteNumber(array.opt(it)) ?: throw SpecException(at)).coerceIn(0.0, 1.0).toFloat() }
+        }
+        val fill = o.opt("fill").let { if (it == null || it == JSONObject.NULL) null else rgb(it, "$path.fill") }
+        val outline = o.opt("outline").let { raw ->
+            if (raw == null || raw == JSONObject.NULL) return@let null
+            val line = raw as? JSONObject ?: throw SpecException("$path.outline")
+            val color = rgb(line.opt("color"), "$path.outline.color")
+            val width = (finiteNumber(line.opt("width")) ?: throw SpecException("$path.outline.width")).coerceIn(0.0, MAX_CUTOUT_OUTLINE)
+            if (width > 0.0) CutoutOutline(color, width) else null
+        }
+        return Cutout(uri, soft, shift, fill, outline)
     }
 
     /**
@@ -1028,6 +1065,15 @@ object ComposeSpecParser {
      * a kernel the size of the frame.
      */
     const val MAX_FOCUS_BLUR = 0.1
+
+    /** The widest outline a cutout may have, a fraction of the source's shorter side - `MAX_CUTOUT_OUTLINE`. */
+    const val MAX_CUTOUT_OUTLINE = 0.04
+
+    /** The refinement's window, `2 * R + 1` cells across - `CUTOUT_RADIUS`. */
+    const val CUTOUT_RADIUS = 2
+
+    /** The refinement's regularisation, in luma squared - `CUTOUT_EPSILON`. */
+    const val CUTOUT_EPSILON = 0.004f
 
     /** The largest subject id: a track holds one byte a cell, 0 being the background. */
     private const val MAX_SUBJECT_ID = 255

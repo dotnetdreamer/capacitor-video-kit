@@ -1,10 +1,11 @@
-import { emptyManifest, outputFor, rasteriseOverlay, type EditOverlay } from '../editor';
+import { emptyManifest, encodeMatteTrack, matteKey, outputFor, parseMatteTrack, rasteriseOverlay, type EditOverlay } from '../editor';
 import { describe, expect, it, vi } from 'vitest';
 
 import { resolveEditorHost } from '../host/defaults';
 import { stickerUrl } from '../data/stickers';
 import { setEditorAssetPath } from '../index';
 import { EditorStore } from './editor-store';
+import type { MatteState } from './editor.types';
 import { OverlayBitmaps } from './overlay-bitmap';
 
 /*
@@ -171,6 +172,61 @@ describe('OverlayBitmaps handing its bitmaps to a render', () => {
     expect(rasterise).not.toHaveBeenCalled();
     expect(store.bitmaps.value.get('fx')).toMatchObject({ frameW: drawnFor.width, frameH: drawnFor.height });
     expect(bitmaps.renderContext(bigger).drawn?.(effect)).toBeNull();
+    bitmaps.dispose();
+  });
+});
+
+/*
+ * Compare in the Cutout sheet shows a cut-out photo as it was, background and all, so the photo's
+ * bitmap carries the photo whole beside it - the one it had a moment ago wherever that is still kept.
+ */
+describe('OverlayBitmaps keeping a cut-out photo whole, for Compare', () => {
+  const photo = { id: 'ph', kind: 'image', uri: 'file:///p.jpg', fileName: 'p.jpg', aspect: 1, cx: 0.5, cy: 0.5, scale: 1, rotationDeg: 0, opacity: 1, startMs: 0, endMs: 0 } as EditOverlay;
+  const cut = { ...photo, cutout: {} } as EditOverlay;
+  const matte: MatteState = {
+    status: 'ready',
+    result: { engine: 'mlkit', uri: 'file:///cache/matte-tracks/p.vkmt', cached: false, kind: 'image', target: 'subject', width: 2, height: 2, frames: 1, durationMs: 0, coverage: 0.5 },
+    track: parseMatteTrack(encodeMatteTrack({ width: 2, height: 2, times: [0], frames: [Uint8Array.of(255, 0, 255, 0)], meta: { engine: 'mlkit', kind: 'image', target: 'subject', durationMs: 0, fps: 0, coverage: 0.5 } })),
+  };
+
+  async function open(overlays: EditOverlay[]): Promise<{ store: EditorStore; bitmaps: OverlayBitmaps }> {
+    rasterise.mockClear();
+    const host = resolveEditorHost();
+    const store = new EditorStore(host);
+    store.load([], new Map(), { ...emptyManifest(), overlays });
+    store.mattes.value = new Map([[matteKey('file:///p.jpg', 'subject'), matte]]);
+    const bitmaps = new OverlayBitmaps(store, host);
+    await bitmaps.ensureFresh();
+    return { store, bitmaps };
+  }
+
+  it('keeps the bitmap the photo had before it was cut out, drawing nothing more for it', async () => {
+    const { store, bitmaps } = await open([photo]);
+    const before = store.bitmaps.value.get('ph');
+    rasterise.mockClear();
+
+    store.commit('Cutout', (m) => ({ ...m, overlays: [cut] }));
+    await bitmaps.ensureFresh();
+
+    expect(rasterise).toHaveBeenCalledTimes(1);
+    expect(rasterise.mock.calls[0]?.[0]).toMatchObject({ cutout: {} });
+    expect(store.bitmaps.value.get('ph')?.whole).toEqual({ png: before?.png, wPx: before?.wPx, hPx: before?.hPx });
+    bitmaps.dispose();
+  });
+
+  it('draws the photo whole once for a draft opened with its cutout made', async () => {
+    const { store, bitmaps } = await open([cut]);
+
+    expect(rasterise.mock.calls.map(([overlay]) => 'cutout' in overlay)).toEqual([true, false]);
+    expect(store.bitmaps.value.get('ph')?.whole).toBeDefined();
+    bitmaps.dispose();
+  });
+
+  it('never hands the photo whole to a render', async () => {
+    const { store, bitmaps } = await open([cut]);
+    const drawn = bitmaps.renderContext(store.manifest.value.output).drawn?.(cut);
+
+    expect(drawn && Object.keys(drawn).sort()).toEqual(['hPx', 'png', 'wPx']);
     bitmaps.dispose();
   });
 });

@@ -134,8 +134,11 @@ object SubjectFinder {
     /** The search being made was stopped for a render; it is made again once the render is done. */
     private class YieldedException : Exception("stopped for a render")
 
-    /** One search at a time, in the order they were asked for. */
-    private val queue = Mutex()
+    /**
+     * One search at a time, in the order they were asked for - [MatteFinder]'s too, which hold the same
+     * decoder and a segmenter of their own.
+     */
+    internal val searches = Mutex()
 
     /** A search being made, by its file name, so a second request for the same file joins the first. */
     private val inFlight = HashMap<String, CompletableDeferred<Result>>()
@@ -239,7 +242,7 @@ object SubjectFinder {
         if (!owner) return deferred.await()
 
         try {
-            val result = queue.withLock {
+            val result = searches.withLock {
                 // Made while this request waited its turn, by an earlier run of the app.
                 cached(file) ?: if (isDropped(name)) throw StoppedException() else findBetweenRenders(app, uri, resolved, rate, file, name, onProgress)
             }

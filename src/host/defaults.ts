@@ -9,7 +9,8 @@ import {
   qualityOf,
 } from '../editor';
 
-import type { FindSubjectsResult, PickAudioFileResult } from '../video-composer/definitions';
+import type { FindMatteResult, FindSubjectsResult, MatteStage, MatteTarget, PickAudioFileResult } from '../video-composer/definitions';
+import { findMatteInBrowser, stopFindingMattesInBrowser } from '../video-composer/web/mattes';
 import { findSubjectsInBrowser, stopFindingSubjectsInBrowser, SubjectsUnavailableError } from '../video-composer/web/subjects';
 import { resolve } from '../web-runtime/files';
 import { downloadBlob } from '../web-runtime/gallery';
@@ -325,6 +326,14 @@ export function browserMediaHost(): EditorMediaHost {
 
     async stopFindingSubjects(keep: readonly EditorSource[]): Promise<void> {
       stopFindingSubjectsInBrowser(keep.map(pageUrl));
+    },
+
+    findMatte(source: EditorSource, target: MatteTarget, onProgress: (stage: MatteStage, progress: number) => void): Promise<FindMatteResult | null> {
+      return browserMatte(source, target, onProgress);
+    },
+
+    async stopFindingMattes(keep: readonly EditorSource[]): Promise<void> {
+      stopFindingMattesInBrowser(keep.map(pageUrl));
     },
 
     sounds: browserSoundLibrary(),
@@ -667,6 +676,22 @@ export async function browserSubjects(source: EditorSource, onProgress: (progres
   if (!uri) throw new Error(`${source.fileName} has nothing the page can read`);
   try {
     return await findSubjectsInBrowser({ uri, ...(source.kind === 'image' ? { kind: 'image' as const } : {}) }, onProgress);
+  } catch (error) {
+    if (error instanceof SubjectsUnavailableError) return null;
+    throw error;
+  }
+}
+
+/**
+ * [EditorMediaHost.findMatte] in a page: MediaPipe's selfie segmenter over the source as the page
+ * reads it, kept soft, which keeps people whatever `target` asks. Null where MediaPipe will not load,
+ * and the Cutout sheet then says the browser cannot.
+ */
+export async function browserMatte(source: EditorSource, target: MatteTarget, onProgress: (stage: MatteStage, progress: number) => void): Promise<FindMatteResult | null> {
+  const uri = pageUrl(source);
+  if (!uri) throw new Error(`${source.fileName} has nothing the page can read`);
+  try {
+    return await findMatteInBrowser({ uri, target, ...(source.kind === 'image' ? { kind: 'image' as const } : {}) }, onProgress);
   } catch (error) {
     if (error instanceof SubjectsUnavailableError) return null;
     throw error;

@@ -184,8 +184,9 @@ describe('the questions the editor asks', () => {
     expect(renderFailed('no_space').message).toContain('not enough space');
     expect(renderFailed('unreadable_input').message).toContain('could not be read');
     expect(renderFailed('unknown').message).toContain('could not be built');
+    expect(renderFailed('cutout').message).toContain('One of your cutouts could not be made.');
 
-    for (const code of ['no_space', 'unreadable_input', 'unknown'] as const) {
+    for (const code of ['no_space', 'unreadable_input', 'cutout', 'unknown'] as const) {
       expect(renderFailed(code).message).toContain('You can try again, or post your clips without the edits.');
       expect(renderFailed(code).buttons.map(button => button.role)).toEqual(['plain', 'retry']);
     }

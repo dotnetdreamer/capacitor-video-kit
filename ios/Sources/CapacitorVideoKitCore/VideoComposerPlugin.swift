@@ -5,7 +5,7 @@ import UIKit
 /// The bridge surface of the video composer. Argument reading, rejections and event forwarding
 /// only: every decision lives in `ComposeSpecParser`, `JobRegistry`, `JobFolders`, `Thumbnailer`,
 /// `Gallery`, `GalleryLibrary`, `RetainedMedia`, `StagedRenderInputs`, `AudioFilePicker`,
-/// `EncodeSupport`, `MediaLabels`, `SubjectSearches` or `VoiceRecorder`, so this file stays readable next
+/// `EncodeSupport`, `MediaLabels`, `SubjectSearches`, `MatteSearches` or `VoiceRecorder`, so this file stays readable next
 /// to the Kotlin it mirrors.
 ///
 /// Capacitor calls each `@objc func` on its own serial queue, shared with every other plugin in the
@@ -18,7 +18,7 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "VideoComposerPlugin"
     public let jsName = "VideoComposer"
 
-    /// Thirty-two entries. A method missing from this list is rejected by the bridge before this class
+    /// Thirty-four entries. A method missing from this list is rejected by the bridge before this class
     /// is consulted, which is exactly what used to happen to `systemInsets`: the `@objc func` alone
     /// changes nothing. `addListener` / `removeListener` / `removeAllListeners` are special-cased
     /// by `CapacitorBridge.handleJSCall` before the list is read and stay off it.
@@ -31,6 +31,8 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "labelMedia", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "findSubjects", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopFindingSubjects", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "findMatte", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopFindingMattes", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "extractAudio", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "listSounds", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deleteSound", returnType: CAPPluginReturnPromise),
@@ -308,6 +310,65 @@ public class VideoComposerPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func stopFindingSubjects(_ call: CAPPluginCall) {
         let keep = call.getArray("keep")?.compactMap { $0 as? String }
         call.resolve(["stopped": SubjectSearches.shared.stop(keep: keep)])
+    }
+
+    // MARK: - findMatte
+
+    /// A video's or a picture's subject, kept soft and written into a matte track (`MatteFinder`,
+    /// `MatteSearches`): the file a clip's cutout names. Resolves at once, `cached`, from a track still in
+    /// the cache. `fps` is brought into 1...30 and rounded rather than refused, and is 10 for `subject` and
+    /// 15 for `people` when it is absent or not a number; a `kind` or a `target` it does not know is
+    /// refused, in Android's words. Progress arrives as `matteProgress` events - `looking`, about four a
+    /// second and a last one at 1; never `preparing`, because Vision has nothing to download.
+    @objc func findMatte(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), !uri.isEmpty else {
+            call.reject("uri is required", Reject.invalidSpec)
+            return
+        }
+        var kind: MediaLabelsResult.Kind?
+        if let named = call.getString("kind") {
+            guard let known = MediaLabelsResult.Kind(rawValue: named) else {
+                call.reject("kind must be 'video' or 'image'", Reject.invalidSpec)
+                return
+            }
+            kind = known
+        }
+        let target = call.getString("target") ?? "subject"
+        guard target == "subject" || target == "people" else {
+            call.reject("target must be 'subject' or 'people'", Reject.invalidSpec)
+            return
+        }
+        guard let url = JobFolders.fileURL(from: uri) else {
+            call.reject("unreadable uri \(uri)", Reject.unreadableInput)
+            return
+        }
+        let fps = MatteFinder.fps(call.getDouble("fps"), target: target)
+        let events = MatteProgressEvents(plugin: self, uri: uri, target: target)
+
+        Task {
+            do {
+                let finding = try await MatteSearches.shared.find(uri: uri, url: url, kind: kind, target: target, fps: fps,
+                                                                  progress: { events.send($0) })
+                call.resolve(finding.json)
+            } catch let MatteFinder.FindError.unreadable(message) {
+                call.reject(message, Reject.unreadableInput)
+            } catch let MatteFinder.FindError.unsupported(message) {
+                call.reject(message, ComposeFailureCode.unsupported.rawValue)
+            } catch is CancellationError {
+                call.reject("cancelled", ComposeFailureCode.cancelled.rawValue)
+            } catch {
+                // Vision failing, or the track that would not write: the platform's own words.
+                call.reject(ErrorMapping.describe(error), ComposeFailureCode.unknown.rawValue)
+            }
+        }
+    }
+
+    /// Stops every search `findMatte` is running or has waiting that was not asked for by a `uri` in
+    /// `keep` - all of them without one - and answers how many it stopped; their calls reject `cancelled`.
+    /// Never rejects, `stopFindingSubjects`' reading of a `keep` that is not a list of names included.
+    @objc func stopFindingMattes(_ call: CAPPluginCall) {
+        let keep = call.getArray("keep")?.compactMap { $0 as? String }
+        call.resolve(["stopped": MatteSearches.shared.stop(keep: keep)])
     }
 
     // MARK: - Sound library
@@ -1021,5 +1082,25 @@ final class SubjectsProgressEvents: @unchecked Sendable {
 
     func send(_ progress: Double) {
         plugin?.emit("subjectsProgress", ["uri": uri, "progress": progress], retain: false)
+    }
+}
+
+/// `matteProgress` for one `findMatte` call: `{ uri, target, stage, progress }`, the `uri` and `target` as
+/// they were asked - what the page matches an event to - and the stage always `looking`: Vision's models
+/// are on the device, so there is no `preparing` to report. Held and never retained for
+/// `SubjectsProgressEvents`' reasons.
+final class MatteProgressEvents: @unchecked Sendable {
+    private weak var plugin: VideoComposerPlugin?
+    private let uri: String
+    private let target: String
+
+    init(plugin: VideoComposerPlugin, uri: String, target: String) {
+        self.plugin = plugin
+        self.uri = uri
+        self.target = target
+    }
+
+    func send(_ progress: Double) {
+        plugin?.emit("matteProgress", ["uri": uri, "target": target, "stage": "looking", "progress": progress], retain: false)
     }
 }

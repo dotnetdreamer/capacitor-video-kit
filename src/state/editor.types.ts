@@ -1,4 +1,4 @@
-import type { FindSubjectsResult, RasterisedOverlay, SubjectTrack } from '../editor';
+import type { EditClip, FindMatteResult, FindSubjectsResult, ImageOverlay, MatteStage, MatteTrack, RasterisedOverlay, SubjectTrack } from '../editor';
 
 /** What the customer has picked on the timeline or the preview. At most one thing at a time. */
 export type EditorSelection =
@@ -34,7 +34,8 @@ export type EditorPanel =
   | 'background'
   | 'audioEffects'
   | 'focus'
-  | 'slip';
+  | 'slip'
+  | 'cutout';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the
@@ -109,6 +110,11 @@ export interface OverlayBitmap extends RasterisedOverlay {
    */
   frameW: number;
   frameH: number;
+  /**
+   * A cut-out photo as it is without its cutout, background and all: what the preview shows while
+   * Compare is held ([EditorStore.cutoutCompare]). The preview's alone, never handed to a render.
+   */
+  whole?: RasterisedOverlay;
 }
 
 /**
@@ -136,3 +142,22 @@ export type SubjectTrackState =
   | { status: 'finding'; progress: number }
   | { status: 'ready'; result: FindSubjectsResult; track: SubjectTrack }
   | { status: 'none'; reason: 'unsupported' | 'failed' };
+
+/**
+ * How far a source's matte has got, as `EditorMedia` writes it into [EditorStore.mattes] and the
+ * Cutout sheet, the preview and the rasteriser read it - a subject track's states, and a stage:
+ *
+ *  - `finding`: the host is getting its engine ready (`preparing`, the first time on a phone) or
+ *    looking (`looking`), `progress` of the way through the stage;
+ *  - `ready`: the host's answer, with its track read and ready to draw a cutout from;
+ *  - `none`: nothing to draw one from - `unsupported`, a platform with nothing to look with, or
+ *    `failed`, a search that went wrong. A stopped search is not filed at all, so the next look asks
+ *    again.
+ */
+export type MatteState =
+  | { status: 'finding'; stage: MatteStage; progress: number }
+  | { status: 'ready'; result: FindMatteResult; track: MatteTrack }
+  | { status: 'none'; reason: 'unsupported' | 'failed' };
+
+/** What the Cutout sheet is about: a segment on the timeline, or a photo layer. */
+export type CutoutSubject = { kind: 'clip'; clip: EditClip } | { kind: 'overlay'; overlay: ImageOverlay };

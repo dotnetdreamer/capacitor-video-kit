@@ -6,7 +6,20 @@
  * those through a [RasterContext], once, and both its preview and its render pass the same one.
  */
 
+import type { MatteTarget } from '../video-composer/definitions';
 import type { EditOverlay } from './edit-manifest';
+/**
+ * What the rasteriser reads of a matte track: its grid, its first frame and how much of it the subject
+ * covers. A shape rather than the `MatteTrack` class on purpose: the class has private members, which
+ * make TypeScript compare it by name, and the plugin build and the editor build each compile a copy -
+ * so a host holding one build's render host and the other's editor types could not hand one to the other.
+ */
+export interface RasterMatte {
+  readonly width: number;
+  readonly height: number;
+  readonly meta: { readonly coverage: number } | null;
+  frame(index: number): Uint8Array;
+}
 
 /** A text look: a font plus the few extras a canvas can draw identically everywhere. */
 export interface TextStyleSpec {
@@ -47,6 +60,16 @@ export interface RasterContext {
    * anything it is unsure of it answers null for, and that layer is drawn here as it always was.
    */
   drawn?(overlay: EditOverlay): RasterisedOverlay | null;
+  /**
+   * The matte a photo layer's cutout is drawn from ([ImageOverlay.cutout]): the track `findMatte`
+   * wrote for the photo at `uri` keeping `target`, already read - or null where there is none, and
+   * the photo is drawn whole. Resolves once a search still running has settled, so a render drawn
+   * while the photo is being looked at waits for it rather than posting the background.
+   *
+   * Optional: a host without one draws every photo whole, as one that cannot look for subjects does.
+   * The preview and the render are handed the same tracks, so the two draw the same bitmap.
+   */
+  matte?(uri: string, target: MatteTarget): Promise<RasterMatte | null>;
 }
 
 /**

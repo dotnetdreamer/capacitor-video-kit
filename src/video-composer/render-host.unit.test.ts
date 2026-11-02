@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ComposeError, ComposeResult, ComposeSpec, EncodeSupport, FindSubjectsOptions, FindSubjectsResult, StageRenderInputOptions } from './definitions';
+import type {
+  ComposeError,
+  ComposeResult,
+  ComposeSpec,
+  EncodeSupport,
+  FindMatteOptions,
+  FindMatteResult,
+  FindSubjectsOptions,
+  FindSubjectsResult,
+  StageRenderInputOptions,
+} from './definitions';
 
 /*
  * The platform and the plugin, stood in for, as `render-inputs.unit.test.ts` does and for its
@@ -22,6 +32,7 @@ const bridge = vi.hoisted(() => ({
   stageRenderInput: vi.fn<(options: StageRenderInputOptions) => Promise<{ uri: string }>>(),
   releaseRenderInputs: vi.fn<(options: { uris: string[] }) => Promise<void>>(),
   findSubjects: vi.fn<(options: FindSubjectsOptions) => Promise<FindSubjectsResult>>(),
+  findMatte: vi.fn<(options: FindMatteOptions) => Promise<FindMatteResult>>(),
   /** The page's own search, `browserSubjects`: what a phone asks about a clip it holds as a blob. */
   pageSubjects: vi.fn<(source: EditorSource) => Promise<FindSubjectsResult | null>>(),
 }));
@@ -38,6 +49,7 @@ vi.mock('@capacitor/core', () => ({
     stageRenderInput: bridge.stageRenderInput,
     releaseRenderInputs: bridge.releaseRenderInputs,
     findSubjects: bridge.findSubjects,
+    findMatte: bridge.findMatte,
   }),
   WebPlugin: class {},
 }));
@@ -53,7 +65,7 @@ vi.mock('./render-inputs', async (importOriginal) => {
   return { ...actual, withNativeRenderInputs: vi.fn(actual.withNativeRenderInputs) };
 });
 
-import { defaultFocus, reconcileManifest, setClipFocus, type EditManifest, type RasterContext } from '../editor';
+import { defaultCutout, defaultFocus, reconcileManifest, setClipCutout, setClipFocus, type EditManifest, type RasterContext } from '../editor';
 import { setEditorDebug } from '../host/debug';
 import { RenderFailedError, type EditorSource, type RenderRequest } from '../host/host.types';
 
@@ -152,6 +164,7 @@ beforeEach(() => {
   bridge.stageRenderInput.mockReset();
   bridge.releaseRenderInputs.mockReset().mockResolvedValue();
   bridge.findSubjects.mockReset();
+  bridge.findMatte.mockReset();
   bridge.pageSubjects.mockReset();
   vi.mocked(withNativeRenderInputs).mockClear();
 });
@@ -280,6 +293,37 @@ describe('composerRenderHost: the job', () => {
     finishing();
     await host().render(request({}, [{ ...CLIP, playbackUrl: 'https://localhost/_capacitor_file_/clips/a.mp4' }]));
     expect(composed().clips[0]!.uri).toBe(CLIP.sourcePath);
+  });
+});
+
+describe('composerRenderHost: cutout', () => {
+  /** A render of `sources` with the first one's clip cut out, at the Cutout sheet's defaults. */
+  function cutOut(sources: EditorSource[] = [CLIP]): RenderRequest {
+    const plain = request({}, sources);
+    const manifest = setClipCutout(plain.manifest, plain.manifest.clips[0]!.id, defaultCutout());
+    return { ...plain, manifest, raster: raster(manifest) };
+  }
+
+  const MATTE: FindMatteResult = { engine: 'mlkit', uri: 'file:///cache/matte-tracks/a.vkmt', cached: true, kind: 'video', target: 'subject', width: 288, height: 512, frames: 20, durationMs: 2000, coverage: 0.3 };
+
+  it('draws a cut-out clip from the matte the composer answers with', async () => {
+    finishing();
+    bridge.findMatte.mockResolvedValue(MATTE);
+
+    await host().render(cutOut());
+    expect(bridge.findMatte).toHaveBeenCalledWith({ uri: CLIP.sourcePath, target: 'subject' });
+    expect(composed().clips[0]!.cutout).toMatchObject({ uri: MATTE.uri });
+  });
+
+  /* Drawn whole, the post would show the very background the customer took away. */
+  it('fails the render as cutout, naming the source, when a cut-out clip has no matte', async () => {
+    finishing();
+    bridge.findMatte.mockRejectedValue(Object.assign(new Error('the segmenter broke'), { code: 'unknown' }));
+
+    const failure = await host().render(cutOut()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RenderFailedError);
+    expect(failure).toMatchObject({ code: 'cutout', sourceKey: CLIP.key });
+    expect(bridge.compose).not.toHaveBeenCalled();
   });
 });
 

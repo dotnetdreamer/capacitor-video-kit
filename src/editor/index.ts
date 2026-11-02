@@ -22,6 +22,9 @@ export * from './sound-effects';
 export * from './audio-effect-windows';
 export * from './focus';
 export * from './subject-track';
+export * from './cutout';
+export * from './cutout-pixels';
+export * from './matte-track';
 
 /**
  * The scenes `labelMedia`'s labels are read into, and the reader itself. Not the editor's, but pure
@@ -40,12 +43,34 @@ export * from '../video-composer/scenes';
  * emit declarations that would need one, so the two names travel with the contract that returns
  * them.
  */
-export { MAX_AUDIO_EFFECTS, MAX_FOCUS_BLUR, MAX_FOCUS_KEYS, MAX_SUBJECTS, MIN_AUDIO_EFFECT_SPEED, SUBJECT_GRID, SUBJECT_TRACK_MAGIC, SUBJECT_TRACK_VERSION } from '../video-composer/definitions';
+export {
+  CUTOUT_EPSILON,
+  CUTOUT_RADIUS,
+  MATTE_GRID,
+  MATTE_PICTURE_GRID,
+  MATTE_TRACK_MAGIC,
+  MATTE_TRACK_VERSION,
+  MAX_AUDIO_EFFECTS,
+  MAX_CUTOUT_OUTLINE,
+  MAX_FOCUS_BLUR,
+  MAX_FOCUS_KEYS,
+  MAX_SUBJECTS,
+  MIN_AUDIO_EFFECT_SPEED,
+  SUBJECT_GRID,
+  SUBJECT_TRACK_MAGIC,
+  SUBJECT_TRACK_VERSION,
+} from '../video-composer/definitions';
 export type {
   ComposeAudioEffect,
   ComposeCamera,
+  ComposeCutout,
+  ComposeCutoutOutline,
   ComposeFocus,
   ComposeFocusSubject,
+  FindMatteResult,
+  MatteEngine,
+  MatteStage,
+  MatteTarget,
   FindSubjectsResult,
   SubjectEngine,
   SubjectInfo,

@@ -107,6 +107,8 @@
     "android/src/nolabeling/",
     "android/src/subjects/",
     "android/src/nosubjects/",
+    "android/src/cutout/",
+    "android/src/nocutout/",
     "android/build.gradle",
     "android/proguard-rules.pro",
     "mcp/**",

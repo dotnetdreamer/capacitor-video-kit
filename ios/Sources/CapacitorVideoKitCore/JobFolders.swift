@@ -154,6 +154,11 @@ enum JobFolders {
     /// track can always be found again.
     static func subjectsDir() -> URL { caches("video-composer/subjects") }
 
+    /// Where `findMatte` keeps its matte tracks (`MatteCache`): beside the subject tracks, for their
+    /// reasons, and where the WebView's preview reads them through Capacitor's file URL conversion, as it
+    /// reads Android's from its cache dir.
+    static func mattesDir() -> URL { caches("video-composer/mattes") }
+
     private static func caches(_ relative: String) -> URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent(relative, isDirectory: true)
@@ -521,8 +526,8 @@ enum JobFolders {
     /// Deliberately conservative about job folders, because the alternative is deleting the files
     /// behind a post the customer can still retry. Three rules, in order:
     ///
-    /// 1. cache entries and staged render inputs older than 24 h, and subject tracks nothing has asked
-    ///    for in 7 days (`subjectsTTL`)
+    /// 1. cache entries and staged render inputs older than 24 h, and subject and matte tracks nothing
+    ///    has asked for in 7 days (`subjectsTTL`)
     /// 2. a job folder carrying the done marker, 24 h after the marker was written
     /// 3. an unmarked job folder after 7 days, and only when nothing still claims it
     ///
@@ -557,6 +562,7 @@ enum JobFolders {
         sweepCache(voiceDir(), now: now)
         sweepCache(StagedRenderInputs.folder, now: now)
         sweepCache(subjectsDir(), now: now, ttl: subjectsTTL)
+        sweepCache(mattesDir(), now: now, ttl: subjectsTTL)
     }
 
     /// The folder name IS `folderName(batchId)`, not the batch id, so both of the guards below

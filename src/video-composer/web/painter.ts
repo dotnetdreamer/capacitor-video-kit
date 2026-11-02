@@ -6,7 +6,9 @@ import type { ComposeRect, ComposeTransition } from '../definitions';
 
 import { cameraAffine } from './camera-draw';
 import { offsetVector, toGlColumnMajor, type ColorMatrix } from './color-matrix';
-import { INTERPOLATE_FRAMES_GLSL, interpolateFrames2d } from './frame-interpolation';
+import { Cutout2d } from './cutout-2d';
+import { CutoutGl, type CutoutDraw } from './cutout-gl';
+import { INTERPOLATE_FRAMES4_GLSL, INTERPOLATE_FRAMES_GLSL, interpolateFrames2d } from './frame-interpolation';
 import { Focus2d } from './focus-2d';
 import { FocusGl, type FocusDraw } from './focus-gl';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
@@ -233,6 +235,19 @@ export interface LayerDraw {
    * before this field existed, the source's own texture and the same bits.
    */
   focus?: FocusDraw | null;
+  /**
+   * The clip's CUTOUT at this frame - its background taken away, `ComposeCutout` read at the frame's
+   * source time - or absent for none. See `cutout-gl.ts`.
+   *
+   * Applied after the focus, to the source, as the focus is: what the layer is cropped, fitted, placed,
+   * turned and seen through the camera from is the cut-out picture, already GRADED - the contract puts
+   * the cutout after the grade - so a layer with one is drawn with no grade of its own, and its alpha
+   * lets what is under it show. A synthesised frame's two frames are both cut out, B with its own
+   * [FrameTween.cutout] where it has one and with this one where it does not.
+   *
+   * Absent or null takes exactly the path every layer took before this field existed.
+   */
+  cutout?: CutoutDraw | null;
 }
 
 /** Frame B of a synthesised frame, and how far towards it: see [LayerDraw.tween]. */
@@ -242,6 +257,8 @@ export interface FrameTween {
   weight: number;
   /** Frame B's own focus, at its own source time; absent is the layer's. See [LayerDraw.focus]. */
   focus?: FocusDraw | null;
+  /** Frame B's own cutout, at its own source time; absent is the layer's. See [LayerDraw.cutout]. */
+  cutout?: CutoutDraw | null;
 }
 
 export interface OverlayDraw {
@@ -322,8 +339,12 @@ uniform vec3 u_offset;
 uniform float u_opacity;
 // The canvas colour a letterbox bar is: black, until a post gives the canvas a colour.
 uniform vec3 u_bars;
+// The frame is a cutout's (see cutout-gl.ts): premultiplied, already graded, with an alpha of its own.
+// False for every other layer, which takes the path it always took.
+uniform bool u_premul;
 out vec4 fragColor;
 ${INTERPOLATE_FRAMES_GLSL}
+${INTERPOLATE_FRAMES4_GLSL}
 void main() {
   // Outside the layer's own RECTANGLE there is no layer. It matters for a base-track clip, whose
   // rectangle sits inside a destination that is the whole frame: fitted cover, its picture is
@@ -337,17 +358,23 @@ void main() {
   // not the bound: the window goes on mapping past the rectangle the kept picture lands on, and
   // what lies just outside it is the part of the source the customer cropped away - which a test
   // against 0..1 drew into the bars.
-  vec3 rgb = u_bars;
+  vec4 picture = vec4(u_bars, 1.0);
   if (v_uv.x >= u_kept.x && v_uv.x <= u_kept.x + u_kept.z && v_uv.y >= u_kept.y && v_uv.y <= u_kept.y + u_kept.w) {
     // The picture at this instant: the one frame, or - for a slowed clip - a frame made from the two
     // either side of it, read at the SAME coordinate so everything above and below applies to it as
     // it would to a recorded one. The test is on a uniform, so every pixel of a layer takes the same
     // side of it, and the side a layer with no second frame takes is the one read it always made.
-    vec3 texel = u_tween > 0.0 ? interpolateFrames(u_tex, u_texNext, v_uv, u_tween) : texture(u_tex, v_uv).rgb;
-    rgb = clamp(u_matrix * texel + u_offset, 0.0, 1.0);
+    if (u_premul) {
+      // A cutout's frame: premultiplied, its own alpha letting what is under the layer show, and its
+      // colour already through the grade. Two of them are mixed as they are, which is their mix.
+      picture = u_tween > 0.0 ? interpolateFrames4(u_tex, u_texNext, v_uv, u_tween) : texture(u_tex, v_uv);
+    } else {
+      vec3 texel = u_tween > 0.0 ? interpolateFrames(u_tex, u_texNext, v_uv, u_tween) : texture(u_tex, v_uv).rgb;
+      picture = vec4(clamp(u_matrix * texel + u_offset, 0.0, 1.0), 1.0);
+    }
   }
   // Premultiplied, which is what the blend function below expects.
-  fragColor = vec4(rgb * u_opacity, u_opacity);
+  fragColor = picture * u_opacity;
 }`;
 
 const IDENTITY_GL = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
@@ -378,6 +405,9 @@ export class Painter {
   /** Built the first time a layer has a focus, and never for a post that has none; null once a context refused it. */
   private focusGl: FocusGl | null | undefined = undefined;
   private focus2d: Focus2d | null = null;
+  /** Built the first time a layer has a cutout, and never for a post that has none; null once a context refused it. */
+  private cutoutGl: CutoutGl | null | undefined = undefined;
+  private cutout2d: Cutout2d | null = null;
   /** Where the 2D fallback makes a synthesised frame; built the first time it needs one. */
   private tweenSurface: HTMLCanvasElement | null = null;
   /** Textures of released [GpuFrame]s, for the next copy; see [copyFrame]. */
@@ -477,6 +507,8 @@ export class Painter {
     this.transition2d = null;
     this.focus2d?.dispose();
     this.focus2d = null;
+    this.cutout2d?.dispose();
+    this.cutout2d = null;
     return true;
   }
 
@@ -711,6 +743,8 @@ export class Painter {
     this.transition2d = null;
     this.focus2d?.dispose();
     this.focus2d = null;
+    this.cutout2d?.dispose();
+    this.cutout2d = null;
     if (this.tweenSurface) {
       this.tweenSurface.width = 0;
       this.tweenSurface.height = 0;
@@ -730,6 +764,8 @@ export class Painter {
     this.transitionGl = null;
     this.focusGl?.dispose();
     this.focusGl = undefined;
+    this.cutoutGl?.dispose();
+    this.cutoutGl = undefined;
     this.flowEstimator?.dispose();
     this.flowEstimator = undefined;
     this.flows.length = 0;
@@ -747,6 +783,7 @@ export class Painter {
     this.spareTextures = [];
     this.transitionGl = null;
     this.focusGl = undefined;
+    this.cutoutGl = undefined;
     // Its textures went with the context; the 2D path draws the cross-fade and needs none of it.
     this.flowEstimator = undefined;
     this.flows.length = 0;
@@ -830,6 +867,14 @@ export class Painter {
       gl.disable(gl.BLEND);
       return false;
     }
+    // And the cut-out picture in place of that, made from the focused one where there is a focus.
+    // Null only where the cutout programs would not build: the frame goes to the 2D path, which cuts
+    // out too.
+    const cut = this.cutoutLayerGl(gl, layer, tween);
+    if (cut === null) {
+      gl.disable(gl.BLEND);
+      return false;
+    }
     // The pair's motion on units 2 and 3, where only the interpolation reads it - worked out before the
     // frame began (see prepareFlows). A pair without it is drawn as the cross-fade.
     const flow = tween ? this.keptFlow(layer.source, tween.source) : null;
@@ -858,6 +903,8 @@ export class Painter {
     gl.uniform3f(this.uniforms['u_camera'] ?? null, camera ? camera.scale : 1, camera ? camera.tx : 0, camera ? camera.ty : 0);
     gl.uniform1f(this.uniforms['u_opacity'] ?? null, layer.opacity);
     gl.uniform3f(this.uniforms['u_bars'] ?? null, this.background[0], this.background[1], this.background[2]);
+    // Set on every layer for the camera's reason.
+    gl.uniform1i(this.uniforms['u_premul'] ?? null, cut ? 1 : 0);
     // Set on every layer for the camera's reason: a layer with no second frame drawn after one with
     // a second frame would otherwise inherit its weight.
     gl.uniform1f(this.uniforms['u_tween'] ?? null, tween ? tween.weight : 0);
@@ -908,6 +955,42 @@ export class Painter {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, textureA);
     }
+    return true;
+  }
+
+  /**
+   * Binds the CUT-OUT picture of the layer's frame on unit 0, and of frame B on unit 1 for a
+   * synthesised frame, where the layer has a cutout; see [LayerDraw.cutout]. What is cut out is what is
+   * bound there already - the focused picture, or the frame's own - and what replaces it is graded and
+   * premultiplied, which the layer program is told with `u_premul`.
+   *
+   * True when it cut something out, false for a layer with no cutout, which is left exactly as it was;
+   * null where the cutout programs would not build, which the caller answers as it answers a source
+   * the shader refused. Both frames of a pair are cut out whenever either has a cutout - they are the
+   * one clip's - because the layer program takes both as graded once one is.
+   */
+  private cutoutLayerGl(gl: WebGL2RenderingContext, layer: LayerDraw, tween: FrameTween | null): boolean | null {
+    const ownA = layer.cutout ?? null;
+    const ownB = tween ? (tween.cutout === undefined ? ownA : tween.cutout) : null;
+    const lookA = ownA ?? ownB;
+    if (!lookA) return false;
+    const cutout = this.cutoutGl === undefined ? (this.cutoutGl = CutoutGl.create(gl, this.position)) : this.cutoutGl;
+    if (!cutout) return null;
+    const work = this.focusWork(layer.sourceWidth, layer.sourceHeight);
+    const matrix = this.matrix;
+    const grade = { matrix: matrix ? toGlColumnMajor(matrix) : IDENTITY_GL, offset: matrix ? offsetVector(matrix) : ZERO_OFFSET };
+    gl.activeTexture(gl.TEXTURE1);
+    const boundB = tween ? (gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null) : null;
+    gl.activeTexture(gl.TEXTURE0);
+    const boundA = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null;
+    const cutB = boundB ? cutout.apply(boundB, ownB ?? lookA, grade, work, 'b') : null;
+    const cutA = boundA ? cutout.apply(boundA, lookA, grade, work, 'a') : null;
+    if (cutB) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, cutB);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, cutA ?? boundA);
     return true;
   }
 
@@ -1178,9 +1261,18 @@ export class Painter {
     // the moment a rectangle could be larger than the output or hang off its edge, and would have
     // made a layer's bars turn transparent as a pinch took it through the frame's own size.
     ctx.globalAlpha = layer.opacity;
-    // The canvas colour, as the GL path's bars are; black for a post that has none.
+    // The canvas colour, as the GL path's bars are; black for a post that has none. Round a cut-out
+    // picture and not under it, where the GL path's shader paints none either: what is under the
+    // layer shows through its cutout.
     ctx.fillStyle = this.backgroundCss();
-    ctx.fillRect(clipX, clipY, clipW, clipH);
+    if (layer.cutout && rects) {
+      ctx.beginPath();
+      ctx.rect(clipX, clipY, clipW, clipH);
+      ctx.rect(originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
+      ctx.fill('evenodd');
+    } else {
+      ctx.fillRect(clipX, clipY, clipW, clipH);
+    }
     // A [GpuFrame] is a texture, which this path has no way to draw: its layer keeps its black. The
     // preview asks [canDraw] before it hands one over, so only a frame in which the GPU gave up part
     // way through can meet one here, and the next frame is drawn from the element instead.
@@ -1198,12 +1290,17 @@ export class Painter {
       const picture = focus && work ? (this.focus2d ?? (this.focus2d = new Focus2d())).apply(recorded, layer.sourceWidth, layer.sourceHeight, focus, work) : recorded;
       // The focused picture is at its working size, so the part of the source the layer shows is read
       // off it at that scale.
-      const k = picture === recorded || !work ? 1 : work.width / layer.sourceWidth;
+      // Cut out from the focused picture, graded on the way in (see Cutout2d), so it is drawn with no
+      // filter and no tints of its own. A picture whose pixels cannot be read is drawn as it is.
+      const cutout = layer.cutout ?? null;
+      const cut = cutout ? (this.cutout2d ?? (this.cutout2d = new Cutout2d())).apply(picture, cutout, this.focusWork(layer.sourceWidth, layer.sourceHeight), this.cssFilter, this.cssTints) : null;
+      const drawn = cut ?? picture;
+      const k = cut ? cut.width / layer.sourceWidth : picture === recorded || !work ? 1 : work.width / layer.sourceWidth;
       ctx.globalAlpha = layer.opacity;
-      ctx.filter = this.cssFilter;
-      ctx.drawImage(picture, rects.sx * k, rects.sy * k, rects.sw * k, rects.sh * k, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
+      ctx.filter = cut ? 'none' : this.cssFilter;
+      ctx.drawImage(drawn, rects.sx * k, rects.sy * k, rects.sw * k, rects.sh * k, originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
       ctx.filter = 'none';
-      for (const tint of this.cssTints) {
+      for (const tint of cut ? [] : this.cssTints) {
         ctx.globalAlpha = layer.opacity;
         ctx.fillStyle = tint;
         ctx.fillRect(originX + rects.dx, originY + rects.dy, rects.dw, rects.dh);
@@ -1443,6 +1540,7 @@ function buildProgram(gl: WebGL2RenderingContext): { program: WebGLProgram; unif
       u_opacity: gl.getUniformLocation(program, 'u_opacity'),
       u_bars: gl.getUniformLocation(program, 'u_bars'),
       u_tween: gl.getUniformLocation(program, 'u_tween'),
+      u_premul: gl.getUniformLocation(program, 'u_premul'),
       u_flowOn: gl.getUniformLocation(program, 'u_flowOn'),
       u_flowSize: gl.getUniformLocation(program, 'u_flowSize'),
     },

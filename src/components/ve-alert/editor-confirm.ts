@@ -194,7 +194,9 @@ export function renderFailed(code: RenderFailureCode): ConfirmRequest {
       ? 'There is not enough space on your phone to build this video.'
       : code === 'unreadable_input'
         ? 'One of your clips could not be read.'
-        : 'Your edited video could not be built.';
+        : code === 'cutout'
+          ? 'One of your cutouts could not be made.'
+          : 'Your edited video could not be built.';
 
   return {
     header: 'Couldn’t build your video',

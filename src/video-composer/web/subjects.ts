@@ -66,8 +66,12 @@ interface Segmenter {
 
 let segmenter: Promise<Segmenter> | null = null;
 
-/** One search at a time: the segmenter is one, and a phone's browser has one decoder to spare. */
-const turns = new Turns(1);
+/**
+ * One search at a time: the segmenter is one, and a phone's browser has one decoder to spare. Shared
+ * with `findMatte`'s searches (`mattes.ts`), which run the same segmenter.
+ */
+export const segmenterTurns = new Turns(1);
+const turns = segmenterTurns;
 
 /** The tracks this page has made, by file and rate, and the searches running or waiting. */
 const made = new Map<string, Promise<FindSubjectsResult>>();
@@ -197,6 +201,41 @@ function segmentInto(engine: Segmenter, image: TexImageSource, cells: Uint8Array
   } finally {
     result.close();
   }
+}
+
+/** One picture's person confidence, 0..1 a pixel at the size of the picture it was shown, row by row. */
+export interface PersonConfidence {
+  values: Float32Array;
+  width: number;
+  height: number;
+}
+
+/**
+ * The person confidence of one picture, copied out of MediaPipe's buffer, or null for a model that
+ * gave none. What `findMatte` keeps soft where [segmentInto] thresholds it onto a grid. A segmenter
+ * that throws is let go, as [segmentInto] lets it go.
+ */
+export async function personConfidence(image: TexImageSource): Promise<PersonConfidence | null> {
+  const engine = await segmenterOnce();
+  let result: TasksVision.ImageSegmenterResult;
+  try {
+    result = engine.segmenter.segmentForVideo(image, ++engine.clock);
+  } catch (error) {
+    segmenter = null;
+    throw new SubjectsUnavailableError(`the segmenter stopped working: ${messageOf(error)}`);
+  }
+  try {
+    const masks = result.confidenceMasks ?? [];
+    const mask = masks[masks.length > 1 ? 1 : 0];
+    return mask ? { values: mask.getAsFloat32Array().slice(), width: mask.width, height: mask.height } : null;
+  } finally {
+    result.close();
+  }
+}
+
+/** Loads the segmenter, refusing as unavailable where it will not: what a search checks before it opens a file. */
+export async function readySegmenter(): Promise<void> {
+  await segmenterOnce();
 }
 
 /** The track's bytes as a `blob:` URL, and the answer that names it. */

@@ -401,6 +401,68 @@
   bottom: auto;
 }
 
+/*
+ * The offer to cut a photo out: the toast's place and shape, but a button - it takes the tap the toast
+ * lets through - lit with the accent and breathing once as it arrives, so it reads as something to
+ * reach for rather than something to read. Above the toast, which a message may still be leaving.
+ */
+.ve__offer {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(20, 20, 22, 0.88);
+  color: #fff;
+  box-shadow:
+    0 0 0 1.5px var(--ve-accent, #a6ff2e),
+    0 6px 22px rgba(0, 0, 0, 0.45);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transform: translateX(-50%);
+  -webkit-tap-highlight-color: transparent;
+  animation: ve-offer-in 520ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.ve__offer ve-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--ve-accent, #a6ff2e);
+}
+
+.ve__offer:active {
+  transform: translateX(-50%) scale(0.96);
+}
+
+@keyframes ve-offer-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px) scale(0.9);
+  }
+  60% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-2px) scale(1.04);
+  }
+  100% {
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ve__offer {
+    animation: none;
+  }
+}
+
 /* The text sheet sizes itself to its content, which sits above the keyboard. */
 .ve__sheet--text {
   height: auto;

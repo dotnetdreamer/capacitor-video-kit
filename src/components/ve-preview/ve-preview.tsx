@@ -11,6 +11,7 @@ import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
 import { ClipMedia } from './clip-media';
 import { LayerMotion } from './layer-motion';
+import { PhotoReveals } from './photo-reveals';
 import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPictures } from './preview-pictures';
@@ -302,6 +303,9 @@ export class VePreview implements EditorPlayer {
    * Read off the player's clock, so a layer moves in step with the picture under it.
    */
   private readonly motion = new LayerMotion(() => this.player?.instantMs() ?? this.ctx.store.playheadMs.value);
+
+  /** A photo layer's cutout arriving: the photo as it was, fading off the cut-out one ([PhotoReveals]). */
+  private readonly reveals = new PhotoReveals(() => this.ctx.store.cutoutReveals.peek());
   private gestures: OverlayGestures | null = null;
   private stageResize: ResizeObserver | null = null;
   private readonly disposers: Array<() => void> = [];
@@ -358,13 +362,16 @@ export class VePreview implements EditorPlayer {
     const visible = this.visibleIds.value;
     const bitmaps = store.bitmaps.value;
     const editingId = store.textEdit.value?.id ?? null;
+    // Compare held in the Cutout sheet: every cut-out photo as it was, background and all.
+    const comparing = store.cutoutCompare.value;
     const views: LayerView[] = [];
     for (const overlay of this.overlays.value) {
       const editing = overlay.id === editingId;
       if (!visible.has(overlay.id) && !editing) continue;
       if (editing && overlay.kind === 'text' && !overlay.text.trim()) continue;
-      const bitmap = bitmaps.get(overlay.id);
-      if (!bitmap) continue;
+      const drawn = bitmaps.get(overlay.id);
+      if (!drawn) continue;
+      const bitmap = comparing && drawn.whole ? { ...drawn, ...drawn.whole } : drawn;
 
       if (overlay.kind === 'effect') {
         views.push({
@@ -703,6 +710,8 @@ export class VePreview implements EditorPlayer {
     this.attachExtras();
     // A render writes every layer back at rest; the moving ones go straight back where they are.
     this.motion.update(this.layers.value, this.ctx.store.overlayMotions.value);
+    // A render is also where a photo's new bitmap first shows, which is what starts its reveal.
+    this.reveals.update(this.layers.value);
     // The canvas is composited from the store and not from the DOM, so a render cannot move a
     // picture without something in the store having moved it - but a render is also the first
     // moment a newly written element exists, and the cheapest place to ask for the frame that puts
@@ -724,6 +733,7 @@ export class VePreview implements EditorPlayer {
     this.subjects?.destroy();
     this.subjects = null;
     this.motion.destroy();
+    this.reveals.destroy();
     this.gestures?.destroy();
     this.gestures = null;
     this.stageResize?.disconnect();
@@ -853,6 +863,10 @@ export class VePreview implements EditorPlayer {
             store.backgroundRgb.value,
             // A focus put on, changed, or its subjects found: the world softens on a paused frame too.
             store.focusFrames.value,
+            // A cutout put on or changed, its matte arriving and revealed, Compare held and let go.
+            store.cutoutFrames.value,
+            store.cutoutReveals.value,
+            store.cutoutCompare.value,
           ] as const,
         () => this.canvas?.request(),
       ),
@@ -1167,10 +1181,14 @@ export class VePreview implements EditorPlayer {
                 ></video>
               ))}
 
-              {this.layers.value.map(layer =>
-                layer.effect ? (
-                  <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} ref={this.motion.refFor(layer.id)} style={{ opacity: String(layer.opacity) }} />
-                ) : (
+              {this.layers.value.map(layer => {
+                if (layer.effect) {
+                  return <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} ref={this.motion.refFor(layer.id)} style={{ opacity: String(layer.opacity) }} />;
+                }
+                // A photo whose cutout has just landed: the photo as it was, over it, fading away, and
+                // a light rising and falling round what is kept.
+                const ghost = this.reveals.ghosts.value.get(layer.id);
+                return [
                   <img
                     key={layer.id}
                     class="pv__layer"
@@ -1186,9 +1204,42 @@ export class VePreview implements EditorPlayer {
                       'transform': layer.transform,
                       'opacity': String(layer.opacity),
                     }}
-                  />
-                ),
-              )}
+                  />,
+                  ghost ? (
+                    <img
+                      key={`${layer.id}:glow`}
+                      class="pv__layer pv__layer--glow"
+                      alt=""
+                      draggable={false}
+                      src={layer.png}
+                      style={{
+                        'left': `${layer.left}%`,
+                        'top': `${layer.top}%`,
+                        'width': `${layer.width}%`,
+                        'aspect-ratio': layer.aspect,
+                        'transform': layer.transform,
+                      }}
+                    />
+                  ) : null,
+                  ghost ? (
+                    <img
+                      key={`${layer.id}:ghost`}
+                      class="pv__layer pv__layer--ghost"
+                      alt=""
+                      draggable={false}
+                      src={ghost.png}
+                      style={{
+                        'left': `${layer.left}%`,
+                        'top': `${layer.top}%`,
+                        'width': `${ghost.width}%`,
+                        'aspect-ratio': ghost.aspect,
+                        'transform': layer.transform,
+                        'opacity': String(layer.opacity),
+                      }}
+                    />
+                  ) : null,
+                ];
+              })}
 
               {ph && (
                 <div

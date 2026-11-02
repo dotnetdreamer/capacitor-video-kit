@@ -1,4 +1,4 @@
-import type { EditManifest, FindSubjectsResult, RasterContext } from '../editor';
+import type { EditManifest, FindMatteResult, FindSubjectsResult, MatteStage, MatteTarget, RasterContext } from '../editor';
 
 /**
  * Everything the editor needs from the application that hosts it.
@@ -286,6 +286,29 @@ export interface EditorMediaHost {
   stopFindingSubjects?(keep: readonly EditorSource[]): Promise<void>;
 
   /**
+   * A source's matte: its subject - whatever stands out of it, or only its people (`target`) - found
+   * frame by frame and written down as a matte track, which is what a clip's or a photo's Cutout keeps
+   * ([EditClip.cutout], [ImageOverlay.cutout]). `onProgress` hears the stage and how far it has got,
+   * 0..1, a few times a second: `preparing` while the engine itself is got ready - Android downloading
+   * its segmenter into Play services, once per phone - and `looking` while the frames are.
+   *
+   * Resolves null where there is nothing to look with - a platform with no segmenter, a browser where
+   * MediaPipe will not load - and the Cutout sheet then says so; rejects for a source that cannot be
+   * read, or a search [stopFindingMattes] stopped. The answer is kept, so asking again for the same
+   * source answers at once.
+   *
+   * Optional; absent, the editor offers no Cutout. `composerMediaHost()` has one on Android and in a
+   * page, and so does the browser default, from the files a host serves for MediaPipe.
+   */
+  findMatte?(source: EditorSource, target: MatteTarget, onProgress: (stage: MatteStage, progress: number) => void): Promise<FindMatteResult | null>;
+
+  /**
+   * Stops every search [findMatte] is running for a source not among `keep`: the customer moved on, or
+   * left, and footage nobody will cut out should not hold the phone's decoder. Never rejects.
+   */
+  stopFindingMattes?(keep: readonly EditorSource[]): Promise<void>;
+
+  /**
    * The sounds this customer has kept, and how one more gets in there.
    *
    * Absent, there is no Sound sheet at all: "Add sound" opens `pickAudio` directly, which is what
@@ -510,8 +533,10 @@ export interface EditorVoiceHost {
  * How a render ended without a video. The editor shows a different sentence for each.
  *
  * `too_large` is the composer's own code of that name: the file passed [EditorOutputOptions.maxBytes].
+ * `cutout` is a segment or photo whose background was taken away and whose matte could not be had
+ * ([EditorMediaHost.findMatte]): drawn whole, the post would show a background the customer removed.
  */
-export type RenderFailureCode = 'no_space' | 'unreadable_input' | 'too_large' | 'unknown';
+export type RenderFailureCode = 'no_space' | 'unreadable_input' | 'too_large' | 'cutout' | 'unknown';
 
 /**
  * The mark every [RenderFailedError] carries, under a registered symbol so that every copy of the

@@ -1,0 +1,361 @@
+/*
+ * The Cutout sheet: what is kept and how its edge sits on one tab, what goes behind and round it on
+ * the other.
+ *
+ * Budgeted against the compact sheet as the Focus sheet is: under the 53px head, the Subject tab is a
+ * 52px row of choices and two 52px slider rows, and the Style tab two 52px rows of colours, the
+ * outline's width and a photo's 48px switch at most, all inside the 259px a compact sheet is held to,
+ * so the preview the cutout is watched on keeps as much of the screen as it can.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
+ */
+
+.cs {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100%;
+  padding: 2px 0 6px;
+}
+
+.cs--style {
+  justify-content: flex-start;
+  padding: 0;
+}
+
+/* ------------------------------------------------------------------------------------ status */
+
+.cs__status {
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-text, #fff);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Under the choices, where the sliders would be, for a matte in which nothing stood out. */
+.cs__status--row {
+  padding-top: 18px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
+/*
+ * The search's progress: a bar that fills from the left, with a glint running along it so a long
+ * clip's slow first percent still reads as work being done rather than a screen that has stopped.
+ */
+.cs__bar {
+  position: relative;
+  overflow: hidden;
+  height: 4px;
+  margin: 14px 20px 0;
+  border-radius: 2px;
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.cs__bar-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--ve-accent, #a6ff2e);
+  transform-origin: left center;
+  transition: transform 200ms linear;
+}
+
+.cs__bar-glint {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 30%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: cs-glint 1400ms ease-in-out infinite;
+}
+
+@keyframes cs-glint {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+/* -------------------------------------------------------------------------------------- rows */
+
+.cs__row {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+}
+
+/* One width for the words, so the sliders and the colours start at the same x. */
+.cs__word {
+  flex: 0 0 56px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* What a people-only engine keeps, said where the choice would be. */
+.cs__word--wide {
+  flex: 1 1 auto;
+}
+
+.cs__value {
+  flex: 0 0 40px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.cs__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+/* ---------------------------------------------------------------------------------- choices */
+
+.cs__keep {
+  justify-content: space-between;
+  padding-left: 12px;
+}
+
+.cs__chips {
+  display: flex;
+  gap: 4px;
+}
+
+/* The button is the 44px touch target; the pill inside is what shows - the Focus sheet's chips. */
+.cs__chip {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  cursor: pointer;
+  outline-offset: -2px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cs__pill {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 44px;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  font-size: 13px;
+  font-weight: 700;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.cs__chip:active .cs__pill {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.cs__chip--on .cs__pill,
+.cs__chip--on:active .cs__pill {
+  background: #fff;
+  color: #000;
+}
+
+/* Compare: held, not tapped, and it says so by lighting while it is. */
+.cs__compare {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px 0 10px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.cs__compare ve-icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Under a search that broke: the 44px target round a pill like Compare's. */
+.cs__retry {
+  align-self: center;
+  height: 44px;
+  margin-top: 6px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 22px;
+  background: transparent;
+  color: var(--ve-accent, #a6ff2e);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cs__retry:active {
+  background: var(--ve-raised, #2c2c2e);
+}
+
+.cs__compare--held {
+  background: var(--ve-accent, #a6ff2e);
+  color: #000;
+}
+
+/* ---------------------------------------------------------------------------------- colours */
+
+/* The colours scroll sideways when there are more than fit, as the toolbar's tools do. */
+.cs__swatches {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  height: 52px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.cs__swatches::-webkit-scrollbar {
+  display: none;
+}
+
+/* The 44px target; the 30px dot inside is the colour, ringed when it is the one in use. */
+.cs__swatch {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  cursor: pointer;
+  outline-offset: -2px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cs__dot {
+  box-sizing: border-box;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--cs-colour, #fff);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  transition: transform 120ms ease;
+}
+
+.cs__swatch--none ve-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.cs__swatch--on .cs__dot {
+  box-shadow:
+    0 0 0 2px var(--ve-surface, #1c1c1e),
+    0 0 0 4px #fff;
+  transform: scale(0.86);
+}
+
+.cs__swatch--none.cs__swatch--on {
+  color: #fff;
+}
+
+/* ----------------------------------------------------------------------------------- switch */
+
+.cs__switch-row {
+  justify-content: space-between;
+  width: 100%;
+  height: 48px;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cs__switch-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.cs__switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--ve-raised-2, #3a3a3c);
+  transition: background-color 150ms ease;
+}
+
+.cs__switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 150ms ease;
+}
+
+.cs__switch--on {
+  background: var(--ve-accent, #a6ff2e);
+}
+
+.cs__switch--on .cs__switch-knob {
+  transform: translateX(18px);
+}
+
+/*
+ * A customer who has asked their phone to stop animating things still sees the bar fill; the glint,
+ * which says nothing the bar does not, is left off.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .cs__bar-glint {
+    display: none;
+  }
+
+  .cs__bar-fill,
+  .cs__dot,
+  .cs__switch-knob {
+    transition: none;
+  }
+}

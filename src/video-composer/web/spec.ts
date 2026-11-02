@@ -1,6 +1,7 @@
 import type {
   ComposeAudioEffect,
   ComposeCamera,
+  ComposeCutout,
   ComposeFit,
   ComposeFocus,
   ComposeMusic,
@@ -20,6 +21,7 @@ import type {
 
 import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
 import { normaliseCamera } from '../../editor/camera';
+import { CutoutError, normaliseComposeCutout } from '../../editor/cutout';
 import { FocusError, normaliseComposeFocus } from '../../editor/focus';
 import { RectMotionError, normaliseRectMotion } from '../../editor/layout-motion';
 import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
@@ -464,10 +466,27 @@ function readClip(input: unknown, path: string): ComposeSpec['clips'][number] {
     out.speed = 1;
     out.muted = true;
   }
-  // Last, as every parser reads it.
+  // Last, as every parser reads it, and the cutout after it.
   const focus = readFocus(clip['focus'], `${path}.focus`);
   if (focus) out.focus = focus;
+  const cutout = readCutout(clip['cutout'], `${path}.cutout`);
+  if (cutout) out.cutout = cutout;
   return out;
+}
+
+/**
+ * A clip's cutout, or `null` when it has none. The rules are `normaliseComposeCutout`'s, shared with
+ * the editor and the tests; what this adds is the refusal turned into a [SpecError] naming the path
+ * that broke - `clips[1].cutout.outline.width`.
+ */
+function readCutout(value: unknown, path: string): ComposeCutout | null {
+  try {
+    return normaliseComposeCutout(value);
+  } catch (error) {
+    if (!(error instanceof CutoutError)) throw error;
+    const at = error.field ? `${path}.${error.field}` : path;
+    throw new SpecError(at, `invalid_spec:${at}`);
+  }
 }
 
 /**

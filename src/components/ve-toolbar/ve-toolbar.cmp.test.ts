@@ -249,7 +249,7 @@ describe('ve-toolbar', () => {
     // Nor a part of its clip to choose, which is all Trim does.
     expect(ids(bar)).not.toContain('slip');
     // Everything else a segment has, a picture has - Focus included, a still's subjects being found as a video's are.
-    for (const id of ['split', 'transition', 'delete', 'duplicate', 'replace', 'crop', 'fit', 'filters', 'adjust', 'focus']) {
+    for (const id of ['split', 'cutout', 'transition', 'delete', 'duplicate', 'replace', 'crop', 'fit', 'filters', 'adjust', 'focus']) {
       expect(ids(bar)).toContain(id);
     }
 
@@ -260,14 +260,14 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'clip', id: 'seg-c' });
     await until('the video layer row', () => label(bar) === 'Video layer tools');
-    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'focus', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['layout', 'cutout', 'crop', 'fit', 'focus', 'start-here', 'replace', 'delete']);
   });
 
   it('shows the tools for whatever is selected, and a way back out of them', async () => {
     const { store, bar } = await mount();
 
     expect(label(bar)).toBe('Editing tools');
-    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'cutout', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
     // Nothing to step back out to, so no chevron at all.
     expect(root(bar).querySelector('.tile--collapse')).toBe(null);
 
@@ -282,7 +282,7 @@ describe('ve-toolbar', () => {
     // rectangle, and for a while it was the one segment that could not be told to.
     store.select({ kind: 'clip', id: 'seg-c' });
     await until('the video layer row', () => label(bar) === 'Video layer tools');
-    expect(ids(bar)).toEqual(['layout', 'crop', 'fit', 'slip', 'speed', 'volume', 'focus', 'start-here', 'replace', 'delete']);
+    expect(ids(bar)).toEqual(['layout', 'cutout', 'crop', 'fit', 'slip', 'speed', 'volume', 'focus', 'start-here', 'replace', 'delete']);
     expect(tile(bar, 'delete').textContent).toContain('Remove');
 
     store.select({ kind: 'overlay', id: 'ov-text' });
@@ -733,7 +733,7 @@ describe('ve-toolbar', () => {
     await frames(3);
 
     tile(bar, 'edit').focus();
-    for (const id of ['crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
+    for (const id of ['crop', 'zoom', 'cutout', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers']) {
       press(toolbar, 'ArrowRight');
       expect(root(bar).activeElement).toBe(tile(bar, id));
       await frames(1);
@@ -788,11 +788,11 @@ describe('ve-toolbar on a host that does not offer Zoom', () => {
 
   it('takes the Zoom tile off the root row and leaves every other tile where it was', async () => {
     const on = await mount();
-    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'cutout', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
 
     const off = await mount(NO_ZOOM);
     expect(label(off.bar)).toBe('Editing tools');
-    expect(ids(off.bar)).toEqual(['edit', 'crop', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(off.bar)).toEqual(['edit', 'crop', 'cutout', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
     // Taken away rather than dimmed: there is nothing to hear a reason from and no tile to tap.
     expect(root(off.bar).querySelector('[data-tile="zoom"]')).toBeNull();
     expect(ids(off.bar)).toEqual(ids(on.bar).filter(id => id !== 'zoom'));
