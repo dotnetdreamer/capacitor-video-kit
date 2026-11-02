@@ -1,34 +1,82 @@
-import { lostAt, overlayWireWindow, trackedFootage, trackedThingAt, type EditOverlay, type OverlayTrack } from '../../editor';
-import type { EditorStore } from '../../state/editor-store';
+import {
+  TRACK_HUES,
+  UNSURE_BELOW,
+  lostAt,
+  sureAt,
+  trackById,
+  trackStretches,
+  trackedFootage,
+  trackedThingAt,
+  type EditTrack,
+  type TrackScene,
+  type TrackStretch,
+} from '../../editor';
+import type { EditorStore, TrackPersonBox } from '../../state/editor-store';
 import type { TrackAim } from '../../state/editor.types';
 
 /**
- * The Track sheet on the picture: the box the customer aims, the run as it reads the footage, and the
- * path a tracked layer follows.
+ * The Track sheet on the picture: the box the customer aims, the run as it reads the footage, and the path
+ * of the track the sheet shows - which may have come from a layer, from the track's own row, or from the
+ * main row's Track tool, with no layer at all.
  *
- * Chrome, not picture, like the Focus sheet's outlines: a canvas of its own over the preview's, drawn
- * only while the sheet is open, and cleared otherwise. Three looks, one per thing the customer is doing:
+ * Chrome, not picture, like the Focus sheet's outlines: a canvas of its own over the preview's, drawn only
+ * while the sheet is open, and cleared otherwise. One look for each thing the customer is doing:
  *
+ *  - CHOOSING: each of the post's tracks boxed where its thing is, in its own colour, so the sheet's chips
+ *    name things the customer can see.
  *  - AIMING: the picture dims everywhere but the box, so what will be followed is the one bright part of
- *    the frame; lime brackets at its corners, handles to size it by, a dot at its middle.
+ *    the frame; brackets at its corners - the accent for a new track, the track's colour for a fix -
+ *    handles to size it by, a dot at its middle. The people the finder found are lifted out of the dimming
+ *    and outlined, to say a tap aims at them. A tap locks on: the box closes to a small square at the
+ *    finger while its fit is worked out, then opens out round the thing.
  *  - RUNNING: the frame being read, grey, laid over the picture through the clip's own framing, with the
  *    box riding along on it and the way it has come trailing behind - the run watched, not waited for.
- *    Where the thing is lost the box goes amber and dashed, and finds it again in lime.
- *  - TRACKED: the path itself, faint, across the layer's time on screen - solid behind the playhead,
- *    dotted ahead of it, amber where the thing was out of sight - and the box round the thing now.
+ *    Where the thing is lost the box goes amber and dashed, and finds it again.
+ *  - TRACK: the path over the stretch of the post its footage plays in, coloured by how sure the tracker
+ *    was - the track's colour where sure, amber where unsure, red and dotted where it lost the thing -
+ *    solid behind the playhead and faint ahead of it, and the box round the thing now in the track's
+ *    colour, red and dashed where the thing was lost.
  *
  * Everything is placed through the same arithmetic the render places the footage with ([trackedFootage]),
  * so the box is where the thing is however the clip is cropped, fitted, placed, turned or zoomed into.
+ *
+ * Drawn on demand, a frame at a time, and on a cheap phone: a path is worked out once per track, post and
+ * canvas size and kept, rather than once a frame, and a box locking on asks for frames only while it moves.
  */
-
-/** The lost colour: amber, which reads as "look here" without reading as an error. */
-const LOST = '#ffb340';
 
 /** How dark the picture outside the box goes while it is aimed. */
 const SPOTLIGHT = 'rgba(0, 0, 0, 0.42)';
 
-/** How often the path is read, across the layer's time on screen. */
+/** How much of that dark is taken off the people the finder found, so they stand out as things to tap. */
+const PERSON_LIFT = 'rgba(0, 0, 0, 0.35)';
+
+/** How often the path is read, across the stretch of the post it is drawn over. */
 const PATH_STEP_MS = 1000 / 15;
+
+/** The lock-on: the box opens out from a square this many CSS pixels across at the finger, over this long. */
+const LOCK_SQUARE_PX = 36;
+const LOCK_MS = 180;
+
+/** As the box lands, its brackets swell and settle over this long. */
+const PULSE_MS = 260;
+
+/**
+ * While the fit is worked out the square at the finger breathes, once in [BREATHE_MS] - for at most
+ * [BREATHE_FOR_MS], so a fit that never lands does not cost a frame of drawing for ever.
+ */
+const BREATHE_MS = 900;
+const BREATHE_FOR_MS = 4000;
+
+/** The track colours the tokens name (`--ve-track-0` on), for a page that does not load them. */
+const FALLBACK_HUES = ['#a6ff2e', '#4dd8ff', '#ff6bd6', '#c77dff', '#6b8cff', '#5cffc8'];
+
+/** A track's health at a point of its path, as [healthAt] codes it: a byte a point. */
+const SURE = 0;
+const UNSURE = 1;
+const LOST = 2;
+
+/** No dashes: one array, handed to `setLineDash` as often as it likes, which copies it. */
+const NO_DASH: number[] = [];
 
 export class TrackOverlay {
   private readonly ctx: CanvasRenderingContext2D | null;
@@ -37,12 +85,23 @@ export class TrackOverlay {
   private frameImage: ImageData | null = null;
   private pending = false;
   private destroyed = false;
+  /** The tokens' colours, read once the canvas is in a styled page; see [colours]. */
+  private palette: Palette | null = null;
+  /** Whether the customer asked for less motion: a box then lands where it lands, without opening out or swelling. */
+  private readonly calm: MediaQueryList | null;
+  /** The lock-on being drawn - the store's own object, so a new tap is a new one - and when it was first drawn. */
+  private lock: { of: object; start: number } | null = null;
+  /** The track's stretches of the post, kept while the track and the post are the same objects. */
+  private stretches: { track: EditTrack; manifest: TrackScene['manifest']; list: TrackStretch[] } | null = null;
+  /** The path last worked out, kept while its track, the post, its stretch and the canvas's size are the same. */
+  private path: PathPoints | null = null;
 
   constructor(
     private readonly store: EditorStore,
     private readonly canvas: HTMLCanvasElement,
   ) {
     this.ctx = canvas.getContext('2d');
+    this.calm = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
   }
 
   /** Draws on the next animation frame. Asking twice before it runs still draws once. */
@@ -60,6 +119,9 @@ export class TrackOverlay {
     this.frame.width = 0;
     this.frame.height = 0;
     this.frameImage = null;
+    this.path = null;
+    this.stretches = null;
+    this.lock = null;
   }
 
   private draw(): void {
@@ -76,72 +138,168 @@ export class TrackOverlay {
     ctx.clearRect(0, 0, w, h);
 
     const store = this.store;
-    const layer = store.trackLayer.value;
-    if (store.panel.value !== 'track' || !layer) return;
-    const accent = getComputedStyle(this.canvas).getPropertyValue('--ve-accent').trim() || '#a6ff2e';
-    const view: View = { w, h, ratio, accent };
-
+    if (store.panel.value !== 'track') {
+      this.lock = null;
+      return;
+    }
+    const view: View = { w, h, ratio, colours: this.colours(), now: performance.now(), calm: !!this.calm?.matches };
     if (store.trackRun.value) {
       this.drawRun(ctx, view);
       return;
     }
-    const aiming = !layer.track || store.trackAimMoved.value;
-    if (layer.track) this.drawPath(ctx, layer.track, layer, view, aiming);
-    if (aiming) {
-      const aim = store.shownAim();
-      if (aim) {
-        this.drawSpotlight(ctx, aim, view);
-        this.drawBox(ctx, aimCorners(aim, w, h), view, 'aim');
-      }
+    if (store.trackChoosing.value) {
+      this.drawChoices(ctx, view);
       return;
     }
-    const thing = store.trackThing.value;
-    if (thing && layer.track) {
-      this.drawBox(
-        ctx,
-        thing.corners.map(c => ({ x: c.x * w, y: c.y * h })),
-        view,
-        lostAt(layer.track, thing.sourceMs) ? 'lost' : 'tracked',
-      );
+    const shown = store.trackShown.value;
+    if (!shown || store.trackAimMoved.value) {
+      this.drawAim(ctx, view, shown);
+      return;
     }
+    this.drawPath(ctx, shown, view, false);
+    const thing = store.trackThing.value;
+    if (!thing) return;
+    // In the track's colour, unsure or not - the path says where it was unsure, and a box that turned amber
+    // and back as the playhead crossed a doubtful stretch would flicker - and red and dashed where it lost
+    // the thing, which the path dots in the same red.
+    const lost = lostAt(shown, thing.sourceMs);
+    this.drawBox(ctx, thing.corners.map(c => ({ x: c.x * w, y: c.y * h })), view, boxStyle(lost ? view.colours.lost : hueOf(shown, view), 6 * ratio, { dashed: lost }));
+  }
+
+  /**
+   * The tokens' colours, read off the page once: a style lookup is a style recalculation, and the playhead
+   * asks for a frame thirty times a second. Kept only once the canvas is in the document, before which
+   * every value read is its fallback.
+   */
+  private colours(): Palette {
+    if (this.palette) return this.palette;
+    const style = getComputedStyle(this.canvas);
+    const read = (name: string, fallback: string): string => style.getPropertyValue(name).trim() || fallback;
+    const palette: Palette = {
+      accent: read('--ve-accent', '#a6ff2e'),
+      hues: FALLBACK_HUES.map((fallback, i) => read(`--ve-track-${i}`, fallback)),
+      unsure: read('--ve-track-unsure', '#ffb340'),
+      lost: read('--ve-track-lost', '#ff4d6a'),
+    };
+    if (this.canvas.isConnected) this.palette = palette;
+    return palette;
+  }
+
+  /**
+   * A box being aimed - a new track's, or a track's being fixed, over its faint path - and the people a tap
+   * can aim at while the finder has them. A box a tap put there locks on: a small square at the finger
+   * while its fit is worked out, then opening out round the thing, its brackets swelling as it lands.
+   */
+  private drawAim(ctx: CanvasRenderingContext2D, view: View, fixing: EditTrack | null): void {
+    const store = this.store;
+    const aim = store.shownAim();
+    if (!aim) return;
+    const r = view.ratio;
+    let corners = aimCorners(aim, view.w, view.h);
+    let pulse = 0;
+    let settled = true;
+    const lock = store.trackLockOn.value;
+    // Only while the box is still the one the tap put there: a drag since has it now.
+    if (lock && lock.aim === store.trackAim.value) {
+      if (this.lock?.of !== lock) this.lock = { of: lock, start: view.now };
+      const since = view.now - this.lock.start;
+      const square = squareAt(lock.x * view.w, lock.y * view.h, (LOCK_SQUARE_PX * r) / 2);
+      if (!lock.fitted) {
+        corners = square;
+        settled = false;
+        if (!view.calm && since < BREATHE_FOR_MS) {
+          pulse = 0.5 - 0.5 * Math.cos((2 * Math.PI * since) / BREATHE_MS);
+          this.request();
+        }
+      } else if (!view.calm && since < Math.max(LOCK_MS, PULSE_MS)) {
+        if (since < LOCK_MS) corners = between(square, corners, easeOut(since / LOCK_MS));
+        if (since < PULSE_MS) pulse = Math.sin((Math.PI * since) / PULSE_MS);
+        this.request();
+      }
+    } else {
+      this.lock = null;
+    }
+    this.drawSpotlight(ctx, corners, view);
+    if (store.trackPeople.value === 'ready') this.drawPeople(ctx, view, settled ? aim : null);
+    if (fixing) this.drawPath(ctx, fixing, view, true);
+    this.drawBox(ctx, corners, view, boxStyle(fixing ? hueOf(fixing, view) : view.colours.accent, 10 * r, { handles: settled, pulse }));
   }
 
   /** The picture dimmed everywhere but the box. */
-  private drawSpotlight(ctx: CanvasRenderingContext2D, aim: TrackAim, view: View): void {
+  private drawSpotlight(ctx: CanvasRenderingContext2D, corners: Point[], view: View): void {
     ctx.save();
     ctx.fillStyle = SPOTLIGHT;
     ctx.fillRect(0, 0, view.w, view.h);
     ctx.globalCompositeOperation = 'destination-out';
-    roundedPath(ctx, aimCorners(aim, view.w, view.h), 10 * view.ratio);
+    roundedPath(ctx, corners, 10 * view.ratio);
     ctx.fill();
     ctx.restore();
   }
 
   /**
-   * The box: a thin outline, lime brackets at its corners, a dot at its middle. Aimed, it has white
-   * handles at the corners to size it by; lost, it is amber and dashed.
+   * The people the finder found at the playhead, lifted out of the dimming and softly outlined, so they read
+   * as things to tap. One the box is already round is left to the box.
    */
-  private drawBox(ctx: CanvasRenderingContext2D, corners: Point[], view: View, look: 'aim' | 'tracked' | 'lost' | 'running'): void {
+  private drawPeople(ctx: CanvasRenderingContext2D, view: View, aim: TrackAim | null): void {
+    const people = this.store.trackPeopleBoxes.value;
+    if (people.length === 0) return;
     const r = view.ratio;
-    const colour = look === 'lost' ? LOST : view.accent;
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = PERSON_LIFT;
+    for (const person of people) {
+      if (aim && boxedBy(person, aim)) continue;
+      roundedPath(ctx, aimCorners(person, view.w, view.h), 12 * r);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.lineWidth = 1.5 * r;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    for (const person of people) {
+      if (aim && boxedBy(person, aim)) continue;
+      roundedPath(ctx, aimCorners(person, view.w, view.h), 12 * r);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** While the sheet asks which track to follow: each track whose thing is on screen boxed in its colour, so a chip names something to see. */
+  private drawChoices(ctx: CanvasRenderingContext2D, view: View): void {
+    const store = this.store;
+    const scene = store.trackScene.value;
+    const at = store.playheadMs.value;
+    for (const track of store.tracks.value) {
+      if (!trackStretches(track, scene.manifest).some(stretch => at >= stretch.startMs && at <= stretch.endMs)) continue;
+      const thing = trackedThingAt(track, scene, at);
+      if (thing) this.drawBox(ctx, thing.corners.map(c => ({ x: c.x * view.w, y: c.y * view.h })), view, boxStyle(hueOf(track, view), 6 * view.ratio));
+    }
+  }
+
+  /**
+   * The box: a thin outline, brackets at its corners in its colour, a dot at its middle. Being aimed, it has
+   * white handles at the corners to size it by; lost, its outline is dashed in its colour. `pulse`, 0..1,
+   * swells the brackets and their glow.
+   */
+  private drawBox(ctx: CanvasRenderingContext2D, corners: Point[], view: View, style: BoxStyle): void {
+    const r = view.ratio;
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
     // The outline, quiet: the brackets are what is looked at.
-    roundedPath(ctx, corners, (look === 'aim' ? 10 : 6) * r);
+    roundedPath(ctx, corners, style.radius);
     ctx.lineWidth = 1.5 * r;
-    ctx.strokeStyle = look === 'lost' ? LOST : 'rgba(255, 255, 255, 0.85)';
-    if (look === 'lost') ctx.setLineDash([6 * r, 5 * r]);
+    ctx.strokeStyle = style.dashed ? style.colour : 'rgba(255, 255, 255, 0.85)';
+    if (style.dashed) ctx.setLineDash([6 * r, 5 * r]);
     ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.setLineDash(NO_DASH);
 
     // The brackets, a third of each side and never more than 22px, glowing a little: one path, so the
     // glow is worked out once rather than once a corner.
-    ctx.lineWidth = 3.5 * r;
-    ctx.strokeStyle = colour;
-    ctx.shadowColor = colour;
-    ctx.shadowBlur = 8 * r;
+    ctx.lineWidth = 3.5 * r * (1 + 0.5 * style.pulse);
+    ctx.strokeStyle = style.colour;
+    ctx.shadowColor = style.colour;
+    ctx.shadowBlur = 8 * r * (1 + style.pulse);
     ctx.beginPath();
     for (let i = 0; i < 4; i++) {
       const at = corners[i]!;
@@ -159,12 +317,12 @@ export class TrackOverlay {
     const mid = centre(corners);
     ctx.beginPath();
     ctx.arc(mid.x, mid.y, 4 * r, 0, Math.PI * 2);
-    ctx.fillStyle = colour;
+    ctx.fillStyle = style.colour;
     ctx.fill();
     ctx.shadowBlur = 0;
 
     // The handles, on a box that can be sized.
-    if (look === 'aim') {
+    if (style.handles) {
       ctx.fillStyle = '#fff';
       ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
       ctx.shadowBlur = 4 * r;
@@ -178,47 +336,107 @@ export class TrackOverlay {
   }
 
   /**
-   * The path the layer's thing takes across the layer's time on screen: solid up to the playhead, dotted
-   * after it, amber where it was lost. Fainter while a mend is being aimed, which is about one frame.
+   * The path the track's thing takes over its stretch of the post at the playhead - the nearest one, where
+   * the playhead is between two - coloured by how sure the tracker was: solid up to the playhead, dotted and
+   * fainter after it, red and dotted wherever the thing was lost. Fainter still while a fix is being aimed.
    */
-  private drawPath(ctx: CanvasRenderingContext2D, track: OverlayTrack, layer: EditOverlay, view: View, faint: boolean): void {
-    const store = this.store;
-    const scene = store.trackScene.value;
-    const window = overlayWireWindow(layer, store.totalMs.value);
-    const now = store.playheadMs.value;
-    const points: { x: number; y: number; t: number; lost: boolean }[] = [];
-    for (let t = window.startMs; t <= window.endMs; t += PATH_STEP_MS) {
-      const thing = trackedThingAt(track, scene, t);
-      if (thing) points.push({ x: thing.cx * view.w, y: thing.cy * view.h, t, lost: lostAt(track, thing.sourceMs) });
+  private drawPath(ctx: CanvasRenderingContext2D, track: EditTrack, view: View, faint: boolean): void {
+    const path = this.pathOf(track, view);
+    if (!path || path.n < 2) return;
+    // The first point ahead of the playhead.
+    const now = this.store.playheadMs.value;
+    let lo = 0;
+    let hi = path.n;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (path.ts[mid]! <= now) lo = mid + 1;
+      else hi = mid;
     }
-    if (points.length < 2) return;
+    const split = lo;
     const r = view.ratio;
     const strength = faint ? 0.45 : 0.9;
+    const colours = { sure: hueOf(track, view), unsure: view.colours.unsure, lost: view.colours.lost };
+    const dots = [1, 6 * r];
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    // Behind the playhead solid, ahead of it dotted: each a few strokes, one per run of one colour.
-    const split = points.findIndex(p => p.t > now);
-    const past = split < 0 ? points : points.slice(0, split + 1);
-    const ahead = split < 0 ? [] : points.slice(Math.max(0, split - 1));
-    ctx.setLineDash([]);
-    strokeRuns(ctx, past, view.accent, 2.5 * r, () => strength);
-    ctx.setLineDash([1, 6 * r]);
-    strokeRuns(ctx, ahead, view.accent, 2 * r, () => strength * 0.6);
+    // Each half takes in the point either side of the playhead, so the two meet.
+    strokeHealth(ctx, path, 0, Math.min(path.n - 1, split), colours, 2.5 * r, strength, false, dots);
+    strokeHealth(ctx, path, Math.max(0, split - 1), path.n - 1, colours, 2 * r, strength * 0.6, true, dots);
     ctx.restore();
+  }
+
+  /** The points of `track`'s path over its stretch of the post nearest the playhead, worked out once and kept; see [path]. */
+  private pathOf(track: EditTrack, view: View): PathPoints | null {
+    const store = this.store;
+    const scene = store.trackScene.value;
+    const stretch = this.stretchOf(track, scene.manifest, store.playheadMs.value);
+    if (!stretch) return null;
+    const kept = this.path;
+    if (kept && kept.track === track && kept.scene === scene && kept.w === view.w && kept.h === view.h && kept.startMs === stretch.startMs && kept.endMs === stretch.endMs) return kept;
+    const count = Math.max(2, Math.ceil((stretch.endMs - stretch.startMs) / PATH_STEP_MS) + 1);
+    const path: PathPoints = {
+      track,
+      scene,
+      w: view.w,
+      h: view.h,
+      startMs: stretch.startMs,
+      endMs: stretch.endMs,
+      xs: new Float32Array(count),
+      ys: new Float32Array(count),
+      ts: new Float64Array(count),
+      health: new Uint8Array(count),
+      n: 0,
+    };
+    for (let k = 0; k < count; k++) {
+      const t = Math.min(stretch.endMs, stretch.startMs + k * PATH_STEP_MS);
+      const thing = trackedThingAt(track, scene, t);
+      if (!thing) continue;
+      path.xs[path.n] = thing.cx * view.w;
+      path.ys[path.n] = thing.cy * view.h;
+      path.ts[path.n] = t;
+      path.health[path.n] = healthAt(track, thing.sourceMs);
+      path.n++;
+    }
+    this.path = path;
+    return path;
+  }
+
+  /** The stretch of the post `track`'s footage plays in at output `now`, or the nearest one; null for a track whose footage has gone. */
+  private stretchOf(track: EditTrack, manifest: TrackScene['manifest'], now: number): TrackStretch | null {
+    let kept = this.stretches;
+    if (!kept || kept.track !== track || kept.manifest !== manifest) {
+      kept = { track, manifest, list: trackStretches(track, manifest) };
+      this.stretches = kept;
+    }
+    let best: TrackStretch | null = null;
+    let gap = Infinity;
+    for (const stretch of kept.list) {
+      const off = now < stretch.startMs ? stretch.startMs - now : now > stretch.endMs ? now - stretch.endMs : 0;
+      if (off < gap) {
+        gap = off;
+        best = stretch;
+      }
+    }
+    return best;
   }
 
   /** A run as it reads: the frame being read through the clip's framing, the way it has come, and the box on it. */
   private drawRun(ctx: CanvasRenderingContext2D, view: View): void {
     const store = this.store;
     const run = store.trackRun.value!;
+    // A fix in its track's colour; a new track, which has none yet, in the accent.
+    const fixed = run.trackId ? trackById(store.manifest.value, run.trackId) : null;
+    const colour = fixed ? hueOf(fixed, view) : view.colours.accent;
+    const r = view.ratio;
     const live = store.trackLive.value;
     if (!live) {
       // Before the first frame: the box as it was aimed, so nothing jumps.
       const aim = store.shownAim();
       if (aim) {
-        this.drawSpotlight(ctx, aim, view);
-        this.drawBox(ctx, aimCorners(aim, view.w, view.h), view, 'running');
+        const corners = aimCorners(aim, view.w, view.h);
+        this.drawSpotlight(ctx, corners, view);
+        this.drawBox(ctx, corners, view, boxStyle(colour, 6 * r));
       }
       return;
     }
@@ -250,24 +468,23 @@ export class TrackOverlay {
       ctx.restore();
     }
 
-    // The way it has come, glowing behind the box, its oldest stretch faintest. The glow is a wide faint
-    // stroke under the line rather than a canvas shadow, which blurs every stroke it is on and, on a
-    // phone, cost more than following the thing did.
-    const r = view.ratio;
+    // The way it has come, glowing behind the box, its oldest stretch faintest, amber where it was lost.
+    // The glow is a wide faint stroke under the line rather than a canvas shadow, which blurs every stroke
+    // it is on and, on a phone, cost more than following the thing did.
     const trail = live.trail;
     if (trail.length > 1) {
       const points = trail.map(p => ({ ...at(p.x, p.y), lost: p.lost }));
       ctx.save();
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
-      strokeRuns(ctx, points, view.accent, 9 * r, () => 0.16);
-      strokeRuns(ctx, points, view.accent, 3 * r, i => 0.3 + 0.7 * (i / (points.length - 1)));
+      strokeRuns(ctx, points, colour, view.colours.unsure, 9 * r, () => 0.16);
+      strokeRuns(ctx, points, colour, view.colours.unsure, 3 * r, i => 0.3 + 0.7 * (i / (points.length - 1)));
       ctx.restore();
     }
 
     // The box on the frame, turned with the thing only for a layer that turns with it (see `trackedThingAt`).
     const box = live.box;
-    const rad = store.trackLayer.value?.track?.turnWith ? (box.angle * Math.PI) / 180 : 0;
+    const rad = store.trackLayer.value?.follow?.turnWith ? (box.angle * Math.PI) / 180 : 0;
     const cos = Math.cos(rad);
     const sin = Math.sin(rad);
     const aspect = live.frame.width / live.frame.height;
@@ -279,7 +496,7 @@ export class TrackOverlay {
       [hw, hh],
       [-hw, hh],
     ].map(([x, y]) => at(box.cx + (x! * cos - y! * sin) / aspect, box.cy + x! * sin + y! * cos));
-    this.drawBox(ctx, corners, view, live.lost ? 'lost' : 'running');
+    this.drawBox(ctx, corners, view, live.lost ? boxStyle(view.colours.unsure, 6 * r, { dashed: true }) : boxStyle(colour, 6 * r));
   }
 
   /** The run's frame as a picture: its luma laid into a grey canvas the size it was read at. */
@@ -308,12 +525,66 @@ export class TrackOverlay {
 /** Whether this platform keeps a 32-bit word's lowest byte first, which is how a pixel's red lands first. */
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
+/** How sure `track` was of its thing at SOURCE `sourceMs`: [SURE], [UNSURE] or [LOST]. */
+function healthAt(track: EditTrack, sourceMs: number): number {
+  if (lostAt(track, sourceMs)) return LOST;
+  return sureAt(track, sourceMs) * 100 < UNSURE_BELOW ? UNSURE : SURE;
+}
+
+/** The colour `track` is drawn in: its row's, its box's and its followers' marks'. */
+function hueOf(track: EditTrack, view: View): string {
+  const hue = ((Math.round(track.hue) % TRACK_HUES) + TRACK_HUES) % TRACK_HUES;
+  return view.colours.hues[hue] ?? view.colours.accent;
+}
+
 /**
- * A line through `points`, stroked once per run of points of one colour - the thing's own colour where
- * it was seen, amber where it was lost - each run with the alpha `alphaAt` gives its first point, so a
- * line of hundreds of points is a handful of strokes.
+ * Points `from`..`to` of a path, stroked once per run of one health - the track's own colour where it was
+ * sure, amber where unsure, red where it lost the thing - so a path of hundreds of points is a handful of
+ * strokes. Lost runs are dotted always; `dotted` dots the rest too, as the stretch ahead of the playhead is.
  */
-function strokeRuns(ctx: CanvasRenderingContext2D, points: readonly (Point & { lost: boolean })[], colour: string, width: number, alphaAt: (index: number) => number): void {
+function strokeHealth(
+  ctx: CanvasRenderingContext2D,
+  path: PathPoints,
+  from: number,
+  to: number,
+  colours: { sure: string; unsure: string; lost: string },
+  width: number,
+  alpha: number,
+  dotted: boolean,
+  dots: number[],
+): void {
+  if (to - from < 1) return;
+  ctx.lineWidth = width;
+  ctx.globalAlpha = alpha;
+  let start = from;
+  for (let i = from + 1; i <= to; i++) {
+    if (i < to && path.health[i] === path.health[start]) continue;
+    // A run takes in the first point of the next, so the colours meet rather than leave a gap.
+    const health = path.health[start]!;
+    ctx.beginPath();
+    ctx.moveTo(path.xs[start]!, path.ys[start]!);
+    for (let k = start + 1; k <= i; k++) ctx.lineTo(path.xs[k]!, path.ys[k]!);
+    ctx.strokeStyle = health === LOST ? colours.lost : health === UNSURE ? colours.unsure : colours.sure;
+    ctx.setLineDash(dotted || health === LOST ? dots : NO_DASH);
+    ctx.stroke();
+    start = i;
+  }
+  ctx.setLineDash(NO_DASH);
+}
+
+/**
+ * A line through `points`, stroked once per run of points of one colour - `colour` where the thing was
+ * seen, `lost` where it was not - each run with the alpha `alphaAt` gives its first point, so a line of
+ * hundreds of points is a handful of strokes.
+ */
+function strokeRuns(
+  ctx: CanvasRenderingContext2D,
+  points: readonly (Point & { lost: boolean })[],
+  colour: string,
+  lost: string,
+  width: number,
+  alphaAt: (index: number) => number,
+): void {
   if (points.length < 2) return;
   ctx.lineWidth = width;
   // A run ends where the colour changes, and at most every sixteen points so a fade along it shows.
@@ -325,7 +596,7 @@ function strokeRuns(ctx: CanvasRenderingContext2D, points: readonly (Point & { l
     ctx.beginPath();
     ctx.moveTo(points[start]!.x, points[start]!.y);
     for (let k = start + 1; k <= last; k++) ctx.lineTo(points[k]!.x, points[k]!.y);
-    ctx.strokeStyle = points[start]!.lost ? LOST : colour;
+    ctx.strokeStyle = points[start]!.lost ? lost : colour;
     ctx.globalAlpha = alphaAt(start);
     ctx.stroke();
     start = last;
@@ -338,11 +609,56 @@ interface Point {
   y: number;
 }
 
+/** The tokens the overlay draws in: see [TrackOverlay.colours]. */
+interface Palette {
+  accent: string;
+  /** `--ve-track-0` to `--ve-track-5`, by [EditTrack.hue]. */
+  hues: string[];
+  unsure: string;
+  lost: string;
+}
+
 interface View {
   w: number;
   h: number;
   ratio: number;
-  accent: string;
+  colours: Palette;
+  /** The frame's time, for what moves: the lock-on. */
+  now: number;
+  /** The customer asked for less motion. */
+  calm: boolean;
+}
+
+/** How [TrackOverlay.drawBox] draws a box. */
+interface BoxStyle {
+  colour: string;
+  radius: number;
+  /** Lost: the outline dashed, in the colour. */
+  dashed: boolean;
+  /** Sizable: white handles at the corners. */
+  handles: boolean;
+  /** 0..1: how much the brackets swell. */
+  pulse: number;
+}
+
+function boxStyle(colour: string, radius: number, more: Partial<Omit<BoxStyle, 'colour' | 'radius'>> = {}): BoxStyle {
+  return { colour, radius, dashed: more.dashed ?? false, handles: more.handles ?? false, pulse: more.pulse ?? 0 };
+}
+
+/** A track's path worked out over one stretch of the post, as the canvas draws it; see [TrackOverlay.pathOf]. */
+interface PathPoints {
+  track: EditTrack;
+  scene: TrackScene;
+  w: number;
+  h: number;
+  startMs: number;
+  endMs: number;
+  /** For each of the first [n] points: where it is on the canvas, its output ms, and [healthAt]'s code. */
+  xs: Float32Array;
+  ys: Float32Array;
+  ts: Float64Array;
+  health: Uint8Array;
+  n: number;
 }
 
 /** The aim's corners in canvas pixels: top-left, top-right, bottom-right, bottom-left. */
@@ -357,6 +673,34 @@ export function aimCorners(aim: TrackAim, w: number, h: number): Point[] {
     { x: x1, y: y1 },
     { x: x0, y: y1 },
   ];
+}
+
+/** A square `half` either way of (`x`, `y`), its corners in [aimCorners]' order: where a lock-on opens out from. */
+export function squareAt(x: number, y: number, half: number): Point[] {
+  return [
+    { x: x - half, y: y - half },
+    { x: x + half, y: y - half },
+    { x: x + half, y: y + half },
+    { x: x - half, y: y + half },
+  ];
+}
+
+/** Corners `k` of the way from `from` to `to`, corner by corner. */
+export function between(from: readonly Point[], to: readonly Point[], k: number): Point[] {
+  return from.map((a, i) => ({ x: a.x + (to[i]!.x - a.x) * k, y: a.y + (to[i]!.y - a.y) * k }));
+}
+
+/** Quick to start and gentle to land: a cubic ease-out of `t`, held to 0..1. */
+export function easeOut(t: number): number {
+  const u = 1 - Math.min(1, Math.max(0, t));
+  return 1 - u * u * u;
+}
+
+/** Whether `aim` covers most of `person`: the box is already round them, and their own outline would only double it. */
+export function boxedBy(person: TrackPersonBox, aim: TrackAim): boolean {
+  const across = Math.min(person.cx + person.w / 2, aim.cx + aim.w / 2) - Math.max(person.cx - person.w / 2, aim.cx - aim.w / 2);
+  const down = Math.min(person.cy + person.h / 2, aim.cy + aim.h / 2) - Math.max(person.cy - person.h / 2, aim.cy - aim.h / 2);
+  return across > 0 && down > 0 && across * down > 0.6 * person.w * person.h;
 }
 
 function distance(a: Point, b: Point): number {

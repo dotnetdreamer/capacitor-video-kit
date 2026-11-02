@@ -1,5 +1,5 @@
 import { ObjectTracker, type LumaFrame, type TrackerState } from '../editor/object-tracker';
-import { MAX_TRACK_SAMPLES } from '../editor/overlay-track';
+import { coastLost, MAX_TRACK_SAMPLES } from '../editor/overlay-track';
 import type { TrackRunResult } from '../editor/track-motion';
 import { openTrackFrames, TrackStoppedError, type TrackFrame, type TrackFrameSource } from '../video-composer/web/track-frames';
 
@@ -28,9 +28,22 @@ export interface TrackRunRequest {
   /** The SOURCE stretch to follow the thing through, with the anchor inside it. */
   fromMs: number;
   toMs: number;
-  /** Both ways from the anchor, or only on from it: a path mended from where it slipped. */
+  /** Both ways from the anchor, or only on from it. */
   direction: 'both' | 'forward';
+  /**
+   * A mend's test against the path it mends: whether the thing at SOURCE `sourceMs`, its middle at `at`
+   * (fractions of the source), is where the old path already had it, and surely. Each pass ends once this
+   * has held for [REJOIN_FRAMES] frames in a row - the old path is right from there on, and the mend hands
+   * back to it. Absent, a pass runs to its end of the stretch.
+   */
+  rejoin?: (sourceMs: number, at: { x: number; y: number }) => boolean;
 }
+
+/** How many frames in a row a mend's pass must agree with the old path before it hands back to it. */
+export const REJOIN_FRAMES = 8;
+
+/** No pass hands back this near the frame the box was put on: the old path was wrong there. */
+const REJOIN_AFTER_MS = 250;
 
 /** What the preview shows while a run goes: the frame being read, and where the thing is in it. */
 export interface TrackRunLive {
@@ -161,6 +174,18 @@ async function follow(
       };
     };
 
+    // Whether a mend's pass has met the old path: REJOIN_FRAMES sightings in a row where the old path agrees.
+    let agreed = 0;
+    const rejoined = (timeMs: number, state: TrackerState): boolean => {
+      const rejoin = request.rejoin;
+      if (!rejoin || state.lost || Math.abs(timeMs - request.anchorMs) < REJOIN_AFTER_MS) {
+        agreed = 0;
+        return false;
+      }
+      agreed = rejoin(timeMs, { x: (state.cx + 0.5) / W, y: (state.cy + 0.5) / H }) ? agreed + 1 : 0;
+      return agreed >= REJOIN_FRAMES;
+    };
+
     // On from the anchor.
     let stopped = false;
     try {
@@ -172,6 +197,7 @@ async function follow(
         forward.push({ t: frame.timeMs, state });
         const done = (frame.timeMs - request.anchorMs) / Math.max(1, request.toMs - request.anchorMs);
         onLive(toLive(frame, state, forwardShare * done));
+        if (rejoined(frame.timeMs, state)) break;
         await yielder.maybe();
       }
     } catch (error) {
@@ -183,11 +209,13 @@ async function follow(
     // Back from it, a stretch at a time, with a trail of its own.
     if (!stopped && request.direction === 'both' && request.anchorMs > request.fromMs) {
       trail = [];
+      agreed = 0;
       try {
         const tracker = new ObjectTracker();
         let end = request.anchorMs;
         let started = false;
-        while (end > request.fromMs) {
+        let met = false;
+        while (end > request.fromMs && !met) {
           const start = Math.max(request.fromMs, end - BACK_CHUNK_MS);
           const chunk: TrackFrame[] = [];
           for await (const frame of source.frames(start, end, signal)) {
@@ -208,6 +236,10 @@ async function follow(
             backward.push({ t: frame.timeMs, state });
             const done = (request.anchorMs - frame.timeMs) / Math.max(1, request.anchorMs - request.fromMs);
             onLive(toLive(frame, state, forwardShare + (1 - forwardShare) * done));
+            if (rejoined(frame.timeMs, state)) {
+              met = true;
+              break;
+            }
             await yielder.maybe();
           }
           // The next stretch ends on the frame before this one's first.
@@ -228,7 +260,10 @@ async function follow(
   }
 }
 
-/** The samples as a run's path: fractions of the source, in time order, the lost frames as spans. */
+/**
+ * The samples as a run's path: fractions of the source, in time order, how sure each is, the lost frames as
+ * spans - and carried along through those, rather than held where the thing was last seen ([coastLost]).
+ */
 function resultOf(request: TrackRunRequest, source: FrameShape, samples: Sample[]): TrackRunResult {
   const every = Math.max(1, Math.ceil(samples.length / MAX_TRACK_SAMPLES));
   const kept: Sample[] = [];
@@ -250,7 +285,7 @@ function resultOf(request: TrackRunRequest, source: FrameShape, samples: Sample[
     }
   });
   const round5 = (v: number) => Math.round(v * 1e5) / 1e5;
-  return {
+  const run: TrackRunResult = {
     clipId: request.clipId,
     clipKey: request.clipKey,
     aspect: source.aspect,
@@ -260,9 +295,11 @@ function resultOf(request: TrackRunRequest, source: FrameShape, samples: Sample[
     y: kept.map(s => round5((s.state.cy + 0.5) / source.height)),
     scale: kept.map(s => Math.round(s.state.scale * 1e4) / 1e4),
     turn: kept.map(s => Math.round(s.state.angle * 100) / 100),
+    sure: kept.map(s => (s.state.lost ? 0 : Math.round(Math.min(1, Math.max(0, s.state.confidence)) * 100))),
     lost,
     anchorMs: Math.round(request.anchorMs),
   };
+  return lost.length > 0 ? coastLost(run, i => !kept[i]!.state.lost) : run;
 }
 
 /**

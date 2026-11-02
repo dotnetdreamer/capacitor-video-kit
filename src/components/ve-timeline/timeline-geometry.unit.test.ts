@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import type { TrackHealthSpan } from '../../editor';
 import type { Filmstrip } from '../../state/editor.types';
 import {
   DROP_CANCEL_PX,
   SEGMENT_GAP_PX,
+  STRIP_BRIDGE_MS,
   TRANSITION_DOT_CIRCLE_PX,
   TRANSITION_DOT_HIT_PX,
   TRANSITION_DOT_MIN_SEGMENT_PX,
@@ -13,13 +15,20 @@ import {
   durationChip,
   dropTargetAt,
   frameUrl,
+  healthGradient,
+  healthRuns,
   nearestFrameUrl,
   nearestSnap,
   snapTargets,
   rulerLabel,
   rulerStepMs,
+  runFill,
   segmentTiles,
+  spotLabel,
+  spotOutputMs,
+  stretchOnPost,
   touchDistance,
+  trackedRowLabel,
   type DropRow,
 } from './timeline-geometry';
 
@@ -521,5 +530,152 @@ describe('dotHitWidth', () => {
     const slots = [{ startMs: 0, durationMs: 4000 }];
     expect(dotHitWidth(slots, 0, PPS)).toBe(TRANSITION_DOT_CIRCLE_PX);
     expect(dotHitWidth(slots, 1, PPS)).toBe(TRANSITION_DOT_CIRCLE_PX);
+  });
+});
+
+/*
+ * A track's row: a thing followed through the footage, drawn in OUTPUT time over each stretch of the
+ * post its footage plays in, from a path kept in SOURCE time. The stretch below plays its source at
+ * twice the speed, so a slip between the two clocks shows up as a factor of two.
+ */
+describe('stretchOnPost', () => {
+  // Four seconds of the post, 1 s to 5 s, showing eight of the source, 2 s to 10 s.
+  const stretch = { startMs: 1000, endMs: 5000, fromMs: 2000, toMs: 10_000 };
+
+  it('hands back a stretch wholly on the post as it is', () => {
+    expect(stretchOnPost(stretch, 6000)).toBe(stretch);
+  });
+
+  it('cuts the source with the post, at the stretch’s own speed', () => {
+    expect(stretchOnPost(stretch, 3000)).toEqual({ startMs: 1000, endMs: 3000, fromMs: 2000, toMs: 6000 });
+  });
+
+  it('is nothing for a stretch past the end of the post', () => {
+    expect(stretchOnPost(stretch, 1000)).toBeNull();
+  });
+});
+
+describe('spotOutputMs', () => {
+  const stretches = [
+    { startMs: 0, endMs: 2000, fromMs: 0, toMs: 2000 },
+    { startMs: 3000, endMs: 4000, fromMs: 2000, toMs: 4000 },
+  ];
+
+  it('marks a spot at its middle, through the stretch that shows it', () => {
+    expect(spotOutputMs({ fromMs: 500, toMs: 1500 }, stretches)).toBe(1000);
+    // The second stretch runs at twice the speed: source 3 s is half way through it.
+    expect(spotOutputMs({ fromMs: 2500, toMs: 3500 }, stretches)).toBe(3500);
+  });
+
+  it('is nothing for a spot no stretch shows', () => {
+    expect(spotOutputMs({ fromMs: 5000, toMs: 6000 }, stretches)).toBeNull();
+  });
+});
+
+describe('healthRuns', () => {
+  const span = (fromMs: number, toMs: number, health: TrackHealthSpan['health']): TrackHealthSpan => ({ fromMs, toMs, health });
+  // Sure, unsure from 0.75 s to 2.25 s, sure again: the track a tracker was unsure of for a moment.
+  const wobble = [span(0, 750, 'sure'), span(750, 2250, 'unsure'), span(2250, 4000, 'sure')];
+
+  it('measures each stretch of health as a part of the bar', () => {
+    expect(healthRuns(wobble, 0, 4000)).toEqual([
+      { from: 0, to: 0.1875, health: 'sure' },
+      { from: 0.1875, to: 0.5625, health: 'unsure' },
+      { from: 0.5625, to: 1, health: 'sure' },
+    ]);
+  });
+
+  it('cuts the health to the stretch the bar is drawn over', () => {
+    expect(healthRuns(wobble, 1000, 2000)).toEqual([{ from: 0, to: 1, health: 'unsure' }]);
+    expect(healthRuns(wobble, 2000, 3000)).toEqual([
+      { from: 0, to: 0.25, health: 'unsure' },
+      { from: 0.25, to: 1, health: 'sure' },
+    ]);
+  });
+
+  it('draws a short sure moment between two weak ones as one weak run, as the spot it is part of', () => {
+    const flicker = [span(0, 1000, 'sure'), span(1000, 1100, 'unsure'), span(1100, 1200, 'sure'), span(1200, 1500, 'lost'), span(1500, 4000, 'sure')];
+    expect(healthRuns(flicker, 0, 4000)).toEqual([
+      { from: 0, to: 0.25, health: 'sure' },
+      { from: 0.25, to: 0.3, health: 'unsure' },
+      { from: 0.3, to: 0.375, health: 'lost' },
+      { from: 0.375, to: 1, health: 'sure' },
+    ]);
+  });
+
+  it('keeps a sure moment as long as the bridge, and a short one at either end of the bar', () => {
+    const gap = [span(0, 100, 'sure'), span(100, 1000, 'unsure'), span(1000, 1000 + STRIP_BRIDGE_MS, 'sure'), span(1000 + STRIP_BRIDGE_MS, 4000, 'unsure')];
+    expect(healthRuns(gap, 0, 4000).map(run => run.health)).toEqual(['sure', 'unsure', 'sure', 'unsure']);
+  });
+
+  it('is nothing for a stretch with no length', () => {
+    expect(healthRuns(wobble, 1000, 1000)).toEqual([]);
+  });
+});
+
+describe('healthGradient', () => {
+  it('is nothing for a track sure the whole way, which the strip’s own colour draws', () => {
+    expect(healthGradient([{ from: 0, to: 1, health: 'sure' }])).toBeNull();
+    expect(healthGradient([])).toBeNull();
+  });
+
+  it('paints each run hard-edged in its own colour, sure in the track’s', () => {
+    expect(
+      healthGradient([
+        { from: 0, to: 0.1875, health: 'sure' },
+        { from: 0.1875, to: 0.5625, health: 'unsure' },
+        { from: 0.5625, to: 1, health: 'lost' },
+      ]),
+    ).toBe('linear-gradient(to right, var(--tracked-hue, #a6ff2e) 0% 18.75%, var(--ve-track-unsure, #ffb340) 18.75% 56.25%, var(--ve-track-lost, #ff4d6a) 56.25% 100%)');
+  });
+});
+
+describe('trackedRowLabel', () => {
+  it('names the track, then how many spots it has to check, then whether it is selected', () => {
+    expect(trackedRowLabel('Track 1', 0, false)).toBe('Track 1');
+    expect(trackedRowLabel('Track 1', 1, false)).toBe('Track 1, 1 spot to check');
+    expect(trackedRowLabel('Track 1', 2, false)).toBe('Track 1, 2 spots to check');
+    expect(trackedRowLabel('Track 1', 0, true)).toBe('Track 1, selected');
+    expect(trackedRowLabel('Dog', 3, true)).toBe('Dog, 3 spots to check, selected');
+  });
+});
+
+describe('spotLabel', () => {
+  it('names the spot by its time, as the ruler reads it', () => {
+    expect(spotLabel(1500)).toBe('Spot to check at 00:01.5');
+    expect(spotLabel(62_000)).toBe('Spot to check at 01:02');
+  });
+});
+
+/*
+ * A run reads on from the box's frame to the end of its stretch, then back from the frame to the start,
+ * sharing its progress between the two by their lengths. A ten second stretch with the box put on at
+ * 4 s: six tenths of the run on, four tenths back.
+ */
+describe('runFill', () => {
+  function expectFill(fill: { from: number; to: number }, from: number, to: number): void {
+    expect(fill.from).toBeCloseTo(from, 9);
+    expect(fill.to).toBeCloseTo(to, 9);
+  }
+
+  it('fills on from the box first', () => {
+    expectFill(runFill(0, 10_000, 4000, 0), 0.4, 0.4);
+    expectFill(runFill(0, 10_000, 4000, 0.3), 0.4, 0.7);
+    expectFill(runFill(0, 10_000, 4000, 0.6), 0.4, 1);
+  });
+
+  it('then back from the box to the start', () => {
+    expectFill(runFill(0, 10_000, 4000, 0.8), 0.2, 1);
+    expectFill(runFill(0, 10_000, 4000, 1), 0, 1);
+  });
+
+  it('gives the way on at least a twentieth of the run, as the run does', () => {
+    // The box on the last frame: nothing to read on, and still five percent spent on it.
+    expectFill(runFill(0, 10_000, 10_000, 0.05), 1, 1);
+    expectFill(runFill(0, 10_000, 10_000, 0.525), 0.5, 1);
+  });
+
+  it('measures from the start of the stretch, wherever it is on the post', () => {
+    expectFill(runFill(2000, 6000, 2000, 0.5), 0, 0.5);
   });
 });

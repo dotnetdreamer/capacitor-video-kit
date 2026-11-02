@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { MAX_LAYERS, emptyManifest, type EditManifest } from '../../editor';
+import { MAX_LAYERS, MAX_TRACKS, emptyManifest, type EditManifest, type EditTrack } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import type { VideoEditorHost } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
@@ -88,6 +88,30 @@ function fixture(): EditManifest {
     },
     voiceovers: [{ id: 'vo-1', uri: 'take.webm', startMs: 500, durationMs: 1200, volume: 1 }],
     zooms: [{ id: 'zm-1', startMs: 1000, endMs: 4000, cx: 0.5, cy: 0.5, scale: 2, rampMs: 700, ease: 'smooth' }],
+  };
+}
+
+/**
+ * A thing followed through the first four seconds of the first segment's footage, seen the whole way
+ * unless `lost` says where it was not (SOURCE ms pairs, as a track keeps them): enough of a track for
+ * its row, and for a layer added at the start of the post to land on it.
+ */
+function followedThing(id: string, lost?: number[]): EditTrack {
+  const atMs = Array.from({ length: 41 }, (_, i) => i * 100);
+  return {
+    id,
+    name: 'Track 1',
+    hue: 0,
+    clipId: 'seg-a',
+    clipKey: 'clip-a',
+    aspect: 9 / 16,
+    box: { w: 0.3, h: 0.16 },
+    atMs,
+    x: atMs.map(() => 0.5),
+    y: atMs.map(() => 0.55),
+    scale: atMs.map(() => 1),
+    turn: atMs.map(() => 0),
+    ...(lost ? { lost } : {}),
   };
 }
 
@@ -267,7 +291,7 @@ describe('ve-toolbar', () => {
     const { store, bar } = await mount();
 
     expect(label(bar)).toBe('Editing tools');
-    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'track', 'filters', 'adjust', 'magic', 'captions']);
     // Nothing to step back out to, so no chevron at all.
     expect(root(bar).querySelector('.tile--collapse')).toBe(null);
 
@@ -782,6 +806,153 @@ describe('ve-toolbar', () => {
     expect(store.panel.value).toBe('zoom');
     expect(store.selection.value?.kind).toBe('zoom');
   });
+
+  it('puts Track on the root row after the layers a track carries, and aims a new track from it', async () => {
+    const { store, bar } = await mount();
+
+    expect(ids(bar).indexOf('track')).toBe(ids(bar).indexOf('stickers') + 1);
+    expect(tile(bar, 'track').textContent?.trim()).toBe('Track');
+
+    tile(bar, 'track').click();
+    expect(store.panel.value).toBe('track');
+    // A new track rather than one of the post's: nothing selected, none shown, and a box to aim with.
+    expect(store.selection.value).toBeNull();
+    expect(store.trackOpen.value).toBeNull();
+    expect(store.trackAim.value).not.toBeNull();
+  });
+
+  it('dims Track at the most tracks a post keeps, and still says why', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: Array.from({ length: MAX_TRACKS }, (_, i) => followedThing(`trk-${i}`)) }));
+    await until('the tile to dim', () => tile(bar, 'track').classList.contains('tile--dim'));
+    expect(tile(bar, 'track').getAttribute('aria-disabled')).toBe('true');
+
+    tile(bar, 'track').click();
+    expect(store.toast.value?.text).toBe(`You can track up to ${MAX_TRACKS} things`);
+    expect(store.panel.value).toBeNull();
+  });
+
+  it('gives a selected track its own row, and a way back out of it', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+    expect(ids(bar)).toEqual(['pin-text', 'pin-sticker', 'pin-photo', 'fix', 'smooth', 'rename', 'delete']);
+    expect(tiles(bar).map(button => button.textContent?.trim())).toEqual(['Pin text', 'Pin sticker', 'Pin photo', 'Fix', 'Smooth', 'Rename', 'Remove']);
+    const back = root(bar).querySelector<HTMLButtonElement>('.tile--collapse')!;
+    expect(back.getAttribute('aria-label')).toBe('Close track tools');
+
+    back.click();
+    await until('the root row', () => label(bar) === 'Editing tools');
+    expect(store.selection.value).toBeNull();
+  });
+
+  it('opens the track’s own sheet from Smooth and Rename, Rename on its name, and takes the track off with Remove', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+
+    tile(bar, 'smooth').click();
+    expect(store.panel.value).toBe('track');
+    expect(store.trackOpen.value).toBe('trk-1');
+    expect(store.trackRenaming.value).toBe(false);
+    store.closePanel();
+
+    tile(bar, 'rename').click();
+    expect(store.panel.value).toBe('track');
+    expect(store.trackOpen.value).toBe('trk-1');
+    expect(store.trackRenaming.value).toBe(true);
+    // Shut, the sheet lets go of the name field, so the next Smooth opens on the track and not on its name.
+    store.closePanel();
+    expect(store.trackRenaming.value).toBe(false);
+
+    tile(bar, 'delete').click();
+    expect(store.manifest.value.tracks).toBeUndefined();
+    await until('the root row', () => label(bar) === 'Editing tools');
+    store.undo();
+    expect(store.manifest.value.tracks?.map(track => track.id)).toEqual(['trk-1']);
+  });
+
+  it('takes Fix to the track’s next spot worth a second look, and dims it on a track sure the whole way', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-sure'), followedThing('trk-lost', [1000, 1400])] }));
+
+    store.select({ kind: 'track', id: 'trk-sure' });
+    await until('the track row', () => label(bar) === 'Track tools');
+    const fix = tile(bar, 'fix');
+    expect(fix.classList.contains('tile--dim')).toBe(true);
+    expect(fix.getAttribute('aria-disabled')).toBe('true');
+    // Still a button: the tap says why there is nowhere to go.
+    fix.click();
+    expect(store.toast.value?.text).toBe('Nothing to check on this track');
+    expect(store.panel.value).toBeNull();
+
+    // Lost for a moment a second in: Fix opens the track's sheet with the playhead in the middle of it.
+    store.select({ kind: 'track', id: 'trk-lost' });
+    await until('Fix to wake up', () => !tile(bar, 'fix').classList.contains('tile--dim'));
+    tile(bar, 'fix').click();
+    expect(store.panel.value).toBe('track');
+    expect(store.trackOpen.value).toBe('trk-lost');
+    expect(store.playheadMs.value).toBe(1200);
+  });
+
+  it('pins a new text to the selected track, in the text sheet the root row’s Text opens', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+
+    tile(bar, 'pin-text').click();
+    expect(store.panel.value).toBe('text');
+    expect(store.selectedOverlay.value?.kind).toBe('text');
+    expect(store.selectedOverlay.value?.follow?.trackId).toBe('trk-1');
+  });
+
+  it('pins the next sticker or photo to the selected track, through the tools the root row adds each with', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+    store.host.media.pickImage = async () => ({ uri: 'blob:photo', fileName: 'photo.jpg', aspect: 1.5 });
+    const onTrack = async () => {
+      store.select({ kind: 'track', id: 'trk-1' });
+      await until('the track row', () => label(bar) === 'Track tools');
+    };
+
+    await onTrack();
+    tile(bar, 'pin-sticker').click();
+    expect(store.panel.value).toBe('stickers');
+    const sticker = store.addSticker({ assetId: 'hidden-gem' });
+    expect(sticker).not.toBeNull();
+    expect(store.manifest.value.overlays.find(overlay => overlay.id === sticker)?.follow?.trackId).toBe('trk-1');
+    store.closePanel();
+
+    await onTrack();
+    tile(bar, 'pin-photo').click();
+    await until('the photo', () => store.manifest.value.overlays.some(overlay => overlay.kind === 'image'));
+    expect(store.manifest.value.overlays.find(overlay => overlay.kind === 'image')?.follow?.trackId).toBe('trk-1');
+  });
+
+  it('dims the pin tools at the layer cap, where each says why and leaves no pin waiting for the next layer', async () => {
+    const { store, bar } = await mount();
+    const [first] = store.manifest.value.overlays;
+    const overlays = Array.from({ length: MAX_LAYERS }, (_, i) => ({ ...first!, id: `full-${i}` }));
+    store.manifest.value = { ...store.manifest.value, overlays, tracks: [followedThing('trk-1')] };
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+    for (const id of ['pin-text', 'pin-sticker', 'pin-photo']) expect(tile(bar, id).getAttribute('aria-disabled')).toBe('true');
+
+    tile(bar, 'pin-sticker').click();
+    expect(store.toast.value?.text).toBe(`You can add up to ${MAX_LAYERS} layers`);
+    expect(store.panel.value).toBeNull();
+
+    // With room again, a sticker added another way is not caught by a pin that tap never set.
+    store.select({ kind: 'overlay', id: 'full-0' });
+    store.deleteSelectedOverlay();
+    const sticker = store.addSticker({ assetId: 'hidden-gem' });
+    expect(sticker).not.toBeNull();
+    expect(store.manifest.value.overlays.find(overlay => overlay.id === sticker)?.follow).toBeUndefined();
+  });
 });
 
 /*
@@ -794,11 +965,11 @@ describe('ve-toolbar on a host that does not offer Zoom', () => {
 
   it('takes the Zoom tile off the root row and leaves every other tile where it was', async () => {
     const on = await mount();
-    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(on.bar)).toEqual(['edit', 'crop', 'zoom', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'track', 'filters', 'adjust', 'magic', 'captions']);
 
     const off = await mount(NO_ZOOM);
     expect(label(off.bar)).toBe('Editing tools');
-    expect(ids(off.bar)).toEqual(['edit', 'crop', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'filters', 'adjust', 'magic', 'captions']);
+    expect(ids(off.bar)).toEqual(['edit', 'crop', 'layout', 'background', 'sound', 'text', 'effects', 'overlay', 'stickers', 'track', 'filters', 'adjust', 'magic', 'captions']);
     // Taken away rather than dimmed: there is nothing to hear a reason from and no tile to tap.
     expect(root(off.bar).querySelector('[data-tile="zoom"]')).toBeNull();
     expect(ids(off.bar)).toEqual(ids(on.bar).filter(id => id !== 'zoom'));

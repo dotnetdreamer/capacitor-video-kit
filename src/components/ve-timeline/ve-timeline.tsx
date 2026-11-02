@@ -9,11 +9,13 @@ import {
   MIN_CLIP_MS,
   MIN_LAYER_MS,
   MIN_ZOOM_MS,
+  TRACK_HUES,
   clamp,
   effectPreset,
   findClip,
   findOverlay,
   findVideoTrack,
+  followedTrack,
   moveLayerTo,
   musicMovedTo,
   musicPhaseMs,
@@ -27,17 +29,23 @@ import {
   soundEffectPreset,
   timelineSlots,
   totalDurationMs,
+  nextTrackHue,
+  nextTrackName,
   trackIdOfClip,
   transitionPreset,
+  weakSpots,
   zoomSlots,
   type ClipDropTarget,
   type EditOverlay,
+  type EditTrack,
   type OverlayKind,
+  type TrackHealthSpan,
+  type WeakSpot,
 } from '../../editor';
 import type { EditorIconName } from '../../icons/icons';
 import { computedWith } from '../../state/computed-with';
 import type { EditorStore } from '../../state/editor-store';
-import { clipWaveKey, type EditorSelection } from '../../state/editor.types';
+import { clipWaveKey, type EditorSelection, type TrackRunView } from '../../state/editor.types';
 import { SOUND_EFFECT_ICONS } from '../ve-audio-effects-sheet/effect-icons';
 import {
   musicEndTrim,
@@ -77,12 +85,19 @@ import {
   durationChip,
   dropTargetAt,
   frameUrl,
+  healthGradient,
+  healthRuns,
   nearestSnap,
   snapTargets,
   rulerLabel,
   rulerStepMs,
+  runFill,
   segmentTiles,
+  spotLabel,
+  spotOutputMs,
+  stretchOnPost,
   touchDistance,
+  trackedRowLabel,
   zoomBar,
   zoomBarLabel,
   zoomNeighbours,
@@ -126,6 +141,12 @@ const FLING_STOP_MS = 120;
 const FOLLOW_LEAD_MS = 50;
 /** How far the rail of lifted thumbnails slides per frame while the finger holds at an edge. */
 const REORDER_RAIL_PX = 6;
+/**
+ * How far before a spot to check a tap on its marker puts the playhead, before it asks the store for
+ * the next spot. `fixNextSpot` goes to the first spot more than 50 ms past the playhead, so from here
+ * the next spot is the one tapped and not the one after it.
+ */
+const SPOT_LEAD_MS = 60;
 
 /** The add button's own size and the air it keeps from the edge of the screen. Its width is the usual
  *  44px finger target. */
@@ -276,6 +297,77 @@ interface LayerLaneView {
   label: string;
   emoji: string | null;
   image: string | null;
+  /** The colour of the track the layer follows, as its dot is drawn in, or null for a layer that follows none. */
+  follow: string | null;
+}
+
+/**
+ * One track's row - a thing followed through the footage, not a video layer; see the component's own
+ * comment - with what its bars, its strip and its markers are drawn from.
+ */
+interface TrackedRowView {
+  id: string;
+  /** The track's colour, as the CSS value its row is drawn in. */
+  hue: string;
+  name: string;
+  /** `2 pinned`: how many layers follow the track, or null when none does. */
+  pinned: string | null;
+  selected: boolean;
+  /** The whole accessible name: `Track 1, 2 spots to check`, or with `, selected` on the end. */
+  label: string;
+  /**
+   * Which path the track has, as a number: the strip and the markers are keyed by it, so a new path - a
+   * run landing, a fix, an undo of either - makes them again and they fade in, where a rename or a
+   * change of smoothing, which keep the path, leaves them alone.
+   */
+  version: number;
+  bars: TrackedBarView[];
+  spots: TrackedSpotView[];
+}
+
+/**
+ * One stretch of the post a track's footage plays in, as its bar: a segment of the track's source, or
+ * each of several where the source is cut. Where it is in content px, and where in output ms, which is
+ * what the markers on it are placed by.
+ */
+interface TrackedBarView {
+  x: number;
+  w: number;
+  startMs: number;
+  endMs: number;
+  /** The health strip along its foot, as a gradient across it; null where the track was sure the whole way. */
+  strip: string | null;
+  /** Too short for the track's name, so drawn as its dot alone. */
+  short: boolean;
+}
+
+/** A spot worth a second look on a track's row, as its marker: a tap opens the track's sheet on it. */
+interface TrackedSpotView {
+  /** Unique on the timeline: what the marker's `data-id` is and a tap finds it by. */
+  id: string;
+  trackId: string;
+  /** The output instant it is marked at, the spot's middle, as the store's `fixNextSpot` reckons it. */
+  ms: number;
+  x: number;
+  /** Some of it was not seen at all: red rather than amber. */
+  lost: boolean;
+  label: string;
+}
+
+/**
+ * The row a run that makes a NEW track fills in: where the stretch it follows is drawn, that stretch in
+ * output ms with the frame the box was put on inside it, and the name and colour the track will land
+ * with. How far the run has got is not here; see [VeTimeline.trackRunRow].
+ */
+interface TrackRunRowView {
+  x: number;
+  w: number;
+  startMs: number;
+  endMs: number;
+  anchorMs: number;
+  name: string;
+  hue: string;
+  short: boolean;
 }
 
 interface MusicLaneView {
@@ -380,6 +472,15 @@ interface PinchState {
  * A tap opens the zoom's sheet; the selected bar is dragged to move it and its handles retime it,
  * stopping at the zooms either side, because there is one camera. It stays in the slim timeline
  * over the zoom sheet, where the lanes are hidden.
+ *
+ * Above the layers' lanes is a row for every TRACK: a thing followed through the footage, which text,
+ * stickers and photos are pinned to. Not a video layer, which this file has called a track since long
+ * before them (`trackRows`, `TrackRowView`, `TrackDrag`), so in here they are the TRACKED rows. Each
+ * draws a bar over every stretch of the post its footage plays in, with a strip along its foot saying
+ * how sure the tracker was and a marker on every spot worth a second look; a tap selects it, a tap on
+ * a marker opens it there to fix it, and a lane whose layer follows one wears its colour. The Track
+ * sheet's own track keeps its row in the slim timeline over that sheet, as the zoom row does over the
+ * zoom sheet, and a run making a new track fills its row in as it goes.
  *
  * Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  *  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
@@ -773,6 +874,165 @@ export class VeTimeline {
     (a, b) => a === b || (!!a && !!b && a.inX === b.inX && a.outX === b.outX),
   );
 
+  /**
+   * One row per track, in the order the tracks were made: a bar over every stretch of the post the
+   * track's footage plays in, cut to the post, a strip along each bar's foot saying how sure the tracker
+   * was there, and a marker on every spot worth a second look. A track none of whose footage is on the
+   * post any more has nowhere to be drawn, and no row.
+   *
+   * Under a compact sheet only the Track sheet's own track keeps its row, as the zoom row stays under
+   * the zoom sheet: the slim timeline has room for one row, and that is the one the sheet is about.
+   *
+   * Compared field by field, for the zoom bars' reason and one more: the store's `trackRows` is a new
+   * array of new objects on every change to the post - every frame of a sticker pinched on the stage -
+   * so the strips and the spots are worked out once per track ([stripOf], [spotsOf]), and a frame that
+   * moved nothing here works out neither again and repaints nothing.
+   */
+  private readonly trackedRows = computedWith<TrackedRowView[]>(
+    () => {
+      const store = this.ctx.store;
+      // Asked first in the slim timeline: `trackRows` works out every track's health and spots, and a
+      // row that is not going to be drawn is no reason to have them worked out on every edit.
+      const shown = this.compactSig.value ? (store.panel.value === 'track' ? store.trackShown.value : null) : undefined;
+      if (shown === null) return [];
+      const rows = shown ? store.trackRows.value.filter(row => row.track.id === shown.id) : store.trackRows.value;
+      if (!rows.length) return [];
+      const pps = store.pps.value;
+      const pad = this.pad.value;
+      const total = store.totalMs.value;
+      const selection = store.selection.value;
+      const views: TrackedRowView[] = [];
+      for (const { track, stretches, health, followers, spots } of rows) {
+        const bars: TrackedBarView[] = [];
+        for (const stretch of stretches) {
+          const on = stretchOnPost(stretch, total);
+          if (!on) continue;
+          const w = Math.max(MIN_ITEM_PX, ((on.endMs - on.startMs) / 1000) * pps);
+          bars.push({
+            x: pad + (on.startMs / 1000) * pps,
+            w,
+            startMs: on.startMs,
+            endMs: on.endMs,
+            strip: stripOf(track, health, on.fromMs, on.toMs),
+            short: w < LANE_GLYPH_ONLY_PX,
+          });
+        }
+        if (!bars.length) continue;
+        const marks: TrackedSpotView[] = [];
+        spotsOf(track).forEach((spot, i) => {
+          const ms = spotOutputMs(spot, stretches);
+          const bar = ms === null ? undefined : bars.find(b => ms >= b.startMs && ms <= b.endMs);
+          if (ms === null || !bar) return;
+          // Along the bar as it is DRAWN, which a bar floored at the narrowest item is wider than its
+          // time: the marker stays on the part of the strip it marks.
+          const along = bar.endMs > bar.startMs ? (ms - bar.startMs) / (bar.endMs - bar.startMs) : 0;
+          marks.push({ id: `${track.id}#${i}`, trackId: track.id, ms, x: bar.x + along * bar.w, lost: spot.lost, label: spotLabel(ms) });
+        });
+        const selected = selection?.kind === 'track' && selection.id === track.id;
+        views.push({
+          id: track.id,
+          hue: trackHue(track.hue),
+          name: track.name,
+          pinned: followers > 0 ? `${followers} pinned` : null,
+          selected,
+          label: trackedRowLabel(track.name, spots, selected),
+          version: pathVersion(track),
+          bars,
+          spots: marks,
+        });
+      }
+      return views;
+    },
+    (a, b) =>
+      sameList(
+        a,
+        b,
+        (x, y) =>
+          x.id === y.id &&
+          x.hue === y.hue &&
+          x.name === y.name &&
+          x.pinned === y.pinned &&
+          x.selected === y.selected &&
+          x.label === y.label &&
+          x.version === y.version &&
+          sameList(x.bars, y.bars, (p, q) => p.x === q.x && p.w === q.w && p.strip === q.strip && p.short === q.short) &&
+          sameList(x.spots, y.spots, (p, q) => p.id === q.id && p.ms === q.ms && p.x === q.x && p.lost === q.lost && p.label === q.label),
+      ),
+  );
+
+  /**
+   * The row a run that makes a NEW track fills in while it goes, under the name and in the colour the
+   * track will land with (see [nextTrackLook]), over the stretch the run follows - which is where the
+   * row it lands as will be.
+   *
+   * Where the stretch is, and nothing of how far the run has got. A run reports every percent, and a
+   * render that read that would repaint the whole timeline a hundred times a run while the tracker and
+   * the preview fight for the thread; the fill is sized from [trackRunFill] by an effect instead, the
+   * way the take being recorded grows.
+   */
+  private readonly trackRunRow = computedWith<TrackRunRowView | null>(
+    () => {
+      const store = this.ctx.store;
+      const run = store.trackRun.value;
+      if (!run || run.mode !== 'new') return null;
+      const span = this.runSpan(run);
+      if (!span) return null;
+      const pps = store.pps.value;
+      const look = nextTrackLook(store.tracks.value);
+      const w = Math.max(MIN_ITEM_PX, ((span.endMs - span.startMs) / 1000) * pps);
+      return { x: this.pad.value + (span.startMs / 1000) * pps, w, ...span, name: look.name, hue: trackHue(look.hue), short: w < LANE_GLYPH_ONLY_PX };
+    },
+    (a, b) =>
+      a === b ||
+      (!!a &&
+        !!b &&
+        a.x === b.x &&
+        a.w === b.w &&
+        a.startMs === b.startMs &&
+        a.endMs === b.endMs &&
+        a.anchorMs === b.anchorMs &&
+        a.name === b.name &&
+        a.hue === b.hue &&
+        a.short === b.short),
+  );
+
+  /** How much of the run's row is filled, as fractions of it. Only the effect that sizes the fill reads this; see [trackRunRow]. */
+  private readonly trackRunFill = computed<{ from: number; to: number } | null>(() => {
+    const row = this.trackRunRow.value;
+    const run = this.ctx.store.trackRun.value;
+    return row && run ? runFill(row.startMs, row.endMs, row.anchorMs, run.progress) : null;
+  });
+
+  /**
+   * The stretch of the post a run follows the thing through, output ms, with the frame the box was put
+   * on inside it - the store's own choice in `startTracking`, read back from the segment and the layer
+   * the run names: the whole segment, its transition tail included, where the clip plays on under the
+   * next one's dissolve; or for a run from a layer, the layer's time on screen inside it. Cut to the
+   * post. Null once the segment is gone.
+   */
+  private runSpan(run: TrackRunView): { startMs: number; endMs: number; anchorMs: number } | null {
+    const store = this.ctx.store;
+    const m = store.manifest.value;
+    const total = store.totalMs.value;
+    const laneId = trackIdOfClip(m, run.clipId);
+    if (laneId === undefined) return null;
+    const lane = laneId === null ? null : findVideoTrack(m, laneId);
+    const slot = (lane ? timelineSlots({ clips: lane.clips }) : store.slots.value).find(s => s.clip.id === run.clipId);
+    if (!slot) return null;
+    let startMs = (lane?.startMs ?? 0) + slot.startMs;
+    let endMs = startMs + Math.max(0, slot.durationMs) + slot.tailMs;
+    const layer = run.overlayId ? findOverlay(m, run.overlayId) : null;
+    if (layer) {
+      const shown = overlayWireWindow(layer, total);
+      startMs = Math.max(startMs, shown.startMs);
+      endMs = Math.min(endMs, shown.endMs);
+    }
+    const anchorMs = run.outputMs;
+    startMs = Math.max(0, Math.min(startMs, anchorMs));
+    endMs = Math.min(total, Math.max(endMs, anchorMs));
+    return endMs > startMs ? { startMs, endMs, anchorMs } : null;
+  }
+
   /** One lane per layer, FRONT-MOST FIRST: the top lane is the layer drawn on top. */
   private readonly layerLanes = computedWith<LayerLaneView[]>(
     () => {
@@ -792,11 +1052,14 @@ export class VeTimeline {
         // zoom bars' geometry, because a lane is the same bar: the same x and width, ramps and all.
         const wire = overlayWireWindow(overlay, total);
         const spans = overlay.animation ? overlayAnimationSpans(overlay.animation, wire.endMs - wire.startMs) : null;
+        // Effects never follow; a follow whose track the post no longer has is no follow.
+        const followed = overlay.kind === 'effect' ? null : followedTrack(m, overlay);
         lanes.push({
           id: overlay.id,
           kind: overlay.kind,
           ...zoomBar({ startMs: start, endMs: end, rampInMs: spans?.inMs ?? 0, rampOutMs: spans?.outMs ?? 0 }, pps, pad),
           selected: selection?.kind === 'overlay' && selection.id === overlay.id,
+          follow: followed ? trackHue(followed.track.hue) : null,
           ...this.laneContent(overlay),
         });
       }
@@ -815,7 +1078,8 @@ export class VeTimeline {
           x.selected === y.selected &&
           x.label === y.label &&
           x.emoji === y.emoji &&
-          x.image === y.image,
+          x.image === y.image &&
+          x.follow === y.follow,
       ),
   );
 
@@ -1380,6 +1644,7 @@ export class VeTimeline {
   private stopFollowEffect: (() => void) | null = null;
   private stopPlayingEffect: (() => void) | null = null;
   private stopRecordingEffect: (() => void) | null = null;
+  private stopRunFillEffect: (() => void) | null = null;
 
   /* -- the elements -------------------------------------------------------------------------- */
 
@@ -1440,6 +1705,24 @@ export class VeTimeline {
     if (recording && this.recordingEl) this.recordingEl.style.width = `${recording.w}px`;
   }
 
+  /*
+   * The fill of the row a run is making a new track on. How far it reaches is not in the render - see
+   * `trackRunRow` - so a new element gets it here, the moment it is made, as the take's bar does.
+   */
+  private runFillEl?: HTMLSpanElement;
+  private readonly keepRunFill = (el?: HTMLSpanElement | null) => {
+    this.runFillEl = el ?? undefined;
+    if (el) this.sizeRunFill(untracked(() => this.trackRunFill.value));
+  };
+
+  /** In percent of the bar, so a zoom mid-run - which draws the bar again at its new width - leaves the fill where it was. */
+  private sizeRunFill(fill: { from: number; to: number } | null): void {
+    const el = this.runFillEl;
+    if (!el || !fill) return;
+    el.style.left = `${Math.round(fill.from * 100_000) / 1000}%`;
+    el.style.width = `${Math.round((fill.to - fill.from) * 100_000) / 1000}%`;
+  }
+
   /* ========================================================================================= */
   /* Lifecycle                                                                                 */
   /* ========================================================================================= */
@@ -1488,7 +1771,8 @@ export class VeTimeline {
    *
    * No body writes to the store while the store is part way through a change of its own, which is
    * what would make them `deferredEffect` instead: the first only scrolls, the second only runs
-   * when the player starts or stops, and the third only sizes the bar of a take being recorded.
+   * when the player starts or stops, and the last two only size the bar of a take being recorded
+   * and the fill of the row a run is making.
    */
   private startEffects(): void {
     const store = this.ctx.store;
@@ -1528,6 +1812,13 @@ export class VeTimeline {
     this.stopRecordingEffect = effect(() => {
       const recording = this.recording.value;
       untracked(() => this.sizeRecording(recording));
+    });
+
+    // A new track's row fills in as its run goes, written onto the fill for the take's reason: the run
+    // reports every percent, and the render would repaint the whole timeline for each of them.
+    this.stopRunFillEffect = effect(() => {
+      const fill = this.trackRunFill.value;
+      untracked(() => this.sizeRunFill(fill));
     });
   }
 
@@ -1739,6 +2030,8 @@ export class VeTimeline {
     this.stopPlayingEffect = null;
     this.stopRecordingEffect?.();
     this.stopRecordingEffect = null;
+    this.stopRunFillEffect?.();
+    this.stopRunFillEffect = null;
     this.unbindTouchTargets();
     this.ourTouches.clear();
     this.cancelPress();
@@ -2296,6 +2589,12 @@ export class VeTimeline {
       case 'afx':
         if (id) this.tapAudioEffect(id);
         return;
+      case 'tracked':
+        if (id) this.tapTracked(id);
+        return;
+      case 'tracked-spot':
+        if (id) this.tapSpot(id);
+        return;
       case 'transition':
         // A tap and only a tap: a swipe that began on the dot was the browser's scroll, which ended
         // the press with a pointercancel before it could get here. A finger HELD on the dot is not a
@@ -2395,6 +2694,61 @@ export class VeTimeline {
     const id = (event.currentTarget as HTMLElement | null)?.dataset['id'];
     if (id) this.tapAudioEffect(id);
   };
+
+  /**
+   * A track's row tapped is selected, as every bar here is, and the selected one let go.
+   *
+   * Not while a run is under way. A new selection shuts the Track sheet, and the sheet shutting stops
+   * the run - which is right for Next, or for the customer closing the sheet, and wrong for a finger
+   * that lands on the slim timeline while the customer watches the thing being followed.
+   */
+  private tapTracked(id: string): void {
+    if (this.ctx.store.trackRun.value) return;
+    this.toggleSelection({ kind: 'track', id });
+  }
+
+  /**
+   * A spot to check tapped: the track's sheet, open on the spot to fix it from there. Through the
+   * store's own `fixNextSpot`, which goes to the first spot more than 50 ms past the playhead - so the
+   * playhead goes [SPOT_LEAD_MS] before THIS one first, and the next spot is the one tapped. Not while
+   * a run is under way, for [tapTracked]'s reason.
+   */
+  private tapSpot(id: string): void {
+    const store = this.ctx.store;
+    if (store.trackRun.value) return;
+    let spot: TrackedSpotView | undefined;
+    for (const row of this.trackedRows.value) {
+      spot = row.spots.find(one => one.id === id);
+      if (spot) break;
+    }
+    if (!spot) return;
+    store.seek(Math.max(0, spot.ms - SPOT_LEAD_MS));
+    store.fixNextSpot(spot.trackId);
+  }
+
+  /** Enter and Space on a focused track row or spot; see [onDotKey], which this copies. */
+  private readonly onTrackedKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+    const target = event.currentTarget as HTMLElement | null;
+    const id = target?.dataset['id'];
+    if (!target || !id) return;
+    event.preventDefault();
+    this.pressEndedAt = performance.now();
+    if (!event.repeat) this.pressTracked(target, id);
+  };
+
+  /** A bare click on a track row or a spot - a screen reader's, or switch access; see [onDotClick]. */
+  private readonly onTrackedClick = (event: MouseEvent): void => {
+    if (performance.now() - this.pressEndedAt < CLICK_ECHO_MS) return;
+    const target = event.currentTarget as HTMLElement | null;
+    const id = target?.dataset['id'];
+    if (target && id) this.pressTracked(target, id);
+  };
+
+  private pressTracked(target: HTMLElement, id: string): void {
+    if (target.dataset['hit'] === 'tracked-spot') this.tapSpot(id);
+    else this.tapTracked(id);
+  }
 
   /**
    * "Add sound" opens on its CLICK, where every other press on the timeline acts on the pointer's
@@ -3471,6 +3825,8 @@ export class VeTimeline {
         return rows.querySelector<HTMLElement>('[data-row="zoom"]');
       case 'audioEffect':
         return rows.querySelector<HTMLElement>(`[data-afx-lane="${CSS.escape(selection.id)}"]`);
+      case 'track':
+        return rows.querySelector<HTMLElement>(`[data-tracked-row="${CSS.escape(selection.id)}"]`);
       case 'clip': {
         // The base track pans away with everything else, and a segment on it is selected from
         // outside the timeline too: by touching the video on the preview, or by Edit and Crop.
@@ -3683,6 +4039,9 @@ export class VeTimeline {
 
                   {this.showZoomRow.value ? this.zoomRow() : null}
 
+                  {/* The lanes are gone under a compact sheet; the Track sheet's own track keeps its row here. */}
+                  {compact ? this.trackedLanes() : null}
+
                   {this.showLanes.value ? this.lanes(compact, pad, rows, marks, reorder) : null}
                 </div>
               </div>
@@ -3795,6 +4154,105 @@ export class VeTimeline {
               <span class="handle handle--out" key="zoom-out" data-hit="zoom-end" data-id={handles.id} style={{ left: `${handles.outX}px` }}></span>,
             ]
           : null}
+      </div>
+    );
+  }
+
+  /**
+   * The tracks' rows, and the row a run making a new track fills in, after them: just above the lanes
+   * of the layers that follow them in the full timeline, and straight under the filmstrip in the slim
+   * one, where the lanes are not drawn (see [trackedRows]).
+   */
+  private trackedLanes() {
+    const rows = this.trackedRows.value;
+    const run = this.trackRunRow.value;
+    if (!rows.length && !run) return null;
+    return [...rows.map(row => this.trackedRow(row)), run ? this.trackRunLane(run) : null];
+  }
+
+  /**
+   * One track's row: a bar over each stretch of its footage, dark, with the track's colour down its
+   * left edge and on the dot before its name, how many layers follow it beside the name, and the strip
+   * along its foot; then a marker over each spot to check.
+   *
+   * The bars are buttons named with their state (`Track 1, 1 spot to check, selected`), never
+   * `aria-pressed`, for the reason the zoom bars give, and the markers are buttons of their own. The
+   * strip and the markers are keyed by the path they are drawn from, so they are made again - and fade
+   * in - when a new one lands. Never `touch-action: none`, selected or not: nothing here is dragged, so
+   * a swipe that starts on any of it is the timeline's scroll.
+   */
+  private trackedRow(row: TrackedRowView) {
+    return (
+      <div class="lane tl__tracked" key={`tracked-${row.id}`} data-row="tracked" data-tracked-row={row.id} style={{ '--tracked-hue': row.hue }}>
+        {row.bars.map((bar, i) => (
+          <button
+            type="button"
+            key={`bar-${i}`}
+            class={{ 'item': true, 'item--tracked': true, 'item--selected': row.selected, 'item--tracked-short': bar.short }}
+            data-hit="tracked"
+            data-id={row.id}
+            aria-label={row.label}
+            style={{ left: `${bar.x}px`, width: `${bar.w}px` }}
+            onKeyDown={this.onTrackedKey}
+            onClick={this.onTrackedClick}
+          >
+            <span class="item__paint" key="paint" aria-hidden="true">
+              <span class="item__strip" key={`strip-${row.version}`} style={bar.strip ? { backgroundImage: bar.strip } : undefined}></span>
+            </span>
+            <span class="item__label" key="label" aria-hidden="true">
+              <span class="item__dot" key="dot"></span>
+              <span class="item__text" key="text">
+                {row.name}
+              </span>
+              {row.pinned ? (
+                <span class="item__pinned" key="pinned">
+                  {row.pinned}
+                </span>
+              ) : null}
+            </span>
+          </button>
+        ))}
+        {row.spots.map(spot => (
+          <button
+            type="button"
+            key={`spot-${row.version}-${spot.id}`}
+            class={{ 'tl__spot': true, 'tl__spot--lost': spot.lost }}
+            data-hit="tracked-spot"
+            data-id={spot.id}
+            aria-label={spot.label}
+            style={{ left: `${spot.x}px` }}
+            onKeyDown={this.onTrackedKey}
+            onClick={this.onTrackedClick}
+          ></button>
+        ))}
+      </div>
+    );
+  }
+
+  /**
+   * The row a run making a new track fills in, under the name and in the colour the track will land
+   * with: the bar over the stretch the run follows, and in it the fill an effect keeps sized (see
+   * [trackRunRow]). A picture and nothing else - the sheet says how far the run has got, and a finger
+   * on it is a finger on the timeline, as anywhere else - so it is out of the accessibility tree.
+   */
+  private trackRunLane(run: TrackRunRowView) {
+    return (
+      <div class="lane tl__tracked" key="tracked-run" data-row="tracked" aria-hidden="true" style={{ '--tracked-hue': run.hue }}>
+        <div
+          class={{ 'item': true, 'item--tracked': true, 'item--tracked-run': true, 'item--tracked-short': run.short }}
+          key="run"
+          style={{ left: `${run.x}px`, width: `${run.w}px` }}
+        >
+          <span class="item__paint" key="paint">
+            <span class="item__fill" key="fill" ref={this.keepRunFill}></span>
+          </span>
+          <span class="item__label" key="label">
+            <span class="item__dot" key="dot"></span>
+            <span class="item__text" key="text">
+              {run.name}
+            </span>
+          </span>
+        </div>
       </div>
     );
   }
@@ -3961,6 +4419,9 @@ export class VeTimeline {
           </div>
         ))}
 
+        {/* The tracks, just above the lanes of the layers that follow them. */}
+        {compact ? null : this.trackedLanes()}
+
         {compact
           ? null
           : this.layerLanes.value.map((lane, i) => {
@@ -4002,13 +4463,18 @@ export class VeTimeline {
     );
   }
 
-  /** A lane's glyph first, then which one it is: a sticker's picture, a photo's thumbnail, its words. */
+  /**
+   * A lane's glyph first, then which one it is: a sticker's picture, a photo's thumbnail, its words -
+   * and before the words, on a layer that follows a track, a dot in that track's colour, so what
+   * follows what reads down the timeline from the track's row to the lanes under it.
+   */
   private laneLabel(lane: LayerLaneView) {
     const text = (
       <span class="item__text" key="text">
         {lane.label}
       </span>
     );
+    const follow = lane.follow ? <span class="item__follow" key="follow" aria-hidden="true" style={{ background: lane.follow }}></span> : null;
     switch (lane.kind) {
       case 'sticker':
         return [
@@ -4020,12 +4486,18 @@ export class VeTimeline {
           ) : lane.image ? (
             <img class="item__sticker" key="sticker" src={lane.image} alt="" draggable={false} />
           ) : null,
+          follow,
           text,
         ];
       case 'image':
-        return [laneGlyph(LAYER_GLYPHS.image), lane.image ? <img class="item__thumb" key="thumb" src={lane.image} alt="" draggable={false} decoding="async" /> : null, text];
+        return [
+          laneGlyph(LAYER_GLYPHS.image),
+          lane.image ? <img class="item__thumb" key="thumb" src={lane.image} alt="" draggable={false} decoding="async" /> : null,
+          follow,
+          text,
+        ];
       default:
-        return [laneGlyph(LAYER_GLYPHS[lane.kind]), text];
+        return [laneGlyph(LAYER_GLYPHS[lane.kind]), follow, text];
     }
   }
 
@@ -4374,6 +4846,81 @@ function laneGlyph(name: EditorIconName) {
       <ve-icon name={name}></ve-icon>
     </span>
   );
+}
+
+/**
+ * The kit's track colours, for a host that has not declared `--ve-track-*` itself: the values in
+ * `ve-tokens.css`, which every colour in this component falls back to the same way.
+ */
+const TRACK_HUE_FALLBACKS: readonly string[] = ['#a6ff2e', '#4dd8ff', '#ff6bd6', '#c77dff', '#6b8cff', '#5cffc8'];
+
+/** Track colour `hue` as the CSS value a track's row, its strip and its followers' dots are drawn in. */
+function trackHue(hue: number): string {
+  const index = Number.isInteger(hue) && hue >= 0 && hue < TRACK_HUES ? hue : 0;
+  return `var(--ve-track-${index}, ${TRACK_HUE_FALLBACKS[index] ?? TRACK_HUE_FALLBACKS[0]})`;
+}
+
+/**
+ * The name and the colour a new track lands with: the lowest "Track N" no track of the post is called,
+ * and the colour the fewest of them are drawn in, the first such. The store's own choice when a run
+ * lands, made here too so the row a run fills in is the row it lands as - the same name, in the same
+ * colour - rather than a placeholder that changes under the customer's eyes as the track arrives.
+ */
+function nextTrackLook(tracks: readonly EditTrack[]): { name: string; hue: number } {
+  return { name: nextTrackName(tracks), hue: nextTrackHue(tracks) };
+}
+
+/** A number for each path a track has had, by the path's sample times: see [TrackedRowView.version]. */
+const pathVersions = new WeakMap<readonly number[], number>();
+let pathCount = 0;
+
+function pathVersion(track: EditTrack): number {
+  let version = pathVersions.get(track.atMs);
+  if (version === undefined) {
+    version = ++pathCount;
+    pathVersions.set(track.atMs, version);
+  }
+  return version;
+}
+
+/**
+ * Each track's strips, by the stretch of its footage they are drawn over.
+ *
+ * Made once per track rather than on every change to the post, because the store's `trackRows` is
+ * rebuilt on each of those - a sticker pinched on the stage among them - and a strip is a stop pair
+ * for every change of health along the track, which for a tracker in two minds is a long string. The
+ * track object is the key: the manifest replaces a track to change it. A trim gives the stretch new
+ * ends on every frame, so a track's strips are let go of in a batch once there are [STRIPS_KEPT] of
+ * them, rather than kept for every frame of every trim.
+ */
+const stripCache = new WeakMap<EditTrack, Map<string, string | null>>();
+const STRIPS_KEPT = 32;
+
+function stripOf(track: EditTrack, health: readonly TrackHealthSpan[], fromMs: number, toMs: number): string | null {
+  let byStretch = stripCache.get(track);
+  if (!byStretch) {
+    byStretch = new Map();
+    stripCache.set(track, byStretch);
+  }
+  const key = `${fromMs}/${toMs}`;
+  const kept = byStretch.get(key);
+  if (kept !== undefined) return kept;
+  if (byStretch.size >= STRIPS_KEPT) byStretch.clear();
+  const strip = healthGradient(healthRuns(health, fromMs, toMs));
+  byStretch.set(key, strip);
+  return strip;
+}
+
+/** Each track's spots to check, once per track object, for [stripOf]'s reason. */
+const spotCache = new WeakMap<EditTrack, readonly WeakSpot[]>();
+
+function spotsOf(track: EditTrack): readonly WeakSpot[] {
+  let spots = spotCache.get(track);
+  if (!spots) {
+    spots = weakSpots(track);
+    spotCache.set(track, spots);
+  }
+  return spots;
 }
 
 /** Places the two edge handles of an item spanning `x` to `x + w` in content px. */

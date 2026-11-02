@@ -8,7 +8,8 @@ export type EditorSelection =
   | { kind: 'audio'; id: string }
   | { kind: 'voice'; id: string }
   | { kind: 'zoom'; id: string }
-  | { kind: 'audioEffect'; id: string };
+  | { kind: 'audioEffect'; id: string }
+  | { kind: 'track'; id: string };
 
 /**
  * The sheets that can slide up over the timeline and the toolbar. One at a time; opening one closes
@@ -152,12 +153,16 @@ export interface TrackAim {
 
 /** A tracking run under way, as the sheet and the preview show it. */
 export interface TrackRunView {
-  overlayId: string;
+  /** The track being fixed; null for a run that makes a new one. */
+  trackId: string | null;
+  /** The layer a new track is pinned to once it lands; null from the main row's Track tool, and for a fix. */
+  overlayId: string | null;
   clipId: string;
   clipKey: string;
   /** The output instant the box was drawn at: the frame the run starts from, and the one it is shown over. */
   outputMs: number;
-  mode: 'all' | 'from';
+  /** A new track, or a fix of the one shown. */
+  mode: 'new' | 'fix';
   /**
    * 0..1, in whole percent, so the sheet repaints only when the number it shows changes. The frame
    * being read is [EditorStore.trackLive], which changes every frame and only the preview reads.

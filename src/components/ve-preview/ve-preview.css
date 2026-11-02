@@ -219,6 +219,12 @@
   transition: filter 160ms ease-out;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .pv__layer--aiming {
+    transition: none;
+  }
+}
+
 /*
  * The Track sheet's box, its run and its path (`TrackOverlay`): the frame's size, drawn in its own
  * pixels, OVER the layers so the box is never hidden under the text it is moving.

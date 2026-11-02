@@ -51,7 +51,18 @@ export type HitKind =
   /** An audio effect layer's bar on its row, and the two handles that retime the selected one. */
   | 'afx'
   | 'afx-start'
-  | 'afx-end';
+  | 'afx-end'
+  /**
+   * A track's bar on its row - a thing followed through the footage, not a video layer - which a tap
+   * selects. Never a body to drag, selected or not: a track is where its thing is in the footage and
+   * nothing moves it along the post, so a swipe that starts on one is the timeline's scroll.
+   */
+  | 'tracked'
+  /**
+   * A spot to check on a track's row, named by its place in the rows (see the component's
+   * `trackedRows`). Only ever a tap, like a transition dot: it opens the track there to fix it.
+   */
+  | 'tracked-spot';
 
 /** A finger that is down but not yet a drag: it may still become a tap, a long press or a scroll. */
 export interface Press {

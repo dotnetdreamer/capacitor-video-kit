@@ -7,20 +7,35 @@
 
 ## Overview
 
-Track: a text, a sticker or a photo pinned to something in the footage, so it moves with it.
+Track: something in the footage followed, a layer of its own that texts, stickers and photos are pinned
+to so they move with it.
 
-One thing to do and one button to do it with. The sheet opens with a box on the picture round the
-layer - most layers are put on or beside what they are about - which the customer drags onto the thing
-(a tap moves it there, a corner or a pinch sizes it), and Track follows it through the layer's time on
-screen, both ways from the frame the box is on. The run is watched on the picture rather than waited
-for: the box rides along the footage as it is read, and the finished track plays itself back once.
+The sheet is where a track is made, looked at and mended, and it opens from three places: the Track tool
+on the main row (a new track), the Track tool on a text, sticker or photo (the track the layer follows,
+or one for it to follow), and a track's own row. It shows one of five faces, the first that applies:
 
-Tracked, the sheet is the few choices a track has - whether the layer grows and turns with the thing,
-and how smooth its path is - and the box on the picture is the way to mend it: scrubbed to where it
-slipped and dragged back onto the thing, it tracks again from there and keeps everything before.
+ - A run under way: how far it has got, and Stop, which keeps what it found.
+ - Choosing: a layer that follows nothing, on a post that has tracks, picks one of them - pinned where
+   it is drawn now - or New track.
+ - Aiming: the box on the picture, which a tap or a drag puts on the thing, and Track. The people the
+   finder found light up on the picture, where a tap on one aims at them; this face only offers to
+   look for them, and says how that went.
+ - Fixing: the shown track's box dragged off its path. Fix track follows the thing again from this
+   frame, both ways, until each way meets the old path.
+ - The track: how sure it is, how smooth its path is and, on a layer that follows it, whether the layer
+   grows and turns with the thing.
 
-Every control writes the manifest through the store, as every sheet does. The none button takes the
-track off and leaves the layer where it is; the tick is done, and a run still going keeps what it found.
+A shown track's name heads the body rather than the frame: `ve-sheet` takes its heading as a string,
+and the name is a button that becomes a field - on a tap, or from Rename on the track's row, which opens
+the sheet with `trackRenaming` set.
+
+The sheet's height depends on whether it is open on a layer and on nothing else, never on the face:
+the picture above it is what the box is dragged on, and a sheet that grew when the box left the track
+resized the picture under the finger that was dragging it. The stylesheet has the arithmetic.
+
+Every control writes the manifest through the store, as every sheet does, and the store gives the
+haptics. The none button takes a layer off its track (Remove tracking) or, with no layer, the track off
+the post (Remove track); the tick is done, and a run still going keeps what it found.
 
 ## Properties
 

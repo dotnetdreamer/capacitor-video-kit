@@ -32,6 +32,15 @@ A tap opens the zoom's sheet; the selected bar is dragged to move it and its han
 stopping at the zooms either side, because there is one camera. It stays in the slim timeline
 over the zoom sheet, where the lanes are hidden.
 
+Above the layers' lanes is a row for every TRACK: a thing followed through the footage, which text,
+stickers and photos are pinned to. Not a video layer, which this file has called a track since long
+before them (`trackRows`, `TrackRowView`, `TrackDrag`), so in here they are the TRACKED rows. Each
+draws a bar over every stretch of the post its footage plays in, with a strip along its foot saying
+how sure the tracker was and a marker on every spot worth a second look; a tap selects it, a tap on
+a marker opens it there to fix it, and a lane whose layer follows one wears its colour. The Track
+sheet's own track keeps its row in the slim timeline over that sheet, as the zoom row does over the
+zoom sheet, and a run making a new track fills its row in as it goes.
+
 Two directions of truth meet here, and keeping them from feeding each other is most of this file:
  - the customer's finger (and the fling after it) moves the scroller, which seeks the store;
  - everything else - playback, undo, a split, a sheet - moves the store's playhead, which scrolls

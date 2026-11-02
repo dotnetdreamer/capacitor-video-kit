@@ -367,9 +367,9 @@ export class VePreview implements EditorPlayer {
     const visible = this.visibleIds.value;
     const bitmaps = store.bitmaps.value;
     const editingId = store.textEdit.value?.id ?? null;
-    // The layer the Track sheet is boxing the footage under: aimed for, or being tracked.
+    // The layer the Track sheet is boxing the footage under; see [trackBoxing].
     const trackLayer = store.trackLayer.value;
-    const aimingId = trackLayer && (!trackLayer.track || store.trackAimMoved.value || store.trackRun.value) ? trackLayer.id : null;
+    const aimingId = trackLayer && this.trackBoxing.value ? trackLayer.id : null;
     const views: LayerView[] = [];
     for (const overlay of this.overlays.value) {
       const editing = overlay.id === editingId;
@@ -398,7 +398,7 @@ export class VePreview implements EditorPlayer {
       }
       // A layer at rest is where it was put, and its motion - its track among it - moves it from there.
       // The text being typed is held at rest, so a tracked one rests where it has followed its thing to.
-      const rest = editing && overlay.track ? store.shownOverlay(overlay) : overlay;
+      const rest = editing && overlay.follow ? store.shownOverlay(overlay) : overlay;
       const box = layerBox(rest, bitmap, store.outputWidth.value);
       if (!box) continue;
       views.push({
@@ -456,7 +456,7 @@ export class VePreview implements EditorPlayer {
     if (selected.kind === 'effect') return null;
     // A tracked layer's box would trail the layer a frame behind while it plays, round a layer nothing
     // can be done to until it stops.
-    if (selected.track && store.playing.value) return null;
+    if (selected.follow && store.playing.value) return null;
     // Round the layer where it is drawn now, which for a tracked one is where its thing has led it.
     const overlay = store.shownOverlay(selected);
     const bitmap = store.bitmaps.value.get(overlay.id);
@@ -545,6 +545,22 @@ export class VePreview implements EditorPlayer {
   private readonly stageSize = signal<{ width: number; height: number; bounds: ChromeBounds } | null>(null);
 
   private readonly recording = computed(() => this.ctx.store.recordingFromMs.value !== null);
+
+  /**
+   * The Track sheet has a box on the footage: a new track aimed, a track being fixed, or a run going - not
+   * while it asks which track to follow, when there is none. One answer, so a run's progress, a new object
+   * every percent, does not rebuild the layers every percent.
+   */
+  private readonly trackBoxing = computed(() => {
+    const store = this.ctx.store;
+    return store.panel.value === 'track' && !store.trackChoosing.value && (!store.trackShown.value || store.trackAimMoved.value || !!store.trackRun.value);
+  });
+
+  /** The Track sheet is aiming a new track's box: open, showing no track, not asking which to follow, no run going. */
+  private readonly aimingNewTrack = computed(() => {
+    const store = this.ctx.store;
+    return store.panel.value === 'track' && !store.trackShown.value && !store.trackChoosing.value && !store.trackRun.value;
+  });
 
   /**
    * Each element's source width / height, once its metadata is in. Two of them, because the two
@@ -903,24 +919,42 @@ export class VePreview implements EditorPlayer {
       ),
     );
 
-    // The Track sheet's box, run and path follow the box, the run, the playhead and the post - read only
-    // while the sheet is open, so a playing post does not ask a closed sheet for a frame thirty times a second.
+    // The Track sheet's box, run and path follow the box, the run, the track shown, the people found, the
+    // playhead and the post - read only while the sheet is open, so a playing post does not ask a closed
+    // sheet for a frame thirty times a second.
     this.disposers.push(
       deferredEffect(
         () =>
           store.panel.value === 'track'
             ? ([
                 store.trackLayer.value,
+                store.trackShown.value,
+                store.trackChoosing.value,
                 store.trackAim.value,
                 store.trackAimMoved.value,
+                store.trackLockOn.value,
                 store.trackRun.value,
                 store.trackLive.value,
                 store.trackThing.value,
+                store.trackPeople.value,
+                store.trackPeopleBoxes.value,
                 store.trackScene.value,
                 store.playheadMs.value,
               ] as const)
             : null,
         () => this.trackOverlay?.request(),
+      ),
+    );
+
+    // The people in the footage, looked for as a new track's box goes up, so they light up for a tap. The
+    // search is Focus's and kept, so asking each time is asking once; a track's own box and a fix use what
+    // is already found rather than starting a whole clip's search the customer did not ask for.
+    this.disposers.push(
+      deferredEffect(
+        () => this.aimingNewTrack.value,
+        aiming => {
+          if (aiming) store.findTrackPeople();
+        },
       ),
     );
 

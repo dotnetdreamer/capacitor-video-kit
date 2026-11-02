@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import { UNSURE_BELOW } from '../editor/overlay-track';
 import { TrackStoppedError, type TrackFrame, type TrackFrameSource } from '../video-composer/web/track-frames';
 
-import { runTrack, startTrackRun, type TrackRun, type TrackRunLive, type TrackRunRequest } from './track-session';
+import { REJOIN_FRAMES, runTrack, startTrackRun, type TrackRun, type TrackRunLive, type TrackRunRequest } from './track-session';
 
 /*
  * A source made up for the test: 30 fps, 180x320, a textured square drifting right and up over a
@@ -222,5 +223,87 @@ describe('runTrack', () => {
     expect(lost[0]!).toBeLessThan(700);
     expect(lost[1]!).toBeGreaterThanOrEqual(860);
     expect(lost[1]!).toBeLessThan(1000);
+  });
+
+  it('says how sure it was of every frame, and is sure of a thing in plain sight', async () => {
+    const outcome = await runTrack(
+      request(),
+      () => undefined,
+      new AbortController().signal,
+      async () => source(),
+    );
+    const sure = outcome.result!.sure;
+    expect(sure.length).toBe(outcome.result!.atMs.length);
+    for (const s of sure) {
+      expect(Number.isInteger(s)).toBe(true);
+      // Never nothing: that is for a frame where the thing was not seen.
+      expect(s).toBeGreaterThan(0);
+      expect(s).toBeLessThanOrEqual(100);
+    }
+    const sorted = [...sure].sort((a, b) => a - b);
+    expect(sorted[Math.floor(sorted.length / 2)]!).toBeGreaterThanOrEqual(UNSURE_BELOW);
+  });
+
+  it('carries the thing along where it was out of sight, rather than holding it where it was last seen', async () => {
+    const outcome = await runTrack(
+      request({ anchorMs: 0, direction: 'forward' }),
+      () => undefined,
+      new AbortController().signal,
+      async () => source({ hiddenFrom: 600, hiddenTo: 900 }),
+    );
+    const result = outcome.result!;
+    const [from, to] = result.lost as [number, number];
+    // Held, the box would have been left behind by the thing's own move over the stretch.
+    expect(0.03 * (to - from)).toBeGreaterThan(5);
+    let hidden = 0;
+    result.atMs.forEach((t, i) => {
+      if (t < from || t > to) return;
+      hidden++;
+      expect(result.sure[i], `sure at ${t}`).toBe(0);
+      const at = truth(Math.round(t / STEP) * STEP);
+      expect(Math.abs(result.x[i]! * W - 0.5 - at.x), `x at ${t}`).toBeLessThan(1);
+      expect(Math.abs(result.y[i]! * H - 0.5 - at.y), `y at ${t}`).toBeLessThan(1);
+    });
+    expect(hidden).toBeGreaterThan(5);
+  });
+
+  it('stops each way once it has agreed with the path it mends REJOIN_FRAMES frames in a row, never counting the quarter second round the anchor', async () => {
+    const asked: Array<{ t: number; at: { x: number; y: number } }> = [];
+    const outcome = await runTrack(
+      request({
+        rejoin: (t, at) => {
+          asked.push({ t, at });
+          return true;
+        },
+      }),
+      () => undefined,
+      new AbortController().signal,
+      async () => source(),
+    );
+    const result = outcome.result!;
+    // Counted from the first frame a quarter second or more from the anchor at 1000: 1267 on, 733 back.
+    const on = Math.ceil(1250 / STEP);
+    const back = Math.floor(750 / STEP);
+    expect(result.atMs.at(-1)).toBe(Math.round((on + REJOIN_FRAMES - 1) * STEP));
+    expect(result.atMs[0]).toBe(Math.round((back - REJOIN_FRAMES + 1) * STEP));
+    expect(asked.length).toBe(2 * REJOIN_FRAMES);
+    // Asked about each frame with where the thing is in it.
+    for (const { t, at } of asked) {
+      expect(Math.abs(t - 1000), `asked at ${t}`).toBeGreaterThanOrEqual(250);
+      const where = truth(Math.round(t / STEP) * STEP);
+      expect(Math.abs(at.x * W - 0.5 - where.x), `x at ${t}`).toBeLessThan(1);
+      expect(Math.abs(at.y * H - 0.5 - where.y), `y at ${t}`).toBeLessThan(1);
+    }
+  });
+
+  it('runs each way to its end when it never agrees with the path it mends REJOIN_FRAMES frames in a row', async () => {
+    const outcome = await runTrack(
+      request({ rejoin: t => Math.round(t / STEP) % REJOIN_FRAMES !== 0 }),
+      () => undefined,
+      new AbortController().signal,
+      async () => source(),
+    );
+    expect(outcome.result!.atMs[0]).toBe(0);
+    expect(outcome.result!.atMs.at(-1)).toBe(2000);
   });
 });

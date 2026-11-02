@@ -47,7 +47,7 @@ import {
 import { MAX_FOCUS_CHANGES, normaliseFocus, sameFocus } from './focus';
 import { normaliseLayoutAnimation, sameLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation, sameOverlayAnimation } from './motion';
-import { normaliseOverlayTrack } from './overlay-track';
+import { normaliseOverlayFollow } from './overlay-track';
 import { sameSoundEffectSettings } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
@@ -1099,9 +1099,9 @@ export function duplicateOverlay(manifest: EditManifest, id: string, newId: stri
     id: newId,
     cx: source.kind === 'effect' ? source.cx : clamp(source.cx + 0.05, 0, 1),
     cy: source.kind === 'effect' ? source.cy : clamp(source.cy + 0.05, 0, 1),
-    // A tracked copy is placed by its pin, so the nudge goes there too: near enough the same step
-    // on a clip that fills the frame, and still off the original on one that does not.
-    ...(source.track ? { track: { ...source.track, pin: { ...source.track.pin, dx: source.track.pin.dx + 0.05, dy: source.track.pin.dy + 0.05 } } } : {}),
+    // A following copy is placed by its pin, so the nudge goes there too: near enough the same step on a
+    // clip that fills the frame, and still off the original on one that does not. Both follow the one track.
+    ...(source.follow ? { follow: { ...source.follow, pin: { ...source.follow.pin, dx: source.follow.pin.dx + 0.05, dy: source.follow.pin.dy + 0.05 } } } : {}),
   });
   const overlays = [...manifest.overlays];
   overlays.splice(index + 1, 0, copy);
@@ -1194,10 +1194,11 @@ function normaliseLayer<T extends EditOverlay>(overlay: T): T {
   const animation = normaliseOverlayAnimation(overlay.animation);
   if (animation) layer.animation = animation;
   else delete layer.animation;
-  // A track by the same rule, and never on an effect, which covers the frame.
-  const track = overlay.kind === 'effect' ? undefined : normaliseOverlayTrack(overlay.track);
-  if (track) layer.track = track;
-  else delete layer.track;
+  // A follow by the same rule, and never on an effect, which covers the frame. Whether its track exists is
+  // the manifest's to say: removing a track takes its followers off it in the same step.
+  const follow = overlay.kind === 'effect' ? undefined : normaliseOverlayFollow(overlay.follow);
+  if (follow) layer.follow = follow;
+  else delete layer.follow;
   return layer;
 }
 

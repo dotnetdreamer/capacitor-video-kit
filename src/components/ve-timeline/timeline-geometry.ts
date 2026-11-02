@@ -1,4 +1,4 @@
-import { clamp, type ClipDropTarget } from '../../editor';
+import { clamp, outputMsOf, type ClipDropTarget, type TrackHealth, type TrackHealthSpan, type TrackStretch } from '../../editor';
 
 import type { Filmstrip } from '../../state/editor.types';
 
@@ -423,4 +423,153 @@ export function zoomSnapTargets(zooms: readonly { id: string; startMs: number; e
 export function zoomBarLabel(scale: number, selected: boolean): string {
   const name = `Zoom ${scale.toFixed(1)}x`;
   return selected ? `${name}, selected` : name;
+}
+
+/*
+ * ------------------------------------------------------------------------------------------
+ * The tracks' rows.
+ *
+ * A TRACK below is a thing followed through the footage (`EditTrack`), which text, stickers and
+ * photos are pinned to - not a video layer, which this file and the component have called a track
+ * since long before (`TRACK_H`, `TRACK2_H`). The component calls these rows the TRACKED rows.
+ *
+ * A track lives in SOURCE time, the file's own milliseconds, and its row is drawn in OUTPUT time over
+ * each stretch of the post its footage plays in (`trackStretches`). A stretch is one segment at one
+ * constant speed, so source and output are a straight line apart inside it - which is why a fraction
+ * of a stretch's source span is the same fraction of the bar drawn over it, at any zoom.
+ * ------------------------------------------------------------------------------------------
+ */
+
+/**
+ * The stretch of a track's footage that is on the post: a layer's segments can run past the end of the
+ * post, which the render cuts them to, and the row is cut with them. The source end is cut through the
+ * stretch's own straight line, so the strip drawn over what is left is the strip of what is left. The
+ * same stretch back when nothing is cut; null for one wholly past the end.
+ */
+export function stretchOnPost(stretch: TrackStretch, totalMs: number): TrackStretch | null {
+  const startMs = Math.max(0, stretch.startMs);
+  const endMs = Math.min(totalMs, stretch.endMs);
+  if (!(endMs > startMs)) return null;
+  if (startMs === stretch.startMs && endMs === stretch.endMs) return stretch;
+  const span = stretch.endMs - stretch.startMs;
+  const sourceAt = (outputMs: number): number => (span > 0 ? stretch.fromMs + ((outputMs - stretch.startMs) * (stretch.toMs - stretch.fromMs)) / span : stretch.fromMs);
+  return { startMs, endMs, fromMs: sourceAt(startMs), toMs: sourceAt(endMs) };
+}
+
+/**
+ * The output instant a spot to check is marked at: its middle, through the FIRST stretch that shows it.
+ * That is the store's own arithmetic in `fixNextSpot`, on purpose - a tap on the marker asks the store
+ * for the spot at this instant, and an instant worked out any other way could ask for its neighbour.
+ * Null for a spot no stretch shows.
+ */
+export function spotOutputMs(spot: { fromMs: number; toMs: number }, stretches: readonly TrackStretch[]): number | null {
+  const mid = (spot.fromMs + spot.toMs) / 2;
+  const stretch = stretches.find(s => mid >= s.fromMs && mid <= s.toMs);
+  return stretch ? outputMsOf(stretch, mid) : null;
+}
+
+/** One run of a track's health strip: from and to as fractions of the bar it is drawn across, and how well the thing was followed there. */
+export interface HealthRun {
+  from: number;
+  to: number;
+  health: TrackHealth;
+}
+
+/**
+ * A sure stretch shorter than this between two weak ones is drawn weak too.
+ *
+ * A tracker hovering either side of sure flips from one frame to the next, and drawn as it is that is a
+ * strip striped at the frame rate - which reads as texture, not as a place to look. The store's
+ * `weakSpots` already counts weak stretches this close together as one spot to check, and this makes
+ * the strip agree with the marker it puts there: one amber run, one marker.
+ */
+export const STRIP_BRIDGE_MS = 300;
+
+/**
+ * A track's health over one stretch of its footage (`fromMs..toMs`, SOURCE ms), as runs across the bar
+ * drawn over it: each of the track's spans (`trackHealth`) cut to the stretch and measured as a fraction
+ * of it, a run per change of health, with a short sure run between two weak ones drawn weak (see
+ * [STRIP_BRIDGE_MS]). A sure run at either end is never bridged, however short: there is nothing weak
+ * on its far side for it to join. Empty for a stretch with no length.
+ */
+export function healthRuns(spans: readonly TrackHealthSpan[], fromMs: number, toMs: number): HealthRun[] {
+  const span = toMs - fromMs;
+  if (!(span > 0)) return [];
+  // Cut to the stretch, one run per health. Neighbours of a sure run are then weak by construction.
+  const cut: TrackHealthSpan[] = [];
+  for (const one of spans) {
+    const a = Math.max(one.fromMs, fromMs);
+    const b = Math.min(one.toMs, toMs);
+    if (!(b > a)) continue;
+    const last = cut[cut.length - 1];
+    if (last && last.health === one.health) last.toMs = b;
+    else cut.push({ fromMs: a, toMs: b, health: one.health });
+  }
+  for (let i = 1; i + 1 < cut.length; i++) {
+    const run = cut[i];
+    if (run.health === 'sure' && run.toMs - run.fromMs < STRIP_BRIDGE_MS) run.health = 'unsure';
+  }
+  const runs: HealthRun[] = [];
+  for (const run of cut) {
+    const last = runs[runs.length - 1];
+    const to = (run.toMs - fromMs) / span;
+    if (last && last.health === run.health) last.to = to;
+    else runs.push({ from: (run.fromMs - fromMs) / span, to, health: run.health });
+  }
+  return runs;
+}
+
+/**
+ * The strip's colours. Sure is the track's own, which the row writes as `--tracked-hue`; the other two
+ * are the kit's, with the values in `ve-tokens.css` as their fallbacks like every colour here.
+ */
+export const STRIP_COLOURS: Readonly<Record<TrackHealth, string>> = {
+  sure: 'var(--tracked-hue, #a6ff2e)',
+  unsure: 'var(--ve-track-unsure, #ffb340)',
+  lost: 'var(--ve-track-lost, #ff4d6a)',
+};
+
+/**
+ * Health runs as the strip draws them: a hard-edged gradient across the bar, a stop pair per run, in
+ * percent of the bar so it holds at every zoom without being worked out again. Null for runs that are
+ * sure the whole way, which the strip's own colour already draws.
+ */
+export function healthGradient(runs: readonly HealthRun[]): string | null {
+  if (runs.every(run => run.health === 'sure')) return null;
+  const at = (fraction: number): string => `${Math.round(clamp(fraction, 0, 1) * 100_000) / 1000}%`;
+  return `linear-gradient(to right, ${runs.map(run => `${STRIP_COLOURS[run.health]} ${at(run.from)} ${at(run.to)}`).join(', ')})`;
+}
+
+/**
+ * A track row's accessible name: `Track 1`, `Track 1, 2 spots to check`, and `, selected` on the
+ * selected one. The state is in the NAME and never in `aria-pressed`, for the reason [zoomBarLabel]
+ * gives.
+ */
+export function trackedRowLabel(name: string, spots: number, selected: boolean): string {
+  const checks = spots === 1 ? ', 1 spot to check' : spots > 1 ? `, ${spots} spots to check` : '';
+  return `${name}${checks}${selected ? ', selected' : ''}`;
+}
+
+/** A spot marker's accessible name: `Spot to check at 00:07.5`, the time read as the ruler reads it. */
+export function spotLabel(outputMs: number): string {
+  return `Spot to check at ${rulerLabel(outputMs)}`;
+}
+
+/**
+ * How much of a new track's row its run has filled, as fractions of the stretch it follows
+ * (`startMs..endMs`, output ms, with the box's frame `anchorMs` inside it).
+ *
+ * In the order the run reads the footage: on from the box's frame to the end first, then back from it to
+ * the start. The run shares its progress between the two passes by their lengths, the way on never less
+ * than a twentieth (`forwardShare` in `track-session.ts`), and this shares it the same way - so the fill
+ * reaches the end of the stretch as the run does, and turns back where the run turns back.
+ */
+export function runFill(startMs: number, endMs: number, anchorMs: number, progress: number): { from: number; to: number } {
+  const done = clamp(progress, 0, 1);
+  const span = endMs - startMs;
+  if (!(span > 0)) return { from: 0, to: done };
+  const anchor = clamp((anchorMs - startMs) / span, 0, 1);
+  const on = Math.max(0.05, 1 - anchor);
+  if (done <= on) return { from: anchor, to: anchor + (1 - anchor) * (done / on) };
+  return { from: anchor * (1 - (done - on) / (1 - on)), to: 1 };
 }

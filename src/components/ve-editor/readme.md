@@ -93,6 +93,14 @@ parts do the editing.
 | `--ve-surface`           | The tool row's back chevron, and a tool under a mouse, a step up from the page                         |
 | `--ve-text`              | Text and glyphs at full strength                                                                       |
 | `--ve-toolbar-max`       | The same for the tool row, wide enough that its longest row still fits                                 |
+| `--ve-track-0`           | The first colour a track is drawn in: its row, its box on the picture and its followers' marks         |
+| `--ve-track-1`           | The second track colour                                                                                |
+| `--ve-track-2`           | The third track colour                                                                                 |
+| `--ve-track-3`           | The fourth track colour                                                                                |
+| `--ve-track-4`           | The fifth track colour                                                                                 |
+| `--ve-track-5`           | The sixth track colour                                                                                 |
+| `--ve-track-lost`        | Where a track lost the thing altogether                                                                |
+| `--ve-track-unsure`      | Where a track was unsure of the thing: a spot to check                                                 |
 | `--ve-transport-max`     | The same for the clock and transport row, which wants to stay tighter                                  |
 
 

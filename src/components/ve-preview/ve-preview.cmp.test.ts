@@ -2,7 +2,16 @@ import { BufferTarget, CanvasSource, Mp4OutputFormat, Output, Quality } from 'me
 import { afterEach, describe, expect, it, type TestContext } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { PICTURE_SOURCE_MS, defaultClipEdit, defaultPictureEdit, emptyManifest, type EditManifest } from '../../editor';
+import {
+  PICTURE_SOURCE_MS,
+  defaultClipEdit,
+  defaultPictureEdit,
+  emptyManifest,
+  encodeSubjectTrack,
+  parseSubjectTrack,
+  type EditManifest,
+  type FindSubjectsResult,
+} from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -2076,11 +2085,17 @@ describe("ve-preview: the Track sheet's box under the fingers", () => {
    * A finger that lands off the box puts the box on it - but only once it is a tap or a drag. On landing
    * it is neither yet: it may be the first half of a pinch, and the box jumping to it then put the box
    * under the first finger of every pinch that started off it.
+   *
+   * A tap while a box is aimed fits the box round what is under the finger. There is no footage to read
+   * here, so a fit finds nothing and the box stays where a fit that finds nothing leaves it: a thumb wide,
+   * on the finger. A person the finder found is aimed at without reading anything.
    */
 
-  /** A sticker with the Track sheet open on it, and the frame on screen. */
-  async function openTrackOnSticker(): Promise<{ store: EditorStore; stage: HTMLElement; frame: DOMRect }> {
+  /** A sticker with the Track sheet open on it, and the frame on screen. `before` sets the post up first. */
+  async function openTrackOnSticker(before?: (store: EditorStore) => void): Promise<{ store: EditorStore; stage: HTMLElement; frame: DOMRect }> {
     const { store, preview } = await mount(false);
+    store.openTrackFootage = () => Promise.reject(new Error('no footage in this test'));
+    before?.(store);
     const id = store.addSticker({ emoji: '⭐' })!;
     store.select({ kind: 'overlay', id });
     store.openTrack();
@@ -2156,5 +2171,68 @@ describe("ve-preview: the Track sheet's box under the fingers", () => {
     touch(stage, frame, 'pointercancel', 1, 0.25, 0.75);
     await frames(1);
     expect(store.shownAim()).toEqual(before);
+  });
+
+  it('locks the box on a finger tapped inside it, and leaves it be for one tapped on a corner', async () => {
+    const { store, stage, frame } = await openTrackOnSticker();
+    const before = store.shownAim()!;
+    const left = before.cx - before.w / 2;
+    const top = before.cy - before.h / 2;
+    touch(stage, frame, 'pointerdown', 1, left, top);
+    await frames(1);
+    touch(stage, frame, 'pointerup', 1, left, top);
+    await frames(1);
+    expect(store.shownAim(), 'a corner only sizes the box').toEqual(before);
+
+    const x = before.cx + before.w / 5;
+    const y = before.cy + before.h / 5;
+    touch(stage, frame, 'pointerdown', 1, x, y);
+    await frames(1);
+    touch(stage, frame, 'pointerup', 1, x, y);
+    await until('the box to lock on', () => !!store.trackLockOn.value?.fitted);
+    expect(store.shownAim()!.cx).toBeCloseTo(x, 3);
+    expect(store.shownAim()!.cy).toBeCloseTo(y, 3);
+  });
+
+  it('aims at a person the finder found, tapped, without reading the footage', async () => {
+    const grid = 32;
+    const cells = new Uint8Array(grid * grid);
+    for (let y = 20; y < 30; y++) for (let x = 12; x < 20; x++) cells[y * grid + x] = 1;
+    const track = parseSubjectTrack(
+      encodeSubjectTrack({ width: grid, height: grid, times: [0, 5000], frames: [cells, cells], meta: { engine: 'mediapipe', kind: 'video', durationMs: 5000, fps: 10, subjects: [] } }),
+    );
+    const result: FindSubjectsResult = {
+      engine: 'mediapipe',
+      uri: 'blob:subjects',
+      cached: false,
+      kind: 'video',
+      width: grid,
+      height: grid,
+      frames: 2,
+      durationMs: 5000,
+      subjects: [{ id: 1, kind: 'person', startMs: 0, endMs: 5000, peakMs: 0, box: { x: 0.375, y: 0.625, w: 0.25, h: 0.3125 }, area: 0.08 }],
+    };
+    let read = 0;
+    const { store, stage, frame } = await openTrackOnSticker(s => {
+      // Focus found them already: the Track sheet looks no further than what it found.
+      s.subjectTracks.value = new Map([['clip-a', { status: 'ready', result, track }]]);
+      s.openTrackFootage = () => {
+        read++;
+        return Promise.reject(new Error('no footage in this test'));
+      };
+    });
+    await until('the people to light up', () => store.trackPeopleBoxes.value.length === 1);
+    expect(store.trackPeople.value).toBe('ready');
+    const person = store.trackPeopleBoxes.value[0]!;
+    touch(stage, frame, 'pointerdown', 1, person.cx, person.cy);
+    await frames(1);
+    touch(stage, frame, 'pointerup', 1, person.cx, person.cy);
+    await frames(1);
+    const aim = store.shownAim()!;
+    expect(aim.cx).toBeCloseTo(person.cx, 3);
+    expect(aim.cy).toBeCloseTo(person.cy, 3);
+    expect(aim.w, 'their box, a little bigger').toBeCloseTo(Math.min(1, person.w * 1.12), 3);
+    expect(store.trackLockOn.value?.fitted).toBe(true);
+    expect(read, 'nothing read for a person').toBe(0);
   });
 });

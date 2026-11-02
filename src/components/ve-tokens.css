@@ -41,6 +41,14 @@
    * @prop --ve-lane-music: The timeline lane colour for music
    * @prop --ve-lane-voice: The timeline lane colour for a voiceover
    * @prop --ve-lane-audio-effect: The timeline lane colour for an audio effect
+   * @prop --ve-track-0: The first colour a track is drawn in: its row, its box on the picture and its followers' marks
+   * @prop --ve-track-1: The second track colour
+   * @prop --ve-track-2: The third track colour
+   * @prop --ve-track-3: The fourth track colour
+   * @prop --ve-track-4: The fifth track colour
+   * @prop --ve-track-5: The sixth track colour
+   * @prop --ve-track-unsure: Where a track was unsure of the thing: a spot to check
+   * @prop --ve-track-lost: Where a track lost the thing altogether
    * @prop --ve-clip-wave: The waveform drawn on a video clip that has sound
    * @prop --ve-lane-music-wave: The waveform drawn on the music lane
    * @prop --ve-lane-voice-wave: The waveform drawn on a voiceover lane
@@ -100,6 +108,18 @@
   --ve-lane-voice: #ff9f5a;
   /* A pale cousin of the music's teal: it changes the sound under it, and is no sound itself. */
   --ve-lane-audio-effect: #74dccf;
+  /*
+   * One colour per track (`EditTrack.hue`), so two things followed in one shot never look alike. Bright on
+   * the black stage, and none of them the amber and red that mean unsure and lost.
+   */
+  --ve-track-0: #a6ff2e;
+  --ve-track-1: #4dd8ff;
+  --ve-track-2: #ff6bd6;
+  --ve-track-3: #c77dff;
+  --ve-track-4: #6b8cff;
+  --ve-track-5: #5cffc8;
+  --ve-track-unsure: #ffb340;
+  --ve-track-lost: #ff4d6a;
   /*
    * The sound drawn on those two lanes. Translucent rather than a third and fourth colour, so a
    * host that restyles a lane gets a wave that still reads on it without restyling this as well.

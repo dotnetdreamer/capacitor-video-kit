@@ -3,16 +3,17 @@ import { FULL_FRAME, pictureDest } from '../video-composer/web/geometry';
 import { LayerMap } from '../video-composer/web/layer-map';
 
 import { cameraAt } from './camera';
-import { MAX_SCALE, MIN_SCALE, type EditClip, type EditManifest, type EditOverlay, type OverlayTrack } from './edit-manifest';
+import { MAX_SCALE, MIN_SCALE, type EditClip, type EditManifest, type EditOverlay, type EditTrack, type OverlayFollow } from './edit-manifest';
 import { timelineSlots, type TimelineSlot } from './edit-ops';
 import { layoutRectAt, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayMotionAt } from './motion';
-import { cutTrackAt, pathAt, pinAt, pinnedPoint, trackPath } from './overlay-track';
+import { pathAt, pinAt, pinnedPoint, trackPath, type RunSamples } from './overlay-track';
 
 /**
- * What a layer's track ([OverlayTrack]) does on the post: where the layer is at every instant, LOWERED
- * to the same [ComposeOverlayMotion] keys an animation is, so the web, Android and iOS render it with
- * the arithmetic they already have and the preview reads the very keys the render is handed.
+ * What following a track ([OverlayFollow] of an [EditTrack]) does to a layer on the post: where the layer
+ * is at every instant, LOWERED to the same [ComposeOverlayMotion] keys an animation is, so the web, Android
+ * and iOS render it with the arithmetic they already have and the preview reads the very keys the render
+ * is handed. A track draws nothing itself; only what follows it moves.
  *
  * The path is in the footage's own terms, so placing the layer at an output instant means finding the
  * footage there and drawing the path's point the way the painter draws the footage itself: the clip's
@@ -27,7 +28,7 @@ import { cutTrackAt, pathAt, pinAt, pinnedPoint, trackPath } from './overlay-tra
 
 /** The parts of the post a track is drawn through. */
 export interface TrackScene {
-  manifest: Pick<EditManifest, 'clips' | 'videoTracks' | 'output' | 'fit'>;
+  manifest: Pick<EditManifest, 'clips' | 'videoTracks' | 'output' | 'fit' | 'tracks'>;
   /** The post's camera, compiled: `compileCamera(manifest.zooms, totalMs)`. */
   camera: ComposeCamera | null;
   /** Every clip's arrangement keys: `compileLayoutMotions(manifest)`. */
@@ -51,7 +52,7 @@ interface Lane {
 }
 
 /** The lane the followed segment is on, or failing that the first one playing its source. */
-function laneOf(manifest: TrackScene['manifest'], track: Pick<OverlayTrack, 'clipId' | 'clipKey'>): Lane | null {
+function laneOf(manifest: Pick<EditManifest, 'clips' | 'videoTracks'>, track: Pick<EditTrack, 'clipId' | 'clipKey'>): Lane | null {
   const lanes: Lane[] = [{ base: true, clips: manifest.clips, startMs: 0 }, ...manifest.videoTracks.map(t => ({ base: false, clips: t.clips, startMs: t.startMs }))];
   return lanes.find(lane => lane.clips.some(clip => clip.id === track.clipId)) ?? lanes.find(lane => lane.clips.some(clip => clip.clipKey === track.clipKey)) ?? null;
 }
@@ -72,7 +73,7 @@ export function sourceMsThrough(slot: TimelineSlot, localMs: number): number {
  * and otherwise the followed segment itself, through its transition tail and then held at its nearer
  * end. Null when neither is on the post any more.
  */
-export function trackedFootage(track: Pick<OverlayTrack, 'clipId' | 'clipKey' | 'aspect'>, scene: TrackScene, outputMs: number): Footage | null {
+export function trackedFootage(track: Pick<EditTrack, 'clipId' | 'clipKey' | 'aspect'>, scene: TrackScene, outputMs: number): Footage | null {
   const manifest = scene.manifest;
   const lane = laneOf(manifest, track);
   if (!lane) return null;
@@ -102,6 +103,44 @@ export function trackedFootage(track: Pick<OverlayTrack, 'clipId' | 'clipKey' | 
   return { map, sourceMs: sourceMsThrough(slot, into), clip, outputMs: at };
 }
 
+/** One stretch of the post where a track's footage plays inside the track's span: output ms, and the SOURCE ms shown at either end. */
+export interface TrackStretch {
+  startMs: number;
+  endMs: number;
+  fromMs: number;
+  toMs: number;
+}
+
+/**
+ * Where a track's thing is on the post: one stretch per segment of its lane playing its source inside the
+ * track's span, in time order - what the timeline draws a track's row over. A track of a picture (one
+ * sample) is on for the whole of every segment showing the picture.
+ */
+export function trackStretches(track: Pick<EditTrack, 'clipId' | 'clipKey' | 'atMs'>, manifest: Pick<EditManifest, 'clips' | 'videoTracks'>): TrackStretch[] {
+  const lane = laneOf(manifest, track);
+  if (!lane || track.atMs.length === 0) return [];
+  const first = track.atMs[0]!;
+  const last = track.atMs[track.atMs.length - 1]!;
+  const still = track.atMs.length === 1;
+  const out: TrackStretch[] = [];
+  for (const slot of timelineSlots({ clips: lane.clips })) {
+    const clip = slot.clip;
+    if (clip.clipKey !== track.clipKey) continue;
+    const speed = clip.speed || 1;
+    const fromMs = still ? clip.inMs : Math.max(clip.inMs, first);
+    const toMs = still ? clip.outMs : Math.min(clip.outMs, last);
+    if (!(toMs > fromMs)) continue;
+    out.push({ startMs: lane.startMs + slot.startMs + (fromMs - clip.inMs) / speed, endMs: lane.startMs + slot.startMs + (toMs - clip.inMs) / speed, fromMs, toMs });
+  }
+  return out;
+}
+
+/** The output instant a stretch shows SOURCE instant `sourceMs` at. */
+export function outputMsOf(stretch: TrackStretch, sourceMs: number): number {
+  const span = stretch.toMs - stretch.fromMs;
+  return span > 0 ? stretch.startMs + ((sourceMs - stretch.fromMs) * (stretch.endMs - stretch.startMs)) / span : stretch.startMs;
+}
+
 /** A tracked layer as it is drawn at one instant: its centre on the frame, its size and its angle. */
 export interface TrackedPose {
   cx: number;
@@ -110,17 +149,36 @@ export interface TrackedPose {
   rotationDeg: number;
 }
 
+/** The track a layer follows, and how: null for a layer that follows none, or one the post does not have. */
+export function followedTrack(manifest: Pick<EditManifest, 'tracks'>, overlay: Pick<EditOverlay, 'follow'>): { track: EditTrack; follow: OverlayFollow } | null {
+  const follow = overlay.follow;
+  if (!follow) return null;
+  const track = manifest.tracks?.find(t => t.id === follow.trackId);
+  return track ? { track, follow } : null;
+}
+
+/** The track with id `trackId`, or null. */
+export function trackById(manifest: Pick<EditManifest, 'tracks'>, trackId: string | null | undefined): EditTrack | null {
+  return (trackId && manifest.tracks?.find(t => t.id === trackId)) || null;
+}
+
+/** The layers following track `trackId`, bottom to top. */
+export function followersOf<T extends Pick<EditOverlay, 'follow'>>(overlays: readonly T[], trackId: string): T[] {
+  return overlays.filter(overlay => overlay.follow?.trackId === trackId);
+}
+
 /**
- * Where a tracked layer is drawn at output instant `outputMs`, before its animation does anything: what a
- * selection box, a hit test and a drag take hold of. Null for a layer with no track, and for one whose
- * footage is no longer on the post, which is drawn where it was put.
+ * Where a following layer is drawn at output instant `outputMs`, before its animation does anything: what
+ * a selection box, a hit test and a drag take hold of. Null for a layer that follows nothing, and for one
+ * whose footage is no longer on the post, which is drawn where it was put.
  */
-export function trackedPoseAt(overlay: Pick<EditOverlay, 'track' | 'scale' | 'rotationDeg'>, scene: TrackScene, outputMs: number): TrackedPose | null {
-  const track = overlay.track;
-  if (!track) return null;
+export function trackedPoseAt(overlay: Pick<EditOverlay, 'follow' | 'scale' | 'rotationDeg'>, scene: TrackScene, outputMs: number): TrackedPose | null {
+  const followed = followedTrack(scene.manifest, overlay);
+  if (!followed) return null;
+  const { track, follow } = followed;
   const footage = trackedFootage(track, scene, outputMs);
   if (!footage) return null;
-  const point = pinnedPoint(track, trackPath(track), footage.sourceMs);
+  const point = pinnedPoint(track, follow, trackPath(track), footage.sourceMs);
   const out = footage.map.toOutput(point.x, point.y);
   const output = scene.manifest.output;
   return { cx: out.x / output.width, cy: out.y / output.height, scale: overlay.scale * point.scale, rotationDeg: overlay.rotationDeg + point.turn };
@@ -130,12 +188,17 @@ export function trackedPoseAt(overlay: Pick<EditOverlay, 'track' | 'scale' | 'ro
  * The thing a track follows as it is drawn at output instant `outputMs`: its middle and its box's four
  * corners on the frame, 0..1 of it. What the Track sheet draws its box and path with.
  *
- * Turned with the thing only when the layer turns with it. The tracker reads a turn off how the points
- * inside the box move round each other, and a thing that changes shape - a flower opening, a person
- * walking - moves them round as surely as one that turns, so its turn wanders tens of degrees on footage
- * where nothing turned. Left out, the box is never drawn askew round a layer that is not turning.
+ * Turned with the thing only when `turned` - a layer that turns with it is being looked at. The tracker
+ * reads a turn off how the points inside the box move round each other, and a thing that changes shape - a
+ * flower opening, a person walking - moves them round as surely as one that turns, so its turn wanders
+ * tens of degrees on footage where nothing turned. Left out, the box is never drawn askew for nothing.
  */
-export function trackedThingAt(track: OverlayTrack, scene: TrackScene, outputMs: number): { cx: number; cy: number; corners: { x: number; y: number }[]; sourceMs: number } | null {
+export function trackedThingAt(
+  track: EditTrack,
+  scene: TrackScene,
+  outputMs: number,
+  turned = false,
+): { cx: number; cy: number; corners: { x: number; y: number }[]; sourceMs: number } | null {
   const footage = trackedFootage(track, scene, outputMs);
   if (!footage) return null;
   const here = pathAt(trackPath(track), footage.sourceMs);
@@ -145,7 +208,7 @@ export function trackedThingAt(track: OverlayTrack, scene: TrackScene, outputMs:
     return { x: out.x / output.width, y: out.y / output.height };
   };
   const middle = toFrame(here.x, here.y);
-  const rad = track.turnWith ? (here.turn * Math.PI) / 180 : 0;
+  const rad = turned ? (here.turn * Math.PI) / 180 : 0;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
   // Half the box in units of the source's height, turned there, and back into fractions.
@@ -167,9 +230,9 @@ function roundTo(value: number, places: number): number {
 }
 
 /**
- * A tracked layer's move over its window on the wire, `window`, as motion keys - one per frame of the
- * post's `fps`, the window's two ends included - or null for a layer with no track, whose footage is gone,
- * or that the track never moves. Coarser where a long window would pass `maxKeys`.
+ * A following layer's move over its window on the wire, `window`, as motion keys - one per frame of the
+ * post's `fps`, the window's two ends included - or null for a layer that follows nothing, whose footage is
+ * gone, or that the track never moves. Coarser where a long window would pass `maxKeys`.
  *
  * Offsets against the layer's own `cx`/`cy`, a size against its own `scale` and a turn added to its own
  * `rotationDeg`: the wire's meaning, so the layer is drawn by exactly the path every moving layer takes.
@@ -181,9 +244,9 @@ export function compileTrackMotion(
   fps = scene.manifest.output.fps,
   maxKeys = MAX_OVERLAY_MOTION_KEYS,
 ): ComposeOverlayMotion | null {
-  const track = overlay.track;
-  if (!track || overlay.kind === 'effect') return null;
-  if (!trackedFootage(track, scene, window.startMs)) return null;
+  const followed = followedTrack(scene.manifest, overlay);
+  if (!followed || overlay.kind === 'effect') return null;
+  if (!trackedFootage(followed.track, scene, window.startMs)) return null;
   const span = window.endMs - window.startMs;
   if (!(span > 0)) return null;
   let step = 1000 / Math.max(1, Math.min(120, fps || 30));
@@ -198,10 +261,11 @@ export function compileTrackMotion(
   return isStill(held) ? null : held;
 }
 
-/** A tracked layer's keys at exactly the output instants `times`, in order; null where its footage is gone throughout. */
+/** A following layer's keys at exactly the output instants `times`, in order; null where its footage is gone throughout. */
 function trackKeysAt(overlay: EditOverlay, scene: TrackScene, times: readonly number[]): ComposeOverlayMotion | null {
-  const track = overlay.track;
-  if (!track) return null;
+  const followed = followedTrack(scene.manifest, overlay);
+  if (!followed) return null;
+  const { track, follow } = followed;
   const output = scene.manifest.output;
   const path = trackPath(track);
   const atMs: number[] = [];
@@ -212,7 +276,7 @@ function trackKeysAt(overlay: EditOverlay, scene: TrackScene, times: readonly nu
   for (const t of times) {
     const footage = trackedFootage(track, scene, t);
     if (!footage) continue;
-    const point = pinnedPoint(track, path, footage.sourceMs);
+    const point = pinnedPoint(track, follow, path, footage.sourceMs);
     const out = footage.map.toOutput(point.x, point.y);
     atMs.push(roundTo(t, 3));
     x.push(roundTo(out.x / output.width - overlay.cx, 5));
@@ -222,8 +286,8 @@ function trackKeysAt(overlay: EditOverlay, scene: TrackScene, times: readonly nu
   }
   if (atMs.length === 0) return null;
   const motion: ComposeOverlayMotion = { atMs, x, y };
-  if (track.scaleWith || track.pin.grow !== undefined) motion.scale = scale;
-  if (track.turnWith) motion.rotation = rotation;
+  if (follow.scaleWith || follow.pin.grow !== undefined) motion.scale = scale;
+  if (follow.turnWith) motion.rotation = rotation;
   return motion;
 }
 
@@ -388,7 +452,7 @@ function sizeAt(drawn: number): { scale: number; grow: number } {
 }
 
 /**
- * A tracked layer moved, sized or turned on the frame at output instant `outputMs`: `shown` is what the
+ * A following layer moved, sized or turned on the frame at output instant `outputMs`: `shown` is what the
  * customer put it at THERE, as they see it. Answers the patch that draws it so - the pin moved to that
  * instant with the layer's centre against the thing there, and `cx`, `cy`, `scale` and `rotationDeg`
  * the drawn ones (`scale` times the pin's `grow`) - so everywhere else it keeps following the thing from
@@ -398,12 +462,13 @@ function sizeAt(drawn: number): { scale: number; grow: number } {
  * the same point of the footage, grown and turned from the new pin exactly as it was from the old.
  */
 export function repinOverlay(overlay: EditOverlay, scene: TrackScene, outputMs: number, shown: ShownPose = {}): Partial<EditOverlay> | null {
-  const track = overlay.track;
-  if (!track) return null;
+  const followed = followedTrack(scene.manifest, overlay);
+  if (!followed) return null;
+  const { track, follow } = followed;
   const footage = trackedFootage(track, scene, outputMs);
   if (!footage) return null;
   const path = trackPath(track);
-  const point = pinnedPoint(track, path, footage.sourceMs);
+  const point = pinnedPoint(track, follow, path, footage.sourceMs);
   const out = footage.map.toOutput(point.x, point.y);
   const output = scene.manifest.output;
   const cx = shown.cx ?? out.x / output.width;
@@ -411,104 +476,34 @@ export function repinOverlay(overlay: EditOverlay, scene: TrackScene, outputMs: 
   const size = sizeAt(shown.scale ?? overlay.scale * point.scale);
   const rotationDeg = shown.rotationDeg ?? overlay.rotationDeg + point.turn;
   const source = footage.map.toSourceAnywhere(cx * output.width, cy * output.height);
-  return { cx, cy, scale: size.scale, rotationDeg, track: { ...track, pin: pinAt(path, footage.sourceMs, source.u, source.v, size.grow) } };
+  return { cx, cy, scale: size.scale, rotationDeg, follow: { ...follow, pin: pinAt(path, footage.sourceMs, source.u, source.v, size.grow) } };
 }
 
 /**
- * The patch that takes a layer's track off and leaves it standing where it is drawn at `outputMs`, rather
+ * The patch that takes a layer off its track and leaves it standing where it is drawn at `outputMs`, rather
  * than jumping back to where it was last put - at the size it is drawn there, held to MIN_SCALE..MAX_SCALE
- * as every layer without a track is.
+ * as every layer that follows nothing is.
  */
-export function untrackOverlay(overlay: EditOverlay, scene: TrackScene, outputMs: number): Partial<EditOverlay> & { track: undefined } {
+export function unfollowOverlay(overlay: EditOverlay, scene: TrackScene, outputMs: number): Partial<EditOverlay> & { follow: undefined } {
   const pose = trackedPoseAt(overlay, scene, outputMs);
-  return pose ? { ...pose, track: undefined } : { track: undefined };
+  if (!pose) return { follow: undefined };
+  return { ...pose, scale: Math.min(MAX_SCALE, Math.max(MIN_SCALE, pose.scale)), follow: undefined };
 }
 
 /** What a tracking run found: one sample per frame read, in time order, the thing's box where scale is 1. */
-export interface TrackRunResult {
+export interface TrackRunResult extends RunSamples {
   clipId: string;
   clipKey: string;
   aspect: number;
   box: { w: number; h: number };
-  atMs: number[];
-  x: number[];
-  y: number[];
-  scale: number[];
-  turn: number[];
-  lost: number[];
-  /** The SOURCE instant the box was drawn on, where the run's scale is 1 and its turn 0. */
-  anchorMs: number;
 }
 
-/**
- * A layer with a run's path on it. `outputMs` is the frame the box was drawn on.
- *
- * A whole new path (`all`) pins the layer exactly where it is drawn on that frame now, so tracking never
- * moves a layer on the frame the customer is looking at.
- *
- * `from` mends a path from the frame where it slipped: the layer's path before the run's anchor is kept,
- * the run's taken from there on, its size and turn carried on from where the old path had them. The layer
- * keeps where it sat AGAINST THE THING on that frame - not where it was drawn, which was wherever the
- * slipping path had dragged it - so it goes back onto the thing, and before the anchor nothing moves.
- */
-export function withTrackRun(overlay: EditOverlay, scene: TrackScene, outputMs: number, run: TrackRunResult, mode: 'all' | 'from' = 'all'): Partial<EditOverlay> | null {
-  if (overlay.kind === 'effect' || run.atMs.length === 0) return null;
-  const old = overlay.track;
-
-  if (mode === 'from' && old && old.clipKey === run.clipKey) {
-    const oldPath = trackPath(old);
-    // Cut where the run's first frame is, not at the anchor: that frame is the one ON SCREEN at the
-    // anchor, which starts a little before it, and a sample kept from both paths at one time would be
-    // dropped by the manifest - leaving a path a hair from the one the pin below was worked out on. The
-    // cut leaves a seam there, so the part before is still smoothed with what followed it.
-    const first = run.atMs[0]!;
-    const thing = pathAt(oldPath, first);
-    const kept = cutTrackAt(old, first);
-    const lost: number[] = [];
-    for (let i = 0; i + 1 < (old.lost?.length ?? 0); i += 2) {
-      const from = old.lost![i]!;
-      const to = Math.min(old.lost![i + 1]!, first - 1);
-      if (to > from) lost.push(from, to);
-    }
-    lost.push(...run.lost);
-    const track: OverlayTrack = {
-      ...old,
-      atMs: [...kept.atMs, ...run.atMs],
-      x: [...kept.x, ...run.x],
-      y: [...kept.y, ...run.y],
-      scale: [...kept.scale, ...run.scale.map(s => roundTo(s * thing.scale, 4))],
-      turn: [...kept.turn, ...run.turn.map(t => roundTo(t + thing.turn, 2))],
-    };
-    if (lost.length > 0) track.lost = lost;
-    else delete track.lost;
-    if (kept.seams.length > 0) track.seams = kept.seams;
-    else delete track.seams;
-    // Pinned on the anchor frame, against the thing as the MENDED path has it there - its size and turn
-    // read off the new path, smoothed as it is drawn - so that before the anchor, where the path is the
-    // old one, the layer's offset from the thing works out to exactly what it was.
-    const was = pathAt(oldPath, old.pin.atMs);
-    const now = pathAt(trackPath(track), run.anchorMs);
-    const grew = old.scaleWith ? now.scale / was.scale : 1;
-    const turn = old.turnWith ? now.turn - was.turn : 0;
-    const rad = (turn * Math.PI) / 180;
-    const ox = old.pin.dx * old.aspect * grew;
-    const oy = old.pin.dy * grew;
-    const size = sizeAt(overlay.scale * (old.pin.grow ?? 1) * grew);
-    track.pin = {
-      atMs: Math.round(run.anchorMs),
-      dx: roundTo((ox * Math.cos(rad) - oy * Math.sin(rad)) / old.aspect, 5),
-      dy: roundTo(ox * Math.sin(rad) + oy * Math.cos(rad), 5),
-    };
-    if (size.grow !== 1) track.pin.grow = size.grow;
-    const rotationDeg = overlay.rotationDeg + turn;
-    const pose = trackedPoseAt({ track, scale: size.scale, rotationDeg }, scene, outputMs);
-    if (!pose) return null;
-    return { cx: pose.cx, cy: pose.cy, scale: size.scale, rotationDeg, track };
-  }
-
-  // Where the layer is drawn on that frame now: by its old path, or where it stands when it has none.
-  const before = trackedPoseAt(overlay, scene, outputMs) ?? { cx: overlay.cx, cy: overlay.cy, scale: overlay.scale, rotationDeg: overlay.rotationDeg };
-  const track: OverlayTrack = {
+/** A new track from a run's path: named, coloured, and smoothed as `smooth` says (the default when absent). */
+export function trackFromRun(run: TrackRunResult, id: string, name: string, hue: number, smooth?: number): EditTrack {
+  const track: EditTrack = {
+    id,
+    name,
+    hue,
     clipId: run.clipId,
     clipKey: run.clipKey,
     aspect: run.aspect,
@@ -518,17 +513,51 @@ export function withTrackRun(overlay: EditOverlay, scene: TrackScene, outputMs: 
     y: run.y,
     scale: run.scale,
     turn: run.turn,
-    pin: { atMs: run.anchorMs, dx: 0, dy: 0 },
   };
+  if (run.sure.some(s => s < 100)) track.sure = run.sure;
   if (run.lost.length > 0) track.lost = run.lost;
-  if (old?.scaleWith) track.scaleWith = true;
-  if (old?.turnWith) track.turnWith = true;
-  if (old?.smooth !== undefined) track.smooth = old.smooth;
+  if (smooth !== undefined) track.smooth = smooth;
+  return track;
+}
+
+/**
+ * The patch that pins `overlay` to `track` exactly where it is drawn at `outputMs` now - through whatever
+ * track it followed before - so pinning never moves a layer on the frame the customer is looking at. Its
+ * way of following (`scaleWith`, `turnWith`) is taken from `flags`, or kept from the follow it had. Null
+ * for an effect, and where the track's footage is not on the post at all. `scene` must already hold
+ * `track`, and still hold any track the layer followed before.
+ */
+export function followPatch(
+  overlay: EditOverlay,
+  track: EditTrack,
+  scene: TrackScene,
+  outputMs: number,
+  flags: { scaleWith?: boolean; turnWith?: boolean } = {},
+): Partial<EditOverlay> | null {
+  if (overlay.kind === 'effect') return null;
+  const before = trackedPoseAt(overlay, scene, outputMs) ?? { cx: overlay.cx, cy: overlay.cy, scale: overlay.scale, rotationDeg: overlay.rotationDeg };
   const footage = trackedFootage(track, scene, outputMs);
   if (!footage) return null;
   const output = scene.manifest.output;
   const source = footage.map.toSourceAnywhere(before.cx * output.width, before.cy * output.height);
   const size = sizeAt(before.scale);
-  track.pin = pinAt(trackPath(track), footage.sourceMs, source.u, source.v, size.grow);
-  return { cx: before.cx, cy: before.cy, scale: size.scale, rotationDeg: before.rotationDeg, track };
+  const follow: OverlayFollow = { trackId: track.id, pin: pinAt(trackPath(track), footage.sourceMs, source.u, source.v, size.grow) };
+  if (flags.scaleWith ?? overlay.follow?.scaleWith) follow.scaleWith = true;
+  if (flags.turnWith ?? overlay.follow?.turnWith) follow.turnWith = true;
+  return { cx: before.cx, cy: before.cy, scale: size.scale, rotationDeg: before.rotationDeg, follow };
+}
+
+/**
+ * A follow moved from `before`'s path onto `after`'s at SOURCE instant `atMs`, the layer drawn there exactly
+ * where `before` drew it - its offset from the thing, its size and its turn - with the turn it had come
+ * through handed back (`turn`) for the layer's own angle. Wherever the two paths agree, the layer is then
+ * drawn where it was: what keeps a mend from moving a layer pinned inside the mended stretch anywhere
+ * outside it.
+ */
+export function refollowAt(before: EditTrack, after: EditTrack, follow: OverlayFollow, atMs: number): { follow: OverlayFollow; turn: number } {
+  const was = pinnedPoint(before, follow, trackPath(before), atMs);
+  const here = pathAt(trackPath(after), atMs);
+  const pin: OverlayFollow['pin'] = { atMs: Math.round(atMs), dx: roundTo(was.x - here.x, 5), dy: roundTo(was.y - here.y, 5) };
+  if (Math.abs(was.scale - 1) > 1e-6) pin.grow = roundTo(was.scale, 6);
+  return { follow: { ...follow, pin }, turn: roundTo(was.turn, 2) };
 }

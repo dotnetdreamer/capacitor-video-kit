@@ -388,13 +388,16 @@ type ZoomGesture =
  * Measured from where it started, like every gesture here.
  */
 type TrackGesture =
-  /** One finger: the box moved, or sized by a corner. */
-  | { kind: 'one'; pointerId: number; x0: number; y0: number; aim0: TrackAim; grip: AimGrip }
+  /**
+   * One finger: the box moved, or sized by a corner. Its body lifted again inside the tap slop, while a box
+   * is being aimed (`aiming`, read as the finger lands), is a tap on what is in the box: see [trackUp].
+   */
+  | { kind: 'one'; pointerId: number; x0: number; y0: number; t0: number; aim0: TrackAim; grip: AimGrip; aiming: boolean; moved: boolean }
   /**
    * One finger off the box, not yet a tap or a drag: lifted, or moved past the slop, it puts the box on
    * itself. Until then the box stays where it is, because a second finger may join and make it a pinch.
    */
-  | { kind: 'place'; pointerId: number; x0: number; y0: number }
+  | { kind: 'place'; pointerId: number; x0: number; y0: number; t0: number; aiming: boolean }
   /** Two fingers anywhere on the frame: the box grows and shrinks with them about its middle. */
   | { kind: 'pinch'; aim0: TrackAim; dist0: number }
   /** Finished, given up on, or a run going, while fingers are still down. */
@@ -1245,17 +1248,22 @@ export class OverlayGestures {
   /* The Track sheet's box                                                                     */
   /* ========================================================================================= */
 
-  /** Whether the Track sheet is open on a layer, which gives the frame to its box. */
+  /**
+   * Whether the Track sheet is open, which gives the frame to its box - on a layer or on no layer at all: a
+   * track opened from its own row, or a new one from the main row's Track tool.
+   */
   private trackTool(): boolean {
-    return this.store.panel.value === 'track' && !!this.store.trackLayer.value;
+    return this.store.panel.value === 'track';
   }
 
   /**
    * A finger landing while the Track sheet owns the frame. On the box it takes hold of it - a corner to
-   * size it, anywhere else to move it; off the box, a tap puts the box on the finger and a drag puts it
-   * there and carries it on, so the quickest way to aim is to touch the thing. Not on landing: a finger
-   * landing off the box may be the first of a pinch, and a second finger pinches the box's size where
-   * the box is. While a run is going the box is the run's, and a finger changes nothing.
+   * size it, anywhere else to move it; off the box, a drag puts the box on the finger and carries it on. A
+   * TAP while a box is being aimed - a new track's, or a track's being fixed - fits the box round whatever
+   * the finger is on, on the box or off it; on a track's own box, before any fix, a tap off the box puts
+   * the box there instead, which starts one. Not on landing: a finger landing off the box may be the first
+   * of a pinch, and a second finger pinches the box's size where the box is. While a run is going the box
+   * is the run's, and while the sheet asks which track to follow there is no box: a finger changes nothing.
    */
   private trackDown(e: PointerEvent): void {
     e.preventDefault();
@@ -1268,7 +1276,7 @@ export class OverlayGestures {
     }
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const rect = this.stage.getBoundingClientRect();
-    if (this.store.trackRun.value || !(rect.width > 0) || !(rect.height > 0)) {
+    if (this.store.trackRun.value || this.store.trackChoosing.value || !(rect.width > 0) || !(rect.height > 0)) {
       this.trackGesture = { kind: 'spent' };
       return;
     }
@@ -1278,10 +1286,12 @@ export class OverlayGestures {
     if (this.pointers.size === 1) {
       const shown = this.store.shownAim();
       const grip = shown ? aimGripAt(shown, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height) : null;
+      const t0 = performance.now();
+      const aiming = !this.store.trackShown.value || this.store.trackAimMoved.value;
       this.trackGesture =
         shown && grip
-          ? { kind: 'one', pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, aim0: shown, grip }
-          : { kind: 'place', pointerId: e.pointerId, x0: e.clientX, y0: e.clientY };
+          ? { kind: 'one', pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, t0, aim0: shown, grip, aiming, moved: false }
+          : { kind: 'place', pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, t0, aiming };
       return;
     }
     const pair = this.firstTwo();
@@ -1301,12 +1311,17 @@ export class OverlayGestures {
       if (gesture.pointerId !== e.pointerId || distance(point, { x: gesture.x0, y: gesture.y0 }) <= TAP_SLOP_PX) return;
       // A drag: the box goes where the finger landed, and from there on it is carried like any box.
       const aim = this.placeAim(gesture.x0, gesture.y0, rect);
-      this.trackGesture = aim ? { kind: 'one', pointerId: e.pointerId, x0: gesture.x0, y0: gesture.y0, aim0: aim, grip: 'move' } : { kind: 'spent' };
+      this.trackGesture = aim
+        ? { kind: 'one', pointerId: e.pointerId, x0: gesture.x0, y0: gesture.y0, t0: gesture.t0, aim0: aim, grip: 'move', aiming: gesture.aiming, moved: true }
+        : { kind: 'spent' };
       if (aim) this.store.setTrackAim(gripAim(aim, 'move', (e.clientX - gesture.x0) / rect.width, (e.clientY - gesture.y0) / rect.height));
       return;
     }
     if (gesture.kind === 'one') {
       if (gesture.pointerId !== e.pointerId) return;
+      // Carried from the first pixel, as ever - a box nudged a few pixels is a box placed - but a finger that
+      // has not left the slop can still lift as a tap.
+      if (!gesture.moved && distance(point, { x: gesture.x0, y: gesture.y0 }) > TAP_SLOP_PX) gesture.moved = true;
       this.store.setTrackAim(gripAim(gesture.aim0, gesture.grip, (e.clientX - gesture.x0) / rect.width, (e.clientY - gesture.y0) / rect.height));
       return;
     }
@@ -1321,18 +1336,36 @@ export class OverlayGestures {
   private trackUp(e: PointerEvent): void {
     if (!this.pointers.delete(e.pointerId)) return;
     const gesture = this.trackGesture;
-    // A finger lifted off the box without having moved: a tap, which puts the box on it. One the system
-    // took back is no tap.
-    if (gesture?.kind === 'place' && gesture.pointerId === e.pointerId && e.type !== 'pointercancel') {
+    // A finger lifted without having moved: off the box it puts the box on it, and quickly enough to be a
+    // tap while a box is being aimed - anywhere but a corner, which only sizes - it fits the box round what
+    // it landed on. One the system took back is neither.
+    const own = (gesture?.kind === 'place' || gesture?.kind === 'one') && gesture.pointerId === e.pointerId && e.type !== 'pointercancel';
+    if (own && (gesture.kind === 'place' || (gesture.grip === 'move' && !gesture.moved))) {
       const rect = this.stage.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) this.placeAim(gesture.x0, gesture.y0, rect);
+      const tapped = gesture.aiming && performance.now() - gesture.t0 < TAP_MS;
+      if (rect.width > 0 && rect.height > 0) {
+        if (tapped) this.tapAim(gesture.x0, gesture.y0, rect);
+        else if (gesture.kind === 'place') this.placeAim(gesture.x0, gesture.y0, rect);
+      }
     }
     // A pinch that loses a finger is over, as the zoom area's is, rather than turning into a jumpy drag.
     if (gesture?.kind === 'pinch' || ((gesture?.kind === 'one' || gesture?.kind === 'place') && gesture.pointerId === e.pointerId)) this.trackGesture = { kind: 'spent' };
     if (this.pointers.size === 0) this.endTrackTouch();
   }
 
-  /** The box put with its middle at (`x`, `y`) on the screen, its size kept: a tap or a drag off it. */
+  /**
+   * A tap at (`x`, `y`) on the screen while a box is being aimed: on a person the people finder has lit up,
+   * the box goes round them; anywhere else it is fitted round whatever is there ([EditorStore.fitTrackAimAt]),
+   * which also says when it has locked on.
+   */
+  private tapAim(x: number, y: number, rect: DOMRect): void {
+    const point = { x: (x - rect.left) / rect.width, y: (y - rect.top) / rect.height };
+    const person = this.store.trackPersonAt(point);
+    if (person) this.store.aimTrackAtPerson(person, point);
+    else void this.store.fitTrackAimAt(point);
+  }
+
+  /** The box put with its middle at (`x`, `y`) on the screen, its size kept: a drag off it, a press held too long to be a tap, a tap on a track's own box. */
   private placeAim(x: number, y: number, rect: DOMRect): TrackAim | null {
     const size = this.store.shownAim() ?? { w: 0.3, h: 0.3 * this.store.frameAspect.value };
     this.store.setTrackAim({ cx: (x - rect.left) / rect.width, cy: (y - rect.top) / rect.height, w: size.w, h: size.h });
@@ -1348,7 +1381,7 @@ export class OverlayGestures {
   /** The mouse's cursor while the Track sheet owns the frame, or null when it does not. */
   private trackCursor(e: PointerEvent): string | null {
     if (!this.trackTool()) return null;
-    if (this.store.trackRun.value) return '';
+    if (this.store.trackRun.value || this.store.trackChoosing.value) return '';
     const gesture = this.trackGesture;
     if (gesture?.kind === 'one') return gesture.grip === 'move' ? 'move' : AIM_CURSORS[gesture.grip];
     if (gesture?.kind === 'pinch') return 'move';

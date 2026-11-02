@@ -1,28 +1,214 @@
 /*
- * The Track sheet: the box's one button, a run's progress, and a track's few choices.
+ * The Track sheet: a run's progress, the choice of track, the box's one button, and a track's few
+ * choices under its name.
  *
- * Budgeted against the compact sheet as the Focus sheet is: tracked, the 53px head, two 52px rows and
- * the 36px hint come to 193px, well under the 259px a compact sheet is held to, so the picture the box
- * is dragged on keeps as much of the screen as it can.
+ * Held to ONE height whatever it shows. The picture above it is what the box is dragged on, and a sheet
+ * that grew when the box moved off the track - the old mend face did, by 32px - resized the picture under
+ * the finger dragging it. So every face is laid out inside the body's one height, and that height depends
+ * only on whether the sheet is open on a layer:
  *
- * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this component
- * includes ahead of this file.
+ *  - on a layer, 192px: the tallest face is the track's, its name, Smooth and Follow at 52px each and the
+ *    36px hint. With the 53px head the sheet is 245px, under the 259px a compact sheet is held to.
+ *  - without one, 140px of faces: there is no Follow row, and every face fits - the name, Smooth and the
+ *    hint; the name, the hint and the fix's buttons side by side (52 + 36 + 52); the hint, the people line
+ *    and Track (36 + 44 + 52 and two 4px gaps). Then 12px of air, because those last two end on the lime
+ *    button, and the body scrolls, so it cuts off whatever is drawn past its edge: the button's glow ended
+ *    in a hard line there without it. The sheet is 205px, and the picture keeps the other 40px.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
+ * component includes ahead of this file.
  */
 
 .tk {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 12px;
-  min-height: 100%;
-  padding: 6px 20px 10px;
+  height: 152px;
+  padding-bottom: 12px;
 }
 
-.tk--tracked {
-  justify-content: flex-start;
+/* On a layer every face but the track's has air under it already, and the track's ends in its hint. */
+.tk--layer {
+  height: 192px;
+  padding-bottom: 0;
+}
+
+/* ------------------------------------------------------------------------------------- name */
+
+/*
+ * The shown track's name: in the body rather than the frame's head, because `ve-sheet` takes its heading
+ * as a string and this one is a button that turns into a field. The button carries 10px of padding, so
+ * its dot sits where the rows' words start, 20px in.
+ */
+.tk__head {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 16px 0 10px;
+  animation: tk-in 160ms ease-out;
+}
+
+.tk__head--field {
+  padding-left: 20px;
+}
+
+.tk__dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tk-hue, var(--ve-accent, #a6ff2e));
+}
+
+.tk__name {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 44px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* While a run is going the name is only words. */
+.tk__name--still {
+  cursor: default;
+}
+
+button.tk__name:active {
+  background: var(--ve-raised, #2c2c2e);
+}
+
+.tk__name:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: -2px;
+}
+
+/* A long name gives way to how sure the track is, not the other way round. */
+.tk__name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tk__pencil {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--ve-faint, rgba(255, 255, 255, 0.35));
+}
+
+/*
+ * `appearance` and `font-family` are named for the search field's reason in `ve-sheet.css`: no reset
+ * reaches into a shadow root. 16px is a floor rather than a choice: a WebView zooms the whole page in when
+ * a smaller field takes the focus, and the editor's layout does not survive being zoomed.
+ */
+.tk__field {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  outline: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  caret-color: var(--tk-hue, var(--ve-accent, #a6ff2e));
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  animation: tk-in 160ms ease-out;
+}
+
+.tk__field:focus {
+  box-shadow: inset 0 0 0 2px var(--tk-hue, var(--ve-accent, #a6ff2e));
+}
+
+/* How sure the track is, at the far end of the name's row. */
+.tk__health {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  animation: tk-in 160ms ease-out;
+}
+
+.tk__check {
+  width: 16px;
+  height: 16px;
+  color: var(--tk-hue, var(--ve-accent, #a6ff2e));
+}
+
+/* A spot to check, marked in the amber the timeline draws one in. */
+.tk__health--spots::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ve-track-unsure, #ffb340);
+}
+
+/* ------------------------------------------------------------------------------------ faces */
+
+/*
+ * The one face of five that applies, under the name when a track is shown. It fades in when it takes
+ * over from another rather than snapping, so a run landing or a box moved off the track reads as this
+ * sheet changing, not as another sheet opening.
+ */
+.tk__face {
+  box-sizing: border-box;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  min-height: 0;
+  padding: 0 20px;
+  animation: tk-in 160ms ease-out;
+}
+
+/* The track's rows run the sheet's width and carry their own padding, as every sheet's rows do. */
+.tk__face--rows {
   gap: 0;
   padding: 0;
+}
+
+/* The gaps the budget above leaves room for: each box here carries air of its own besides. */
+.tk__face--aim,
+.tk__face--choose {
+  gap: 4px;
+}
+
+.tk__face--run {
+  gap: 10px;
+}
+
+.tk__face--fix {
+  gap: 0;
 }
 
 /* ------------------------------------------------------------------------------------ words */
@@ -96,15 +282,30 @@
   outline-offset: 3px;
 }
 
+/* A fix: Cancel, quiet, beside the button rather than under it, so the face fits under the name. */
+.tk__pair {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.tk__pair .tk__go {
+  flex: 1 1 auto;
+  width: auto;
+  margin: 0;
+}
+
 .tk__cancel {
-  margin-top: -6px;
+  flex: 0 0 auto;
 }
 
 /* -------------------------------------------------------------------------------------- run */
 
-/* How far the run has got: the Focus sheet's bar. */
+/* How far the run has got: the Focus sheet's bar, in the track's colour for a fix. */
 .tk__bar {
   position: relative;
+  flex: 0 0 auto;
   overflow: hidden;
   height: 4px;
   border-radius: 2px;
@@ -119,12 +320,16 @@
   transition: transform 160ms linear;
 }
 
+.tk__bar--fix .tk__bar-fill {
+  background: var(--tk-hue, var(--ve-accent, #a6ff2e));
+}
+
 .tk__stop {
   align-self: center;
-  height: 40px;
-  padding: 0 26px;
+  height: 44px;
+  padding: 0 28px;
   border: 0;
-  border-radius: 20px;
+  border-radius: 22px;
   background: var(--ve-raised, #2c2c2e);
   color: var(--ve-text, #fff);
   font-family: inherit;
@@ -180,6 +385,34 @@
 
 /* -------------------------------------------------------------------------------------- chips */
 
+/*
+ * The tracks to choose from, scrolling sideways when there are more than fit. Out to the sheet's edges,
+ * so they scroll under them rather than stop short; the run inside is centred by its auto margins while
+ * it fits and starts at the left edge, scrollable, once it does not - `justify-content: center` on the
+ * scroller would put the first chips out of reach to the left instead.
+ */
+.tk__chips {
+  display: flex;
+  flex: 0 0 auto;
+  height: 48px;
+  margin: 0 -20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tk__chips::-webkit-scrollbar {
+  display: none;
+}
+
+.tk__chips-run {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
 /* The button is the 44px touch target; the pill inside is what shows - the Focus sheet's chips. */
 .tk__chip {
   display: grid;
@@ -198,8 +431,10 @@
 }
 
 .tk__pill {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   box-sizing: border-box;
   min-width: 44px;
   height: 32px;
@@ -208,9 +443,21 @@
   background: var(--ve-raised, #2c2c2e);
   font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
   transition:
     background-color 120ms ease,
     color 120ms ease;
+}
+
+.tk__pill .tk__dot {
+  width: 8px;
+  height: 8px;
+}
+
+.tk__pill ve-icon {
+  width: 16px;
+  height: 16px;
+  margin-left: -4px;
 }
 
 .tk__chip:active .tk__pill {
@@ -223,12 +470,60 @@
   color: #000;
 }
 
+/* ----------------------------------------------------------------------------------- people */
+
+/* One 44px line whatever it says, so the button turning into words moves nothing round it. */
+.tk__people {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  min-height: 44px;
+}
+
+.tk__people .tk__chip {
+  animation: tk-in 160ms ease-out;
+}
+
+.tk__note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin: 0;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  animation: tk-in 160ms ease-out;
+}
+
+/* ----------------------------------------------------------------------------------- motion */
+
+@keyframes tk-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Asked for less motion, a face simply replaces the last one. */
+@media (prefers-reduced-motion: reduce) {
+  .tk__head,
+  .tk__field,
+  .tk__health,
+  .tk__face,
+  .tk__note,
+  .tk__people .tk__chip {
+    animation: none;
+  }
+}
+
 @media (hover: hover) and (pointer: fine) {
   .tk__go:hover {
     filter: brightness(1.06);
   }
 
-  .tk__stop:hover {
+  .tk__stop:hover,
+  button.tk__name:hover {
     background: var(--ve-raised-2, #3a3a3c);
   }
 }

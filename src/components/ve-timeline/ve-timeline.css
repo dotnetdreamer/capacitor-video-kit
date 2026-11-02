@@ -976,6 +976,243 @@
   object-fit: cover;
 }
 
+/*
+ * A lane whose layer follows a track wears the track's colour as a dot before its words, so what
+ * follows what reads down the timeline from the track's row. Ringed in the lanes' ink, because a
+ * track's colour can be as light as the lane it sits on. On a lane too short for words it stays, in the
+ * bar's corner, where the rule above would have put it out of sight with the words.
+ */
+.item__follow {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--ve-lane-ink, #2a0a33);
+}
+
+.item--glyph .item__label > .item__follow {
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  overflow: visible;
+  clip-path: none;
+}
+
+/* ---------------------------------------------------------------------------------- tracks */
+
+/*
+ * A track's row: a thing followed through the footage, just above the lanes of the layers that follow
+ * it. A lane's height and corners, and quieter than a lane on purpose - dark, its colour only down its
+ * left edge, on its dot and along its strip - because the layers are what the customer made and the
+ * track is what they hang on. `--tracked-hue` is the track's colour, written on the row by the
+ * component.
+ *
+ * Under a compact sheet the row sits in the column itself, the lanes being gone, and takes the air
+ * above it that `.tl__lanes` would have given it. The slim timeline has 96px: 52 for the filmstrip and
+ * its air, 40 for this.
+ *
+ * No `data-vrow`, so a dropped segment never takes it for a video layer.
+ */
+.tl__tracked {
+  --tracked-hue: var(--ve-track-0, #a6ff2e);
+}
+
+.tl__rows > .tl__tracked {
+  margin-top: var(--lane-gap);
+}
+
+/*
+ * A button, named with its state for the zoom bars' reason. Never a body to drag - a track is where its
+ * thing is in the footage, and nothing moves it along the post - so a selected one keeps the content's
+ * `pan-x` where `.item--selected` takes it away: a swipe on it is the timeline's scroll, as anywhere.
+ */
+.item--tracked {
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+}
+
+.item--tracked.item--selected {
+  touch-action: pan-x;
+}
+
+.item--tracked:focus-visible {
+  box-shadow:
+    inset 0 0 0 2px #fff,
+    0 0 0 2px #1c1c1e;
+}
+
+/*
+ * What the row paints - its colour down the left edge, the strip along its foot - clipped to its
+ * corners. Inside the white ring of a selected row rather than under it, so the ring stays whole and
+ * the strip, which is what the customer reads a selected track by, stays in sight.
+ */
+.item__paint {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.item--selected .item__paint {
+  inset: 2px;
+  border-radius: 6px;
+}
+
+.item__paint::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--tracked-hue);
+}
+
+/*
+ * How sure the tracker was along the way: the track's colour where it was sure, amber where it was
+ * not, red where it lost the thing. The component writes the runs as a gradient across the bar; a track
+ * sure the whole way has none, and this colour is the strip.
+ *
+ * It fades in when it is made, which is when a track lands and when a fix does - the strip is keyed by
+ * the path it is drawn from - and when the row comes back on screen, where the same short fade reads
+ * as the row settling in.
+ */
+.item__strip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background-color: var(--tracked-hue);
+  animation: tl-tracked-in 160ms ease-out;
+}
+
+/* Clear of the colour down the left edge by the air every lane leaves. */
+.item--tracked .item__label {
+  padding-left: 11px;
+}
+
+.item__dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tracked-hue);
+}
+
+/* How many layers follow the track: a note beside its name, not a second name. */
+.item__pinned {
+  flex: 0 0 auto;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A bar too short for the name is its dot alone, centred. The name is still the button's. */
+.item--tracked-short .item__label {
+  justify-content: center;
+  width: 100%;
+  padding: 0;
+}
+
+.item--tracked-short .item__text,
+.item--tracked-short .item__pinned {
+  display: none;
+}
+
+/*
+ * A spot worth a second look: a marker over the strip, amber where the tracker was unsure and red
+ * where it lost the thing, and a button of its own - a tap opens the track there to fix it. The target
+ * is 32px across and the row's height, centred on the spot; the triangle is what shows, pointing at the
+ * stretch of strip it is about. Above the bars, a selected one (1) included. No `touch-action`, for the
+ * transition dot's reason: a swipe that starts on one is the timeline's scroll.
+ */
+.tl__spot {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 32px;
+  margin-left: -16px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+  animation: tl-tracked-in 160ms ease-out;
+}
+
+.tl__spot::before {
+  content: '';
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  width: 10px;
+  height: 8px;
+  margin-left: -5px;
+  background: var(--ve-track-unsure, #ffb340);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  transform-origin: 50% 100%;
+  transition: transform 120ms ease;
+}
+
+.tl__spot--lost::before {
+  background: var(--ve-track-lost, #ff4d6a);
+}
+
+.tl__spot:active::before {
+  transform: scale(0.8);
+}
+
+.tl__spot:focus-visible {
+  box-shadow: inset 0 0 0 2px #fff;
+}
+
+/*
+ * A new track's row filling in while its run goes: a wash of the colour it will land in, and the strip
+ * along its foot. The component writes its left and its width in percent of the bar, a percent of the
+ * run at a time, and the transition turns those steps into a fill.
+ */
+.item__fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: linear-gradient(to top, var(--tracked-hue) 0 3px, transparent 3px);
+  transition:
+    left 160ms linear,
+    width 160ms linear;
+}
+
+.item__fill::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--tracked-hue);
+  opacity: 0.22;
+}
+
+@keyframes tl-tracked-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .item__strip,
+  .item__fill,
+  .tl__spot,
+  .tl__spot::before {
+    animation: none;
+    transition: none;
+  }
+}
+
 /* -------------------------------------------------------------------------- fixed overlays */
 
 .tl__playhead {
@@ -1277,6 +1514,12 @@
     cursor: pointer;
   }
 
+  /* A track's row is pressed rather than taken hold of: a tap selects it, and nothing drags it along. */
+  .item--tracked:not(.item--tracked-run),
+  .tl__spot {
+    cursor: pointer;
+  }
+
   /* The dot grows a little under the pointer, the one sign it is a button and not a mark. */
   .tl__trans:hover .tl__trans-dot {
     transform: scale(1.12);
@@ -1302,7 +1545,8 @@
   .tl--drag-move .item--add-sound,
   .tl--drag-move .tl__mute,
   .tl--drag-move .tl__add,
-  .tl--drag-move .tl__trans {
+  .tl--drag-move .tl__trans,
+  .tl--drag-move .tl__spot {
     cursor: grabbing;
   }
 
@@ -1313,7 +1557,8 @@
   .tl--drag-resize .handle,
   .tl--drag-resize .item--add-sound,
   .tl--drag-resize .tl__mute,
-  .tl--drag-resize .tl__add {
+  .tl--drag-resize .tl__add,
+  .tl--drag-resize .tl__spot {
     cursor: ew-resize;
   }
 

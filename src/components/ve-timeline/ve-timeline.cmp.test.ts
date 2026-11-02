@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest, type EditMusic, type EditVideoTrack, type TextOverlay } from '../../editor';
+import { emptyManifest, type EditManifest, type EditMusic, type EditTrack, type EditVideoTrack, type TextOverlay } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -2297,5 +2297,158 @@ describe('the lane ramps', () => {
     const pps = store.pps.value;
     await until('the ramps', () => Math.abs(ramp(tl, id, 'in') - 0.2 * pps) < 0.5);
     expect(ramp(tl, id, 'out')).toBeCloseTo(0.4 * pps, 0);
+  });
+});
+
+/*
+ * The tracks' rows: a thing followed through the footage, drawn over the stretch of the post its
+ * footage plays in, with a strip along its foot saying how sure the tracker was and a marker on each
+ * spot worth a second look. At 64 px a second, over the first segment, which plays its four seconds
+ * from the start of the post.
+ */
+describe('the track rows', () => {
+  /** Sure, then unsure from 0.75 s to 2.25 s, then sure again: one spot to check, marked at 1.5 s. */
+  function track(id = 'trk-1', name = 'Track 1'): EditTrack {
+    const atMs = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000];
+    return {
+      id,
+      name,
+      hue: 1,
+      clipId: 'seg-a',
+      clipKey: 'clip-a',
+      aspect: 16 / 9,
+      box: { w: 0.2, h: 0.2 },
+      atMs,
+      x: atMs.map(() => 0.5),
+      y: atMs.map(() => 0.5),
+      scale: atMs.map(() => 1),
+      turn: atMs.map(() => 0),
+      sure: [90, 90, 20, 20, 20, 90, 90, 90, 90],
+    };
+  }
+
+  function rowEl(tl: HTMLElement, id = 'trk-1'): HTMLElement | null {
+    return root(tl).querySelector<HTMLElement>(`[data-tracked-row="${id}"]`);
+  }
+
+  function bar(tl: HTMLElement, id = 'trk-1'): HTMLElement {
+    const found = rowEl(tl, id)?.querySelector<HTMLElement>('.item--tracked');
+    if (!found) throw new Error(`no ${id} row`);
+    return found;
+  }
+
+  function spot(tl: HTMLElement): HTMLElement {
+    const found = rowEl(tl)?.querySelector<HTMLElement>('.tl__spot');
+    if (!found) throw new Error('no spot');
+    return found;
+  }
+
+  async function withTrack(): Promise<{ store: EditorStore; tl: HTMLElement }> {
+    const mounted = await mount();
+    mounted.store.commit('Track', m => ({ ...m, tracks: [track()] }));
+    await until('the track row', () => !!rowEl(mounted.tl));
+    return mounted;
+  }
+
+  it('is not there without a track', async () => {
+    const { tl } = await mount();
+    expect(root(tl).querySelector('[data-row="tracked"]')).toBeNull();
+  });
+
+  it('draws the track over its footage, named with its spots to check and never aria-pressed', async () => {
+    const { tl } = await withTrack();
+    const el = bar(tl);
+    expect(el.getAttribute('aria-label')).toBe('Track 1, 1 spot to check');
+    expect(el.hasAttribute('aria-pressed')).toBe(false);
+    expect(el.textContent).toContain('Track 1');
+    // Four seconds at 64 px a second.
+    expect(el.getBoundingClientRect().width).toBeCloseTo(256, 0);
+    // Not a video row, so a dropped segment never takes it for one.
+    expect(rowEl(tl)!.hasAttribute('data-vrow')).toBe(false);
+    // Its health along its foot: amber from 0.75 s to 2.25 s, the track's own colour either side.
+    expect(el.querySelector<HTMLElement>('.item__strip')!.style.backgroundImage).toContain('18.75%');
+  });
+
+  it('sits above the layers that follow it, which wear its colour, and counts them', async () => {
+    const { store, tl } = await withTrack();
+    const id = store.addSticker({ emoji: '🔥' })!;
+    store.commitOverlay(id, { follow: { trackId: 'trk-1', pin: { atMs: 1000, dx: 0, dy: 0 } } }, 'Track');
+    store.select(null);
+    const lane = () => root(tl).querySelector<HTMLElement>(`[data-hit="layer"][data-id="${id}"]`);
+    await until('the follower’s dot', () => !!lane()?.querySelector('.item__follow'));
+    expect(bar(tl).textContent).toContain('1 pinned');
+    expect(bar(tl).getBoundingClientRect().bottom).toBeLessThanOrEqual(lane()!.getBoundingClientRect().top);
+    // After the glyph, which still leads the lane.
+    expect(lane()!.querySelector('.item__label')!.firstElementChild!.classList.contains('item__kind')).toBe(true);
+  });
+
+  it('selects the track on a tap and names it selected, and lets it go on another', async () => {
+    const { store, tl } = await withTrack();
+    const at = centre(bar(tl));
+    pointer(bar(tl), 'pointerdown', at.x, at.y);
+    pointer(bar(tl), 'pointerup', at.x, at.y);
+    expect(store.selection.value).toEqual({ kind: 'track', id: 'trk-1' });
+    await until('the name to follow', () => bar(tl).getAttribute('aria-label') === 'Track 1, 1 spot to check, selected');
+
+    pointer(bar(tl), 'pointerdown', at.x, at.y);
+    pointer(bar(tl), 'pointerup', at.x, at.y);
+    expect(store.selection.value).toBe(null);
+  });
+
+  it('marks the spot to check, and opens the track there to fix it on a tap', async () => {
+    const { store, tl } = await withTrack();
+    const el = spot(tl);
+    expect(el.getAttribute('aria-label')).toBe('Spot to check at 00:01.5');
+    // On the spot's middle, 1.5 s along the bar, and a target a finger can find.
+    const rect = el.getBoundingClientRect();
+    expect(rect.left + rect.width / 2 - bar(tl).getBoundingClientRect().left).toBeCloseTo(96, 0);
+    expect(rect.width).toBeGreaterThanOrEqual(32);
+    expect(rect.height).toBeGreaterThanOrEqual(32);
+
+    const at = centre(el);
+    pointer(el, 'pointerdown', at.x, at.y);
+    pointer(el, 'pointerup', at.x, at.y);
+    expect(store.panel.value).toBe('track');
+    expect(store.trackShown.value?.id).toBe('trk-1');
+    expect(store.playheadMs.value).toBeCloseTo(1500, -1);
+  });
+
+  it('keeps the shown track’s row in the slim timeline while its sheet is open, and no other', async () => {
+    const { store, tl } = await withTrack();
+    store.commit('Track', m => ({ ...m, tracks: [...(m.tracks ?? []), track('trk-2', 'Track 2')] }));
+    await until('both rows', () => root(tl).querySelectorAll('[data-row="tracked"]').length === 2);
+    (tl as HTMLElement & { compact: boolean }).compact = true;
+    await until('the rows to go', () => !root(tl).querySelector('[data-row="tracked"]'));
+
+    store.openTrackSheet('trk-2');
+    await until('the shown track’s row', () => !!rowEl(tl, 'trk-2'));
+    expect(root(tl).querySelectorAll('[data-row="tracked"]').length).toBe(1);
+    // Inside the 96 px the slim timeline has.
+    expect(bar(tl, 'trk-2').getBoundingClientRect().bottom - tl.getBoundingClientRect().top).toBeLessThanOrEqual(96);
+  });
+
+  it('fills in the row of a track being made as its run goes, without drawing the timeline again', async () => {
+    const { store, tl } = await mount();
+    (tl as HTMLElement & { compact: boolean }).compact = true;
+    store.openPanel('track');
+    const run = { trackId: null, overlayId: null, clipId: 'seg-a', clipKey: 'clip-a', outputMs: 1000, mode: 'new' as const, progress: 0 };
+    store.trackRun.value = run;
+    const fill = () => root(tl).querySelector<HTMLElement>('[data-row="tracked"] .item__fill');
+    await until('the run’s row', () => !!fill());
+    // Under the name the track will land with.
+    expect(root(tl).querySelector('[data-row="tracked"]')!.textContent).toContain('Track 1');
+    expect(parseFloat(fill()!.style.width)).toBe(0);
+
+    const renders = countRenders(tl);
+    store.trackRun.value = { ...run, progress: 0.5 };
+    await frames(2);
+    expect(renders()).toBe(0);
+    // The way on from the box at 1 s is three quarters of the run, so half the run reaches 3 s of the
+    // four second segment: a quarter of the way along to three quarters.
+    expect(parseFloat(fill()!.style.left)).toBeCloseTo(25, 3);
+    expect(parseFloat(fill()!.style.width)).toBeCloseTo(50, 3);
+
+    store.trackRun.value = null;
+    await until('the run’s row to go', () => !fill());
   });
 });

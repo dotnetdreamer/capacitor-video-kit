@@ -2,7 +2,7 @@ import { MAX_AUDIO_EFFECTS, type FilterOp } from '../video-composer/definitions'
 import { focusChangesPicture, normaliseFocus } from './focus';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
-import { normaliseOverlayTrack } from './overlay-track';
+import { MAX_TRACKS, normaliseEditTrack, normaliseOverlayFollow, splitLayerTrack, TRACK_HUES } from './overlay-track';
 import { normaliseSoundEffectSettings, soundEffectPreset } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
@@ -20,7 +20,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 20;
+export const MANIFEST_VERSION = 21;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -292,33 +292,54 @@ export interface OverlayCommon {
    */
   animation?: OverlayAnimation;
   /**
-   * Something in the footage the layer is pinned to, and moves with: a name over a runner, a heart on
-   * a dog. Absent is a layer that stays where it was put, which is every layer of every manifest
-   * written before version 20, and absent is what [toComposeSpec] turns into a layer whose `motion`
-   * is its animation alone.
+   * The track the layer is pinned to, and moves with: a name over a runner, a heart on a dog. Absent is
+   * a layer that stays where it was put, which is every layer of every manifest written before version
+   * 20, and absent is what [toComposeSpec] turns into a layer whose `motion` is its animation alone.
    *
    * Never on an effect, which covers the frame. With one, `cx`, `cy`, `scale` and `rotationDeg` are
-   * where the layer was drawn at the track's [TrackPin] - the last place the customer put it, its size
+   * where the layer was drawn at the follow's [TrackPin] - the last place the customer put it, its size
    * there `scale` times the pin's [TrackPin.grow] - and the track's path says where it goes from there; a
    * build that does not know tracks draws it still, at that place.
    */
-  track?: OverlayTrack;
+  follow?: OverlayFollow;
 }
 
 /**
- * The path of something a layer follows, as the Track tool found it: where its middle was in every frame
- * the tracker read, how big it was and how far it had turned, and where the layer sits against it.
+ * How a layer follows a track ([EditManifest.tracks]): which one, where it sits against the thing, and
+ * whether it grows and turns with it. Any number of layers may follow one track, each in its own way.
+ */
+export interface OverlayFollow {
+  /** The [EditTrack.id] followed. */
+  trackId: string;
+  /** Where the layer sits against the thing. */
+  pin: TrackPin;
+  /** The layer grows and shrinks with the thing. Absent keeps it its own size. */
+  scaleWith?: true;
+  /** The layer turns with the thing. Absent keeps it at its own angle. */
+  turnWith?: true;
+}
+
+/**
+ * Something in the footage, followed: a layer of its own on the timeline, which text, stickers and photos
+ * are pinned to ([OverlayFollow]). Its path is where the thing's middle was in every frame the tracker
+ * read, how big it was and how far it had turned, and how sure the tracker was of each.
  *
  * Kept in the footage's own terms - SOURCE milliseconds of the file, fractions of its oriented frame -
- * rather than in the post's, so the layer stays on the thing however the clip is later trimmed, cut,
- * slowed, cropped, laid out or zoomed into: each of those moves the footage, and the path moves with
+ * rather than in the post's, so whatever follows stays on the thing however the clip is later trimmed,
+ * cut, slowed, cropped, laid out or zoomed into: each of those moves the footage, and the path moves with
  * it. Every segment over the same file shares the path, so a cut through the middle of a tracked clip
- * leaves the layer following across the cut.
+ * leaves its followers following across the cut.
  *
- * The path is the tracker's raw answer, smoothed only when it is drawn ([smooth]), so the smoothing can
- * be changed without tracking again.
+ * The path is the tracker's answer - carried along where the thing was hidden - smoothed only when it is
+ * drawn ([smooth]), so the smoothing can be changed without tracking again.
  */
-export interface OverlayTrack {
+export interface EditTrack {
+  /** Unique among the post's tracks; what a follow names. */
+  id: string;
+  /** What the customer calls it: "Track 1" until it is renamed. */
+  name: string;
+  /** Which of the track colours (`0 .. TRACK_HUES - 1`) its row, its box and its followers' marks are drawn in. */
+  hue: number;
   /** The segment the thing was found in: an [EditClip.id] on any video layer. */
   clipId: string;
   /** That segment's source, by the host's key. */
@@ -338,15 +359,16 @@ export interface OverlayTrack {
   turn: number[];
   /**
    * Where the tracker could not see the thing, as SOURCE ms pairs `[from, to, from, to, ...]`: the path
-   * holds where it was last seen there. Absent is seen throughout.
+   * there is where the thing was carried along to, from how it was moving when it was last seen. Absent
+   * is seen throughout.
    */
   lost?: number[];
-  /** Where the layer sits against the thing. */
-  pin: TrackPin;
-  /** The layer grows and shrinks with the thing. Absent keeps it its own size. */
-  scaleWith?: true;
-  /** The layer turns with the thing. Absent keeps it at its own angle. */
-  turnWith?: true;
+  /**
+   * How sure the tracker was of each sample, 0..100, one per [atMs]: under `UNSURE_BELOW` the timeline
+   * draws the stretch amber, a spot to check. Absent is sure throughout, which is every track from before
+   * version 21.
+   */
+  sure?: number[];
   /** How much the path is smoothed when it is drawn, 0..1. Absent is `DEFAULT_TRACK_SMOOTH`. */
   smooth?: number;
   /**
@@ -372,7 +394,7 @@ export interface TrackSeam {
 }
 
 /**
- * The layer against the thing: at SOURCE time [atMs], the layer's centre was ([dx], [dy]) from the
+ * A following layer against the thing: at SOURCE time [atMs], the layer's centre was ([dx], [dy]) from the
  * thing's middle, in fractions of the source's width and height, and the layer's own `rotationDeg` and
  * `scale` - times [grow] - are what it was drawn at then. Elsewhere that offset grows and turns with the
  * thing when the layer does.
@@ -764,6 +786,13 @@ export interface EditManifest {
   originalMuted: boolean;
   /** Bottom to top: a later layer is drawn over an earlier one, in the preview and in the render. */
   overlays: EditOverlay[];
+  /**
+   * The things in the footage the Track tool has followed, in the order they were made: layers of their
+   * own, which overlays follow by [OverlayFollow.trackId]. They draw nothing themselves. Absent is none,
+   * which is every manifest written before version 21 and every post nobody has tracked in, and what
+   * [toComposeSpec] never reads: a following layer goes on the wire as its motion keys. At most `MAX_TRACKS`.
+   */
+  tracks?: EditTrack[];
   music: EditMusic | null;
   /** Absent in older drafts, which continue to use the single `music` field. */
   audioTracks?: EditAudioTrack[];
@@ -1982,6 +2011,12 @@ export function emptyManifest(): EditManifest {
  * manifest: a version-19 layer has no `track`, which is a layer that stays where it was put, and
  * [toComposeSpec] sends it with the motion it always had. Bumped because an older build reading a
  * version-20 draft leaves every tracked layer standing where it was last put.
+ *
+ * Version 20 to version 21 makes a track a layer of its own: [EditManifest.tracks], followed by any
+ * number of layers through [OverlayCommon.follow]. A version-20 layer's own `track` is read as a track of
+ * the post's ("Track 1", "Track 2", in layer order) that the layer follows, pinned exactly as it was, so
+ * the draft plays back unchanged. Bumped because an older build reading a version-21 draft finds no
+ * `track` on any layer and leaves every one of them standing where it was last put.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -2014,6 +2049,28 @@ export function normaliseManifest(input: unknown): EditManifest {
     .filter((track: EditVideoTrack) => track.clips.length > 0)
     .slice(0, MAX_VIDEO_TRACKS - 1);
 
+  // Tracks before the layers that follow them, since a version-20 layer's own track becomes one of these.
+  const tracks: EditTrack[] = [];
+  const trackIds = new Set<string>();
+  for (const value of Array.isArray(raw['tracks']) ? raw['tracks'] : []) {
+    const track = normaliseEditTrack(value);
+    if (!track || trackIds.has(track.id) || tracks.length >= MAX_TRACKS) continue;
+    trackIds.add(track.id);
+    tracks.push(track);
+  }
+  const followOf = (o: any): OverlayFollow | undefined => {
+    const follow = normaliseOverlayFollow(o.follow);
+    if (follow) return follow;
+    if (!o.track || tracks.length >= MAX_TRACKS) return undefined;
+    let id = `trk-${String(o.id)}`;
+    for (let k = 2; trackIds.has(id); k++) id = `trk-${String(o.id)}-${k}`;
+    const split = splitLayerTrack(o.track, id, `Track ${tracks.length + 1}`, tracks.length % TRACK_HUES);
+    if (!split) return undefined;
+    trackIds.add(id);
+    tracks.push(split.track);
+    return split.follow;
+  };
+
   const overlays: EditOverlay[] = Array.isArray(raw['overlays'])
     ? raw['overlays'].map((o: any): EditOverlay => {
         const common: OverlayCommon = {
@@ -2030,9 +2087,9 @@ export function normaliseManifest(input: unknown): EditManifest {
         // and an animation whose every move this version does not know reads as none.
         const animation = normaliseOverlayAnimation(o.animation);
         if (animation) common.animation = animation;
-        // The same for a track, which an effect - covering the frame - never has.
-        const track = o.kind === 'effect' ? undefined : normaliseOverlayTrack(o.track);
-        if (track) common.track = track;
+        // The same for following a track, which an effect - covering the frame - never does.
+        const follow = o.kind === 'effect' ? undefined : followOf(o);
+        if (follow) common.follow = follow;
         switch (o.kind) {
           case 'sticker':
             return { ...common, kind: 'sticker', emoji: o.emoji ?? null, assetId: o.assetId ?? null };
@@ -2199,7 +2256,9 @@ export function normaliseManifest(input: unknown): EditManifest {
      */
     fit: raw['fit'] === 'cover' ? 'cover' : 'contain',
     originalMuted: !!raw['originalMuted'],
-    overlays,
+    // A follow of a track the post does not have is a layer that stands where it was put.
+    overlays: overlays.map(overlay => (overlay.follow && !trackIds.has(overlay.follow.trackId) ? withoutFollow(overlay) : overlay)),
+    ...(tracks.length > 0 ? { tracks } : {}),
     music,
     ...(audioTracks.length > 0 ? { audioTracks } : {}),
     ...(audioEffects.length > 0 ? { audioEffects } : {}),
@@ -2211,6 +2270,11 @@ export function normaliseManifest(input: unknown): EditManifest {
     output: normaliseOutput(raw['output']),
     ...(background ? { background } : {}),
   };
+}
+
+function withoutFollow<T extends EditOverlay>(overlay: T): T {
+  const { follow: _follow, ...rest } = overlay;
+  return rest as T;
 }
 
 /**

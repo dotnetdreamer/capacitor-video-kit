@@ -3,12 +3,12 @@ import { Component, Element, Host, Prop } from '@stencil/core';
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { MAX_LAYERS, musicMovedTo } from '../../editor';
+import { MAX_LAYERS, MAX_TRACKS, musicMovedTo, weakSpots } from '../../editor';
 import type { EditorIconName } from '../../icons/icons';
 import type { EditorPanel } from '../../state/editor.types';
 
 /** Which set of tools the bottom row is showing. */
-export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'zoom' | 'music' | 'audio' | 'voice' | 'audioEffect';
+export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'track' | 'zoom' | 'music' | 'audio' | 'voice' | 'audioEffect';
 
 /** One tile in the row. Built fresh whenever what the row depends on changes. */
 export interface ToolTile {
@@ -112,6 +112,18 @@ export class VeToolbar {
   private readonly zoomSelected = computed(() => !!this.ctx.store.selectedZoom.value);
   /** A boolean for the reason [zoomSelected] is one: a drag of the layer rewrites it every frame. */
   private readonly audioEffectSelected = computed(() => !!this.ctx.store.selectedAudioEffect.value);
+  /**
+   * A boolean for the reason [zoomSelected] is one: the row changes when what is selected does, and
+   * the track itself is a new object after every change made to it - a fix, a rename, its smoothing.
+   */
+  private readonly trackSelected = computed(() => !!this.ctx.store.selectedTrack.value);
+  /** The selected track is sure the whole way, so Fix has no spot to go to: dimmed, and a tap says so. */
+  private readonly trackAllSure = computed(() => {
+    const track = this.ctx.store.selectedTrack.value;
+    return !!track && weakSpots(track).length === 0;
+  });
+  /** The post has as many tracks as it keeps: the root row's Track is dimmed, and a tap says why. */
+  private readonly tracksFull = computed(() => this.ctx.store.tracks.value.length >= MAX_TRACKS);
   private readonly lastClip = computed(() => this.ctx.store.manifest.value.clips.length <= 1);
   /** The SELECTED segment's fit, or the post's when nothing is selected - what a tap will change. */
   private readonly fitContain = computed(() => this.ctx.store.clipFit(this.ctx.store.selectedClip.value) === 'contain');
@@ -144,6 +156,7 @@ export class VeToolbar {
   private readonly rowKind = computed<ToolbarRowKind>(() => {
     if (this.clipSelected.value) return 'clip';
     if (this.layerKind.value) return 'layer';
+    if (this.trackSelected.value) return 'track';
     if (this.zoomSelected.value) return 'zoom';
     if (this.audioEffectSelected.value) return 'audioEffect';
     if (this.ctx.store.musicSelected.value) return 'music';
@@ -422,6 +435,8 @@ export class VeToolbar {
         return this.clipRow();
       case 'layer':
         return this.layerRow();
+      case 'track':
+        return this.trackRow();
       case 'zoom':
         return this.zoomRow();
       case 'music':
@@ -502,6 +517,17 @@ export class VeToolbar {
           icon: 'happy-outline',
           disabled: full,
           run: () => this.openLayerPanel('stickers'),
+        },
+        // After the layers a track carries: a text, a sticker or a photo pinned to something in the
+        // footage rides along with it. A new track, aimed on the frame at the playhead; the post's own
+        // tracks are rows of the timeline, and a tap on one brings up its tools here. Dimmed at the
+        // most tracks a post keeps, where the store says so.
+        {
+          id: 'track',
+          label: 'Track',
+          icon: 'track-outline',
+          disabled: this.tracksFull.value,
+          run: () => store.openNewTrack(),
         },
         { id: 'filters', label: 'Filters', icon: 'color-filter-outline', run: () => store.openPanel('filters') },
         { id: 'adjust', label: 'Adjust', icon: 'options-outline', run: () => store.openPanel('adjust') },
@@ -813,6 +839,55 @@ export class VeToolbar {
   }
 
   /**
+   * The tools for a selected track: something in the footage, followed, which is a layer of its own on
+   * the timeline. The first three add a text, a sticker or a photo through the very tools the root row
+   * adds them with, and the layer lands on the thing, pinned to it. The rest look after the track: Fix
+   * goes to its next spot worth a second look, Smooth and Rename open its sheet - Rename with its name
+   * ready to type over - and Remove takes it off the post, every layer that followed it left standing
+   * where it is.
+   *
+   * The track's id is read at tap time, as a zoom's is, for the reason [zoomSelected] gives.
+   */
+  private trackRow(): ToolRow {
+    const store = this.ctx.store;
+    const full = store.layersFull.value;
+    const withTrack = (act: (id: string) => void) => () => {
+      const track = store.selectedTrack.value;
+      if (track) act(track.id);
+    };
+    return {
+      kind: 'track',
+      label: 'Track tools',
+      collapse: this.deselect('Close track tools'),
+      tiles: [
+        // Dimmed at the layer cap, as Add text and Stickers are, and the tool each opens says why.
+        { id: 'pin-text', label: 'Pin text', icon: 'text-outline', disabled: full, run: this.pinNew(() => store.startNewText()) },
+        { id: 'pin-sticker', label: 'Pin sticker', icon: 'happy-outline', disabled: full, run: this.pinNew(() => this.openLayerPanel('stickers')) },
+        { id: 'pin-photo', label: 'Pin photo', icon: 'image-outline', disabled: full, run: this.pinNew(() => void this.ctx.media.pickPhoto()) },
+        {
+          id: 'fix',
+          label: 'Fix',
+          icon: 'build-outline',
+          // Sure the whole way, the track has no spot to go to, and the store says so on a tap.
+          disabled: this.trackAllSure.value,
+          run: withTrack(id => store.fixNextSpot(id)),
+        },
+        { id: 'smooth', label: 'Smooth', icon: 'smooth-outline', run: withTrack(id => store.openTrackSheet(id)) },
+        {
+          id: 'rename',
+          label: 'Rename',
+          icon: 'pencil-outline',
+          run: withTrack(id => {
+            store.openTrackSheet(id);
+            store.trackRenaming.value = true;
+          }),
+        },
+        { id: 'delete', label: 'Remove', icon: 'trash-outline', run: withTrack(id => store.deleteTrack(id)) },
+      ],
+    };
+  }
+
+  /**
    * The tools for a selected zoom. Short on purpose: its window is set by dragging its bar on the
    * timeline, and its level, curve and ramp in the sheet Edit opens. The zoom's id is read at tap
    * time, not from the row, for the reason [zoomSelected] gives.
@@ -1006,6 +1081,24 @@ export class VeToolbar {
 
   private deselect(ariaLabel: string): ToolRow['collapse'] {
     return { ariaLabel, run: () => this.ctx.store.select(null) };
+  }
+
+  /**
+   * Pin text, Pin sticker and Pin photo: `open` is the tool the root row adds that kind of layer with,
+   * and the next layer added lands on the selected track's thing, pinned to it.
+   *
+   * The pin is set only when there is room for a layer. At the cap the tool says why and adds nothing,
+   * and a pin set anyway would wait out its time for the next layer added from anywhere - the root
+   * row's Stickers among them - and catch it once a layer had gone.
+   */
+  private pinNew(open: () => void): () => void {
+    return () => {
+      const store = this.ctx.store;
+      const track = store.selectedTrack.value;
+      if (!track) return;
+      if (!store.layersFull.value) store.pinNextTo(track.id);
+      open();
+    };
   }
 
   /**
