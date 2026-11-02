@@ -126,6 +126,7 @@ parts do the editing.
 - [ve-audio-effects-sheet](../ve-audio-effects-sheet)
 - [ve-focus-sheet](../ve-focus-sheet)
 - [ve-slip-sheet](../ve-slip-sheet)
+- [ve-track-sheet](../ve-track-sheet)
 - [ve-toolbar](../ve-toolbar)
 
 ### Graph
@@ -157,6 +158,7 @@ graph TD;
   ve-editor --> ve-audio-effects-sheet
   ve-editor --> ve-focus-sheet
   ve-editor --> ve-slip-sheet
+  ve-editor --> ve-track-sheet
   ve-editor --> ve-toolbar
   ve-timeline --> ve-icon
   ve-preview --> ve-icon
@@ -204,6 +206,9 @@ graph TD;
   ve-focus-sheet --> ve-slider
   ve-slip-sheet --> ve-sheet
   ve-slip-sheet --> ve-icon
+  ve-track-sheet --> ve-sheet
+  ve-track-sheet --> ve-icon
+  ve-track-sheet --> ve-slider
   ve-toolbar --> ve-icon
   style ve-editor fill:#f9f,stroke:#333,stroke-width:4px
 ```

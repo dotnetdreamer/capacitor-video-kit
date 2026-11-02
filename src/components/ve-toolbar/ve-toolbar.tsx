@@ -739,6 +739,9 @@ export class VeToolbar {
     // the tools that make the layer what it is and ahead of the ones that move it in time or in the
     // stack, where CapCut keeps it.
     tiles.push({ id: 'animation', label: 'Animation', icon: 'animation-outline', run: () => store.openAnimation() });
+    // Beside the other tool that moves a layer: pinned to something in the footage, it moves with it.
+    // Never on an effect, which covers the frame and has nothing to be pinned by.
+    if (!isEffect) tiles.push({ id: 'track', label: 'Track', icon: 'track-outline', run: () => store.openTrack() });
     // The move tools call the store even when they are dimmed: it answers "Already on top".
     tiles.push(
       {

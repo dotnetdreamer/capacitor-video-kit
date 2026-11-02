@@ -16,6 +16,7 @@ import { PreviewCanvas } from './preview-canvas';
 import { PreviewPictures } from './preview-pictures';
 import { PreviewPlayer } from './preview-player';
 import { SubjectOverlay } from './subject-overlay';
+import { TrackOverlay } from './track-overlay';
 import { zoomArea, zoomLevelLabel } from './zoom-area';
 
 /**
@@ -39,6 +40,8 @@ interface LayerView {
   rotationDeg: number;
   /** The text being typed, which [LayerMotion] leaves at rest so it can be read. */
   held: boolean;
+  /** The layer the Track sheet is aiming for, faded so the footage under it can be seen. */
+  aiming?: boolean;
 }
 
 interface SelectionView {
@@ -245,6 +248,12 @@ export class VePreview implements EditorPlayer {
   private readonly keepSubjects = (el?: HTMLElement) => {
     this.subjectsEl = el as HTMLCanvasElement | undefined;
   };
+  /** The Track sheet's box, run and path; see [TrackOverlay]. */
+  private trackEl?: HTMLCanvasElement;
+  private trackOverlay: TrackOverlay | null = null;
+  private readonly keepTrack = (el?: HTMLElement) => {
+    this.trackEl = el as HTMLCanvasElement | undefined;
+  };
   private readonly keepVideo = (el?: HTMLElement) => {
     this.videoEl = el as HTMLVideoElement | undefined;
   };
@@ -358,6 +367,9 @@ export class VePreview implements EditorPlayer {
     const visible = this.visibleIds.value;
     const bitmaps = store.bitmaps.value;
     const editingId = store.textEdit.value?.id ?? null;
+    // The layer the Track sheet is boxing the footage under: aimed for, or being tracked.
+    const trackLayer = store.trackLayer.value;
+    const aimingId = trackLayer && (!trackLayer.track || store.trackAimMoved.value || store.trackRun.value) ? trackLayer.id : null;
     const views: LayerView[] = [];
     for (const overlay of this.overlays.value) {
       const editing = overlay.id === editingId;
@@ -384,22 +396,26 @@ export class VePreview implements EditorPlayer {
         });
         continue;
       }
-      const box = layerBox(overlay, bitmap, store.outputWidth.value);
+      // A layer at rest is where it was put, and its motion - its track among it - moves it from there.
+      // The text being typed is held at rest, so a tracked one rests where it has followed its thing to.
+      const rest = editing && overlay.track ? store.shownOverlay(overlay) : overlay;
+      const box = layerBox(rest, bitmap, store.outputWidth.value);
       if (!box) continue;
       views.push({
         id: overlay.id,
         effect: false,
         png: bitmap.png,
-        left: overlay.cx * 100,
-        top: overlay.cy * 100,
+        left: rest.cx * 100,
+        top: rest.cy * 100,
         width: box.widthFrac * 100,
         aspect: `${bitmap.wPx} / ${bitmap.hPx}`,
-        transform: layerTransform(overlay.rotationDeg),
+        transform: layerTransform(rest.rotationDeg),
         opacity: overlay.opacity,
-        cx: overlay.cx,
-        cy: overlay.cy,
-        rotationDeg: overlay.rotationDeg,
+        cx: rest.cx,
+        cy: rest.cy,
+        rotationDeg: rest.rotationDeg,
         held: editing,
+        aiming: overlay.id === aimingId,
       });
     }
     return views;
@@ -433,9 +449,16 @@ export class VePreview implements EditorPlayer {
   private readonly selectionBox = computed<SelectionView | null>(() => {
     const store = this.ctx.store;
     if (store.textEdit.value || this.moving.value) return null;
-    const overlay = store.selectedOverlay.value;
-    if (!overlay) return this.clipSelection();
-    if (overlay.kind === 'effect') return null;
+    // The Track sheet owns the frame, and its box is the one thing there to take hold of.
+    if (store.panel.value === 'track') return null;
+    const selected = store.selectedOverlay.value;
+    if (!selected) return this.clipSelection();
+    if (selected.kind === 'effect') return null;
+    // A tracked layer's box would trail the layer a frame behind while it plays, round a layer nothing
+    // can be done to until it stops.
+    if (selected.track && store.playing.value) return null;
+    // Round the layer where it is drawn now, which for a tracked one is where its thing has led it.
+    const overlay = store.shownOverlay(selected);
     const bitmap = store.bitmaps.value.get(overlay.id);
     const box = bitmap ? layerBox(overlay, bitmap, store.outputWidth.value) : null;
     if (!bitmap || !box) return null;
@@ -723,6 +746,8 @@ export class VePreview implements EditorPlayer {
     this.canvas = null;
     this.subjects?.destroy();
     this.subjects = null;
+    this.trackOverlay?.destroy();
+    this.trackOverlay = null;
     this.motion.destroy();
     this.gestures?.destroy();
     this.gestures = null;
@@ -798,6 +823,7 @@ export class VePreview implements EditorPlayer {
     this.player.start();
 
     if (this.subjectsEl) this.subjects = new SubjectOverlay(store, this.subjectsEl);
+    if (this.trackEl) this.trackOverlay = new TrackOverlay(store, this.trackEl);
     this.gestures = new OverlayGestures(store, stage, {
       dragging: this.dragging,
       moving: this.moving,
@@ -874,6 +900,42 @@ export class VePreview implements EditorPlayer {
             store.output.value,
           ] as const,
         () => this.subjects?.request(),
+      ),
+    );
+
+    // The Track sheet's box, run and path follow the box, the run, the playhead and the post - read only
+    // while the sheet is open, so a playing post does not ask a closed sheet for a frame thirty times a second.
+    this.disposers.push(
+      deferredEffect(
+        () =>
+          store.panel.value === 'track'
+            ? ([
+                store.trackLayer.value,
+                store.trackAim.value,
+                store.trackAimMoved.value,
+                store.trackRun.value,
+                store.trackLive.value,
+                store.trackThing.value,
+                store.trackScene.value,
+                store.playheadMs.value,
+              ] as const)
+            : null,
+        () => this.trackOverlay?.request(),
+      ),
+    );
+
+    // Each source's shape as its element reports it: what the Track sheet finds the picture under its
+    // box by, and places the box on that picture's source with.
+    this.disposers.push(
+      deferredEffect(
+        () => [this.shownBase.value, this.baseAspect.value, this.shownExtras.value, this.extraAspects.value] as const,
+        ([base, baseAspect, extras]) => {
+          if (base && baseAspect > 0) store.noteSourceShape(base.clipKey, baseAspect);
+          for (const layer of extras) {
+            const aspect = this.extraAspectOf(layer.trackId);
+            if (aspect > 0) store.noteSourceShape(layer.clipKey, aspect);
+          }
+        },
       ),
     );
 
@@ -1011,6 +1073,7 @@ export class VePreview implements EditorPlayer {
     // and everything a layer carries is a fraction, so the picture is the same either way.
     this.canvas?.resize(rect.width, rect.height);
     this.subjects?.request();
+    this.trackOverlay?.request();
   }
 
   /* ========================================================================================= */
@@ -1173,7 +1236,7 @@ export class VePreview implements EditorPlayer {
                 ) : (
                   <img
                     key={layer.id}
-                    class="pv__layer"
+                    class={{ 'pv__layer': true, 'pv__layer--aiming': !!layer.aiming }}
                     alt=""
                     draggable={false}
                     src={layer.png}
@@ -1204,6 +1267,9 @@ export class VePreview implements EditorPlayer {
                   Enter text
                 </div>
               )}
+
+              {/* The Track sheet's box, run and path, over the layers so the box is never under the text it moves. */}
+              <canvas key="track" class="pv__track" aria-hidden="true" ref={this.keepTrack}></canvas>
 
               {/*
                 The crop tool's window: where the part of the source that is kept lands on the frame.

@@ -210,6 +210,28 @@
   -webkit-user-drag: none;
 }
 
+/*
+ * The layer the Track sheet is aiming for, faded so the footage under it can be seen and boxed. A
+ * filter rather than `opacity`, which the layer's own motion writes frame by frame.
+ */
+.pv__layer--aiming {
+  filter: opacity(0.35);
+  transition: filter 160ms ease-out;
+}
+
+/*
+ * The Track sheet's box, its run and its path (`TrackOverlay`): the frame's size, drawn in its own
+ * pixels, OVER the layers so the box is never hidden under the text it is moving.
+ */
+.pv__track {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 /* ----------------------------------------------------------------------------- text placeholder */
 
 /*

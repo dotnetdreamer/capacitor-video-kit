@@ -82,6 +82,7 @@ What it promises, which is what six sheets are written against:
  - [ve-layout-sheet](../ve-layout-sheet)
  - [ve-opacity-sheet](../ve-opacity-sheet)
  - [ve-speed-sheet](../ve-speed-sheet)
+ - [ve-track-sheet](../ve-track-sheet)
  - [ve-transition-sheet](../ve-transition-sheet)
  - [ve-volume-sheet](../ve-volume-sheet)
  - [ve-zoom-sheet](../ve-zoom-sheet)
@@ -97,6 +98,7 @@ graph TD;
   ve-layout-sheet --> ve-slider
   ve-opacity-sheet --> ve-slider
   ve-speed-sheet --> ve-slider
+  ve-track-sheet --> ve-slider
   ve-transition-sheet --> ve-slider
   ve-volume-sheet --> ve-slider
   ve-zoom-sheet --> ve-slider

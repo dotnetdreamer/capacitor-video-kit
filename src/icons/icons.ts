@@ -83,6 +83,7 @@ export type EditorIconName =
   | 'text-outline'
   | 'thermometer-outline'
   | 'time-outline'
+  | 'track-outline'
   | 'transition'
   | 'transition-outline'
   | 'trash-outline'
@@ -222,6 +223,13 @@ export const EDITOR_ICONS: Readonly<Record<EditorIconName, string>> = {
     '<path d="M307.72 302.27a8 8 0 0 1-3.72-6.75V80a48 48 0 0 0-48-48h0a48 48 0 0 0-48 48v215.52a8 8 0 0 1-3.71 6.74 97.51 97.51 0 0 0-44.19 86.07A96 96 0 0 0 352 384a97.49 97.49 0 0 0-44.28-81.73ZM256 112v272" fill="none" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="32px"/><circle cx="256" cy="384" r="48"/>',
   'time-outline':
     '<path d="M256 64C150 64 64 150 64 256s86 192 192 192 192-86 192-192S362 64 256 64Z" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="32px"/><path d="M256 128v144h96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/>',
+  /*
+   * Not an Ionicon - it has nothing for following a thing - and drawn in the transition glyphs'
+   * grammar: a lock-on box round the thing, and the dotted way it came, which is what Track pins a
+   * layer to.
+   */
+  'track-outline':
+    '<path d="M208 152v-32a24 24 0 0 1 24-24h32M376 96h32a24 24 0 0 1 24 24v32M432 264v32a24 24 0 0 1-24 24h-32M264 320h-32a24 24 0 0 1-24-24v-32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="32px"/><circle cx="320" cy="208" r="40" fill="currentColor"/><path d="M64 448c48-8 88-40 112-88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-dasharray="0 52" stroke-width="40px"/>',
   /*
    * The two transition glyphs are not Ionicons - it has no transition - and are drawn for this
    * package in its grammar: the 512 box, round joins, the outline at a 32px stroke. Two triangles

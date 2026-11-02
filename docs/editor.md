@@ -43,6 +43,51 @@ await VideoComposer.compose(spec);
 | `videoBitrateFor`, `totalDurationMs`, `isUntouched` | Output policy: the bitrate a frame of this size needs to look like its source, however big that makes the file; skip the encode for one untouched clip. |
 | `rasteriseText`, `rasteriseArrow` | Canvas → PNG at output pixel scale, the caller's half of the overlay contract. |
 
+### Layers that follow something in the footage
+
+A text, a sticker or a photo can be pinned to something that moves in a clip, and moves with it: the
+editor's Track tool. The layer carries an `OverlayTrack` (`EditOverlay.track`, manifest version 20): the
+thing's path in the footage's own terms - source milliseconds and fractions of the oriented source -
+and where the layer sits against it. Because the path belongs to the footage, a trim, a cut, a speed
+change, a crop, a layout or a zoom moves the layer with the thing rather than off it.
+
+Tracking runs in the page, not in a native engine: `ObjectTracker` is median flow (pyramidal
+Lucas-Kanade forward and back, the medians of the points that agree, a template search that finds the
+thing again after it was hidden), fed every frame of the clip's preview copy through WebCodecs, or a
+stepped `<video>` where WebCodecs cannot decode the file. Nothing is added to the wire either:
+`toComposeSpec` lowers a track into the layer's `ComposeOverlayMotion` keys, merged with its animation
+(`compileLayerMotion`), so Android, iOS and the web render a tracked layer with arithmetic they already
+have, and the preview reads the very same keys. A track and an animation together are held to the
+wire's `MAX_OVERLAY_MOTION_KEYS`: a track key with an animation key beside it is left out only where the
+line through the keys either side still draws it (a tenth of a pixel), so a track that starts, stops or
+jumps keeps its corners, and one at the very instant of an animation key always goes, that key reading
+the track there exactly; where the two still do not fit, the track is read at half the rate, and half
+again, until they do. Last of all, under an animation keyed to the cap on its own, the track is read only
+at the animation's keys, which leaves the animation's own count.
+
+A path mended from a frame where it slipped ("Track from here") keeps a seam there
+(`OverlayTrack.seams`): the part before it is smoothed with what followed it BEFORE the mend, never with
+the later run, so a mend moves nothing before it at any smoothing. A run that is stopped, or whose
+sheet is shut under it - which Next does - puts what it had found on the layer there and then, so a
+post exported in the same moment has it; one stopped or shut while the clip is still being measured,
+before it has read a frame, starts nothing at all. The footage is followed through a transition's tail,
+where the outgoing clip plays on under the next one, not held where its own slot ends.
+
+A layer that grows with the thing can be drawn past the sizes a customer can pick (`MIN_SCALE` to
+`MAX_SCALE`), which its own `scale` is held to. Moving it, mending its path or tracking it again there
+keeps its size: its `scale` takes the nearest size that can be picked, and the pin's `grow` the rest. A
+pinch on it starts from the size it is drawn at, without a jump.
+
+On the Track sheet the frame is the box's. A finger on the box moves it, or sizes it by a corner; one off
+it puts the box under it once it lifts or moves - not as it lands, because a second finger joining it
+makes the two a pinch, which sizes the box where it is.
+
+| Export | What it is for |
+|---|---|
+| `ObjectTracker` | Follows a box through luma frames, in either direction; reports a frame it lost the thing in. |
+| `compileLayerMotion`, `trackedPoseAt`, `trackedThingAt` | A tracked layer's motion keys, where it is drawn at an instant, and where its thing is. |
+| `repinOverlay`, `untrackOverlay`, `withTrackRun` | The edits: move a tracked layer and keep it following from there; take its track off where it stands; put a run's path on it, or mend a path from where it slipped. |
+
 There is deliberately no UI in `src/editor/` itself. A host is free to build its own screen on the
 contract, and the first application on this package did exactly that, in Angular, until the
 components below replaced it. The contract is what both were written against, which is why replacing

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { handleSpot, hitsLayer, pressBelongsToLayer, type LayerBox } from './overlay-gestures';
+import { MAX_SCALE, MIN_SCALE } from '../../editor';
+
+import { aimGripAt, gripAim, handleSpot, hitsLayer, pinchedScale, pressBelongsToLayer, type LayerBox } from './overlay-gestures';
 
 /**
  * The frame the tests measure on, and a layer centred in it. A 40px-wide square on a 400px frame is
@@ -121,5 +123,61 @@ describe('handleSpot', () => {
     // which `toBe` would separate from 0 by Object.is.
     expect(spot.shiftY).toBeCloseTo(0);
     expect(spot.shiftX).toBeLessThan(0);
+  });
+});
+
+describe('a pinch', () => {
+  it('sizes a layer between the smallest and largest a customer can pick', () => {
+    expect(pinchedScale(1, 2)).toBe(2);
+    expect(pinchedScale(4, 2)).toBe(MAX_SCALE);
+    expect(pinchedScale(1, 0.01)).toBe(MIN_SCALE);
+  });
+
+  it('never jumps a layer a track has drawn past them: it is made smaller, or bigger, and back', () => {
+    expect(pinchedScale(8, 1)).toBe(8);
+    expect(pinchedScale(8, 1.5)).toBe(8);
+    expect(pinchedScale(8, 0.5)).toBe(4);
+    expect(pinchedScale(0.1, 1)).toBe(0.1);
+    expect(pinchedScale(0.1, 0.5)).toBe(0.1);
+    expect(pinchedScale(0.1, 3)).toBeCloseTo(0.3, 9);
+  });
+});
+
+describe("the Track sheet's box", () => {
+  // A box a quarter of the frame across, in the middle: 100x200 on the 400x800 frame.
+  const aim = { cx: 0.5, cy: 0.5, w: 0.25, h: 0.25 };
+
+  it('is taken by a corner near enough to one, by its body inside it, and not at all outside it', () => {
+    expect(aimGripAt(aim, 150, 300, FRAME_W, FRAME_H)).toBe('tl');
+    expect(aimGripAt(aim, 250 + 20, 500 - 10, FRAME_W, FRAME_H)).toBe('br');
+    expect(aimGripAt(aim, 250, 300, FRAME_W, FRAME_H)).toBe('tr');
+    expect(aimGripAt(aim, 200, 400, FRAME_W, FRAME_H)).toBe('move');
+    expect(aimGripAt(aim, 20, 20, FRAME_W, FRAME_H)).toBeNull();
+  });
+
+  it('moves a box too small to leave room between its corners when it is taken by its middle', () => {
+    // 32x32 on the 400x800 frame: every point inside it is within a fingertip of a corner.
+    const tiny = { cx: 0.5, cy: 0.5, w: 32 / FRAME_W, h: 32 / FRAME_H };
+    expect(aimGripAt(tiny, 200, 400, FRAME_W, FRAME_H)).toBe('move');
+    expect(aimGripAt(tiny, 205, 396, FRAME_W, FRAME_H)).toBe('move');
+    // Its corners are still there for a finger nearer one than the middle, inside the box or out.
+    expect(aimGripAt(tiny, 186, 386, FRAME_W, FRAME_H)).toBe('tl');
+    expect(aimGripAt(tiny, 226, 426, FRAME_W, FRAME_H)).toBe('br');
+    expect(aimGripAt(tiny, 200, 360, FRAME_W, FRAME_H)).toBeNull();
+  });
+
+  it('moves whole, or sizes by a corner with the opposite corner held', () => {
+    expect(gripAim(aim, 'move', 0.1, -0.05)).toEqual({ cx: 0.6, cy: 0.45, w: 0.25, h: 0.25 });
+    const pulled = gripAim(aim, 'br', 0.1, 0.05);
+    expect(pulled.cx - pulled.w / 2).toBeCloseTo(0.375, 9);
+    expect(pulled.cy - pulled.h / 2).toBeCloseTo(0.375, 9);
+    expect(pulled.w).toBeCloseTo(0.35, 9);
+    expect(pulled.h).toBeCloseTo(0.3, 9);
+  });
+
+  it('comes out the right way round when a corner is pulled past the opposite one', () => {
+    const flipped = gripAim(aim, 'tl', 0.4, 0);
+    expect(flipped.w).toBeCloseTo(0.15, 9);
+    expect(flipped.cx - flipped.w / 2).toBeCloseTo(0.625, 9);
   });
 });

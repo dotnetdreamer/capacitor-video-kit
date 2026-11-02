@@ -1,4 +1,14 @@
-import type { ComposeAudio, ComposeAudioEffect, ComposeClip, ComposeOverlay, ComposeOverlayMotion, ComposePlacement, ComposeRect, ComposeSpec, ComposeTrack } from '../video-composer/definitions';
+import type {
+  ComposeAudio,
+  ComposeAudioEffect,
+  ComposeClip,
+  ComposeOverlay,
+  ComposeOverlayMotion,
+  ComposePlacement,
+  ComposeRect,
+  ComposeSpec,
+  ComposeTrack,
+} from '../video-composer/definitions';
 
 import {
   MAX_SPEED,
@@ -29,6 +39,7 @@ import { joinContinuousAudio, musicSpeed, overlayEndMs } from './edit-ops';
 import { compileFocus, type SubjectTrackRef } from './focus';
 import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
+import { compileLayerMotion, type TrackScene } from './track-motion';
 import { rasteriseOverlay } from './overlay-raster';
 import type { RasterContext } from './raster-context';
 import { soundEffectSteps } from './sound-effects';
@@ -136,6 +147,11 @@ export async function toComposeSpec(
         }))
       : null;
 
+  // The camera the footage is drawn through, which a tracked layer is carried along by; on the wire
+  // below, where it is set only when a zoom is visible.
+  const camera = compileCamera(manifest.zooms ?? [], totalMs);
+  const scene: TrackScene = { manifest, camera, layout };
+
   const overlays: ComposeOverlay[] = [];
   // Manifest order is drawing order: the native render stacks bitmaps in array order.
   for (const overlay of manifest.overlays) {
@@ -145,7 +161,9 @@ export async function toComposeSpec(
     if (overlay.startMs >= totalMs - 1) continue;
 
     const { startMs, endMs } = overlayWireWindow(overlay, totalMs);
-    const motion = compileOverlayMotion({ startMs, endMs }, overlay.animation, overlay.kind);
+    // Its animation, and the path of whatever it is pinned to: a layer with no track moves exactly as
+    // it always has, and one with neither sends no motion at all.
+    const motion = compileLayerMotion(overlay, scene, { startMs, endMs });
 
     // The preview's own bitmap when the editor vouches for it (see RasterContext.drawn): the same
     // function, context and key drew it, so drawing it again here would only repeat the decode and
@@ -213,7 +231,6 @@ export async function toComposeSpec(
   // package has always produced, byte for byte, and every engine decides once, when it builds its
   // plan, that there is no camera to apply. [compileCamera] answers `null` by the same test
   // [isUntouched] makes, so the fast path and the wire can never disagree.
-  const camera = compileCamera(manifest.zooms ?? [], totalMs);
   if (camera) spec.camera = camera;
 
   // Only a canvas somebody coloured, for the reason `tracks` is left off: a black one is the spec this
@@ -368,12 +385,14 @@ export function overlayWireWindow(overlay: Pick<EditOverlay, 'startMs' | 'endMs'
 
 /**
  * The motion `toComposeSpec` sends for a layer, or null for one that does not move: its animation
- * compiled over [overlayWireWindow]. The live preview reads the same keys through `overlayMotionAt`,
- * so a layer moves on screen exactly as it will in the file.
+ * compiled over [overlayWireWindow], and with `scene` its track too. The live preview reads the same
+ * keys through `overlayMotionAt`, so a layer moves on screen exactly as it will in the file.
  */
-export function overlayMotionFor(overlay: EditOverlay, totalMs: number): ComposeOverlayMotion | null {
+export function overlayMotionFor(overlay: EditOverlay, totalMs: number, scene?: TrackScene): ComposeOverlayMotion | null {
+  const window = overlayWireWindow(overlay, totalMs);
+  if (scene) return compileLayerMotion(overlay, scene, window);
   if (!overlay.animation) return null;
-  return compileOverlayMotion(overlayWireWindow(overlay, totalMs), overlay.animation, overlay.kind);
+  return compileOverlayMotion(window, overlay.animation, overlay.kind);
 }
 
 /**

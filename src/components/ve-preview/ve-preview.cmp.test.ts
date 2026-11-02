@@ -2070,3 +2070,91 @@ describe('ve-preview taking up a preview copy', () => {
     PIXEL_TIMEOUT_MS * 2,
   );
 });
+
+describe("ve-preview: the Track sheet's box under the fingers", () => {
+  /*
+   * A finger that lands off the box puts the box on it - but only once it is a tap or a drag. On landing
+   * it is neither yet: it may be the first half of a pinch, and the box jumping to it then put the box
+   * under the first finger of every pinch that started off it.
+   */
+
+  /** A sticker with the Track sheet open on it, and the frame on screen. */
+  async function openTrackOnSticker(): Promise<{ store: EditorStore; stage: HTMLElement; frame: DOMRect }> {
+    const { store, preview } = await mount(false);
+    const id = store.addSticker({ emoji: '⭐' })!;
+    store.select({ kind: 'overlay', id });
+    store.openTrack();
+    const stage = preview.querySelector('.pv__stage') as HTMLElement;
+    await until('the frame to have a size', () => stage.getBoundingClientRect().width > 0);
+    await until('the box to be on the frame', () => !!store.shownAim());
+    return { store, stage, frame: stage.getBoundingClientRect() };
+  }
+
+  /** A pointer event at (`fx`, `fy`) of the frame. */
+  function touch(stage: HTMLElement, frame: DOMRect, type: string, pointerId: number, fx: number, fy: number): void {
+    stage.dispatchEvent(
+      new PointerEvent(type, {
+        pointerId,
+        pointerType: 'touch',
+        isPrimary: pointerId === 1,
+        clientX: frame.left + fx * frame.width,
+        clientY: frame.top + fy * frame.height,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  it('sizes the box where it is when a pinch starts with both fingers off it', async () => {
+    const { store, stage, frame } = await openTrackOnSticker();
+    const before = store.shownAim()!;
+    touch(stage, frame, 'pointerdown', 1, 0.15, 0.85);
+    await frames(1);
+    touch(stage, frame, 'pointerdown', 2, 0.85, 0.15);
+    await frames(1);
+    touch(stage, frame, 'pointermove', 2, 0.92, 0.08);
+    await frames(1);
+    touch(stage, frame, 'pointerup', 2, 0.92, 0.08);
+    touch(stage, frame, 'pointerup', 1, 0.15, 0.85);
+    await frames(1);
+    const after = store.shownAim()!;
+    expect(after.cx, 'its middle across').toBeCloseTo(before.cx, 3);
+    expect(after.cy, 'its middle down').toBeCloseTo(before.cy, 3);
+    expect(after.w, 'its size').toBeGreaterThan(before.w * 1.05);
+  });
+
+  it('puts the box on a finger tapped off it', async () => {
+    const { store, stage, frame } = await openTrackOnSticker();
+    touch(stage, frame, 'pointerdown', 1, 0.25, 0.75);
+    await frames(1);
+    expect(store.shownAim()!.cy, 'not yet: it may be a pinch').toBeCloseTo(0.42, 3);
+    touch(stage, frame, 'pointerup', 1, 0.25, 0.75);
+    await frames(1);
+    expect(store.shownAim()!.cx).toBeCloseTo(0.25, 3);
+    expect(store.shownAim()!.cy).toBeCloseTo(0.75, 3);
+  });
+
+  it('puts the box on a finger dragged from off it, and carries it with the finger', async () => {
+    const { store, stage, frame } = await openTrackOnSticker();
+    touch(stage, frame, 'pointerdown', 1, 0.25, 0.75);
+    await frames(1);
+    touch(stage, frame, 'pointermove', 1, 0.3, 0.72);
+    await frames(1);
+    touch(stage, frame, 'pointermove', 1, 0.35, 0.7);
+    await frames(1);
+    touch(stage, frame, 'pointerup', 1, 0.35, 0.7);
+    await frames(1);
+    expect(store.shownAim()!.cx).toBeCloseTo(0.35, 3);
+    expect(store.shownAim()!.cy).toBeCloseTo(0.7, 3);
+  });
+
+  it('leaves the box where it was when a touch off it is cancelled', async () => {
+    const { store, stage, frame } = await openTrackOnSticker();
+    const before = store.shownAim()!;
+    touch(stage, frame, 'pointerdown', 1, 0.25, 0.75);
+    await frames(1);
+    touch(stage, frame, 'pointercancel', 1, 0.25, 0.75);
+    await frames(1);
+    expect(store.shownAim()).toEqual(before);
+  });
+});

@@ -13,7 +13,7 @@ import type { EditorPanel } from '../../state/editor.types';
  * How tall a sheet is allowed to be, and therefore what stays on screen above it.
  *
  * `compact` keeps the preview, the transport and a slim timeline; `tall` takes the screen and the
- * sheet is the only thing on it. Seventeen of the twenty are compact, and the three that are not
+ * sheet is the only thing on it. Eighteen of the twenty-one are compact, and the three that are not
  * are the ones with a keyboard or a scrolling list in them.
  *
  * A `Record` rather than the set of compact panels the Angular shell kept, because a `Record` over
@@ -61,6 +61,11 @@ export const PANEL_LAYOUT: Readonly<Record<EditorPanel, 'compact' | 'tall'>> = {
    * whatever the frame on the strip is over, and Play stays in reach to watch it.
    */
   slip: 'compact',
+  /*
+   * Compact because the thing a layer follows is boxed ON the picture, and the run is watched there:
+   * the box rides along the footage as it is read, and the result plays back on the preview.
+   */
+  track: 'compact',
   /* The keyboard sits under this one and the sheet has to clear it. */
   text: 'tall',
   /* A scrolling grid of several hundred tiles, with a search field and a category bar. */

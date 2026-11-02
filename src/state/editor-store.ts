@@ -157,14 +157,42 @@ import {
   setFocusSubjects as setFocusSubjectsOp,
   type EditFocus,
   type FocusSubjects,
+  compileLayerMotion,
+  repinOverlay,
+  sourceMsThrough,
+  trackedFootage,
+  trackedPoseAt,
+  trackedThingAt,
+  untrackOverlay,
+  withTrackRun,
+  type ShownPose,
+  type TrackedPose,
+  type TrackRunResult,
+  type TrackScene,
 } from '../editor';
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
 import { FocusFrames } from '../video-composer/web/focus-frames';
-import type { AudioEffectCopy, EditorPanel, EditorPlayer, EditorSelection, Filmstrip, OverlayBitmap, SoundReplaceTarget, SubjectTrackState, ToolbarMode, VolumeTarget } from './editor.types';
+import { probeMedia } from '../video-composer/web/media';
+import { openTrackFrames, type TrackFrameSource } from '../video-composer/web/track-frames';
+import type {
+  AudioEffectCopy,
+  EditorPanel,
+  EditorPlayer,
+  EditorSelection,
+  Filmstrip,
+  OverlayBitmap,
+  SoundReplaceTarget,
+  SubjectTrackState,
+  ToolbarMode,
+  TrackAim,
+  TrackRunView,
+  VolumeTarget,
+} from './editor.types';
 import { sameUrl } from './same-url';
+import { startTrackRun, type TrackRunLive, type TrackRunOutcome } from './track-session';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
 interface CompiledMotion {
@@ -174,6 +202,36 @@ interface CompiledMotion {
   endMs: number;
   motion: ComposeOverlayMotion | null;
 }
+
+/**
+ * A tracked layer's compiled motion and everything it was compiled from: the layer itself, since its
+ * motion is drawn against its own centre, and every part of the post the footage is drawn through.
+ */
+interface CompiledTrackMotion {
+  overlay: EditOverlay;
+  scene: Pick<EditManifest, 'clips' | 'videoTracks' | 'output' | 'fit'> & Pick<TrackScene, 'camera' | 'layout'>;
+  startMs: number;
+  endMs: number;
+  motion: ComposeOverlayMotion | null;
+}
+
+/** The smallest the Track sheet's box may be drawn, as a fraction of the frame's shorter side. */
+const MIN_AIM = 0.06;
+
+/** How big the box first is, as a fraction of the frame's width: a thumb's width on a phone. */
+const DEFAULT_AIM = 0.3;
+
+/** The longest a finished run plays itself back for, from the layer's start. */
+const REVEAL_MS = 8000;
+
+/**
+ * How often a run's frame is shown while it reads: thirty times a second at most. A run reads faster
+ * than that on a desktop, and every frame shown is a frame's worth of drawing taken from the reading.
+ */
+const LIVE_EVERY_MS = 33;
+
+/** [EditorStore.trackedPoses] while nothing on the post is tracked: one map, so nothing reading it is told of a change. */
+const NO_POSES: ReadonlyMap<string, TrackedPose> = new Map();
 
 interface HistoryEntry {
   manifest: EditManifest;
@@ -997,7 +1055,8 @@ export class EditorStore {
       panel === 'transition' ||
       panel === 'zoom' ||
       panel === 'animation' ||
-      panel === 'slip'
+      panel === 'slip' ||
+      panel === 'track'
     )
       this.closePanel();
     // The Audio effects sheet is about a layer, and stays open only while one is what is selected.
@@ -1017,6 +1076,7 @@ export class EditorStore {
     if (this.panel.value === 'transition' && panel !== 'transition') this.leaveTransition();
     if (this.panel.value === 'animation' && panel !== 'animation') this.leaveAnimation();
     if (this.panel.value === 'slip' && panel !== 'slip') this.leaveSlip();
+    if (this.panel.value === 'track' && panel !== 'track') this.leaveTrack();
     // A layout opening still being played is the layout sheet's, and goes with it.
     if (this.panel.value === 'layout' && panel !== 'layout') this.endAudition();
     if (panel !== 'sound') this.soundReplaceTarget.value = null;
@@ -1029,6 +1089,7 @@ export class EditorStore {
     if (this.panel.value === 'transition') this.leaveTransition();
     if (this.panel.value === 'animation') this.leaveAnimation();
     if (this.panel.value === 'slip') this.leaveSlip();
+    if (this.panel.value === 'track') this.leaveTrack();
     if (this.panel.value === 'layout') this.endAudition();
     this.panel.value = null;
     this.volumeTarget.value = null;
@@ -1876,11 +1937,30 @@ export class EditorStore {
 
   /** A live change to a layer (drag, pinch, slider, typing); wrap in begin/endGesture. */
   previewOverlay(id: string, patch: Parameters<typeof patchOverlay>[2]): void {
-    this.preview(m => patchOverlay(m, id, patch));
+    this.preview(m => patchOverlay(m, id, this.pinnedPatch(m, id, patch)));
   }
 
   commitOverlay(id: string, patch: Parameters<typeof patchOverlay>[2], label: string): void {
-    this.commit(label, m => patchOverlay(m, id, patch));
+    this.commit(label, m => patchOverlay(m, id, this.pinnedPatch(m, id, patch)));
+  }
+
+  /**
+   * A patch to a TRACKED layer's place, size or angle, as the customer made it on the frame at the
+   * playhead - which is where the layer is drawn now, not where it was last put - turned into the patch
+   * that draws it there: the track's pin moved to this instant, so it follows the thing from its new
+   * place. Every other patch, and every patch to a layer with no track, is handed back as it came.
+   */
+  private pinnedPatch(m: EditManifest, id: string, patch: Parameters<typeof patchOverlay>[2]): Parameters<typeof patchOverlay>[2] {
+    const overlay = findOverlay(m, id);
+    if (!overlay?.track) return patch;
+    const shown: ShownPose = {};
+    for (const key of ['cx', 'cy', 'scale', 'rotationDeg'] as const) {
+      const value = (patch as Record<string, unknown>)[key];
+      if (typeof value === 'number') shown[key] = value;
+    }
+    if (Object.keys(shown).length === 0) return patch;
+    const pinned = repinOverlay(overlay, this.sceneOf(m), this.playheadMs.value, shown);
+    return pinned ? { ...patch, ...pinned } : patch;
   }
 
   /** Live move/trim of a layer's time window from the timeline; wrap in begin/endGesture. */
@@ -2138,6 +2218,494 @@ export class EditorStore {
     this.endAudition();
     if (this.gestureStart && !this.gestureInGroup) this.historyGroup = null;
     else this.endHistoryGroup();
+  }
+
+  /* ========================================================================================= */
+  /* Tracking                                                                                  */
+  /* ========================================================================================= */
+
+  /** The parts of the post a tracked layer is drawn through, as the render reads them. */
+  readonly trackScene = computed<TrackScene>(() => ({ manifest: this.manifest.value, camera: this.camera.value, layout: this.layoutMotions.value }));
+
+  /**
+   * Where every tracked layer is drawn at the playhead, by id: what its selection box, a tap and a drag
+   * take hold of. A layer with no track, or whose footage has left the post, has no entry and is drawn
+   * where it was put.
+   */
+  readonly trackedPoses = computed<ReadonlyMap<string, TrackedPose>>(() => {
+    const tracked = this.manifest.value.overlays.filter(overlay => overlay.track && overlay.kind !== 'effect');
+    // Nothing tracked, nothing that moves with the playhead: read it, and every frame of playback would
+    // hand whatever reads this a new map.
+    if (tracked.length === 0) return NO_POSES;
+    const at = this.playheadMs.value;
+    const scene = this.trackScene.value;
+    const poses = new Map<string, TrackedPose>();
+    for (const overlay of tracked) {
+      const pose = trackedPoseAt(overlay, scene, at);
+      if (pose) poses.set(overlay.id, pose);
+    }
+    return poses;
+  });
+
+  /**
+   * A layer as it is drawn at the playhead: its own fields, with a tracked layer's place, size and angle
+   * there. A layer with no track is handed straight back WITHOUT reading the playhead, so whatever draws
+   * it - the selection box - is not redrawn on every frame of playback for nothing.
+   */
+  shownOverlay<T extends EditOverlay>(overlay: T): T {
+    if (!overlay.track) return overlay;
+    const pose = this.trackedPoses.value.get(overlay.id);
+    return pose ? { ...overlay, ...pose } : overlay;
+  }
+
+  /** The layer the Track sheet is open on. */
+  readonly trackLayer = computed(() => (this.panel.value === 'track' ? this.selectedOverlay.value : null));
+
+  /**
+   * The Track sheet's box on the frame: what the next run follows. Null while the sheet is shut, and
+   * while it shows a tracked layer's own box, which [trackThing] draws until the customer moves it.
+   */
+  readonly trackAim = signal<TrackAim | null>(null);
+
+  /**
+   * The box was moved off a tracked layer's thing: the sheet offers to track again from the playhead,
+   * the path before it kept. Always false for a layer with no track yet.
+   */
+  readonly trackAimMoved = signal(false);
+
+  /** A run under way, as the sheet shows it. */
+  readonly trackRun = signal<TrackRunView | null>(null);
+
+  /** The frame a run is reading and where the thing is in it, a frame at a time: the preview's alone. */
+  readonly trackLive = signal<TrackRunLive | null>(null);
+
+  /**
+   * Each source's oriented width over its height, by clip key, as the preview's elements report them:
+   * which picture is under the Track sheet's box, and where on its source the box lands.
+   */
+  readonly sourceShapes = signal<ReadonlyMap<string, number>>(new Map());
+
+  /** The run under way: what stops it, what it has found so far, and how that goes on the layer. */
+  private trackSession: { abort: AbortController; found: () => TrackRunResult | null; land: (found: TrackRunResult) => void } | null = null;
+
+  /** How a run opens the footage it reads: the page's own decoder, or frames made up under test. */
+  openTrackFootage: (uri: string) => Promise<TrackFrameSource> = openTrackFrames;
+
+  /** How a run measures a source the preview has not reported the shape of yet: off the file, or made up under test. */
+  probeTrackFootage: (uri: string) => Promise<{ width: number; height: number }> = probeMedia;
+
+  /** The thing the Track sheet's layer follows, at the playhead: its middle and its box on the frame. */
+  readonly trackThing = computed(() => {
+    const overlay = this.trackLayer.value;
+    return overlay?.track ? trackedThingAt(overlay.track, this.trackScene.value, this.playheadMs.value) : null;
+  });
+
+  /** A source's shape, as an element playing it reports it. */
+  noteSourceShape(clipKey: string, aspect: number): void {
+    if (!(aspect > 0) || this.sourceShapes.value.get(clipKey) === aspect) return;
+    this.sourceShapes.value = new Map(this.sourceShapes.value).set(clipKey, aspect);
+  }
+
+  /**
+   * The Track tool: opens the Track sheet on the selected text, sticker or photo. Paused, and on the
+   * layer when the playhead is somewhere it is not, because the box is drawn on the frame the run
+   * starts from. The box starts round the layer itself - most layers are put on or beside what they
+   * are about - or round what a tracked layer already follows.
+   */
+  openTrack(): void {
+    const overlay = this.selectedOverlay.value;
+    if (!overlay || overlay.kind === 'effect') return;
+    this.pause();
+    this.openPanel('track');
+    const total = this.totalMs.value;
+    let at = this.playheadMs.value;
+    if (!isOverlayVisibleAt(overlay, at, total)) {
+      at = overlayWireWindow(overlay, total).startMs;
+      this.seek(at);
+    }
+    this.trackAimMoved.value = false;
+    this.trackAim.value = overlay.track ? null : this.aimAround(overlay, at);
+    this.haptic('light');
+  }
+
+  /**
+   * The box moved or resized on the frame. Held to the frame and to a fingertip's size. On a tracked
+   * layer this is the customer mending the path from here, which the sheet then offers to do.
+   */
+  setTrackAim(aim: TrackAim): void {
+    const overlay = this.trackLayer.value;
+    if (!overlay || this.trackRun.value) return;
+    this.holdTrackFrame();
+    this.trackAim.value = this.heldAim(aim);
+    if (overlay.track) this.trackAimMoved.value = true;
+  }
+
+  /**
+   * A finger on the Track sheet's frame: playback - the result playing back, or Play - stopped where it
+   * is, so the box is put on the very frame the next run starts from rather than on one the playhead has
+   * already left behind.
+   */
+  holdTrackFrame(): void {
+    this.endAudition();
+    if (this.playing.value) this.pause();
+  }
+
+  /** The box as the frame shows it now: the aim being drawn, or a tracked layer's thing at the playhead. */
+  shownAim(): TrackAim | null {
+    const aim = this.trackAim.value;
+    if (aim) return aim;
+    const thing = this.trackThing.value;
+    if (!thing) return null;
+    const xs = thing.corners.map(c => c.x);
+    const ys = thing.corners.map(c => c.y);
+    return this.heldAim({ cx: thing.cx, cy: thing.cy, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) });
+  }
+
+  /** Back to the tracked layer's own box: the mend the customer started, put down. */
+  cancelTrackAim(): void {
+    if (!this.trackLayer.value?.track) return;
+    this.trackAim.value = null;
+    this.trackAimMoved.value = false;
+  }
+
+  /**
+   * Follows what is in the box, from the frame the playhead is on. `all` is a whole new path, both ways
+   * through the layer's time on screen; `from` mends the path from here on, keeping it before.
+   *
+   * The finished path goes on as ONE step, and plays back once over the layer so the customer sees it
+   * ride along without reaching for Play. Stopped - by Stop, or by the sheet closing under it, which is
+   * the customer being done - it keeps what was found.
+   */
+  async startTracking(mode: 'all' | 'from' = 'all'): Promise<void> {
+    const overlay = this.trackLayer.value;
+    const aim = this.shownAim();
+    if (!overlay || overlay.kind === 'effect' || !aim || this.trackRun.value) return;
+    this.pause();
+    this.endAudition();
+    const at = this.playheadMs.value;
+    const m = this.manifest.value;
+    const under = this.footageUnder(aim, at);
+    if (!under) {
+      this.showToast('Put the box on the video');
+      this.haptic('warning');
+      return;
+    }
+    const { clip, laneStart, slot } = under;
+    const uri = this.trackUri(clip.clipKey);
+
+    // The run is under way from the tap, before anything is waited for: Stop, or the sheet shutting, while
+    // the clip is still being measured calls it off - rather than a run starting later behind a shut sheet -
+    // and a second tap meanwhile starts nothing more.
+    const abort = new AbortController();
+    const session = {
+      abort,
+      found: (): TrackRunResult | null => null,
+      land: (found: TrackRunResult) => this.landTrack(overlay.id, at, mode, found, false),
+    };
+    this.trackSession = session;
+    const view: TrackRunView = { overlayId: overlay.id, clipId: clip.id, clipKey: clip.clipKey, outputMs: at, mode, progress: 0 };
+    this.trackRun.value = view;
+    this.trackLive.value = null;
+    const giveUp = (message?: string): void => {
+      if (this.trackSession !== session) return;
+      this.endTrackRun();
+      if (!message) return;
+      this.showToast(message);
+      this.haptic('warning');
+    };
+
+    let aspect = this.sourceShapes.value.get(clip.clipKey) ?? 0;
+    if (!(aspect > 0) && !clip.image && uri) {
+      const probed = await this.probeTrackFootage(uri).catch(() => null);
+      if (this.trackSession !== session) return;
+      aspect = probed && probed.width > 0 && probed.height > 0 ? probed.width / probed.height : 0;
+    }
+    if (!(aspect > 0)) aspect = clip.image ? this.frameAspect.value : 0;
+    if (!(aspect > 0) || (!clip.image && !uri)) {
+      giveUp('This clip cannot be tracked');
+      return;
+    }
+
+    // The box on the source: its corners taken back through the clip's own framing at this instant.
+    const footage = trackedFootage({ clipId: clip.id, clipKey: clip.clipKey, aspect }, this.sceneOf(m), at);
+    if (!footage) {
+      giveUp();
+      return;
+    }
+    const output = m.output;
+    const corners = [
+      [aim.cx - aim.w / 2, aim.cy - aim.h / 2],
+      [aim.cx + aim.w / 2, aim.cy - aim.h / 2],
+      [aim.cx + aim.w / 2, aim.cy + aim.h / 2],
+      [aim.cx - aim.w / 2, aim.cy + aim.h / 2],
+    ].map(([x, y]) => footage.map.toSourceAnywhere(x! * output.width, y! * output.height));
+    const u0 = within(Math.min(...corners.map(c => c.u)), 0, 1);
+    const u1 = within(Math.max(...corners.map(c => c.u)), 0, 1);
+    const v0 = within(Math.min(...corners.map(c => c.v)), 0, 1);
+    const v1 = within(Math.max(...corners.map(c => c.v)), 0, 1);
+    if (!(u1 - u0 > 0.005) || !(v1 - v0 > 0.005)) {
+      giveUp('Put the box on the video');
+      return;
+    }
+    const box = { cx: (u0 + u1) / 2, cy: (v0 + v1) / 2, w: u1 - u0, h: v1 - v0 };
+
+    // The stretch to follow it through: the layer's time on screen, inside the clip's own - its transition
+    // tail included, where the clip plays on under the next one's dissolve.
+    const total = this.totalMs.value;
+    const window = overlayWireWindow(overlay, total);
+    const spanStart = laneStart + slot.startMs;
+    const spanEnd = spanStart + Math.max(0, slot.durationMs) + slot.tailMs;
+    const sourceAt = (outputMs: number) => sourceMsThrough(slot, outputMs - laneStart);
+    const anchorMs = footage.sourceMs;
+    const fromMs = mode === 'from' ? anchorMs : sourceAt(Math.max(window.startMs, spanStart));
+    const toMs = sourceAt(Math.min(window.endMs, spanEnd));
+
+    if (clip.image) {
+      // A picture never moves in itself: one sample pins the layer to it, through every zoom and layout.
+      const still: TrackRunResult = {
+        clipId: clip.id,
+        clipKey: clip.clipKey,
+        aspect,
+        box: { w: box.w, h: box.h },
+        atMs: [Math.round(anchorMs)],
+        x: [box.cx],
+        y: [box.cy],
+        scale: [1],
+        turn: [0],
+        lost: [],
+        anchorMs: Math.round(anchorMs),
+      };
+      // Read with nothing waited for, so the run reserved above is still this one.
+      this.endTrackRun();
+      this.landTrack(overlay.id, at, mode, still, false);
+      return;
+    }
+
+    this.haptic('light');
+    let shownAt = -Infinity;
+    const run = startTrackRun(
+      {
+        uri,
+        clipId: clip.id,
+        clipKey: clip.clipKey,
+        anchorMs,
+        box,
+        fromMs: Math.min(fromMs, anchorMs),
+        toMs: Math.max(toMs, anchorMs),
+        direction: mode === 'from' ? 'forward' : 'both',
+      },
+      live => {
+        if (this.trackSession !== session) return;
+        const now = performance.now();
+        if (now - shownAt >= LIVE_EVERY_MS) {
+          shownAt = now;
+          this.trackLive.value = live;
+        }
+        const progress = Math.floor(live.progress * 100) / 100;
+        if (progress !== this.trackRun.peek()?.progress) this.trackRun.value = { ...view, progress };
+      },
+      abort.signal,
+      this.openTrackFootage,
+    );
+    session.found = () => run.found();
+    let outcome: TrackRunOutcome;
+    try {
+      outcome = await run.done;
+    } catch {
+      if (this.trackSession !== session) return;
+      this.endTrackRun();
+      this.showToast('This clip cannot be tracked');
+      this.haptic('warning');
+      return;
+    }
+    // Stopped, or the sheet shut under it: what it had found went on the layer there and then.
+    if (this.trackSession !== session) return;
+    this.endTrackRun();
+    if (!outcome.result) {
+      this.showToast('Nothing to follow in this box. Try a bigger one');
+      this.haptic('warning');
+      return;
+    }
+    this.landTrack(overlay.id, at, mode, outcome.result, !outcome.stopped);
+  }
+
+  /**
+   * Stop: the run ends where it has got to, and what it found so far goes on the layer at once - not
+   * once the run has wound down, which a Next tapped straight after would not wait for.
+   */
+  stopTracking(): void {
+    this.settleTrackRun();
+  }
+
+  /**
+   * A run's path put on the layer as ONE step, against the frame at `outputMs` the box was drawn on.
+   * `reveal` plays the layer riding along once, from its start, parked back on that frame: for a run that
+   * finished with the sheet still open, so the customer sees it follow without reaching for Play.
+   */
+  private landTrack(overlayId: string, outputMs: number, mode: 'all' | 'from', found: TrackRunResult, reveal: boolean): void {
+    const applied = this.commit(mode === 'from' ? 'Track from here' : 'Track', next => {
+      const layer = findOverlay(next, overlayId);
+      const patch = layer ? withTrackRun(layer, this.sceneOf(next), outputMs, found, mode) : null;
+      return patch && layer ? patchOverlay(next, layer.id, patch) : null;
+    });
+    if (!applied) return;
+    this.trackAim.value = null;
+    this.trackAimMoved.value = false;
+    this.haptic('success');
+    const layer = findOverlay(this.manifest.value, overlayId);
+    if (reveal && layer && this.panel.value === 'track') {
+      const shown = overlayWireWindow(layer, this.totalMs.value);
+      this.playOnce(shown.startMs, Math.min(shown.endMs, this.totalMs.value, shown.startMs + REVEAL_MS), outputMs);
+    }
+  }
+
+  /** The run under way stopped, and what it has found so far put on the layer there and then. */
+  private settleTrackRun(): void {
+    const session = this.trackSession;
+    if (!session) return;
+    session.abort.abort();
+    const found = session.found();
+    this.endTrackRun();
+    if (found) session.land(found);
+  }
+
+  /** Whether the layer grows and shrinks with the thing, and turns with it. Pinned at the playhead first, so it does not jump there. */
+  setTrackFollow(patch: { scaleWith?: boolean; turnWith?: boolean }): void {
+    const overlay = this.trackLayer.value;
+    if (!overlay?.track) return;
+    const changed = this.commit('Track', m => {
+      const layer = findOverlay(m, overlay.id);
+      if (!layer?.track) return null;
+      const pinned = repinOverlay(layer, this.sceneOf(m), this.playheadMs.value) ?? {};
+      const track = { ...(pinned.track ?? layer.track) };
+      if (patch.scaleWith === true) track.scaleWith = true;
+      if (patch.scaleWith === false) delete track.scaleWith;
+      if (patch.turnWith === true) track.turnWith = true;
+      if (patch.turnWith === false) delete track.turnWith;
+      return patchOverlay(m, layer.id, { ...pinned, track });
+    });
+    if (changed) this.haptic('selection');
+  }
+
+  /** How much the path is smoothed, 0..1. A slider's drag is one step by its coalesce key. */
+  setTrackSmooth(value: number, opts?: { coalesce?: CoalesceKey }): void {
+    const overlay = this.trackLayer.value;
+    if (!overlay?.track) return;
+    const smooth = Math.round(within(value, 0, 1) * 100) / 100;
+    this.commitCoalesced(
+      'Track',
+      m => {
+        const layer = findOverlay(m, overlay.id);
+        if (!layer?.track) return null;
+        // Smoothing moves the path a little everywhere, but the layer the customer is looking at stays
+        // exactly where it is drawn: its pose here taken before the change and pinned to after it.
+        const scene = this.sceneOf(m);
+        const at = this.playheadMs.value;
+        const shown = trackedPoseAt(layer, scene, at);
+        const smoothed = { ...layer, track: { ...layer.track, smooth } } as EditOverlay;
+        const pinned = shown ? repinOverlay(smoothed, scene, at, shown) : null;
+        return patchOverlay(m, layer.id, pinned ?? { track: smoothed.track });
+      },
+      opts?.coalesce,
+    );
+  }
+
+  /** None: the track taken off, the layer left standing where it is at the playhead. Closes the sheet. */
+  removeTrack(): void {
+    const overlay = this.trackLayer.value;
+    if (!overlay) return;
+    if (overlay.track) {
+      this.commit('Remove tracking', m => {
+        const layer = findOverlay(m, overlay.id);
+        return layer?.track ? patchOverlay(m, layer.id, untrackOverlay(layer, this.sceneOf(m), this.playheadMs.value)) : null;
+      });
+      this.haptic('light');
+    }
+    this.closePanel();
+  }
+
+  /**
+   * Everything the Track sheet held open, let go of as it shuts: a run stopped and what it found put on
+   * the layer before the sheet is gone - Next shuts it and reads the post in the same turn - and the box
+   * gone.
+   */
+  private leaveTrack(): void {
+    this.settleTrackRun();
+    this.endAudition();
+    this.trackAim.value = null;
+    this.trackAimMoved.value = false;
+  }
+
+  private endTrackRun(): void {
+    this.trackSession = null;
+    this.trackRun.value = null;
+    this.trackLive.value = null;
+  }
+
+  /** The parts of `m` a tracked layer is drawn through. */
+  private sceneOf(m: EditManifest): TrackScene {
+    if (m === this.manifest.value) return this.trackScene.value;
+    return { manifest: m, camera: compileCamera(m.zooms ?? [], totalDurationMs(m)), layout: compileLayoutMotions(m) };
+  }
+
+  /** A box to start from: a square a thumb wide, round where the layer is drawn at `outputMs`. */
+  private aimAround(overlay: EditOverlay, outputMs: number): TrackAim {
+    const at = trackedPoseAt(overlay, this.trackScene.value, outputMs) ?? overlay;
+    return this.heldAim({ cx: at.cx, cy: at.cy, w: DEFAULT_AIM, h: DEFAULT_AIM * this.frameAspect.value });
+  }
+
+  /** A box held to the frame: no smaller than [MIN_AIM] of its shorter side, no bigger than it, its middle on it. */
+  private heldAim(aim: TrackAim): TrackAim {
+    const aspect = this.frameAspect.value;
+    // The shorter side as fractions of the width and of the height.
+    const minW = MIN_AIM * Math.min(1, 1 / aspect);
+    const minH = MIN_AIM * Math.min(1, aspect);
+    return {
+      cx: within(aim.cx, 0, 1),
+      cy: within(aim.cy, 0, 1),
+      w: within(aim.w, minW, 1),
+      h: within(aim.h, minH, 1),
+    };
+  }
+
+  /**
+   * The video under the middle of `aim` at `outputMs`: the front-most picture there, as the preview
+   * composites them, with the segment's place on its lane. Null over a letterbox bar or the black past a
+   * layer's rectangle, where there is nothing to follow.
+   */
+  private footageUnder(aim: TrackAim, outputMs: number): { clip: EditClip; laneStart: number; slot: TimelineSlot } | null {
+    const m = this.manifest.value;
+    const scene = this.trackScene.value;
+    const output = m.output;
+    const layers = [...this.previewLayers.value].reverse();
+    for (const layer of layers) {
+      const clip = findClip(m, layer.clipId);
+      if (!clip) continue;
+      const aspect = this.sourceShapes.value.get(clip.clipKey) ?? 0;
+      let hit: boolean;
+      if (aspect > 0) {
+        hit = !!trackedFootage({ clipId: clip.id, clipKey: clip.clipKey, aspect }, scene, outputMs)?.map.toSource(aim.cx * output.width, aim.cy * output.height);
+      } else {
+        // Its shape not known yet: its rectangle stands in for its picture.
+        const rect = clip.rect ?? { x: 0, y: 0, w: 1, h: 1 };
+        hit = aim.cx >= rect.x && aim.cx <= rect.x + rect.w && aim.cy >= rect.y && aim.cy <= rect.y + rect.h;
+      }
+      if (!hit) continue;
+      const lane = layer.trackId === null ? { clips: m.clips, startMs: 0 } : m.videoTracks.find(t => t.id === layer.trackId);
+      const slot = lane ? timelineSlots({ clips: lane.clips }).find(s => s.clip.id === clip.id) : undefined;
+      if (lane && slot) return { clip, laneStart: lane.startMs, slot };
+    }
+    return null;
+  }
+
+  /** A URL the page can decode a source from: the preview's own copy where there is one, as the preview plays it. */
+  private trackUri(clipKey: string): string {
+    const copy = this.previewUrls.value.get(clipKey);
+    if (copy) return copy;
+    const source = this.clips.value.find(s => s.key === clipKey);
+    if (!source) return '';
+    if (source.playbackUrl) return source.playbackUrl;
+    return source.sourcePath ? this.host.platform.fileUrl(source.sourcePath) : '';
   }
 
   /* ========================================================================================= */
@@ -2595,9 +3163,25 @@ export class EditorStore {
    */
   readonly overlayMotions = computed<ReadonlyMap<string, ComposeOverlayMotion>>(() => {
     const total = this.totalMs.value;
+    const m = this.manifest.value;
     const motions = new Map<string, ComposeOverlayMotion>();
     const kept = new Map<string, CompiledMotion>();
-    for (const overlay of this.manifest.value.overlays) {
+    const keptTracks = new Map<string, CompiledTrackMotion>();
+    for (const overlay of m.overlays) {
+      // A tracked layer is drawn against the footage, so its keys hang on the layer itself - its own
+      // centre is what they are offsets from - and on everything the footage is drawn through.
+      if (overlay.track && overlay.kind !== 'effect') {
+        const { startMs, endMs } = overlayWireWindow(overlay, total);
+        const scene = { clips: m.clips, videoTracks: m.videoTracks, output: m.output, fit: m.fit, camera: this.camera.value, layout: this.layoutMotions.value };
+        const known = this.compiledTracks.get(overlay.id);
+        const same = known && known.overlay === overlay && known.startMs === startMs && known.endMs === endMs && sameScene(known.scene, scene);
+        const entry: CompiledTrackMotion = same
+          ? known
+          : { overlay, scene, startMs, endMs, motion: compileLayerMotion(overlay, { manifest: m, camera: scene.camera, layout: scene.layout }, { startMs, endMs }) };
+        keptTracks.set(overlay.id, entry);
+        if (entry.motion) motions.set(overlay.id, entry.motion);
+        continue;
+      }
       if (!overlay.animation) continue;
       const { startMs, endMs } = overlayWireWindow(overlay, total);
       const known = this.compiledMotions.get(overlay.id);
@@ -2609,10 +3193,13 @@ export class EditorStore {
       if (entry.motion) motions.set(overlay.id, entry.motion);
     }
     this.compiledMotions = kept;
+    this.compiledTracks = keptTracks;
     return motions;
   });
   /** What [overlayMotions] compiled last time, and from what, so an unchanged layer is not compiled again. */
   private compiledMotions = new Map<string, CompiledMotion>();
+  /** The same for the tracked layers. */
+  private compiledTracks = new Map<string, CompiledTrackMotion>();
   /**
    * What the stage shows while the zoom sheet is open and paused: the whole frame with the area box
    * on it (`area`), or the zoomed picture at the playhead (`result`).
@@ -2948,7 +3535,10 @@ export class EditorStore {
    */
   focusChangeOutputMs(clipId: string, atMs: number): number | null {
     const manifest = this.manifest.value;
-    const rows: { clips: EditClip[]; startMs: number }[] = [{ clips: manifest.clips, startMs: 0 }, ...manifest.videoTracks.map(track => ({ clips: track.clips, startMs: track.startMs }))];
+    const rows: { clips: EditClip[]; startMs: number }[] = [
+      { clips: manifest.clips, startMs: 0 },
+      ...manifest.videoTracks.map(track => ({ clips: track.clips, startMs: track.startMs })),
+    ];
     for (const row of rows) {
       const slot = timelineSlots({ clips: row.clips }).find(candidate => candidate.clip.id === clipId);
       if (!slot) continue;
@@ -3050,6 +3640,9 @@ export class EditorStore {
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = null;
     this.endAudition();
+    // A run reading footage for an editor that has gone: there is nothing left to put its path on.
+    this.trackSession?.abort.abort();
+    this.trackSession = null;
     this.player = null;
   }
 }
@@ -3093,4 +3686,14 @@ function withAnimationPart(m: EditManifest, id: string, part: OverlayAnimationPa
   else if (part === 'loop') animation.loop = move as OverlayLoop;
   else animation[part] = move as OverlayMove;
   return patchOverlay(m, id, { animation });
+}
+
+/** Whether a tracked layer's footage is drawn through the very same parts of the post: identity, part for part. */
+function sameScene(a: CompiledTrackMotion['scene'], b: CompiledTrackMotion['scene']): boolean {
+  return a.clips === b.clips && a.videoTracks === b.videoTracks && a.output === b.output && a.fit === b.fit && a.camera === b.camera && a.layout === b.layout;
+}
+
+/** `value` held to `min..max`. */
+function within(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

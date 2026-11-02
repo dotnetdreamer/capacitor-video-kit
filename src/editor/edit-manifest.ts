@@ -2,6 +2,7 @@ import { MAX_AUDIO_EFFECTS, type FilterOp } from '../video-composer/definitions'
 import { focusChangesPicture, normaliseFocus } from './focus';
 import { normaliseLayoutAnimation } from './layout-animation';
 import { normaliseOverlayAnimation } from './motion';
+import { normaliseOverlayTrack } from './overlay-track';
 import { normaliseSoundEffectSettings, soundEffectPreset } from './sound-effects';
 import { normaliseTransition, transitionSpans } from './transitions';
 
@@ -19,7 +20,7 @@ import { normaliseTransition, transitionSpans } from './transitions';
  * preview and for the render, by the same rasteriser, which is what keeps the two identical.
  */
 
-export const MANIFEST_VERSION = 19;
+export const MANIFEST_VERSION = 20;
 
 /** How a clip's picture is fitted into the rectangle it is drawn in. */
 export type EditFit = 'contain' | 'cover';
@@ -290,6 +291,102 @@ export interface OverlayCommon {
    * preset does to its opacity: a leak that pops in fades in, and one that breathes breathes.
    */
   animation?: OverlayAnimation;
+  /**
+   * Something in the footage the layer is pinned to, and moves with: a name over a runner, a heart on
+   * a dog. Absent is a layer that stays where it was put, which is every layer of every manifest
+   * written before version 20, and absent is what [toComposeSpec] turns into a layer whose `motion`
+   * is its animation alone.
+   *
+   * Never on an effect, which covers the frame. With one, `cx`, `cy`, `scale` and `rotationDeg` are
+   * where the layer was drawn at the track's [TrackPin] - the last place the customer put it, its size
+   * there `scale` times the pin's [TrackPin.grow] - and the track's path says where it goes from there; a
+   * build that does not know tracks draws it still, at that place.
+   */
+  track?: OverlayTrack;
+}
+
+/**
+ * The path of something a layer follows, as the Track tool found it: where its middle was in every frame
+ * the tracker read, how big it was and how far it had turned, and where the layer sits against it.
+ *
+ * Kept in the footage's own terms - SOURCE milliseconds of the file, fractions of its oriented frame -
+ * rather than in the post's, so the layer stays on the thing however the clip is later trimmed, cut,
+ * slowed, cropped, laid out or zoomed into: each of those moves the footage, and the path moves with
+ * it. Every segment over the same file shares the path, so a cut through the middle of a tracked clip
+ * leaves the layer following across the cut.
+ *
+ * The path is the tracker's raw answer, smoothed only when it is drawn ([smooth]), so the smoothing can
+ * be changed without tracking again.
+ */
+export interface OverlayTrack {
+  /** The segment the thing was found in: an [EditClip.id] on any video layer. */
+  clipId: string;
+  /** That segment's source, by the host's key. */
+  clipKey: string;
+  /** The oriented source's width over its height: the shape the fractions below are fractions of. */
+  aspect: number;
+  /** The thing's box where [scale] is 1, as fractions of the source's width and height. */
+  box: { w: number; h: number };
+  /** SOURCE ms of the file, strictly increasing: one per frame the tracker read. */
+  atMs: number[];
+  /** Where the thing's middle was, 0..1 of the oriented source's width and height, top-left origin. */
+  x: number[];
+  y: number[];
+  /** How big it was against the frame the box was drawn on. */
+  scale: number[];
+  /** How far it had turned, clockwise degrees against that frame, unwrapped. */
+  turn: number[];
+  /**
+   * Where the tracker could not see the thing, as SOURCE ms pairs `[from, to, from, to, ...]`: the path
+   * holds where it was last seen there. Absent is seen throughout.
+   */
+  lost?: number[];
+  /** Where the layer sits against the thing. */
+  pin: TrackPin;
+  /** The layer grows and shrinks with the thing. Absent keeps it its own size. */
+  scaleWith?: true;
+  /** The layer turns with the thing. Absent keeps it at its own angle. */
+  turnWith?: true;
+  /** How much the path is smoothed when it is drawn, 0..1. Absent is `DEFAULT_TRACK_SMOOTH`. */
+  smooth?: number;
+  /**
+   * Where the path was mended - tracked again from a frame where it had slipped - in time order. Absent
+   * is a path from one run.
+   */
+  seams?: TrackSeam[];
+}
+
+/**
+ * A mend in a path. From [atMs] on, the samples are a later run's; before it, the earlier one's - and the
+ * earlier part is smoothed with [then], the samples that followed it before the mend, never with the
+ * later run's. So a mend moves nothing before it, at any smoothing: what is drawn there is what was.
+ */
+export interface TrackSeam {
+  /** SOURCE ms of the later run's first sample. */
+  atMs: number;
+  /**
+   * The path as it went on from [atMs] before the mend, as far as smoothing reaches (`3 * MAX_SMOOTH_MS`),
+   * channel for channel as the track's own. Empty where the earlier path ended there.
+   */
+  then: { atMs: number[]; x: number[]; y: number[]; scale: number[]; turn: number[] };
+}
+
+/**
+ * The layer against the thing: at SOURCE time [atMs], the layer's centre was ([dx], [dy]) from the
+ * thing's middle, in fractions of the source's width and height, and the layer's own `rotationDeg` and
+ * `scale` - times [grow] - are what it was drawn at then. Elsewhere that offset grows and turns with the
+ * thing when the layer does.
+ */
+export interface TrackPin {
+  atMs: number;
+  dx: number;
+  dy: number;
+  /**
+   * How much bigger than its own `scale` the layer was drawn at [atMs]: where growing with the thing had
+   * drawn it past the sizes a customer can pick (`MIN_SCALE`..`MAX_SCALE`), which its own `scale` is held
+   * to. Absent is 1.
+   */
+  grow?: number;
 }
 
 /**
@@ -1880,6 +1977,11 @@ export function emptyManifest(): EditManifest {
  * manifest: a version-18 segment has no `focus`, which is the footage as it is, and [toComposeSpec]
  * sends it with none - byte for byte the spec version 18 produced. Bumped because an older build
  * reading a version-19 draft shows every focused clip sharp from edge to edge.
+ *
+ * Version 19 to version 20 adds a layer's [OverlayCommon.track], and nothing is written into an older
+ * manifest: a version-19 layer has no `track`, which is a layer that stays where it was put, and
+ * [toComposeSpec] sends it with the motion it always had. Bumped because an older build reading a
+ * version-20 draft leaves every tracked layer standing where it was last put.
  */
 export function normaliseManifest(input: unknown): EditManifest {
   const raw = (input ?? {}) as Record<string, any>;
@@ -1928,6 +2030,9 @@ export function normaliseManifest(input: unknown): EditManifest {
         // and an animation whose every move this version does not know reads as none.
         const animation = normaliseOverlayAnimation(o.animation);
         if (animation) common.animation = animation;
+        // The same for a track, which an effect - covering the frame - never has.
+        const track = o.kind === 'effect' ? undefined : normaliseOverlayTrack(o.track);
+        if (track) common.track = track;
         switch (o.kind) {
           case 'sticker':
             return { ...common, kind: 'sticker', emoji: o.emoji ?? null, assetId: o.assetId ?? null };

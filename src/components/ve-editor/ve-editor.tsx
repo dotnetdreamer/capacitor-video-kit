@@ -1184,6 +1184,8 @@ export class VeEditor {
         return <ve-focus-sheet key="focus" class="ve__sheet" ctx={ctx} />;
       case 'slip':
         return <ve-slip-sheet key="slip" class="ve__sheet" ctx={ctx} />;
+      case 'track':
+        return <ve-track-sheet key="track" class="ve__sheet" ctx={ctx} />;
       default:
         return <ve-toolbar key="toolbar" class="ve__toolbar" ctx={ctx} />;
     }

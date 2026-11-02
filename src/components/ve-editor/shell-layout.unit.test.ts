@@ -11,7 +11,7 @@ import { PANEL_LAYOUT, formatClock, shellLayout } from './shell-layout';
  */
 
 describe('PANEL_LAYOUT', () => {
-  it('leaves the video, the transport and a slim timeline on screen for seventeen of the twenty', () => {
+  it('leaves the video, the transport and a slim timeline on screen for eighteen of the twenty-one', () => {
     const compact = Object.entries(PANEL_LAYOUT)
       .filter(([, kind]) => kind === 'compact')
       .map(([panel]) => panel);
@@ -30,6 +30,7 @@ describe('PANEL_LAYOUT', () => {
         'quality',
         'slip',
         'speed',
+        'track',
         'transition',
         'voiceover',
         'volume',

@@ -65,6 +65,43 @@ export class LayerMap {
     return { u, v };
   }
 
+  /**
+   * The source point drawn at output pixel (`x`, `y`) - or that WOULD be drawn there if the layer
+   * reached that far: [toSource] with nothing refused, for a point that sits beside the picture rather
+   * than on it, as a caption pinned above a runner's head does.
+   */
+  toSourceAnywhere(x: number, y: number): { u: number; v: number } {
+    const px = (x - this.camera.tx) / this.camera.scale;
+    const py = (y - this.camera.ty) / this.camera.scale;
+    const dx = px - this.pivot.x;
+    const dy = py - this.pivot.y;
+    const ox = (this.pivot.x + dx * this.cos + dy * this.sin) / this.output.width;
+    const oy = (this.pivot.y - dx * this.sin + dy * this.cos) / this.output.height;
+    const dest = this.layer.dest;
+    return { u: this.window.x + ((ox - dest.x) / dest.w) * this.window.w, v: this.window.y + ((oy - dest.y) / dest.h) * this.window.h };
+  }
+
+  /**
+   * The rectangle the layer draws in, as the four output pixels of its corners - turned, and through the
+   * camera - top-left, top-right, bottom-right, bottom-left. Nothing of the layer is drawn outside it.
+   */
+  outline(): { x: number; y: number }[] {
+    const b = this.bounds;
+    const corners = [
+      [b.x, b.y],
+      [b.x + b.w, b.y],
+      [b.x + b.w, b.y + b.h],
+      [b.x, b.y + b.h],
+    ];
+    return corners.map(([fx, fy]) => {
+      const dx = fx! * this.output.width - this.pivot.x;
+      const dy = fy! * this.output.height - this.pivot.y;
+      const px = this.pivot.x + dx * this.cos - dy * this.sin;
+      const py = this.pivot.y + dx * this.sin + dy * this.cos;
+      return { x: px * this.camera.scale + this.camera.tx, y: py * this.camera.scale + this.camera.ty };
+    });
+  }
+
   /** The output pixel source point (`u`, `v`) is drawn at, wherever that is, on the frame or off it. */
   toOutput(u: number, v: number): { x: number; y: number } {
     const dest = this.layer.dest;

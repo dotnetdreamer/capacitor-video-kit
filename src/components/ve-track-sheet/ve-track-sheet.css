@@ -1,0 +1,234 @@
+/*
+ * The Track sheet: the box's one button, a run's progress, and a track's few choices.
+ *
+ * Budgeted against the compact sheet as the Focus sheet is: tracked, the 53px head, two 52px rows and
+ * the 36px hint come to 193px, well under the 259px a compact sheet is held to, so the picture the box
+ * is dragged on keeps as much of the screen as it can.
+ *
+ * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this component
+ * includes ahead of this file.
+ */
+
+.tk {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  min-height: 100%;
+  padding: 6px 20px 10px;
+}
+
+.tk--tracked {
+  justify-content: flex-start;
+  gap: 0;
+  padding: 0;
+}
+
+/* ------------------------------------------------------------------------------------ words */
+
+.tk__hint {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  margin: 0;
+  padding: 0 20px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  text-align: center;
+}
+
+.tk__status {
+  margin: 0;
+  color: var(--ve-text, #fff);
+  font-size: 15px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------------------------ track */
+
+/*
+ * The one thing to press: the editor's forward colour, the full width of the sheet, with the glyph the
+ * box on the picture is drawn after. It glows a little, because it is the whole of what this sheet is for.
+ */
+.tk__go {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  max-width: var(--ve-chrome-max, none);
+  height: 52px;
+  margin: 0 auto;
+  border: 0;
+  border-radius: 26px;
+  background: var(--ve-cta, #a6ff2e);
+  color: var(--ve-cta-text, #1a1a2e);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  /* The glow in the default colour, then in whatever colour a host gave the button where `color-mix` is known. */
+  box-shadow: 0 8px 28px rgba(166, 255, 46, 0.28);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--ve-cta, #a6ff2e) 28%, transparent);
+  cursor: pointer;
+  transition: transform 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tk__go ve-icon {
+  width: 24px;
+  height: 24px;
+}
+
+.tk__go:active {
+  transform: scale(0.97);
+}
+
+.tk__go:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: 3px;
+}
+
+.tk__cancel {
+  margin-top: -6px;
+}
+
+/* -------------------------------------------------------------------------------------- run */
+
+/* How far the run has got: the Focus sheet's bar. */
+.tk__bar {
+  position: relative;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.tk__bar-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--ve-accent, #a6ff2e);
+  transform-origin: left center;
+  transition: transform 160ms linear;
+}
+
+.tk__stop {
+  align-self: center;
+  height: 40px;
+  padding: 0 26px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--ve-raised, #2c2c2e);
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tk__stop:active {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.tk__stop:focus-visible {
+  outline: 2px solid var(--ve-text, #fff);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------------------------- rows */
+
+.tk__row {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+}
+
+/* One width for the two words, so the chips and the slider start at the same x. */
+.tk__word {
+  flex: 0 0 56px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tk__slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  --ve-slider-edge: 0px;
+}
+
+.tk__value {
+  flex: 0 0 40px;
+  color: var(--ve-text, #fff);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* -------------------------------------------------------------------------------------- chips */
+
+/* The button is the 44px touch target; the pill inside is what shows - the Focus sheet's chips. */
+.tk__chip {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ve-text, #fff);
+  font-family: inherit;
+  cursor: pointer;
+  outline-offset: -2px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tk__pill {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 44px;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 16px;
+  background: var(--ve-raised, #2c2c2e);
+  font-size: 13px;
+  font-weight: 700;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.tk__chip:active .tk__pill {
+  background: var(--ve-raised-2, #3a3a3c);
+}
+
+.tk__chip--on .tk__pill,
+.tk__chip--on:active .tk__pill {
+  background: #fff;
+  color: #000;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tk__go:hover {
+    filter: brightness(1.06);
+  }
+
+  .tk__stop:hover {
+    background: var(--ve-raised-2, #3a3a3c);
+  }
+}

@@ -359,23 +359,29 @@ describe('ve-toolbar', () => {
     expect(lanes()).toEqual([[0, 4000], [4000]]);
   });
 
-  it('offers Animation on every layer row, and opens its sheet on the layer', async () => {
+  it('offers Animation and Track on every layer row, and opens their sheets on the layer', async () => {
     const { store, bar } = await mount();
 
     store.select({ kind: 'overlay', id: 'ov-text' });
     await until('the text layer row', () => label(bar) === 'Text layer tools');
-    // Beside Edit, ahead of the tools that move the layer in time or in the stack.
-    expect(ids(bar).slice(0, 3)).toEqual(['edit-text', 'animation', 'split']);
+    // Beside Edit, ahead of the tools that move the layer in time or in the stack: the two that say how
+    // the layer moves on the picture.
+    expect(ids(bar).slice(0, 4)).toEqual(['edit-text', 'animation', 'track', 'split']);
     expect(tile(bar, 'animation').textContent?.trim()).toBe('Animation');
+    expect(tile(bar, 'track').textContent?.trim()).toBe('Track');
 
     store.select({ kind: 'overlay', id: 'ov-sticker' });
     await until('the sticker row', () => label(bar) === 'Sticker tools');
-    expect(ids(bar)[0]).toBe('animation');
+    expect(ids(bar).slice(0, 2)).toEqual(['animation', 'track']);
 
     tile(bar, 'animation').click();
     expect(store.panel.value).toBe('animation');
     // Still on the sticker: the sheet is about it.
     expect(store.selectedOverlay.value?.id).toBe('ov-sticker');
+
+    tile(bar, 'track').click();
+    expect(store.panel.value).toBe('track');
+    expect(store.trackLayer.value?.id).toBe('ov-sticker');
   });
 
   it('dims a tool that cannot do anything, and still lets it answer', async () => {

@@ -34,7 +34,8 @@ export type EditorPanel =
   | 'background'
   | 'audioEffects'
   | 'focus'
-  | 'slip';
+  | 'slip'
+  | 'track';
 
 /**
  * What the bottom row shows when nothing more specific applies. `root` is the main tool list; the
@@ -136,3 +137,30 @@ export type SubjectTrackState =
   | { status: 'finding'; progress: number }
   | { status: 'ready'; result: FindSubjectsResult; track: SubjectTrack }
   | { status: 'none'; reason: 'unsupported' | 'failed' };
+
+/**
+ * The Track sheet's box on the frame: what the next run follows. Its middle in 0..1 of the frame, and
+ * its size as fractions of the frame's width and of its height, so a square box is `w * width ===
+ * h * height`.
+ */
+export interface TrackAim {
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+}
+
+/** A tracking run under way, as the sheet and the preview show it. */
+export interface TrackRunView {
+  overlayId: string;
+  clipId: string;
+  clipKey: string;
+  /** The output instant the box was drawn at: the frame the run starts from, and the one it is shown over. */
+  outputMs: number;
+  mode: 'all' | 'from';
+  /**
+   * 0..1, in whole percent, so the sheet repaints only when the number it shows changes. The frame
+   * being read is [EditorStore.trackLive], which changes every frame and only the preview reads.
+   */
+  progress: number;
+}
