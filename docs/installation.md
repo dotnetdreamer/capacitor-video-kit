@@ -14,13 +14,12 @@ The package is private and unpublished. Build a checkout, then install it throug
 From the repository root, install the build dependencies and build all entry points:
 
 ```sh
-npm install --ignore-scripts
-npm --prefix packages/angular install --ignore-scripts
-npm run build
+npm install
 ```
 
 The Angular wrapper has its own dependency installation; the root workspaces cover React and Vue.
-Skipping install scripts here lets all build dependencies finish installing before `prepare` would run the build.
+`preinstall` installs it; npm runs `prepare` for a linked package before `postinstall`, so `postinstall` would come too late.
+`prepare` then builds every entry point. The hook does nothing in an installed tarball, which ships no `packages/`.
 
 A sibling checkout, which is what the applications built on this package use:
 

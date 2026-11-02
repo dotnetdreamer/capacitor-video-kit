@@ -152,6 +152,7 @@
     "watch:ui": "stencil build --watch --config stencil.watch.config.ts",
     "watch:plugin": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "example": "node examples/plain-web/serve.mjs",
+    "preinstall": "node -e \"if (require('fs').existsSync('packages/angular/package.json')) require('child_process').execSync('npm --prefix packages/angular install --ignore-scripts', { stdio: 'inherit' })\"",
     "prepare": "npm run build",
     "test": "stencil-test --prod --stencil-config stencil.test.config.ts",
     "test:watch": "stencil-test --prod --watch --stencil-config stencil.test.config.ts",
