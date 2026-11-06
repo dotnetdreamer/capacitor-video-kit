@@ -22,6 +22,7 @@ export * from './sound-effects';
 export * from './audio-effect-windows';
 export * from './focus';
 export * from './subject-track';
+export * from './subject-run';
 export * from './overlay-track';
 export * from './track-motion';
 export * from './object-tracker';

@@ -11,6 +11,7 @@ import {
   type EditTrack,
   type EditZoom,
   type ZoomEase,
+  type ZoomFollow,
   type ZoomFraming,
 } from './edit-manifest';
 import { pathAt, trackPath, type TrackPath } from './overlay-track';
@@ -468,7 +469,14 @@ export function followReframes(clip: Pick<EditClip, 'crop' | 'rect'>, track: Pic
  * Where zoom `zoom` looks from `startMs` to `endMs`, a frame of the post at a time, or null when it
  * follows nothing the post still shows. Each frame aims at the thing [FOLLOW_LEAD_MS] ahead, eases
  * there through a [Follower], and is held inside the picture of the clip the thing is in at that
- * frame, with a level of at least the one that fills the frame with that picture.
+ * frame, with a level of at least the one that fills the frame with that picture and at least the
+ * follow's own least level ([ZoomFollow.minScale]), and no closer than its most ([ZoomFollow.maxScale])
+ * unless filling the frame asks for more - the fill always wins, so no bar ever shows. The floor and the
+ * cap are put on the level a framing asks for BEFORE it is eased, as well as on the level shown: a
+ * thing that later shrinks past the floor is closed in on from it at rest, as from any level the camera
+ * held, rather than by a level that had been climbing unseen beneath it, which would start the push in
+ * the middle of a move; and one that shrinks on past the cap is eased up to it, settling there, rather
+ * than stopped at it dead.
  */
 function followPathOver(zoom: EditZoom, follow: CameraFollow, startMs: number, endMs: number): FollowPath | null {
   const track = zoomTrack(zoom, follow.manifest);
@@ -479,6 +487,8 @@ function followPathOver(zoom: EditZoom, follow: CameraFollow, startMs: number, e
   const output = follow.manifest.output;
   const stepMs = frameStep(output.fps);
   const path = trackPath(track);
+  const floor = leastLevel(zoom.follow);
+  const cap = mostLevel(zoom.follow);
   const atMs = [startMs, ...framesInside(startMs, endMs, stepMs), endMs];
   const views: CameraView[] = [];
   let pan: { x: Follower; y: Follower } | null = null;
@@ -496,16 +506,35 @@ function followPathOver(zoom: EditZoom, follow: CameraFollow, startMs: number, e
     pan ??= { x: new Follower(thing.cx, FOLLOW_LAG_MS), y: new Follower(thing.cy, FOLLOW_LAG_MS) };
     const cx = pan.x.to(thing.cx, dt);
     const cy = pan.y.to(thing.cy, dt);
-    let scale = fill;
+    let scale = Math.max(fill, floor);
     if (framing !== 'fill') {
       // Eased as a magnification, so a push from 2x to 4x takes as long as one from 1x to 2x.
-      const wanted = Math.log(framingScale(framing, thing, fill));
+      const wanted = Math.log(Math.max(scale, Math.min(cap, framingScale(framing, thing, fill))));
       level ??= new Follower(wanted, FOLLOW_ZOOM_LAG_MS);
-      scale = Math.min(MAX_CAMERA_SCALE, Math.max(fill, Math.exp(level.to(wanted, dt))));
+      scale = Math.max(scale, Math.min(cap, Math.exp(level.to(wanted, dt))));
     }
-    views.push(heldInside({ scale, cx, cy }, picture));
+    views.push(heldInside({ scale: Math.min(MAX_CAMERA_SCALE, scale), cx, cy }, picture));
   }
   return { stepMs, atMs, views };
+}
+
+/**
+ * A follow's least level ([ZoomFollow.minScale]) as the camera is held to it: 1, which every level is
+ * anyway, where it has none or one the model would not keep - a zoom built by hand need not have been
+ * normalised - and never past [MAX_ZOOM_SCALE].
+ */
+function leastLevel(follow: ZoomFollow | undefined): number {
+  const least = follow?.minScale;
+  return typeof least === 'number' && least > 1 ? Math.min(MAX_ZOOM_SCALE, least) : 1;
+}
+
+/**
+ * A follow's most level ([ZoomFollow.maxScale]) as the camera is held to it: no cap at all where it has none or
+ * one the model would not keep. Under the floor or the fill it gives way to them, where it is applied.
+ */
+function mostLevel(follow: ZoomFollow | undefined): number {
+  const most = follow?.maxScale;
+  return typeof most === 'number' && most > 1 ? most : Infinity;
 }
 
 /** One frame of a post at `fps`, in ms: [compileTrackMotion]'s clock, so a follow's keys and a pinned layer's land on the same frames. */

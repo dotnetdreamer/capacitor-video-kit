@@ -7,16 +7,19 @@ import { toComposeSpec } from './compose';
 import {
   defaultClipEdit,
   emptyManifest,
+  MAX_ZOOM_SCALE,
   normaliseManifest,
   normaliseZoom,
+  sameZoomFollow,
   type EditClip,
   type EditManifest,
   type EditTrack,
   type EditZoom,
   type TextOverlay,
+  type ZoomFollow,
   type ZoomFraming,
 } from './edit-manifest';
-import { updateZoom } from './edit-ops';
+import { duplicateZoom, updateZoom } from './edit-ops';
 import { compileLayoutMotions } from './layout-motion';
 import { overlayMotionAt } from './motion';
 import type { RasterContext } from './raster-context';
@@ -27,8 +30,9 @@ import { compileCamera, easeValue, followPaths, followReframes, followRest, foll
  * Follow cam: a zoom that follows a track, compiled into the same camera keys every other zoom is.
  * These pin what it promises the render - a key every frame of the post, ramps blended frame by frame
  * from the whole frame, the view held inside the PICTURE (a 16:9 shot contained in a 9:16 post is
- * reframed at 256/81 with no bar), framings sized to the thing, an operator's move, the key cap - and
- * that a post with no zoom that follows compiles exactly as it did before following existed.
+ * reframed at 256/81 with no bar), framings sized to the thing, an operator's move, the key cap, a
+ * least level under any framing (a punch-in that follows) and a most over it - and that a post with no
+ * zoom that follows compiles exactly as it did before following existed.
  *
  * The post is 720x1280 at 30 fps over one 10 s clip, "a", contained; its track "k" has the thing at
  * mid height going from 0.1 to 0.9 of the source's width, a sample every 100 ms.
@@ -366,5 +370,151 @@ describe('a zoom that follows, in the model', () => {
     expect(followReframes({}, { aspect: 1082 / 1920 }, output)).toBe(false);
     expect(followReframes({ crop: { x: 0.34, y: 0, w: 81 / 256, h: 1 } }, { aspect: WIDE }, output)).toBe(false);
     expect(followReframes({ rect: { x: 0, y: 0, w: 1, h: 0.5 } }, { aspect: TALL }, output)).toBe(true);
+  });
+});
+
+describe('a follow held at a least level (minScale): a punch-in that follows', () => {
+  /** [follows] at `framing`, the camera held at least `minScale` close. */
+  const floored = (framing: ZoomFraming, minScale: number, over: Partial<EditZoom> = {}): EditZoom => follows(framing, { follow: { trackId: 'k', framing, minScale }, ...over });
+
+  it('closes in on a picture that fills its frame for the whole shot too, panning with the thing', () => {
+    const m = post(walk(TALL, across()), [floored('fill', 1.15)]);
+    const path = pathOf(m);
+    for (const view of path.views) {
+      expect(view.scale).toBeCloseTo(1.15, 9);
+      const half = 0.5 / view.scale;
+      expect(view.cx - half).toBeGreaterThanOrEqual(-1e-9);
+      expect(view.cx + half).toBeLessThanOrEqual(1 + 1e-9);
+    }
+    expect(followViewAt(path, 1000).cx).toBeLessThan(0.45);
+    expect(followViewAt(path, 9000).cx).toBeGreaterThan(0.55);
+    // A camera, where the whole shot of the same picture is none.
+    expect(compileCamera(m.zooms, 10_000, followOf(m))).not.toBeNull();
+  });
+
+  it('raises a framing that frames wider than the floor to it, and leaves one that frames closer alone', () => {
+    // The thing's box 0.2 of the height, which Medium frames at 2.25.
+    const small = (zoom: EditZoom) => pathOf(post(walk(TALL, () => 0.5), [zoom])).views;
+    expect(small(floored('mid', 1.5))).toEqual(small(follows('mid')));
+    for (const view of small(floored('mid', 3))) expect(view.scale).toBeCloseTo(3, 9);
+    // Somebody filling most of the frame, whom Medium does not close in on at all.
+    const big = (zoom: EditZoom) => pathOf(post(walk(TALL, () => 0.5, () => 0.5, 10_000, 100, { w: 0.3, h: 0.8 }), [zoom])).views;
+    expect(big(follows('mid')).every(view => view.scale === 1)).toBe(true);
+    for (const view of big(floored('mid', 1.2))) expect(view.scale).toBeCloseTo(1.2, 9);
+  });
+
+  it('closes in past the floor from rest, the way it would from any level it held', () => {
+    // Walking away: 0.8 of the height at first and 0.2 at last, so Medium asks 1, then 1.3 at about 7.4 s, then 2.25.
+    const away = walk(TALL, () => 0.5);
+    away.scale = away.atMs.map(t => 4 - (3 * t) / 10_000);
+    const views = pathOf(post(away, [floored('mid', 1.3)])).views;
+    expect(views[0].scale).toBeCloseTo(1.3, 9);
+    for (let i = 1; i < views.length; i++) expect(views[i].scale).toBeGreaterThanOrEqual(views[i - 1].scale - 1e-12);
+    expect(views[views.length - 1].scale).toBeGreaterThan(1.6);
+    // Off the floor gathering speed, never already climbing: its first steps up are a fraction of the steady climb's.
+    const off = views.findIndex(view => view.scale > 1.3 + 1e-9);
+    expect(off).toBeGreaterThan(0);
+    for (let i = off; i < off + 5; i++) expect(views[i].scale - views[i - 1].scale, `frame ${i}`).toBeLessThan(1e-3);
+  });
+
+  it('changes nothing where the picture already asks for more: a wide shot contained in a tall post', () => {
+    const wide = (zoom: EditZoom) => pathOf(post(walk(WIDE, across()), [zoom])).views;
+    expect(wide(floored('fill', 1.15))).toEqual(wide(follows('fill')));
+  });
+
+  it('is kept by the model over 1, at four decimals, held to the most the editor offers', () => {
+    const zoom = floored('mid', 1.15);
+    expect(normaliseZoom(zoom).follow).toBe(zoom.follow);
+    const kept = (minScale: unknown, framing: unknown = 'mid') => normaliseZoom({ ...zoom, follow: { trackId: 'k', framing, minScale } as ZoomFollow }).follow;
+    expect(kept(1.123456)).toStrictEqual({ trackId: 'k', framing: 'mid', minScale: 1.1235 });
+    expect(kept(9)).toStrictEqual({ trackId: 'k', framing: 'mid', minScale: MAX_ZOOM_SCALE });
+    expect(kept(1.4, 'wide')).toStrictEqual({ trackId: 'k', framing: 'fill', minScale: 1.4 });
+    for (const none of [1, 0.8, 1.00004, -2, Number.NaN, Infinity, '1.2', null, undefined]) {
+      expect(kept(none), String(none)).toStrictEqual({ trackId: 'k', framing: 'mid' });
+    }
+    const read = normaliseManifest(JSON.parse(JSON.stringify(post(walk(WIDE, across()), [zoom]))));
+    expect(read.zooms[0].follow).toStrictEqual({ trackId: 'k', framing: 'mid', minScale: 1.15 });
+  });
+
+  it('tells two floors apart: the same one is no change, another is one, and a copy of the zoom keeps it', () => {
+    const m = post(walk(TALL, () => 0.5), [floored('mid', 1.15, { endMs: 4000 })]);
+    expect(sameZoomFollow({ trackId: 'k', framing: 'mid', minScale: 1.15 }, { trackId: 'k', framing: 'mid' })).toBe(false);
+    expect(updateZoom(m, 'f', { follow: { trackId: 'k', framing: 'mid', minScale: 1.15 } })).toBe(m);
+    expect(updateZoom(m, 'f', { follow: { trackId: 'k', framing: 'mid', minScale: 1.3 } }).zooms[0].follow).toStrictEqual({ trackId: 'k', framing: 'mid', minScale: 1.3 });
+    // A framing picked in the zoom sheet is a follow without one, so the sheet's framings mean what they say.
+    expect(updateZoom(m, 'f', { follow: { trackId: 'k', framing: 'close' } }).zooms[0].follow).toStrictEqual({ trackId: 'k', framing: 'close' });
+    expect(duplicateZoom(m, 'f', 'g', 10_000)!.zooms[1].follow).toStrictEqual({ trackId: 'k', framing: 'mid', minScale: 1.15 });
+  });
+});
+
+describe('a follow held to a most level (maxScale): never closer than the template allows', () => {
+  /** [follows] at `framing`, its follow given the levels in `limits`. */
+  const limited = (framing: ZoomFraming, limits: Pick<ZoomFollow, 'minScale' | 'maxScale'>, over: Partial<EditZoom> = {}): EditZoom =>
+    follows(framing, { follow: { trackId: 'k', framing, ...limits }, ...over });
+
+  /** Walking away: 0.8 of the height at first and 0.2 at last, so Medium asks 1 at first and 2.25 at the end. */
+  function away(): EditTrack {
+    const track = walk(TALL, () => 0.5);
+    track.scale = track.atMs.map(t => 4 - (3 * t) / 10_000);
+    return track;
+  }
+
+  it('stops a framing that would close in further at the cap, and leaves one that frames wider alone', () => {
+    // A speck the finder took for somebody: Close frames it at the most there is.
+    const speck = (zoom: EditZoom) => pathOf(post(walk(TALL, () => 0.5, () => 0.5, 10_000, 100, { w: 0.02, h: 0.05 }), [zoom])).views;
+    for (const view of speck(follows('close'))) expect(view.scale).toBeCloseTo(MAX_ZOOM_SCALE, 9);
+    for (const view of speck(limited('close', { maxScale: 1.6 }))) expect(view.scale).toBeCloseTo(1.6, 9);
+    const small = (zoom: EditZoom) => pathOf(post(walk(TALL, () => 0.5), [zoom])).views;
+    expect(small(limited('mid', { maxScale: 3 }))).toEqual(small(follows('mid')));
+  });
+
+  it('never frames wider than the fill: a wide shot contained in a tall post shows no bar under any cap', () => {
+    for (const view of pathOf(post(walk(WIDE, across()), [limited('mid', { maxScale: 1.2 })])).views) {
+      expect(view.scale).toBeCloseTo(256 / 81, 9);
+      expect(view.cy).toBeCloseTo(0.5, 9);
+    }
+  });
+
+  it('eases up to the cap and settles there, never past it, and holds between a floor and a cap', () => {
+    const views = pathOf(post(away(), [limited('mid', { maxScale: 1.6 })])).views;
+    for (let i = 1; i < views.length; i++) {
+      expect(views[i].scale).toBeGreaterThanOrEqual(views[i - 1].scale - 1e-12);
+      expect(views[i].scale).toBeLessThanOrEqual(1.6 + 1e-9);
+    }
+    expect(views[views.length - 1].scale).toBeGreaterThan(1.5);
+    // Slowing into it rather than stopped at it dead: each of its last steps no bigger than the one before.
+    const last = views.slice(-11).map(view => view.scale);
+    for (let i = 2; i < last.length; i++) expect(last[i]! - last[i - 1]!).toBeLessThanOrEqual(last[i - 1]! - last[i - 2]! + 1e-12);
+    const between = pathOf(post(away(), [limited('mid', { minScale: 1.3, maxScale: 1.5 })])).views;
+    expect(between[0].scale).toBeCloseTo(1.3, 9);
+    for (const view of between) {
+      expect(view.scale).toBeGreaterThanOrEqual(1.3 - 1e-9);
+      expect(view.scale).toBeLessThanOrEqual(1.5 + 1e-9);
+    }
+    expect(between[between.length - 1].scale).toBeGreaterThan(1.45);
+  });
+
+  it('is kept by the model over 1, at four decimals, held to the most the editor offers and never under the floor', () => {
+    const zoom = limited('close', { minScale: 1.15, maxScale: 1.6 });
+    expect(normaliseZoom(zoom).follow).toBe(zoom.follow);
+    const kept = (minScale: unknown, maxScale: unknown) => normaliseZoom({ ...zoom, follow: { trackId: 'k', framing: 'close', minScale, maxScale } as ZoomFollow }).follow;
+    expect(kept(undefined, 1.654321)).toStrictEqual({ trackId: 'k', framing: 'close', maxScale: 1.6543 });
+    expect(kept(undefined, 7)).toStrictEqual({ trackId: 'k', framing: 'close', maxScale: MAX_ZOOM_SCALE });
+    for (const none of [1, 0.5, 1.00004, Number.NaN, Infinity, '1.6', null, undefined]) {
+      expect(kept(undefined, none), String(none)).toStrictEqual({ trackId: 'k', framing: 'close' });
+    }
+    // A cap under the floor is raised to it: the camera holds the floor, the one level both allow.
+    expect(kept(1.3, 1.2)).toStrictEqual({ trackId: 'k', framing: 'close', minScale: 1.3, maxScale: 1.3 });
+    const read = normaliseManifest(JSON.parse(JSON.stringify(post(walk(WIDE, across()), [zoom]))));
+    expect(read.zooms[0].follow).toStrictEqual({ trackId: 'k', framing: 'close', minScale: 1.15, maxScale: 1.6 });
+  });
+
+  it('tells two caps apart, keeps one through a copy, and loses it to a framing picked in the zoom sheet', () => {
+    const m = post(walk(TALL, () => 0.5), [limited('close', { maxScale: 1.6 }, { endMs: 4000 })]);
+    expect(sameZoomFollow({ trackId: 'k', framing: 'close', maxScale: 1.6 }, { trackId: 'k', framing: 'close' })).toBe(false);
+    expect(updateZoom(m, 'f', { follow: { trackId: 'k', framing: 'close', maxScale: 1.6 } })).toBe(m);
+    expect(updateZoom(m, 'f', { follow: { trackId: 'k', framing: 'close', maxScale: 2 } }).zooms[0].follow).toStrictEqual({ trackId: 'k', framing: 'close', maxScale: 2 });
+    expect(updateZoom(m, 'f', { follow: { trackId: 'k', framing: 'mid' } }).zooms[0].follow).toStrictEqual({ trackId: 'k', framing: 'mid' });
+    expect(duplicateZoom(m, 'f', 'g', 10_000)!.zooms[1].follow).toStrictEqual({ trackId: 'k', framing: 'close', maxScale: 1.6 });
   });
 });

@@ -731,6 +731,25 @@ export interface ZoomFollow {
   /** The [EditTrack.id] followed. A track the post does not have is a zoom that holds its own area. */
   trackId: string;
   framing: ZoomFraming;
+  /**
+   * The least level the camera frames its thing at, over 1 and at most [MAX_ZOOM_SCALE]: a punch-in that
+   * follows. Every framing is held at least this close - `fill` too, which on a picture that fills its
+   * frame is otherwise the whole frame and no camera at all - so a template's shot of somebody who already
+   * fills it still leans in and moves with them, where a framing alone would stand still. Absent is each
+   * framing's own level, which is every follow the editor makes: the zoom sheet offers the framings and
+   * nothing under them, and picking one there writes a follow without this, since a level the sheet cannot
+   * show would make its framings mean something other than they say.
+   */
+  minScale?: number;
+  /**
+   * The most the camera closes in on its thing, over 1: a framing that would frame it closer stops here. A thing
+   * taken for far smaller than it is - a stray "person" a few cells high that a segmenter found in a van - would
+   * otherwise send `close` to [MAX_ZOOM_SCALE], where phone footage is mush. Never under [minScale]: a cap below
+   * the floor is raised to it, which holds the camera at the floor, the one level both allow. And never under the
+   * level that fills the frame with the picture, which always wins, so no bar ever shows for it. Absent is each
+   * framing's own level, and picking a framing in the zoom sheet drops it, as it does [minScale].
+   */
+  maxScale?: number;
 }
 
 /** Every [ZoomEase], in the order a picker offers them; the first is the default. */
@@ -2610,8 +2629,11 @@ export function normaliseZoom(zoom: EditZoom): EditZoom {
 /**
  * A zoom's follow as the model keeps it, or undefined for none: a track named by a string that is not
  * empty, and a framing this version knows. An unknown framing is read as `fill`, the widest, rather
- * than dropped, so the zoom still follows its thing. The very object comes back when it is already in
- * shape, so a patch that did not touch it is no change at all (the fields are compared by identity).
+ * than dropped, so the zoom still follows its thing. `minScale` and `maxScale` are each kept only when
+ * they are a finite number over 1 at four decimals, as a zoom's own scale is, held to [MAX_ZOOM_SCALE]:
+ * 1 or under says nothing a framing does not, which is the key absent. A `maxScale` under the `minScale`
+ * is raised to it. The very object comes back when it is already in shape, so a patch that did not touch
+ * it is no change at all (the fields are compared by identity).
  */
 export function normaliseZoomFollow(value: unknown): ZoomFollow | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -2619,13 +2641,27 @@ export function normaliseZoomFollow(value: unknown): ZoomFollow | undefined {
   const trackId = raw['trackId'];
   if (typeof trackId !== 'string' || !trackId) return undefined;
   const known = ZOOM_FRAMINGS.find(framing => framing === raw['framing']);
-  if (known && Object.keys(raw).length === 2) return value as ZoomFollow;
-  return { trackId, framing: known ?? ZOOM_FRAMINGS[0] };
+  const minScale = followLevel(raw['minScale']);
+  const most = followLevel(raw['maxScale']);
+  const maxScale = most !== undefined && minScale !== undefined ? Math.max(most, minScale) : most;
+  const keys = 2 + (minScale === undefined ? 0 : 1) + (maxScale === undefined ? 0 : 1);
+  if (known && Object.keys(raw).length === keys && raw['minScale'] === minScale && raw['maxScale'] === maxScale) return value as ZoomFollow;
+  const follow: ZoomFollow = { trackId, framing: known ?? ZOOM_FRAMINGS[0] };
+  if (minScale !== undefined) follow.minScale = minScale;
+  if (maxScale !== undefined) follow.maxScale = maxScale;
+  return follow;
 }
 
-/** Whether two follows are the same track at the same framing; two absent ones are. */
+/** [ZoomFollow.minScale] or [ZoomFollow.maxScale] as the model keeps it, or undefined for none. */
+function followLevel(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const level = round4(value);
+  return level > 1 ? Math.min(MAX_ZOOM_SCALE, level) : undefined;
+}
+
+/** Whether two follows are the same track at the same framing, floor and cap; two absent ones are. */
 export function sameZoomFollow(a: ZoomFollow | undefined, b: ZoomFollow | undefined): boolean {
-  return a === b || (!!a && !!b && a.trackId === b.trackId && a.framing === b.framing);
+  return a === b || (!!a && !!b && a.trackId === b.trackId && a.framing === b.framing && a.minScale === b.minScale && a.maxScale === b.maxScale);
 }
 
 /**

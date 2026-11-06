@@ -54,6 +54,7 @@ vi.mock('./render-inputs', async (importOriginal) => {
 });
 
 import { defaultFocus, reconcileManifest, setClipFocus, type EditManifest, type RasterContext } from '../editor';
+import { LOOK_RINGS } from '../editor/track-looks';
 import { setEditorDebug } from '../host/debug';
 import { RenderFailedError, type EditorSource, type RenderRequest } from '../host/host.types';
 
@@ -405,7 +406,8 @@ describe('composerRenderHost: track looks', () => {
     expect(bridge.findSubjects).not.toHaveBeenCalled();
     const focus = composed().clips[0]!.focus!;
     expect(focus).toMatchObject({ uri: 'blob:https://example.test/look', atMs: [0], blur: 0.021, invert: true });
-    expect(focus.subjects.map((subject) => subject.id)).toEqual([1, 2, 3, 4, 5]);
+    // The one blurred thing's middle and each of its rings, in ids from 1.
+    expect(focus.subjects.map((subject) => subject.id)).toEqual(LOOK_RINGS.map((_, k) => 1 + k));
     // The blob is the subject track itself.
     expect(made).toHaveBeenCalledTimes(1);
     const bytes = new Uint8Array(await (made.mock.calls[0]![0] as Blob).arrayBuffer());

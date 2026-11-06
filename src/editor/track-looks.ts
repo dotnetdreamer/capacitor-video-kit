@@ -39,16 +39,33 @@ import { pathAt, trackPath } from './overlay-track';
 export const LOOK_REACH = 1.15;
 
 /**
- * How far into its look each ring of a shape is, from the middle out, one id each: the middle the whole way,
- * then less and less, so the edge feathers rather than steps. Past the last ring is the world.
+ * How far past the shape a look's soft edge reaches, a share of its radius: a penumbra nearly half as wide again
+ * as the shape, as a film's follow-spot throws round a performer, so a spotlight falls away into the dark rather
+ * than stopping at a line, and a blur fades out round a face instead of ending in an oval. Only ever outward: the
+ * shape itself has the look in full - lit, popped, or for a blur softened through and through - and a wider edge
+ * only takes the look further round it.
  */
-export const LOOK_RINGS: readonly number[] = [1, 0.8, 0.55, 0.3, 0.12];
+export const LOOK_FEATHER = 0.45;
 
-/** How far the rings reach past the shape, a share of its radius: about 6% of the box. */
-const FEATHER = 0.1;
+/**
+ * How far into its look each ring of a shape is, from the middle out, one id each: the middle the whole way, then
+ * twenty rings spread evenly across [LOOK_FEATHER], each a twentieth further down a straight line from 1 to 0, read
+ * at its middle (0.975, 0.925 ... 0.025). Past the last ring is the world.
+ *
+ * A STRAIGHT LINE because every engine eases the mask it reads, `e = m * m * (3 - 2 * m)` ([ComposeFocus] step 4):
+ * a straight fall comes out of that a smoothstep, the soft shoulder and toe of a penumbra, where levels that were a
+ * smoothstep already would be eased twice into a harder edge. TWENTY because on a person in a phone's shot each ring
+ * is then a cell or two of the grid wide, so the reader's blend between cell centres runs them into one slope rather
+ * than a stair. The five rings over a tenth of the radius this replaced fell a quarter of the look at a time across
+ * a few cells - an edge, along which the grid's six-pixel cells showed. More rings would buy little a cell can show,
+ * and each is an id: twenty-one leave room for twelve tracks a segment ([MOST_LOOKED]), past the most a post keeps.
+ */
+export const LOOK_RINGS: readonly number[] = [
+  1, 0.975, 0.925, 0.875, 0.825, 0.775, 0.725, 0.675, 0.625, 0.575, 0.525, 0.475, 0.425, 0.375, 0.325, 0.275, 0.225, 0.175, 0.125, 0.075, 0.025,
+];
 
 /** Each ring's outer edge as a squared radius, the shape's own edge being 1: the middle, then the feather in even steps. */
-const RING_EDGES = LOOK_RINGS.map((_, k) => (1 + (k * FEATHER) / (LOOK_RINGS.length - 1)) ** 2);
+const RING_EDGES = LOOK_RINGS.map((_, k) => (1 + (k * LOOK_FEATHER) / (LOOK_RINGS.length - 1)) ** 2);
 
 /**
  * The id every cell of a spotlight's or a pop's frame has where no thing is on screen at all: in focus, so the
@@ -287,6 +304,18 @@ function encodeLooks(clip: LookedClip, group: LookGroup): Uint8Array {
   const base = new Uint16Array(n);
   const rowId = new Uint8Array(width);
   const rowRing = new Uint8Array(width).fill(NO_RING);
+  // Where each ring of the shape being drawn starts and ends on the row, the rings inside it included.
+  const spanFrom = new Int32Array(rings);
+  const spanTo = new Int32Array(rings);
+  /** Ring `ring`, id `id`, over cells `from..to` of the row, wherever no shape has put a ring further in. */
+  const paint = (from: number, to: number, ring: number, id: number): void => {
+    for (let c = from; c <= to; c++) {
+      if (ring <= rowRing[c]!) {
+        rowRing[c] = ring;
+        rowId[c] = id;
+      }
+    }
+  };
   // Each track's span as the frames' whole ms have it: off before its first sample and after its last, on
   // throughout for a track of one sample.
   const starts = tracks.map(track => (track.atMs.length > 1 ? Math.round(track.atMs[0]!) : -Infinity));
@@ -326,8 +355,8 @@ function encodeLooks(clip: LookedClip, group: LookGroup): Uint8Array {
       for (let s = 0; s < shapes; s++) {
         const dv = (v - cy[s]!) / ry[s]!;
         const dv2 = dv * dv;
-        // From the outermost ring in, each over the cells it covers on this row, so a cell ends on the
-        // innermost ring of any shape that covers it. A ring that misses the row has no smaller one inside it.
+        // Each ring's cells on this row, from the outermost in. A ring that misses the row has no smaller one inside it.
+        let inner = rings;
         for (let k = rings - 1; k >= 0; k--) {
           const reach = RING_EDGES[k]! - dv2;
           if (!(reach > 0)) break;
@@ -335,15 +364,19 @@ function encodeLooks(clip: LookedClip, group: LookGroup): Uint8Array {
           const x0 = Math.max(0, Math.ceil((cx[s]! - half) * width - 0.5));
           const x1 = Math.min(width - 1, Math.floor((cx[s]! + half) * width - 0.5));
           if (x1 < x0) break;
-          if (x0 < lo) lo = x0;
-          if (x1 > hi) hi = x1;
-          const id = base[s]! + k;
-          for (let c = x0; c <= x1; c++) {
-            if (k <= rowRing[c]!) {
-              rowRing[c] = k;
-              rowId[c] = id;
-            }
-          }
+          spanFrom[k] = x0;
+          spanTo[k] = x1;
+          inner = k;
+        }
+        if (inner === rings) continue;
+        if (spanFrom[rings - 1]! < lo) lo = spanFrom[rings - 1]!;
+        if (spanTo[rings - 1]! > hi) hi = spanTo[rings - 1]!;
+        // Then each ring over only the cells it adds round the one inside it, so every cell is visited once a shape -
+        // twenty rings cost hardly more than one - and ends on the innermost ring of any shape that covers it.
+        paint(spanFrom[inner]!, spanTo[inner]!, inner, base[s]! + inner);
+        for (let k = inner + 1; k < rings; k++) {
+          paint(spanFrom[k]!, spanFrom[k - 1]! - 1, k, base[s]! + k);
+          paint(spanTo[k - 1]! + 1, spanTo[k]!, k, base[s]! + k);
         }
       }
       if (hi < 0) {

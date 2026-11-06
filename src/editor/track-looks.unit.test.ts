@@ -6,8 +6,9 @@ import { toComposeSpec } from './compose';
 import { defaultClipEdit, defaultPictureEdit, emptyManifest, type EditClip, type EditManifest, type EditTrack } from './edit-manifest';
 import { FOCUS_MAX_SIGMA, defaultFocus } from './focus';
 import type { RasterContext } from './raster-context';
+import { MAX_TRACKS } from './overlay-track';
 import { focusLevels, focusMask, parseSubjectTrack, type SubjectTrack } from './subject-track';
-import { LOOK_KEPT, LOOK_REACH, LOOK_RINGS, hasTrackLooks, segmentLook, segmentLooks, type SegmentLook } from './track-looks';
+import { LOOK_FEATHER, LOOK_KEPT, LOOK_REACH, LOOK_RINGS, hasTrackLooks, segmentLook, segmentLooks, type SegmentLook } from './track-looks';
 
 /*
  * A look that follows a track is drawn by the Focus engine from a subject track made off the track's path,
@@ -71,23 +72,34 @@ function rings(first: number): { id: number; focus: number[] }[] {
   return LOOK_RINGS.map((level, k) => ({ id: first + k, focus: [level] }));
 }
 
+/** Each ring's outer edge as a radius, the shape's own edge being 1: the middle, then the rings spread evenly across the feather. */
+const EDGES = LOOK_RINGS.map((_, k) => 1 + (k * LOOK_FEATHER) / (LOOK_RINGS.length - 1));
+
+/** The mask every engine eases, `e = m * m * (3 - 2 * m)`, as a byte of [focusMask] reads. */
+const eased = (byte: number): number => {
+  const m = byte / 255;
+  return m * m * (3 - 2 * m);
+};
+
+/** The innermost ring of still `thing` whose edge holds (`x`, `y`): -1 outside them all, null on an edge, to rounding. */
+function ringAt(thing: EditTrack, x: number, y: number): number | null {
+  const d = Math.hypot((x - thing.x[0]!) / ((thing.box.w * thing.scale[0]! * LOOK_REACH) / 2), (y - thing.y[0]!) / ((thing.box.h * thing.scale[0]! * LOOK_REACH) / 2));
+  return EDGES.some(edge => Math.abs(d - edge) < 1e-9) ? null : EDGES.findIndex(edge => d <= edge);
+}
+
 describe('segmentLook: the subject track', () => {
   it('draws the thing as the ellipse inside its box, grown, in the cells whose centres it covers', () => {
     const track = made(segmentLook(picture(), [stillThing(0.3, 0.6, 0.2, 0.1, { scale: [1.5] })]));
     expect([track.width, track.height, track.frameCount, [...track.times]]).toEqual([GRID, GRID, 1, [0]]);
     const cells = track.frame(0);
-    const a = (0.2 * 1.5 * LOOK_REACH) / 2;
-    const b = (0.1 * 1.5 * LOOK_REACH) / 2;
-    // The middle to the shape's edge, then a ring for every quarter of the feather - a tenth of the radius.
-    const edges = [1, 1.025, 1.05, 1.075, 1.1];
+    const shape = stillThing(0.3, 0.6, 0.2, 0.1, { scale: [1.5] });
     const wrong: string[] = [];
     let middle = 0;
     for (let gy = 0; gy < GRID; gy++) {
       for (let gx = 0; gx < GRID; gx++) {
-        const d = Math.hypot(((gx + 0.5) / GRID - 0.3) / a, ((gy + 0.5) / GRID - 0.6) / b);
+        const ring = ringAt(shape, (gx + 0.5) / GRID, (gy + 0.5) / GRID);
         // A centre on an edge, to rounding, is the arithmetic's to place either way.
-        if (edges.some(edge => Math.abs(d - edge) < 1e-9)) continue;
-        const ring = edges.findIndex(edge => d <= edge);
+        if (ring === null) continue;
         const want = ring < 0 ? 0 : 1 + ring;
         if (want === 1) middle++;
         if (cells[gy * GRID + gx] !== want) wrong.push(`${gx},${gy}: ${cells[gy * GRID + gx]} not ${want}`);
@@ -103,7 +115,83 @@ describe('segmentLook: the subject track', () => {
     // Out from the middle along a row: the middle, each ring in turn, then the world.
     const row = made(look).frame(0).subarray(160 * GRID + 160, 161 * GRID);
     const order = [...row].filter((id, i) => i === 0 || id !== row[i - 1]);
-    expect(order).toEqual([1, 2, 3, 4, 5, 0]);
+    expect(order).toEqual([...LOOK_RINGS.map((_, k) => 1 + k), 0]);
+  });
+
+  it("falls in a straight line across the feather, which every engine's ease makes a smoothstep", () => {
+    const n = LOOK_RINGS.length - 1;
+    expect(LOOK_RINGS[0]).toBe(1);
+    expect(n).toBe(20);
+    // Each ring at its own middle on the line from 1 at the shape's edge to 0 at the feather's.
+    LOOK_RINGS.slice(1).forEach((level, i) => expect(level, `ring ${i + 1}`).toBeCloseTo(1 - (i + 0.5) / n, 12));
+    // Eased, each is the smoothstep's fall at its middle: the shoulder and the toe of a penumbra.
+    const smoothstep = (u: number) => u * u * (3 - 2 * u);
+    LOOK_RINGS.slice(1).forEach((level, i) => expect(level * level * (3 - 2 * level), `ring ${i + 1}`).toBeCloseTo(1 - smoothstep((i + 0.5) / n), 12));
+  });
+
+  it('feathers a spotlight over a penumbra nearly half the shape wide, eased in steps a cell barely shows', () => {
+    const look = segmentLook(picture(), [stillThing(0.5, 0.5, 0.5, 0.5, { look: { kind: 'spotlight', amount: 0.7 } })])!;
+    const focus: ComposeFocus = { uri: 'blob:look', ...look.focus };
+    // Out from the middle along a row, as the engines ease it: the shape's radius is 92 cells, its feather 41 more.
+    const row = [...focusMask(parseSubjectTrack(look.bytes), focusLevels(focus, 0), 0, false).subarray(160 * GRID + 160, 161 * GRID)].map(eased);
+    expect(row.slice(0, 90).every(e => e === 1)).toBe(true);
+    expect(row.filter(e => e > 0.001 && e < 0.999).length).toBeGreaterThan(38);
+    expect(row.slice(-20).every(e => e === 0)).toBe(true);
+    for (let i = 1; i < row.length; i++) {
+      expect(row[i]!, `cell ${160 + i}`).toBeLessThanOrEqual(row[i - 1]!);
+      expect(row[i - 1]! - row[i]!, `cell ${160 + i}`).toBeLessThan(0.08);
+    }
+  });
+
+  it("keeps a blur's shape softened through and through, its soft edge only softening more round it", () => {
+    const face = stillThing(0.5, 0.5, 0.3, 0.4);
+    const look = segmentLook(picture(), [face])!;
+    const focus: ComposeFocus = { uri: 'blob:look', ...look.focus };
+    const mask = focusMask(parseSubjectTrack(look.bytes), focusLevels(focus, 0), 0, true);
+    let inside = 0;
+    for (let gy = 0; gy < GRID; gy++) {
+      for (let gx = 0; gx < GRID; gx++) {
+        if (ringAt(face, (gx + 0.5) / GRID, (gy + 0.5) / GRID) !== 0) continue;
+        inside++;
+        expect(mask[gy * GRID + gx], `${gx},${gy}`).toBe(0);
+      }
+    }
+    expect(inside).toBeGreaterThan(9000);
+    // The box's corners, outside the ellipse inside it, are softened in part, and the world far off not at all.
+    expect(mask[cellAt(0.65, 0.7)]).toBeGreaterThan(0);
+    expect(mask[cellAt(0.65, 0.7)]).toBeLessThan(255);
+    expect(mask[cellAt(0.05, 0.05)]).toBe(255);
+  });
+
+  it('puts each cell on the innermost ring of any shape over it, where the soft edges of two things meet', () => {
+    const left = stillThing(0.4, 0.5, 0.2, 0.3, { id: 'l' });
+    const right = stillThing(0.56, 0.52, 0.2, 0.3, { id: 'r' });
+    const cells = made(segmentLook(picture(), [left, right])).frame(0);
+    const n = LOOK_RINGS.length;
+    const wrong: string[] = [];
+    for (let gy = 0; gy < GRID; gy++) {
+      for (let gx = 0; gx < GRID; gx++) {
+        const a = ringAt(left, (gx + 0.5) / GRID, (gy + 0.5) / GRID);
+        const b = ringAt(right, (gx + 0.5) / GRID, (gy + 0.5) / GRID);
+        if (a === null || b === null) continue;
+        // Of two rings as far in, the later thing's, drawn over the first.
+        const want = b >= 0 && (a < 0 || b <= a) ? 1 + n + b : a >= 0 ? 1 + a : 0;
+        if (cells[gy * GRID + gx] !== want) wrong.push(`${gx},${gy}: ${cells[gy * GRID + gx]} not ${want}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it('gives every track a post can keep ids of its own, all within 1..255', () => {
+    const lit = Array.from({ length: MAX_TRACKS }, (_, j) => stillThing(0.1 + j * 0.1, 0.5, 0.05, 0.1, { id: `t${j}`, look: { kind: 'spotlight', amount: 0.7 } }));
+    const look = segmentLook(picture(), lit)!;
+    const ids = look.focus.subjects.map(subject => subject.id);
+    expect(ids.length).toBe(1 + MAX_TRACKS * LOOK_RINGS.length);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(Math.min(...ids)).toBe(LOOK_KEPT);
+    expect(Math.max(...ids)).toBeLessThanOrEqual(255);
+    const frame = made(look).frame(0);
+    lit.forEach((_, j) => expect(frame[cellAt(0.1 + j * 0.1, 0.5)], `track ${j}`).toBe(LOOK_KEPT + 1 + j * LOOK_RINGS.length));
   });
 
   it('switches a blur off on the frame either side of the track: every cell the world, softened nowhere', () => {
