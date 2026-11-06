@@ -2,6 +2,8 @@ import type {
   ComposeAudio,
   ComposeAudioEffect,
   ComposeClip,
+  ComposeFocus,
+  ComposeMatte,
   ComposeOverlay,
   ComposeOverlayMotion,
   ComposePlacement,
@@ -36,12 +38,13 @@ import {
   type EditRect,
 } from './edit-manifest';
 import { joinContinuousAudio, musicSpeed, overlayEndMs } from './edit-ops';
-import { compileFocus, type SubjectTrackRef } from './focus';
+import { compileFocus, focusChangesPicture, type SubjectTrackRef } from './focus';
 import { compileLayoutMotions, type LayoutMotions } from './layout-motion';
 import { compileOverlayMotion, overlayRasterDetail } from './motion';
 import { compileLayerMotion, type TrackScene } from './track-motion';
 import { rasteriseOverlay } from './overlay-raster';
-import type { RasterContext } from './raster-context';
+import type { RasterContext, RasterisedOverlay } from './raster-context';
+import { compileOverlayQuad, type SurfaceQuad } from './surface';
 import { soundEffectSteps } from './sound-effects';
 import { compileTransition, transitionSpans } from './transitions';
 import { compileCamera } from './zoom';
@@ -72,6 +75,25 @@ export interface ComposeSpecLimits {
 export type SubjectTracksByKey = ReadonlyMap<string, SubjectTrackRef>;
 
 const NO_SUBJECT_TRACKS: SubjectTracksByKey = new Map();
+
+/**
+ * The focus each segment's track looks are drawn with ([EditTrack.look]), by SEGMENT id - which looks a
+ * segment shows is its own trim's and its own Focus's business - as `segmentLook` made it, with its `uri`
+ * the subject track made beside it, somewhere the render can read: a `blob:` in a page, which
+ * `withNativeRenderInputs` writes out as a file on a phone. A segment with a Focus of its own shows that
+ * instead, and its look here is not sent.
+ */
+export type TrackLooksByClip = ReadonlyMap<string, ComposeFocus>;
+
+const NO_TRACK_LOOKS: TrackLooksByClip = new Map();
+
+/**
+ * Where the people are on the OUTPUT frame, for the layers drawn behind them ([OverlayCommon.behind]): the
+ * matte `buildPeopleMatte` made of the post, its `uri` somewhere the render can read - a `blob:` in a page,
+ * which `withNativeRenderInputs` writes out as a file on a phone. Null, or absent, sends no matte, and an
+ * engine then draws every layer behind on top as any other.
+ */
+export type PeopleMatte = ComposeMatte | null;
 
 /** Thrown when a manifest names a clip the host has no file for. */
 export class MissingClipError extends Error {
@@ -115,6 +137,10 @@ const UNKNOWN_TRACK_END_MS = 3_600_000;
  * @param limits the host's size ceiling, written as `output.maxBytes` only when there is one, so a host with no upload
  *   limit sends exactly the spec it always sent.
  * @param subjects the subject track of every clip key a focused segment plays (see [SubjectTracksByKey]).
+ * @param looks the focus every segment's track looks are drawn with (see [TrackLooksByClip]). Absent, or
+ *   empty, sends the spec a post with no look always was, byte for byte.
+ * @param matte where the people are, for the layers behind them (see [PeopleMatte]): sent only when a layer
+ *   on the wire is behind anyone. A post with no layer behind is the spec it always was, byte for byte.
  */
 export async function toComposeSpec(
   manifest: EditManifest,
@@ -123,6 +149,8 @@ export async function toComposeSpec(
   raster: RasterContext,
   limits: ComposeSpecLimits = {},
   subjects: SubjectTracksByKey = NO_SUBJECT_TRACKS,
+  looks: TrackLooksByClip = NO_TRACK_LOOKS,
+  matte: PeopleMatte = null,
 ): Promise<ComposeSpec> {
   const totalMs = Math.round(totalDurationMs(manifest));
 
@@ -130,7 +158,7 @@ export async function toComposeSpec(
   // animated layer, and then every clip is sent exactly as it was before arrangements could move.
   const layout = compileLayoutMotions(manifest);
 
-  const clips: ComposeClip[] = baseClips(manifest, uriByKey, layout, subjects);
+  const clips: ComposeClip[] = baseClips(manifest, uriByKey, layout, subjects, looks);
 
   // Resolved here beside the base clips rather than further down, so a layer whose footage the host
   // has no file for fails before the phone has spent a second drawing bitmaps for a render that was
@@ -140,7 +168,7 @@ export async function toComposeSpec(
     manifest.videoTracks.length > 0
       ? manifest.videoTracks.map(track => ({
           id: track.id,
-          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, subjects)),
+          clips: track.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, subjects, looks)),
           startMs: Math.max(0, Math.round(track.startMs)),
           z: track.z,
           opacity: clamp(track.opacity, 0, 1),
@@ -148,8 +176,9 @@ export async function toComposeSpec(
       : null;
 
   // The camera the footage is drawn through, which a tracked layer is carried along by; on the wire
-  // below, where it is set only when a zoom is visible.
-  const camera = compileCamera(manifest.zooms ?? [], totalMs);
+  // below, where it is set only when a zoom is visible. A zoom following a track is aimed through the
+  // footage's own placement, so it is handed what the footage is drawn through.
+  const camera = compileCamera(manifest.zooms ?? [], totalMs, { manifest, layout });
   const scene: TrackScene = { manifest, camera, layout };
 
   const overlays: ComposeOverlay[] = [];
@@ -174,13 +203,16 @@ export async function toComposeSpec(
     // largest. `wPx`/`hPx` stay the resting size: every engine scales the bitmap it decodes to them.
     const detail = overlayRasterDetail(motion);
     const bitmap = detail > 1 ? await rasteriseOverlay(overlay, raster, { detail }) : (raster.drawn?.(overlay) ?? (await rasteriseOverlay(overlay, raster)));
+    // On a flat surface: its quad a frame, and as its motion the quad's best fit for a build that draws no
+    // quads - a photo cut to the surface's shape first. Null for every other layer, which goes as it always has.
+    const surface = await surfaceWire(overlay, scene, { startMs, endMs }, bitmap);
     // An effect covers the frame: its bitmap is the whole picture, so it is never moved or turned.
     const fullFrame = overlay.kind === 'effect';
     const wire: ComposeOverlay = {
       id: overlay.id,
-      png: bitmap.png,
-      wPx: bitmap.wPx,
-      hPx: bitmap.hPx,
+      png: surface ? surface.png : bitmap.png,
+      wPx: surface ? surface.wPx : bitmap.wPx,
+      hPx: surface ? surface.hPx : bitmap.hPx,
       cx: fullFrame ? 0.5 : overlay.cx,
       cy: fullFrame ? 0.5 : overlay.cy,
       rotationDeg: fullFrame ? 0 : overlay.rotationDeg,
@@ -191,7 +223,13 @@ export async function toComposeSpec(
     // Only for a layer that moves, and assigned after the object for the reason a clip's crop is: a
     // still layer is the overlay this package has always sent, byte for byte, and every engine tests
     // the ABSENCE of the key once, when it builds its plan, to place it exactly as it always has.
-    if (motion) wire.motion = motion;
+    const moves = surface ? surface.motion : motion;
+    if (moves) wire.motion = moves;
+    // Last, and only on a surface, for the same reason: every other layer is the overlay it always was.
+    if (surface) wire.quad = surface.quad;
+    // After the quad, and only on a layer behind the people, never an effect: every other layer is the
+    // overlay it always was. A behind layer on a surface is drawn through its quad, behind them.
+    if (overlay.behind === true && overlay.kind !== 'effect') wire.behind = true;
     overlays.push(wire);
   }
 
@@ -238,6 +276,10 @@ export async function toComposeSpec(
   // manifest so the two questions cannot disagree.
   const background = normaliseBackground(manifest.background);
   if (background) spec.background = backgroundRgb(background);
+
+  // Where the people are, only when a layer on the wire is behind them, for the reason `tracks` is left
+  // off: a post with no layer behind anyone is the spec this package has always produced, byte for byte.
+  if (matte && overlays.some(wire => wire.behind)) spec.matte = matte;
 
   // Only the layers the post plays, and the key only when there is one, for the reason `tracks` is
   // left off: a post with no layer is the spec this package has always produced, byte for byte.
@@ -409,12 +451,18 @@ export function overlayMotionFor(overlay: EditOverlay, totalMs: number, scene?: 
  * trims in, and [transitionSpan] measured it the same way - so the editor's timeline and the render
  * agree about where every clip starts.
  */
-function baseClips(manifest: EditManifest, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions, subjects: SubjectTracksByKey = NO_SUBJECT_TRACKS): ComposeClip[] {
+function baseClips(
+  manifest: EditManifest,
+  uriByKey: ReadonlyMap<string, string>,
+  layout: LayoutMotions,
+  subjects: SubjectTracksByKey = NO_SUBJECT_TRACKS,
+  looks: TrackLooksByClip = NO_TRACK_LOOKS,
+): ComposeClip[] {
   const spans = transitionSpans(manifest.clips);
   // The outgoing side of a transition is spread from these, so it carries its clip's keys with it -
   // keys that already run on through the stretch it plays under the next clip. Its focus too, whose
-  // keys are in the source's time and cover the whole of the segment's trim.
-  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, subjects));
+  // keys are in the source's time and cover the whole of the segment's trim - a track look's as well.
+  const wired = manifest.clips.map(edit => wireClip(edit, manifest.fit, uriByKey, layout, subjects, looks));
   // A segment sent with more source than it has ([sourceStretch]) gives a transition that much more
   // of it too, so the overlap runs the output time it runs in the editor.
   const stretches = manifest.clips.map(sourceStretch);
@@ -446,14 +494,25 @@ function structuredCloneOf<T>(value: T): T {
  * and framing - and a second copy of this mapping is exactly how the two layers would quietly start
  * disagreeing about which rectangle or which fit a clip is drawn with.
  */
-function wireClip(edit: EditClip, manifestFit: EditFit, uriByKey: ReadonlyMap<string, string>, layout: LayoutMotions, subjects: SubjectTracksByKey): ComposeClip {
+function wireClip(
+  edit: EditClip,
+  manifestFit: EditFit,
+  uriByKey: ReadonlyMap<string, string>,
+  layout: LayoutMotions,
+  subjects: SubjectTracksByKey,
+  looks: TrackLooksByClip = NO_TRACK_LOOKS,
+): ComposeClip {
   const uri = uriByKey.get(edit.clipKey);
   if (!uri) throw new MissingClipError(edit.clipKey);
   const clip = edit.image ? pictureClip(edit, manifestFit, uri, layout) : videoClip(edit, manifestFit, uri, layout);
   // Last, and only for a segment it changes, for the reason a crop is left off when it has none: a
-  // clip nobody focused is the clip this package has always sent, byte for byte.
+  // clip nobody focused is the clip this package has always sent, byte for byte. A segment has one
+  // focus, and its own wins: its tracks' looks only where it has none that changes the picture -
+  // even one whose subjects could not be had, which the preview shows as nothing, too.
   const track = edit.focus ? subjects.get(edit.clipKey) : undefined;
-  const focus = track ? compileFocus(edit, track) : null;
+  const look = focusChangesPicture(edit.focus) ? undefined : looks.get(edit.id);
+  const own = track ? compileFocus(edit, track) : null;
+  const focus = own ?? (look ? structuredCloneOf(look) : null);
   if (focus) clip.focus = focus;
   return clip;
 }
@@ -554,6 +613,51 @@ function pictureClip(edit: EditClip, manifestFit: EditFit, uri: string, layout: 
 }
 
 /** A rectangle worth putting on the wire, or `undefined` for one that says nothing. */
+/**
+ * A layer on a flat surface as the wire carries it ([compileOverlayQuad]): its bitmap - a photo's cut to the
+ * surface's shape - and its size, its quad, and the motion a build without quads draws instead. A page that
+ * cannot cut the photo sends it whole, on the rectangle its own shape makes on the surface. Null for a layer
+ * not on a surface.
+ */
+async function surfaceWire(
+  overlay: EditOverlay,
+  scene: TrackScene,
+  window: { startMs: number; endMs: number },
+  bitmap: RasterisedOverlay,
+): Promise<(Pick<SurfaceQuad, 'quad' | 'motion' | 'wPx' | 'hPx'> & { png: string }) | null> {
+  const compiled = compileOverlayQuad(overlay, scene, window, bitmap);
+  if (!compiled) return null;
+  const png = compiled.cut ? await cutBitmap(bitmap.png, compiled.cut) : bitmap.png;
+  if (png) return { png, wPx: compiled.wPx, hPx: compiled.hPx, quad: compiled.quad, motion: compiled.motion };
+  const whole = compileOverlayQuad(overlay, scene, window, bitmap, { cut: false });
+  return whole ? { png: bitmap.png, wPx: whole.wPx, hPx: whole.hPx, quad: whole.quad, motion: whole.motion } : null;
+}
+
+/** The part `cut` (fractions of it) of the PNG `png`, as a PNG of its own; null where this page cannot draw one. */
+async function cutBitmap(png: string, cut: { x: number; y: number; w: number; h: number }): Promise<string | null> {
+  if (typeof document === 'undefined' || typeof Image === 'undefined') return null;
+  try {
+    const image = new Image();
+    image.src = png;
+    await image.decode();
+    const sw = image.naturalWidth * cut.w;
+    const sh = image.naturalHeight * cut.h;
+    if (!(sw >= 1) || !(sh >= 1)) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(sw));
+    canvas.height = Math.max(1, Math.round(sh));
+    const g = canvas.getContext('2d');
+    if (!g) return null;
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(image, image.naturalWidth * cut.x, image.naturalHeight * cut.y, sw, sh, 0, 0, canvas.width, canvas.height);
+    const out = canvas.toDataURL('image/png');
+    return out.startsWith('data:image/png') ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 function wireRect(rect: EditRect | undefined): ComposeRect | undefined {
   if (!rect || isFullFrameRect(rect)) return undefined;
   // Copied field by field rather than passed through, so nothing a host happened to hang on its

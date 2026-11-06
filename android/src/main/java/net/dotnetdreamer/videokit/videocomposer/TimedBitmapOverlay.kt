@@ -24,6 +24,10 @@ import androidx.media3.effect.StaticOverlaySettings
  *
  * A layer that MOVES carries its [motion], and its settings are worked out per frame from the keys
  * at that frame's time; one that does not hands back the same two settings objects it always did.
+ *
+ * A layer in perspective or behind the people is never handed to Media3 at all: [LayerUnderlayEffect]
+ * draws it from [pixels], placed by [poseAt] or lit by [alphaAt] - the readings below, as numbers - so a
+ * flat layer it draws lands on the pixels Media3 would have put it on.
  */
 @OptIn(UnstableApi::class)
 class TimedBitmapOverlay(
@@ -64,6 +68,9 @@ class TimedBitmapOverlay(
     private val visible: OverlaySettings = overlaySettings(rest)
     private val hidden: OverlaySettings = overlaySettings(rest.copy(alpha = 0f))
 
+    /** Whether [rest] draws anything: false only for a layer at no opacity. */
+    private val restDrawn: Boolean = rest.isDrawn
+
     /**
      * The same instance every time on purpose: `BitmapOverlay` caches the uploaded texture per
      * bitmap instance, so returning one object means one upload for the whole export.
@@ -82,6 +89,33 @@ class TimedBitmapOverlay(
         val sample = motion?.atUs(presentationTimeUs) ?: return visible
         val pose = rest.moved(sample)
         return if (pose.isDrawn) overlaySettings(pose) else hidden
+    }
+
+    /** The bitmap, for [LayerUnderlayEffect], which draws this layer itself from the same pixels. */
+    internal val pixels: Bitmap get() = bitmap
+
+    /**
+     * [getOverlaySettings] as numbers, for a layer [LayerUnderlayEffect] draws instead of Media3: the pose
+     * at [presentationTimeUs] - the one it rests at, or the one its motion moves it to at this very time -
+     * or null wherever those settings hide the layer or draw nothing of it. The same reading, so the layer
+     * lands where Media3 would have put it ([LayerGeometry.poseCorners]).
+     */
+    internal fun poseAt(presentationTimeUs: Long): OverlayPose? {
+        if (presentationTimeUs !in startUs until endUs) return null
+        val sample = motion?.atUs(presentationTimeUs) ?: return if (restDrawn) rest else null
+        val pose = rest.moved(sample)
+        return if (pose.isDrawn) pose else null
+    }
+
+    /**
+     * The layer's alpha at [presentationTimeUs] - its opacity times its motion's, as [OverlayPose.moved]
+     * makes it - and 0 outside its window. All a layer drawn through a quad takes from the fields a flat
+     * one is placed by: the quad stands for the rest of the pose.
+     */
+    internal fun alphaAt(presentationTimeUs: Long): Float {
+        if (presentationTimeUs !in startUs until endUs) return 0f
+        val sample = motion?.atUs(presentationTimeUs) ?: return rest.alpha
+        return (rest.alpha * sample.opacity).toFloat().coerceIn(0f, 1f)
     }
 
     /**

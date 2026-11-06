@@ -58,6 +58,7 @@ export type {
   ComposeCamera,
   ComposeFocus,
   ComposeFocusSubject,
+  ComposeMatte,
   FindSubjectsResult,
   SubjectEngine,
   SubjectInfo,

@@ -293,6 +293,23 @@ class VideoComposerPlugin : Plugin() {
             }
 
             val plan = RenderPlan.build(spec, probes)
+            // The people matte, when the plan keeps one - a layer is behind somebody - read whole and every
+            // frame decoded now, as a focus's track is: one that cannot be read fails the post here rather
+            // than half way through it. It belongs to no clip, so the failure names none. Kept with the
+            // focuses' tracks, by its uri, for the builder to find (see [CompositionBuilder.toComposition]).
+            val matte = plan.matte
+            if (matte != null && !subjectTracks.containsKey(matte.uri)) {
+                subjectTracks[matte.uri] = try {
+                    SubjectFinder.trackForRender(appContext, matte.uri)
+                } catch (e: Exception) {
+                    failJob(
+                        job,
+                        FailureCodes.UNREADABLE_INPUT,
+                        "the people matte cannot be read: ${ErrorMapping.describe(e)}",
+                    )
+                    return
+                }
+            }
             val overlays = try {
                 decodeOverlays(plan)
             } catch (e: OverlayDecodeException) {
@@ -1667,14 +1684,18 @@ class VideoComposerPlugin : Plugin() {
     @PluginMethod
     fun capabilities(call: PluginCall) {
         // An H.264 encoder and an AAC encoder are both CDD requirements at this minSdk, so there is
-        // nothing worth probing for.
+        // nothing worth probing for. The features are what this build draws beyond every build
+        // (`RenderFeature`): layers in perspective and layers behind the people, both drawn by
+        // [LayerUnderlayEffect] on any GPU the rest of the export runs on, so nothing is probed for them
+        // either - and neither needs the segmenter, since the matte arrives as a file.
         call.resolve(
             JSObject()
                 .put("supported", true)
                 .put("videoCodec", "avc1")
                 .put("audioCodec", "mp4a.40.2")
                 .put("container", "mp4")
-                .put("voiceRecording", true),
+                .put("voiceRecording", true)
+                .put("features", JSArray().put("overlayQuad").put("peopleMatte")),
         )
     }
 

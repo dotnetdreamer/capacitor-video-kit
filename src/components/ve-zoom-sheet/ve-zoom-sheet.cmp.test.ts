@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, emptyManifest, type EditManifest, type EditZoom } from '../../editor';
+import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, emptyManifest, type EditManifest, type EditTrack, type EditZoom } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -24,20 +24,39 @@ function zoom(over: Partial<EditZoom> = {}): EditZoom {
   return { id: 'zm-1', startMs: 1000, endMs: 5000, cx: 0.5, cy: 0.5, scale: 2, rampMs: 700, ease: 'smooth', ...over };
 }
 
-function manifestWith(zooms: EditZoom[]): EditManifest {
+function manifestWith(zooms: EditZoom[], tracks?: EditTrack[]): EditManifest {
   return {
     ...emptyManifest(),
     clips: [{ id: 'seg-a', clipKey: 'clip-a', inMs: 0, outMs: 10_000, speed: 1, volume: 1, muted: false }],
     zooms,
+    ...(tracks ? { tracks } : {}),
+  };
+}
+
+/** Track "k" of the clip, "Rider": something crossing a wide shot from left to right. */
+function rider(): EditTrack {
+  return {
+    id: 'k',
+    name: 'Rider',
+    hue: 1,
+    clipId: 'seg-a',
+    clipKey: 'clip-a',
+    aspect: 16 / 9,
+    box: { w: 0.1, h: 0.2 },
+    atMs: [0, 5000, 10_000],
+    x: [0.2, 0.5, 0.8],
+    y: [0.5, 0.5, 0.5],
+    scale: [1, 1, 1],
+    turn: [0, 0, 0],
   };
 }
 
 /** The sheet over a store holding one zoom, opened the way the tool row opens it. */
-async function mount(z: EditZoom | null = zoom()): Promise<{ store: EditorStore; sheet: HTMLElement; ctx: EditorContext; column: HTMLElement }> {
+async function mount(z: EditZoom | null = zoom(), tracks?: EditTrack[]): Promise<{ store: EditorStore; sheet: HTMLElement; ctx: EditorContext; column: HTMLElement }> {
   const host = resolveEditorHost({});
   const store = new EditorStore(host);
   const ctx: EditorContext = { store, media: new EditorMedia(store, host) };
-  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 10_000]]), manifestWith(z ? [z] : []));
+  store.load([{ key: 'clip-a', fileName: 'a.mp4' }], new Map([['clip-a', 10_000]]), manifestWith(z ? [z] : [], tracks));
   if (z) store.openZoom(z.id);
   else store.openPanel('zoom');
 
@@ -292,5 +311,32 @@ describe('ve-zoom-sheet', () => {
     const total = body.getBoundingClientRect().height + (headEl?.getBoundingClientRect().height ?? 53);
     // The transition sheet's compact figure, which this one is budgeted well inside.
     expect(total).toBeLessThanOrEqual(259);
+  });
+
+  it('names the track a following zoom follows and its framings in place of the level, as short as ever', async () => {
+    const { store, sheet } = await mount(zoom({ rampMs: 0, follow: { trackId: 'k', framing: 'fill' } }), [rider()]);
+    const framing = (id: string) => sheet.shadowRoot!.querySelector<HTMLButtonElement>(`[data-framing="${id}"]`)!;
+
+    expect(sliders(sheet).map(s => s.getAttribute('aria-label'))).toEqual(['Zoom ramp']);
+    expect(sheet.shadowRoot!.querySelector('.zs__follows')!.textContent!.trim()).toBe('Follows Rider');
+    expect(sheet.shadowRoot!.querySelector('.zs__hint')).toBe(null);
+    expect(framing('fill').getAttribute('aria-label')).toBe('Whole shot, selected');
+    expect(framing('mid').getAttribute('aria-label')).toBe('Medium');
+    expect(framing('close').getAttribute('aria-label')).toBe('Close');
+
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const body = sheet.shadowRoot!.querySelector<HTMLElement>('.zs')!;
+    const headEl = frame(sheet)!.shadowRoot!.querySelector<HTMLElement>('.sheet__head');
+    expect(body.getBoundingClientRect().height + (headEl?.getBoundingClientRect().height ?? 53)).toBeLessThanOrEqual(259);
+
+    framing('close').click();
+    expect(current(store).follow).toEqual({ trackId: 'k', framing: 'close' });
+    await until('the name to follow', () => framing('close').getAttribute('aria-label') === 'Close, selected');
+    expect(sheet.shadowRoot!.querySelector('[aria-pressed]')).toBe(null);
+
+    // Stop following: an area again, with its level to set.
+    sheet.shadowRoot!.querySelector<HTMLButtonElement>('[data-action="stop-following"]')!.click();
+    expect('follow' in current(store)).toBe(false);
+    await until('the level to come back', () => sliders(sheet).length === 2);
   });
 });

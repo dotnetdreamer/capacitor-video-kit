@@ -269,6 +269,13 @@ export class PreviewCanvas {
   ) {}
 
   /**
+   * Told the output instant of every frame this canvas paints, the moment it is painted: what draws something of
+   * its own FROM the picture - the people put back over the layers behind them (`MatteCanvas`) - in step with it,
+   * so the two are never a frame apart. Not told of a frame the canvas kept rather than painted. Null for nothing.
+   */
+  onPaint: ((atMs: number) => void) | null = null;
+
+  /**
    * Hands over one track's element, or takes it back with null.
    *
    * Called from the render, as the elements come and go, exactly as the player's own followers are
@@ -672,6 +679,7 @@ export class PreviewCanvas {
     const side = draws[0] ? warmSide(draws[0]) : null;
     if (side) this.warmUp(painter, side);
     painter.paintLayers(cameraDraws(draws, camera));
+    this.onPaint?.(atMs);
   }
 
   /**

@@ -4,8 +4,9 @@ import { drawsNothing, rectMotionAt } from '../../editor/layout-motion';
 import { overlayMotionAt } from '../../editor/motion';
 import { lookAt } from '../../editor/transitions';
 import { parseSubjectTrack, type SubjectTrack } from '../../editor/subject-track';
+import { normaliseOverlayQuad, quadAt } from '../../editor/surface';
 import { describe, resolve } from '../../web-runtime/files';
-import type { ComposeClip, ComposeFailureCode, ComposeFocus, ComposeOutput, ComposeRect, ComposeSpec } from '../definitions';
+import type { ComposeClip, ComposeFailureCode, ComposeFocus, ComposeOutput, ComposeOverlayQuad, ComposeRect, ComposeSpec } from '../definitions';
 
 import { mixdown } from './audio';
 import { throughCamera } from './camera-draw';
@@ -13,9 +14,11 @@ import { renderSupport } from './capabilities';
 import { openSink, type FrameSink } from './encode';
 import { FocusFrames } from './focus-frames';
 import { pictureDest } from './geometry';
+import { flatCorners, type MatteDraw } from './matte-pass';
 import { decodeImage, FrameReader, probeMedia, probePicture, readFrameTimes, StillReader, type SourceReader } from './media';
 import { Painter, WHOLE_FRAME, type LayerDraw, type LayerSource, type TransitionDraw } from './painter';
 import { buildPlan, clipIndexAt, sourceTimeUs, transitionAt, visibleIndexAt, type PlannedClip, type ProbedInput, type RenderPlan } from './plan';
+import type { QuadDraw } from './quad-layers';
 import { clipWindow, isSlowMotion } from './slow-motion';
 
 /**
@@ -115,6 +118,8 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   // Read before anything is drawn, like the probes, so a subject track that is not there fails the
   // render before a frame of it is encoded.
   const focus = await loadFocus(spec, options.signal);
+  // The same for the people the layers behind them are drawn under.
+  const matte = await loadMatte(spec, options.signal);
   options.onProgress(0.02);
 
   const mix = await guard(() => mixdown(plan, options.signal), 'unknown');
@@ -149,7 +154,7 @@ export async function renderSpec(spec: ComposeSpec, options: RenderOptions): Pro
   );
 
   try {
-    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, focus, options);
+    const poster = await drawEveryFrame(plan, painter, sink, layers, overlays, focus, options, surfaceQuads(spec), matte);
     const { blob, hasAudio, mimeType } = await guard(() => sink.finish(), 'muxer');
     // The finished file, measured once more: the running count leaves out the container's boxes and
     // the sound, which is only encoded now. A file over the ceiling is dropped here, before anything
@@ -190,6 +195,8 @@ async function drawEveryFrame(
   overlays: OverlayBitmaps,
   focus: ClipFocus,
   options: RenderOptions,
+  quads: ReadonlyMap<string, ComposeOverlayQuad> = new Map(),
+  matte: PeopleMatte | null = null,
 ): Promise<Blob | null> {
   const fps = plan.output.fps;
   const frameUs = 1_000_000 / fps;
@@ -318,13 +325,36 @@ async function drawEveryFrame(
     // in the editor is the zoom in the file. Read at the frame's own unrounded time, on the same
     // milliseconds the preview reads it on. `cameraAt` is null outside every zoom, and the array
     // then goes through untouched. The overlays below never see it: they stay where they were put.
-    painter.paintLayers(camera ? throughCamera(draws, cameraAt(camera, atUs / 1000)) : draws);
+    // The layers on a flat surface at this frame's own instant, through their quads, and the layers behind the
+    // people, through theirs or the corners their pose puts them at: over the video and under every other layer,
+    // as every engine draws them, each at its opacity times its motion's - the ones behind first, then the people
+    // put back over them through the matte at this instant, then the surfaces nobody is behind. A post with
+    // neither hands the painter nothing, and the frame is the one it always drew.
+    const onSurfaces: QuadDraw[] = [];
+    const behind: QuadDraw[] = [];
+    if (quads.size > 0 || matte) {
+      for (const overlay of plan.overlays) {
+        const quad = quads.get(overlay.id);
+        const back = matte?.behind.has(overlay.id) === true;
+        if ((!quad && !back) || atUs < overlay.startUs || atUs >= overlay.endUs) continue;
+        const motion = overlay.motion ? overlayMotionAt(overlay.motion, atUs / 1000) : null;
+        const corners = quad ? quadAt(quad, atUs / 1000) : flatCorners(overlay, motion, plan.output);
+        const bitmap = corners ? await overlays.get(overlay.id, overlay.png) : null;
+        if (!corners || !bitmap) continue;
+        (back ? behind : onSurfaces).push({ bitmap, corners, opacity: overlay.opacity * (motion?.opacity ?? 1) });
+      }
+    }
+    const video = camera ? throughCamera(draws, cameraAt(camera, atUs / 1000)) : draws;
+    if (behind.length > 0) painter.paintLayers(video, { behind, matte: matte ? matteAt(matte.frames, atUs / 1000) : null, quads: onSurfaces });
+    else painter.paintLayers(video, onSurfaces);
 
     // Manifest order is drawing order, which the plan preserved. A layer that moves is read at the
     // frame's own unrounded instant, on the milliseconds the preview reads it on, through the one
     // helper both call; a layer that does not has a null motion and is drawn as it always was.
     for (const overlay of plan.overlays) {
       if (atUs < overlay.startUs || atUs >= overlay.endUs) continue;
+      // Drawn on its surface above, or behind the people, never again over them.
+      if (quads.has(overlay.id) || matte?.behind.has(overlay.id)) continue;
       const bitmap = await overlays.get(overlay.id, overlay.png);
       if (!bitmap) continue;
       painter.paintOverlay({
@@ -338,7 +368,7 @@ async function drawEveryFrame(
         motion: overlay.motion ? overlayMotionAt(overlay.motion, atUs / 1000) : null,
       });
     }
-    overlays.retire(plan, atUs);
+    overlays.retire(plan, atUs, bitmap => painter.forgetQuad(bitmap));
 
     if (!posterCut && atUs >= plan.posterAtUs) {
       posterCut = true;
@@ -460,6 +490,44 @@ async function loadFocus(spec: ComposeSpec, signal: AbortSignal): Promise<ClipFo
     out.set(focus, new FocusFrames(track, focus));
   }
   return out;
+}
+
+/** The people matte of a render ([loadMatte]): its frames, and the layers drawn behind it, by id. */
+interface PeopleMatte {
+  frames: FocusFrames;
+  behind: ReadonlySet<string>;
+}
+
+/**
+ * Reads the post's people matte ([ComposeSpec.matte]), a subject track over the OUTPUT frame in OUTPUT ms, and
+ * names the layers behind it - or null for none, and for a matte nobody is behind, which changes no pixel and whose
+ * layers would be drawn as any other: the old path in full. A matte that cannot be read fails the render as
+ * `unreadable_input`, as a focus's track does, naming no clip: it is the post's.
+ */
+async function loadMatte(spec: ComposeSpec, signal: AbortSignal): Promise<PeopleMatte | null> {
+  const matte = spec.matte;
+  if (!matte) return null;
+  const behind = new Set(spec.overlays.filter(overlay => overlay.behind === true).map(overlay => overlay.id));
+  if (behind.size === 0) return null;
+  throwIfAborted(signal);
+  let track: SubjectTrack;
+  try {
+    track = parseSubjectTrack(await (await resolve(matte.uri)).arrayBuffer());
+  } catch (error) {
+    throw new RenderFailure('unreadable_input', `people matte: ${describe(error)}`);
+  }
+  // Read as a focus is read, with nothing out of focus to soften: only its grid is drawn from.
+  return { frames: new FocusFrames(track, { uri: matte.uri, atMs: matte.atMs, subjects: matte.subjects, blur: 0 }), behind };
+}
+
+/** The matte at an output instant, a frame of it that does not decode failing the render as unreadable. */
+function matteAt(frames: FocusFrames, outputMs: number): MatteDraw {
+  try {
+    const at = frames.at(outputMs);
+    return { mask: at.mask, maskWidth: at.maskWidth, maskHeight: at.maskHeight, maskKey: at.maskKey };
+  } catch (error) {
+    throw new RenderFailure('unreadable_input', `people matte: ${describe(error)}`);
+  }
 }
 
 /** The focus at a source instant, a frame of its track that does not decode failing the render as unreadable. */
@@ -626,14 +694,15 @@ class OverlayBitmaps {
     }
   }
 
-  /** Lets go of every bitmap whose window has closed. */
-  retire(plan: RenderPlan, atUs: number): void {
+  /** Lets go of every bitmap whose window has closed, telling `gone` first of each, for what was made from it. */
+  retire(plan: RenderPlan, atUs: number, gone?: (bitmap: ImageBitmap | HTMLImageElement) => void): void {
     if (this.bitmaps.size === 0) return;
     for (const overlay of plan.overlays) {
       if (atUs < overlay.endUs) continue;
       const bitmap = this.bitmaps.get(overlay.id);
       if (!bitmap) continue;
       this.bitmaps.delete(overlay.id);
+      gone?.(bitmap);
       if ('close' in bitmap) bitmap.close();
     }
   }
@@ -642,6 +711,20 @@ class OverlayBitmaps {
     for (const bitmap of this.bitmaps.values()) if ('close' in bitmap) bitmap.close();
     this.bitmaps.clear();
   }
+}
+
+/**
+ * Each layer's quad on a flat surface, by id ([ComposeOverlay.quad]), read by the one reader the editor's
+ * tests share ([normaliseOverlayQuad]). A quad that does not read is none, and its layer is drawn by its
+ * motion, as a build without quads draws it. Empty for a post with no layer on a surface.
+ */
+function surfaceQuads(spec: ComposeSpec): ReadonlyMap<string, ComposeOverlayQuad> {
+  const out = new Map<string, ComposeOverlayQuad>();
+  for (const overlay of spec.overlays) {
+    const quad = normaliseOverlayQuad((overlay as { quad?: unknown }).quad);
+    if (quad) out.set(overlay.id, quad);
+  }
+  return out;
 }
 
 /* -------------------------------------------------------------------------------------------- */

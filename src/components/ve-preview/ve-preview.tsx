@@ -5,13 +5,27 @@ import { deferredEffect } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
 import { OVERLAY_BASE, isOverlayVisibleAt } from '../../editor';
+import { isBehind } from '../../editor/people-matte';
 import { cropStageBox, cropWindowBox, orWhole, type FrameBox } from '../../state/clip-framing';
 import { computedWith } from '../../state/computed-with';
 import type { PreviewVideoLayer } from '../../state/editor-store';
 import type { EditorPlayer } from '../../state/editor.types';
 import { ClipMedia } from './clip-media';
 import { LayerMotion } from './layer-motion';
-import { NO_GUIDES, OverlayGestures, chromeBounds, handleSpot, layerBox, layerTransform, type ChromeBounds, type SelectionHandle, type SnapGuides } from './overlay-gestures';
+import { MatteCanvas } from './matte-canvas';
+import {
+  NO_GUIDES,
+  NO_TARGETS,
+  OverlayGestures,
+  chromeBounds,
+  handleSpot,
+  layerBox,
+  layerTransform,
+  type ChromeBounds,
+  type DropTarget,
+  type SelectionHandle,
+  type SnapGuides,
+} from './overlay-gestures';
 import { PreviewCanvas } from './preview-canvas';
 import { PreviewPictures } from './preview-pictures';
 import { PreviewPlayer } from './preview-player';
@@ -42,6 +56,13 @@ interface LayerView {
   held: boolean;
   /** The layer the Track sheet is aiming for, faded so the footage under it can be seen. */
   aiming?: boolean;
+  /**
+   * A layer ON a flat surface: its box, a share of the frame's width and its own shape, which [LayerMotion]
+   * puts on its quad - a photo's cut to the surface's shape, the middle of it shown (`object-fit: cover`).
+   */
+  quad?: { widthFrac: number; aspect: number; cut: boolean };
+  /** Behind the people: drawn under the matte that puts them back over it ([MatteCanvas]), on its quad or flat. */
+  behind?: boolean;
 }
 
 interface SelectionView {
@@ -248,6 +269,12 @@ export class VePreview implements EditorPlayer {
   private readonly keepSubjects = (el?: HTMLElement) => {
     this.subjectsEl = el as HTMLCanvasElement | undefined;
   };
+  /** The people put back over the layers behind them; see [MatteCanvas]. */
+  private matteEl?: HTMLCanvasElement;
+  private matte: MatteCanvas | null = null;
+  private readonly keepMatte = (el?: HTMLElement) => {
+    this.matteEl = el as HTMLCanvasElement | undefined;
+  };
   /** The Track sheet's box, run and path; see [TrackOverlay]. */
   private trackEl?: HTMLCanvasElement;
   private trackOverlay: TrackOverlay | null = null;
@@ -301,6 +328,12 @@ export class VePreview implements EditorPlayer {
   readonly moving = signal(false);
   readonly trashHot = signal(false);
   readonly guides = signal<SnapGuides>(NO_GUIDES);
+  /**
+   * What the layer being dragged can be dropped on to pin it to a track, and the one under the finger:
+   * what the Track canvas lights up, and what letting go pins the layer to. See [dropTargets].
+   */
+  readonly trackTargets = signal<readonly DropTarget[]>(NO_TARGETS);
+  readonly trackHot = signal<string | null>(null);
 
   private player: PreviewPlayer | null = null;
   /** The compositor: everything the customer sees of their own footage; see [PreviewCanvas]. */
@@ -310,7 +343,10 @@ export class VePreview implements EditorPlayer {
    * written directly, frame by frame, over the resting place the vdom gives it; see [LayerMotion].
    * Read off the player's clock, so a layer moves in step with the picture under it.
    */
-  private readonly motion = new LayerMotion(() => this.player?.instantMs() ?? this.ctx.store.playheadMs.value);
+  private readonly motion = new LayerMotion(
+    () => this.player?.instantMs() ?? this.ctx.store.playheadMs.value,
+    () => this.stageSize.value,
+  );
   private gestures: OverlayGestures | null = null;
   private stageResize: ResizeObserver | null = null;
   private readonly disposers: Array<() => void> = [];
@@ -371,6 +407,12 @@ export class VePreview implements EditorPlayer {
     const trackLayer = store.trackLayer.value;
     const aimingId = trackLayer && this.trackBoxing.value ? trackLayer.id : null;
     const views: LayerView[] = [];
+    // Layers on a flat surface go under every other layer, as every engine draws them.
+    const quads = store.overlayQuads.value;
+    const under: LayerView[] = [];
+    // And under those, the layers behind the people, with the people put back over them - where the export does it.
+    const putBehind = store.canPutBehind.value;
+    const behind: LayerView[] = [];
     for (const overlay of this.overlays.value) {
       const editing = overlay.id === editingId;
       if (!visible.has(overlay.id) && !editing) continue;
@@ -396,12 +438,37 @@ export class VePreview implements EditorPlayer {
         });
         continue;
       }
+      const back = putBehind && isBehind(overlay);
+      const surface = quads.get(overlay.id);
+      const width = store.outputWidth.value;
+      if (surface && width > 0) {
+        // Unseen in the frame's corner at rest: [LayerMotion] puts it on its quad as it is drawn.
+        (back ? behind : under).push({
+          id: overlay.id,
+          effect: false,
+          png: bitmap.png,
+          left: 0,
+          top: 0,
+          width: (surface.wPx / width) * 100,
+          aspect: `${surface.wPx} / ${surface.hPx}`,
+          transform: 'none',
+          opacity: overlay.opacity,
+          cx: overlay.cx,
+          cy: overlay.cy,
+          rotationDeg: overlay.rotationDeg,
+          held: editing,
+          aiming: overlay.id === aimingId,
+          quad: { widthFrac: surface.wPx / width, aspect: surface.wPx / surface.hPx, cut: surface.cut !== null },
+          ...(back ? { behind: true } : {}),
+        });
+        continue;
+      }
       // A layer at rest is where it was put, and its motion - its track among it - moves it from there.
       // The text being typed is held at rest, so a tracked one rests where it has followed its thing to.
       const rest = editing && overlay.follow ? store.shownOverlay(overlay) : overlay;
       const box = layerBox(rest, bitmap, store.outputWidth.value);
       if (!box) continue;
-      views.push({
+      (back ? behind : views).push({
         id: overlay.id,
         effect: false,
         png: bitmap.png,
@@ -416,9 +483,22 @@ export class VePreview implements EditorPlayer {
         rotationDeg: rest.rotationDeg,
         held: editing,
         aiming: overlay.id === aimingId,
+        ...(back ? { behind: true } : {}),
       });
     }
-    return views;
+    return behind.length > 0 || under.length > 0 ? [...behind, ...under, ...views] : views;
+  });
+
+  /**
+   * When each layer behind the people is, as one string, with whether the preview draws them there: what the matte
+   * follows besides the picture, so a drag of any other layer asks it for nothing.
+   */
+  private readonly behindKey = computed(() => {
+    const store = this.ctx.store;
+    if (!store.behindShown.value) return '';
+    let key = '';
+    for (const overlay of this.overlays.value) if (isBehind(overlay)) key += `${overlay.id}:${overlay.startMs}:${overlay.endMs}\n`;
+    return key;
   });
 
   /** TikTok's "Enter text" box, while a new (or emptied) text is being typed. */
@@ -460,8 +540,11 @@ export class VePreview implements EditorPlayer {
     // Round the layer where it is drawn now, which for a tracked one is where its thing has led it.
     const overlay = store.shownOverlay(selected);
     const bitmap = store.bitmaps.value.get(overlay.id);
-    const box = bitmap ? layerBox(overlay, bitmap, store.outputWidth.value) : null;
-    if (!bitmap || !box) return null;
+    const whole = bitmap ? layerBox(overlay, bitmap, store.outputWidth.value) : null;
+    if (!bitmap || !whole) return null;
+    // A photo on a surface is cut to the surface's shape, and so is the box round it.
+    const cut = store.overlayQuads.value.get(overlay.id)?.cut ?? null;
+    const box = cut ? { widthFrac: whole.widthFrac * cut.w, aspect: (whole.aspect * cut.w) / cut.h } : whole;
     const stage = this.stageSize.value;
     const shift = (handle: SelectionHandle): string => {
       if (!stage) return 'translate(0, 0)';
@@ -475,7 +558,7 @@ export class VePreview implements EditorPlayer {
       left: overlay.cx * 100,
       top: overlay.cy * 100,
       width: box.widthFrac * 100,
-      aspect: `${bitmap.wPx} / ${bitmap.hPx}`,
+      aspect: cut ? `${box.aspect}` : `${bitmap.wPx} / ${bitmap.hPx}`,
       transform: layerTransform(overlay.rotationDeg),
       iconTransform: `rotate(${-overlay.rotationDeg}deg)`,
       shiftDelete: shift('delete'),
@@ -741,7 +824,7 @@ export class VePreview implements EditorPlayer {
     this.setUp();
     this.attachExtras();
     // A render writes every layer back at rest; the moving ones go straight back where they are.
-    this.motion.update(this.layers.value, this.ctx.store.overlayMotions.value);
+    this.motion.update(this.layers.value, this.ctx.store.overlayMotions.value, this.ctx.store.overlayQuads.value);
     // The canvas is composited from the store and not from the DOM, so a render cannot move a
     // picture without something in the store having moved it - but a render is also the first
     // moment a newly written element exists, and the cheapest place to ask for the frame that puts
@@ -760,6 +843,8 @@ export class VePreview implements EditorPlayer {
     this.detachExtras();
     this.canvas?.destroy();
     this.canvas = null;
+    this.matte?.destroy();
+    this.matte = null;
     this.subjects?.destroy();
     this.subjects = null;
     this.trackOverlay?.destroy();
@@ -814,6 +899,12 @@ export class VePreview implements EditorPlayer {
 
     const store = this.ctx.store;
     this.canvas = new PreviewCanvas(store, canvas);
+    // The people cut out of every frame the picture paints, as it paints it; see [MatteCanvas].
+    if (this.matteEl) {
+      const matte = new MatteCanvas(store, this.matteEl, canvas);
+      this.matte = matte;
+      this.canvas.onPaint = atMs => matte.paint(atMs);
+    }
     this.player = new PreviewPlayer(store, {
       video: baseMedia,
       partner: partnerMedia,
@@ -839,12 +930,14 @@ export class VePreview implements EditorPlayer {
     this.player.start();
 
     if (this.subjectsEl) this.subjects = new SubjectOverlay(store, this.subjectsEl);
-    if (this.trackEl) this.trackOverlay = new TrackOverlay(store, this.trackEl);
+    if (this.trackEl) this.trackOverlay = new TrackOverlay(store, this.trackEl, { targets: this.trackTargets, hot: this.trackHot });
     this.gestures = new OverlayGestures(store, stage, {
       dragging: this.dragging,
       moving: this.moving,
       trashHot: this.trashHot,
       guides: this.guides,
+      trackTargets: this.trackTargets,
+      trackHot: this.trackHot,
       focusTap: (fx, fy) => {
         const id = this.subjects?.hitAt(fx, fy);
         if (id) store.toggleFocusSubject(id);
@@ -900,6 +993,15 @@ export class VePreview implements EditorPlayer {
       ),
     );
 
+    // The people put back over the layers behind them follow those layers' windows, the people found and the crop
+    // sheet, none of which moves the picture: a paused frame is painted again for the matte to be cut from it.
+    this.disposers.push(
+      deferredEffect(
+        () => [this.behindKey.value, store.peopleSources.value, store.panel.value === 'crop'] as const,
+        () => this.canvas?.request(),
+      ),
+    );
+
     // The subjects' outlines follow the Focus sheet, the frame its clip is on, and who is in focus.
     this.disposers.push(
       deferredEffect(
@@ -921,7 +1023,8 @@ export class VePreview implements EditorPlayer {
 
     // The Track sheet's box, run and path follow the box, the run, the track shown, the people found, the
     // playhead and the post - read only while the sheet is open, so a playing post does not ask a closed
-    // sheet for a frame thirty times a second.
+    // sheet for a frame thirty times a second. With the sheet shut, a layer being dragged lights up what it
+    // can be dropped on and the one under the finger; the drag over, the canvas draws once more, empty.
     this.disposers.push(
       deferredEffect(
         () =>
@@ -940,8 +1043,16 @@ export class VePreview implements EditorPlayer {
                 store.trackPeopleBoxes.value,
                 store.trackScene.value,
                 store.playheadMs.value,
+                // The four corners of a flat surface, and its run.
+                store.trackAimKind.value,
+                store.surfaceAim.value,
+                store.surfaceLive.value,
+                store.surfaceRunning.value,
+                store.surfaceThing.value,
               ] as const)
-            : null,
+            : this.dragging.value
+              ? ([this.trackHot.value, this.trackTargets.value, store.playheadMs.value] as const)
+              : null,
         () => this.trackOverlay?.request(),
       ),
     );
@@ -988,8 +1099,8 @@ export class VePreview implements EditorPlayer {
     // and a move or a preset changed under a paused playhead. Playing, the frame loop has it.
     this.disposers.push(
       deferredEffect(
-        () => [store.playheadMs.value, store.overlayMotions.value] as const,
-        ([, motions]) => this.motion.update(this.layers.value, motions),
+        () => [store.playheadMs.value, store.overlayMotions.value, store.overlayQuads.value] as const,
+        ([, motions, quads]) => this.motion.update(this.layers.value, motions, quads),
       ),
     );
 
@@ -1170,6 +1281,46 @@ export class VePreview implements EditorPlayer {
     if (clip) this.ctx.store.resetClipFraming(clip.id);
   };
 
+  /**
+   * One layer's bitmap as the render places it at rest: an effect over the whole frame, a layer on a surface unseen
+   * in the frame's corner until [LayerMotion] puts it on its quad, and every other layer where it was put.
+   */
+  private layerImage(layer: LayerView) {
+    return layer.effect ? (
+      <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} ref={this.motion.refFor(layer.id)} style={{ opacity: String(layer.opacity) }} />
+    ) : (
+      <img
+        key={layer.id}
+        class={{ 'pv__layer': true, 'pv__layer--aiming': !!layer.aiming }}
+        alt=""
+        draggable={false}
+        src={layer.png}
+        ref={this.motion.refFor(layer.id)}
+        style={
+          layer.quad
+            ? {
+                'left': '0%',
+                'top': '0%',
+                'width': `${layer.width}%`,
+                'aspect-ratio': layer.aspect,
+                'transform': 'none',
+                'transform-origin': '0 0',
+                'object-fit': layer.quad.cut ? 'cover' : 'fill',
+                'opacity': '0',
+              }
+            : {
+                'left': `${layer.left}%`,
+                'top': `${layer.top}%`,
+                'width': `${layer.width}%`,
+                'aspect-ratio': layer.aspect,
+                'transform': layer.transform,
+                'opacity': String(layer.opacity),
+              }
+        }
+      />
+    );
+  }
+
   /** The top-right handle: a text opens for typing; anything else is duplicated. */
   private readonly editLayer = () => {
     const store = this.ctx.store;
@@ -1264,28 +1415,10 @@ export class VePreview implements EditorPlayer {
                 ></video>
               ))}
 
-              {this.layers.value.map(layer =>
-                layer.effect ? (
-                  <img key={layer.id} class="pv__effect" alt="" draggable={false} src={layer.png} ref={this.motion.refFor(layer.id)} style={{ opacity: String(layer.opacity) }} />
-                ) : (
-                  <img
-                    key={layer.id}
-                    class={{ 'pv__layer': true, 'pv__layer--aiming': !!layer.aiming }}
-                    alt=""
-                    draggable={false}
-                    src={layer.png}
-                    ref={this.motion.refFor(layer.id)}
-                    style={{
-                      'left': `${layer.left}%`,
-                      'top': `${layer.top}%`,
-                      'width': `${layer.width}%`,
-                      'aspect-ratio': layer.aspect,
-                      'transform': layer.transform,
-                      'opacity': String(layer.opacity),
-                    }}
-                  />
-                ),
-              )}
+              {/* The layers behind the people first, under the people put back over them; see [MatteCanvas]. */}
+              {this.layers.value.map(layer => (layer.behind ? this.layerImage(layer) : null))}
+              <canvas key="matte" class="pv__matte" aria-hidden="true" ref={this.keepMatte}></canvas>
+              {this.layers.value.map(layer => (layer.behind ? null : this.layerImage(layer)))}
 
               {ph && (
                 <div
@@ -1302,7 +1435,10 @@ export class VePreview implements EditorPlayer {
                 </div>
               )}
 
-              {/* The Track sheet's box, run and path, over the layers so the box is never under the text it moves. */}
+              {/*
+                The Track sheet's box, run and path, and the things a dragged layer can be pinned to: over the
+                layers, so a box is never under the text it moves or the sticker being dropped on it.
+              */}
               <canvas key="track" class="pv__track" aria-hidden="true" ref={this.keepTrack}></canvas>
 
               {/*

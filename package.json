@@ -140,7 +140,7 @@
   "scripts": {
     "build": "npm run build:package && npm run build:wrappers",
     "build:package": "npm run clean && node scripts/finish-wrappers.mjs --scaffold && npm run build:plugin && npm run build:ui && npm run build:mcp && node scripts/module-type.mjs",
-    "build:plugin": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finish-build.mjs",
+    "build:plugin": "node scripts/build-tracker-worker.mjs && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finish-build.mjs",
     "build:ui": "stencil build",
     "build:mcp": "node scripts/build-mcp.mjs",
     "build:wrappers": "npm run build --workspace @capacitor-video-kit/react && npm run build --workspace @capacitor-video-kit/vue && npm --prefix packages/angular run build && node scripts/finish-wrappers.mjs && node scripts/module-type.mjs",

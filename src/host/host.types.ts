@@ -1,4 +1,5 @@
 import type { EditManifest, FindSubjectsResult, RasterContext } from '../editor';
+import type { RenderFeature } from '../video-composer/definitions';
 
 /**
  * Everything the editor needs from the application that hosts it.
@@ -596,6 +597,13 @@ export interface EditorRenderHost {
    * editing rather than before it.
    */
   encodeSupport?(frames: readonly { width: number; height: number; fps: number }[]): Promise<readonly EditorEncodeSupport[]>;
+
+  /**
+   * What this host's render draws beyond what every build draws ([RenderFeature]): the editor offers only the
+   * tools whose look the export keeps - Flat surface needs `overlayQuad`, Behind people `peopleMatte`.
+   * Optional, and a host that leaves it out is taken to draw none of them.
+   */
+  renderFeatures?(): Promise<readonly RenderFeature[]>;
 }
 
 export interface RenderRequest {

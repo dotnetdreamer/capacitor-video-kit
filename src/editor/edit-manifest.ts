@@ -302,6 +302,16 @@ export interface OverlayCommon {
    * build that does not know tracks draws it still, at that place.
    */
   follow?: OverlayFollow;
+  /**
+   * The layer is drawn BEHIND the people in the picture: a title the dancers pass in front of. Absent is a
+   * layer over the picture, which is every layer of every manifest written before it existed, and absent is
+   * what [toComposeSpec] turns into a layer with no `behind` on the wire, byte for byte the spec it was.
+   *
+   * Never on an effect, which covers the frame. Where the people are comes from Focus's people finder
+   * ([EditorMediaHost.findSubjects]) on the footage under the layer, and the render is handed it as the
+   * post's matte (`people-matte.ts`); an engine that cannot draw one draws the layer on top, as before.
+   */
+  behind?: true;
 }
 
 /**
@@ -317,6 +327,16 @@ export interface OverlayFollow {
   scaleWith?: true;
   /** The layer turns with the thing. Absent keeps it at its own angle. */
   turnWith?: true;
+  /**
+   * The layer is drawn ON the track's flat surface ([EditTrack.corners]), in perspective: a photo on a
+   * phone's screen, a name on a sign. Its rectangle is kept in the surface's own plane, fixed where the
+   * layer is drawn at the [pin] - its `cx`, `cy`, `scale` and `rotationDeg` there are against the surface as
+   * it would look seen square on - and every instant's quad is that rectangle through the surface's
+   * homography then. A photo on a surface is cut to the surface's shape. Absent, or on a track with no
+   * corners, is a layer that follows the thing flat, as every follow did before. A build that does not
+   * know surfaces draws the layer flat over the surface, moving with it.
+   */
+  onSurface?: true;
 }
 
 /**
@@ -376,6 +396,33 @@ export interface EditTrack {
    * is a path from one run.
    */
   seams?: TrackSeam[];
+  /**
+   * A look the track puts on its own footage, following the thing: the thing blurred, or everything but the
+   * thing dimmed or greyed. Absent is none. Drawn by the same Focus engine a segment's own [EditClip.focus]
+   * uses, from a mask made off the track, so a segment with a Focus of its own shows that instead.
+   */
+  look?: TrackLook;
+  /**
+   * A FLAT SURFACE's four corners at every sample, eight numbers each - x0, y0, x1, y1, x2, y2, x3, y3 for
+   * its top-left, top-right, bottom-right and bottom-left - as fractions of the oriented source, aligned with
+   * [atMs] exactly as [sure] is. The surface's middle, size and turn are [x], [y], [scale] and [turn] as for
+   * any track, so whatever follows it flat still does. Absent is a track of a thing, not a surface. A
+   * surface is tracked again whole rather than mended: a mend drops its corners.
+   */
+  corners?: number[];
+}
+
+/** The kinds of [TrackLook], in the order the tools offer them. */
+export const TRACK_LOOKS = ['blur', 'spotlight', 'pop'] as const;
+
+/**
+ * A look that follows a track ([EditTrack.look]). `blur` softens the thing itself - a face or a number plate
+ * hidden; `spotlight` dims everything but the thing; `pop` greys everything but the thing, which keeps its
+ * colour. [amount] is how strong, 0..1, never 0 (no look is no key).
+ */
+export interface TrackLook {
+  kind: (typeof TRACK_LOOKS)[number];
+  amount: number;
 }
 
 /**
@@ -652,6 +699,38 @@ export interface EditZoom {
    * side and the second of its before side.
    */
   chain?: boolean | 'in' | 'out';
+  /**
+   * The track this zoom follows, and how close: the camera keeps the thing in frame for the whole
+   * window instead of holding one area, and the ramps move between the whole frame and wherever the
+   * thing is. Absent is a zoom on one area, which is every zoom written before this existed.
+   *
+   * `cx`, `cy` and `scale` stay meaningful beside it: they are what the zoom plays where it cannot
+   * follow - its track taken off the post, or a build that does not know following - so they hold a
+   * still view of the thing that stands on its own. See [ZoomFollow].
+   */
+  follow?: ZoomFollow;
+}
+
+/**
+ * How close a following zoom ([EditZoom.follow]) frames its thing, in the order the zoom sheet offers
+ * them:
+ *  - `fill`: just close enough to hide the bars of a picture that does not fill the frame, so a wide
+ *    shot in a tall post becomes a tall window panning across it. The whole frame where the picture
+ *    already fills it.
+ *  - `mid`: the thing's box about 45% of the frame's height.
+ *  - `close`: about 70%.
+ * Neither of the last two goes wider than `fill` or past [MAX_ZOOM_SCALE].
+ */
+export type ZoomFraming = 'fill' | 'mid' | 'close';
+
+/** Every [ZoomFraming], in the order the zoom sheet offers them. The first is what an unknown one is read as. */
+export const ZOOM_FRAMINGS: readonly ZoomFraming[] = ['fill', 'mid', 'close'];
+
+/** A zoom following a track ([EditZoom.follow]). */
+export interface ZoomFollow {
+  /** The [EditTrack.id] followed. A track the post does not have is a zoom that holds its own area. */
+  trackId: string;
+  framing: ZoomFraming;
 }
 
 /** Every [ZoomEase], in the order a picker offers them; the first is the default. */
@@ -2090,6 +2169,8 @@ export function normaliseManifest(input: unknown): EditManifest {
         // The same for following a track, which an effect - covering the frame - never does.
         const follow = o.kind === 'effect' ? undefined : followOf(o);
         if (follow) common.follow = follow;
+        // And for standing behind the people, by the same rule: only a real `true`, and never an effect.
+        if (o.behind === true && o.kind !== 'effect') common.behind = true;
         switch (o.kind) {
           case 'sticker':
             return { ...common, kind: 'sticker', emoji: o.emoji ?? null, assetId: o.assetId ?? null };
@@ -2438,6 +2519,9 @@ export function isUntouched(manifest: EditManifest, durations: ReadonlyMap<strin
   // On a clip that fills the frame it shows nowhere, and the file is the picture exactly.
   if (manifest.background && manifest.fit === 'contain' && !fillsFrame(sourceAspect, manifest.output)) return false;
   if (manifest.overlays.length > 0) return false;
+  // A track's look changes the picture as a Focus does - a face blurred is the one edit that must never be
+  // posted as the file on disk. A track with no look draws nothing, and changes nothing.
+  if (manifest.tracks?.some(track => track.look)) return false;
   if (manifest.music || manifest.audioTracks?.some(track => track.clips.length > 0) || manifest.voiceovers.length > 0) return false;
   // [zoomWindow] is the same test the compiled camera makes, so a zoom the render would show is
   // never lost by posting the file as it is - and one parked past the end costs no re-encode.
@@ -2496,7 +2580,8 @@ function num(value: unknown, fallback: number): number {
  *
  * `rampOutMs` is kept only when it is a number, and `chain` only when it is `false`, `'in'` or `'out'`:
  * an absent key is the old zoom exactly, and a `chain: true` would be a second way of writing the
- * default that a patch comparing fields would read as a change.
+ * default that a patch comparing fields would read as a change. `follow` is kept when it names a track
+ * ([normaliseZoomFollow]), whether or not the post has that track: the zoom then holds its own area.
  */
 export function normaliseZoom(zoom: EditZoom): EditZoom {
   const scale = clamp(round4(num(zoom.scale, DEFAULT_ZOOM_SCALE)), MIN_STORED_ZOOM_SCALE, MAX_ZOOM_SCALE);
@@ -2517,7 +2602,30 @@ export function normaliseZoom(zoom: EditZoom): EditZoom {
     out.rampOutMs = Math.round(clamp(zoom.rampOutMs, 0, MAX_STORED_ZOOM_RAMP_MS));
   }
   if (zoom.chain === false || zoom.chain === 'in' || zoom.chain === 'out') out.chain = zoom.chain;
+  const follow = normaliseZoomFollow(zoom.follow);
+  if (follow) out.follow = follow;
   return out;
+}
+
+/**
+ * A zoom's follow as the model keeps it, or undefined for none: a track named by a string that is not
+ * empty, and a framing this version knows. An unknown framing is read as `fill`, the widest, rather
+ * than dropped, so the zoom still follows its thing. The very object comes back when it is already in
+ * shape, so a patch that did not touch it is no change at all (the fields are compared by identity).
+ */
+export function normaliseZoomFollow(value: unknown): ZoomFollow | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const trackId = raw['trackId'];
+  if (typeof trackId !== 'string' || !trackId) return undefined;
+  const known = ZOOM_FRAMINGS.find(framing => framing === raw['framing']);
+  if (known && Object.keys(raw).length === 2) return value as ZoomFollow;
+  return { trackId, framing: known ?? ZOOM_FRAMINGS[0] };
+}
+
+/** Whether two follows are the same track at the same framing; two absent ones are. */
+export function sameZoomFollow(a: ZoomFollow | undefined, b: ZoomFollow | undefined): boolean {
+  return a === b || (!!a && !!b && a.trackId === b.trackId && a.framing === b.framing);
 }
 
 /**

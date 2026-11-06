@@ -23,6 +23,7 @@ import {
   type EditManifest,
 } from '../editor';
 
+import { behindWindows, hasBehindLayers, peopleSourceKeys } from '../editor/people-matte';
 import { debugWarn } from '../host/debug';
 import type { CatalogueSound, EditorSource, PickedAudio, ResolvedEditorHost, SavedSound, SoundCategory } from '../host/host.types';
 import { resolve } from '../web-runtime/files';
@@ -413,7 +414,9 @@ export class EditorMedia {
   /**
    * Asks the host for the subjects of every source a FOCUSED segment plays
    * ([EditorMediaHost.findSubjects]), and puts how far each has got into [EditorStore.subjectTracks],
-   * where the Focus sheet shows it and the preview draws from it.
+   * where the Focus sheet shows it and the preview draws from it. The same for every source on screen
+   * while a layer is behind the people, where the export draws one there ([EditorStore.canPutBehind]):
+   * those people are what the layer is drawn under, a draft reopened and an undo included.
    *
    * It follows the MANIFEST, for the waveforms' reason: a focus arrives from the Focus sheet, from a
    * template, from a draft reopened and from an undo, and watching the manifest covers all of them in
@@ -425,7 +428,7 @@ export class EditorMedia {
     if (!this.host.media.findSubjects) return;
     this.stopWatchingSubjects = effect(() => {
       // Read INTO something, for the reason [watchForCopies] gives: a source added, a focus put on.
-      const reads = this.store.manifest.value.clips.length + this.store.clips.value.length + this.store.subjectTracks.value.size;
+      const reads = this.store.manifest.value.clips.length + this.store.clips.value.length + this.store.subjectTracks.value.size + Number(this.store.canPutBehind.value);
       if (reads >= 0) untracked(() => this.askForSubjects());
     });
   }
@@ -434,8 +437,9 @@ export class EditorMedia {
     if (this.destroyed) return;
     const manifest = this.store.manifest.peek();
     const known = this.store.subjectTracks.peek();
+    const behind = this.store.canPutBehind.peek() && hasBehindLayers(manifest) ? new Set(peopleSourceKeys(manifest, behindWindows(manifest))) : null;
     for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
-      if (!focusChangesPicture(clip.focus)) continue;
+      if (!focusChangesPicture(clip.focus) && !behind?.has(clip.clipKey)) continue;
       const key = clip.clipKey;
       if (known.has(key) || this.subjectsAsked.has(key)) continue;
       const source = this.store.clipByKey(key);

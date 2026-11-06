@@ -33,6 +33,11 @@ never reach the tree uiautomator reads on Android (see ve-slider): the word and 
 what Maestro has. Google's TalkBack on WebView 153 reads the slider's own name, and the pair is
 still there for a screen reader that does not.
 
+A zoom that FOLLOWS a track (Follow cam) has no level or area of its own to set: its camera keeps
+the thing in frame. The Level row and the hint give way to the track it follows, in its colour,
+with a quiet Stop following, and to its three framings, named like the curves (`Medium, selected`).
+Four rows still, inside the same budget.
+
 ## Properties
 
 | Property           | Attribute | Description | Type            | Default     |

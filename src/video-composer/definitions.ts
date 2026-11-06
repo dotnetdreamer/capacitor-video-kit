@@ -654,7 +654,62 @@ export interface ComposeOverlay {
    * when it builds its plan, so a still layer is placed by exactly the arithmetic it always was.
    */
   motion?: ComposeOverlayMotion;
+  /**
+   * The layer pinned onto a flat surface in the footage - a phone's screen, a sign, a wall - and drawn in
+   * perspective: per key, where the bitmap's four corners go on the output frame. Absent is a layer placed by
+   * the fields above and [motion] alone, which is every spec written before this key. An engine that does not
+   * report the `overlayQuad` feature ([CapabilitiesResult.features]) ignores it and draws the layer by
+   * [motion], which JS fills with the quad's best fit - its middle, size and turn - so an older build shows
+   * the layer flat where the surface is: never nothing, and never a refused render.
+   */
+  quad?: ComposeOverlayQuad;
+  /**
+   * The layer is drawn BEHIND the people in the picture, under the post's [ComposeSpec.matte], which puts
+   * the people back over it. Absent, or a spec with no matte, is a layer drawn over the picture as always.
+   * An engine without the `peopleMatte` feature ignores it and draws the layer on top.
+   */
+  behind?: boolean;
 }
+
+/**
+ * Where a layer's bitmap is drawn on a flat surface ([ComposeOverlay.quad]): keys interpolated in straight
+ * lines, corner by corner, the end keys held - but unlike [ComposeOverlayMotion] with no steps: [atMs] is
+ * STRICTLY increasing, which every parser checks. An instant whose quad is not convex, or has three corners on
+ * one line, draws nothing; the layer's alpha is [ComposeOverlay.opacity] times its motion's opacity, and the
+ * motion's place, size and turn are not used where the quad is. Corners are fractions of
+ * the OUTPUT frame, top-left origin, in the bitmap's own order: its top-left, top-right, bottom-right and
+ * bottom-left. Each instant's quad is drawn through the homography that takes the bitmap's rectangle onto
+ * it, so the bitmap is foreshortened as the surface is, and its alpha and [ComposeOverlay.opacity] apply as
+ * they do to any layer.
+ */
+export interface ComposeOverlayQuad {
+  atMs: number[];
+  /** Eight numbers per key: x0, y0, x1, y1, x2, y2, x3, y3. */
+  corners: number[];
+}
+
+/** The most keys one [ComposeOverlayQuad] carries; a render refuses more. */
+export const MAX_OVERLAY_QUAD_KEYS = 6000;
+
+/**
+ * The people mask of [ComposeSpec.matte], shaped exactly as a [ComposeFocus] is so every engine reads it with
+ * the code it reads a focus with, by the same rules - 1 to 2000 keys among them: which ids of its subject track
+ * are people put back in front, each with its level (0..1) keyed in time.
+ */
+export interface ComposeMatte {
+  /** The output-frame subject track (`VKST`): `file://` on a phone, `blob:` in a page, as [ComposeFocus.uri]. */
+  uri: string;
+  /** OUTPUT ms of the level keys. */
+  atMs: number[];
+  /** Each id the mask uses, with its level at each key: 1 puts the picture fully back over the layers behind. */
+  subjects: { id: number; focus: number[] }[];
+}
+
+/** What a build can draw beyond what every build draws ([CapabilitiesResult.features]). */
+export const RENDER_FEATURES = ['overlayQuad', 'peopleMatte'] as const;
+
+/** One of [RENDER_FEATURES]. */
+export type RenderFeature = (typeof RENDER_FEATURES)[number];
 
 /**
  * A layer's animation, LOWERED to keys exactly as [ComposeCamera] is: JS compiles every preset, ease,
@@ -1104,6 +1159,15 @@ export interface ComposeSpec {
    * already ask for - so a post with no zoom renders byte for byte as it always has.
    */
   camera?: ComposeCamera;
+  /**
+   * Where the people are on the OUTPUT frame, for layers drawn behind them ([ComposeOverlay.behind]): a
+   * subject track whose grid is the output frame's - not a source's - and whose times are OUTPUT ms, so an
+   * engine reads it with no clip's geometry at all. Each instant: the video is drawn, then the layers behind,
+   * then the video again wherever the mask says people are, then every other layer. Absent is no layer behind
+   * anyone, which is every spec written before this key. Ignored by an engine without the `peopleMatte`
+   * feature, which then draws the layers behind on top like any other.
+   */
+  matte?: ComposeMatte;
   /**
    * The colour of the canvas, 0..1 RGB: what the output frame is filled with UNDER every video
    * layer. Absent is black, which is every spec written before this key, and every engine is
@@ -1881,6 +1945,11 @@ export interface CapabilitiesResult {
   audioCodec?: string;
   container?: string;
   voiceRecording?: boolean;
+  /**
+   * What this build draws beyond every build: [RenderFeature]s. Absent is none, which is every build written
+   * before this key - the editor then offers no tool whose look this build would not export.
+   */
+  features?: RenderFeature[];
 }
 
 /** One frame an editor would like to offer: the size and the rate, with no bitrate decided yet. */

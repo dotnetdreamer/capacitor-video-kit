@@ -249,6 +249,8 @@ export class VeEditor {
     this.sheetDrag = new SheetDragger(this.store, this.openSheetSlot);
 
     this.unregisterBack = host.platform.registerBackHandler(this.onBack);
+    // Asked now, so the tools that need the export to draw something new are there when their sheets first open.
+    store.loadRenderFeatures();
 
     /*
      * Fired here so that an editor dropped into a page works with no setup at all, and routed

@@ -85,7 +85,11 @@ object CompositionBuilder {
 
     fun toComposition(
         plan: RenderPlan,
-        overlays: List<TextureOverlay>,
+        /**
+         * One per [RenderPlan.overlays], in its order, as the pre-flight decoded them - which is how each
+         * is matched to its placement ([splitUnderlay]). Empty draws no layer.
+         */
+        overlays: List<TimedBitmapOverlay>,
         progressTap: AtomicLong?,
         /**
          * The subject track of every focused clip, by [Focus.uri], as the pre-flight read them; see
@@ -223,8 +227,23 @@ object CompositionBuilder {
         // and the grade has never touched a bar - and before the overlays, which lie over the canvas
         // as they lie over a picture. See [BackgroundEffect].
         background?.let { compositionEffects += BackgroundEffect(it) }
-        overlays.chunked(OVERLAYS_PER_EFFECT).forEach { chunk ->
-            compositionEffects += OverlayEffect(ImmutableList.copyOf(chunk))
+        // The layers in perspective and the layers behind the people are drawn by a pass of their own,
+        // after the canvas and UNDER every other layer - see [LayerUnderlayEffect] - and so are taken out
+        // of Media3's batches. Asked once, here: a post with neither builds no such pass and hands Media3
+        // every layer, in order, exactly as it always has. The matte's track is the pre-flight's, read
+        // with the focuses' (see [VideoComposerPlugin]); a caller that never read it gets its layers behind
+        // with nobody put back over them, which the pass's first log line says.
+        val (under, over) = splitUnderlay(plan.overlays, overlays)
+        if (under.isNotEmpty()) {
+            val matte = plan.matte
+            compositionEffects += LayerUnderlayEffect(
+                layers = under.map { (overlay, placement) -> UnderlayLayer(overlay, placement.quad, placement.behind) },
+                matte = matte,
+                matteTrack = matte?.let { subjectTracks[it.uri] },
+            )
+        }
+        over.chunked(OVERLAYS_PER_EFFECT).forEach { chunk ->
+            compositionEffects += OverlayEffect(ImmutableList.copyOf<TextureOverlay>(chunk))
         }
 
         // The audio effect layers work on the FINISHED mix, so they are the composition's and no item's
@@ -269,6 +288,25 @@ object CompositionBuilder {
             builder.setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
         }
         return builder.build()
+    }
+
+    /**
+     * [overlays] - one per entry of [placements], in its order - split into the layers
+     * [LayerUnderlayEffect] draws, each with its placement, and the rest, for Media3's batches, both in
+     * the spec's order. A layer with no placement to match it stays Media3's, as every layer was. Generic
+     * only so the JVM tests can split something that is not a bitmap.
+     */
+    internal fun <T> splitUnderlay(
+        placements: List<RenderPlan.OverlayPlacement>,
+        overlays: List<T>,
+    ): Pair<List<Pair<T, RenderPlan.OverlayPlacement>>, List<T>> {
+        val under = ArrayList<Pair<T, RenderPlan.OverlayPlacement>>()
+        val over = ArrayList<T>(overlays.size)
+        for ((i, overlay) in overlays.withIndex()) {
+            val placement = placements.getOrNull(i)
+            if (placement != null && placement.drawnUnder) under += overlay to placement else over += overlay
+        }
+        return under to over
     }
 
     /**

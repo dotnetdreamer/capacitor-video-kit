@@ -3,6 +3,7 @@ import type {
   ComposeCamera,
   ComposeFit,
   ComposeFocus,
+  ComposeMatte,
   ComposeMusic,
   ComposeOverlay,
   ComposeOverlayMotion,
@@ -18,11 +19,12 @@ import type {
   FilterOp,
 } from '../definitions';
 
-import { MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
+import { MAX_FOCUS_BLUR, MAX_PLACEMENT_SIZE, MAX_VIDEO_TRACKS, byteCeiling, placementRange } from '../../editor';
 import { normaliseCamera } from '../../editor/camera';
 import { FocusError, normaliseComposeFocus } from '../../editor/focus';
 import { RectMotionError, normaliseRectMotion } from '../../editor/layout-motion';
 import { OverlayMotionError, normaliseOverlayMotion } from '../../editor/motion';
+import { normaliseOverlayQuad } from '../../editor/surface';
 import { AudioEffectWindowError, normaliseAudioEffectWindows } from '../../editor/audio-effect-windows';
 import { SoundEffectError, normaliseSoundEffect } from '../../editor/sound-effects';
 import { batchIdRefusal } from '../batch-id';
@@ -208,6 +210,14 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     // something: absent is what the plan tests to place the layer as it always has.
     const motion = readOverlayMotion((overlay as unknown as Record<string, unknown>)['motion'], `${path}.motion`);
     if (motion) read.motion = motion;
+    // A layer on a flat surface, after its motion as the native parsers read it. One that is not a quad by
+    // [normaliseOverlayQuad]'s rules is no quad, and the layer is drawn by its motion, as a build without quads
+    // draws it.
+    const quad = normaliseOverlayQuad((overlay as unknown as Record<string, unknown>)['quad']);
+    if (quad) read.quad = quad;
+    // Behind the people, after the quad as the native parsers read it, and only a real `true`, as only one
+    // inverts a focus. Whether there is a matte to draw it under is the render's to say.
+    if ((overlay as unknown as Record<string, unknown>)['behind'] === true) read.behind = true;
     return read;
   });
 
@@ -216,6 +226,8 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
   // The canvas colour by the tints' own rule - exactly three finite numbers, each held to 0..1 - since
   // it is the same kind of number, and the native parsers read it with the reader their tints use.
   const background = readTint(spec.background, 'background');
+  // After the canvas, as the native parsers read it: the people matte the layers behind are drawn under.
+  const matte = readMatte((spec as unknown as Record<string, unknown>)['matte']);
 
   const durationMs = Math.max(0, Math.round(finite(spec.durationMs, 0)));
 
@@ -247,6 +259,8 @@ export function validateSpec(input: ComposeSpec): ComposeSpec {
     // what the plan tests to take the path every post without a zoom has always taken.
     ...(camera ? { camera } : {}),
     ...(background ? { background } : {}),
+    // Left off for none, for the camera's reason: absent is what the render tests to draw no matte pass.
+    ...(matte ? { matte } : {}),
     output: {
       width,
       height,
@@ -484,6 +498,22 @@ function readFocus(value: unknown, path: string): ComposeFocus | null {
     const at = error.field ? `${path}.${error.field}` : path;
     throw new SpecError(at, `invalid_spec:${at}${error.detail}`);
   }
+}
+
+/**
+ * The people matte - `ComposeSpec.matte` - or null for none: no key, or JSON null. Refused for exactly what a
+ * focus is refused for, by the focus's own reader, since the two share their `uri`, `atMs` and `subjects` and
+ * the native parsers read both with one function (`parseSubjectKeys`): it is handed those three keys with a
+ * blur it keeps, so the matte is never dropped as a focus that changes nothing. Its levels are clamped to 0..1
+ * and every other key is left behind. A refusal names its path under `matte`.
+ */
+function readMatte(value: unknown): ComposeMatte | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new SpecError('matte');
+  const raw = value as Record<string, unknown>;
+  const read = readFocus({ uri: raw['uri'], atMs: raw['atMs'], subjects: raw['subjects'], blur: MAX_FOCUS_BLUR }, 'matte');
+  if (!read) throw new SpecError('matte');
+  return { uri: read.uri, atMs: read.atMs, subjects: read.subjects };
 }
 
 function readFit(value: unknown): ComposeFit {

@@ -1,4 +1,4 @@
-import type { EditTrack, OverlayFollow, TrackPin, TrackSeam } from './edit-manifest';
+import { TRACK_LOOKS, type EditTrack, type OverlayFollow, type TrackLook, type TrackPin, type TrackSeam } from './edit-manifest';
 
 /**
  * A track as the manifest keeps it ([EditTrack]) - a thing in the footage, a layer of its own that any
@@ -94,6 +94,10 @@ export function normaliseEditTrack(value: unknown): EditTrack | undefined {
   if (n === 0 || x.length !== n || y.length !== n || scale.length !== n || turn.length !== n) return undefined;
   const sureIn = value['sure'];
   const sures = Array.isArray(sureIn) && sureIn.length === n ? sureIn : null;
+  // A surface's corners, eight a sample: a list of any other length is no surface, and the track follows its middle.
+  const cornersIn = value['corners'];
+  const quads = Array.isArray(cornersIn) && cornersIn.length === 8 * n ? (cornersIn as unknown[]) : null;
+  const corners: number[] = [];
 
   const name = value['name'];
   const hue = value['hue'];
@@ -122,6 +126,8 @@ export function normaliseEditTrack(value: unknown): EditTrack | undefined {
     const ps = scale[i];
     const pt = turn[i];
     if (!finite(t) || !finite(px) || !finite(py) || !positive(ps) || !finite(pt)) continue;
+    // A surface's sample whose corners cannot be read goes with them, as one with a broken channel does.
+    if (quads && !quads.slice(8 * i, 8 * i + 8).every(finite)) continue;
     const time = Math.round(t);
     if (track.atMs.length > 0 && !(time > track.atMs[track.atMs.length - 1]!)) continue;
     track.atMs.push(time);
@@ -131,6 +137,7 @@ export function normaliseEditTrack(value: unknown): EditTrack | undefined {
     track.turn.push(clampTo(pt, -36_000, 36_000));
     const s = sures?.[i];
     sure.push(finite(s) ? clampTo(Math.round(s), 0, 100) : 100);
+    if (quads) for (let k = 0; k < 8; k++) corners.push(clampTo(quads[8 * i + k] as number, -2, 3));
   }
   if (track.atMs.length === 0) return undefined;
   // Sure throughout is the same as saying nothing, which is how a track from before version 21 reads.
@@ -142,8 +149,24 @@ export function normaliseEditTrack(value: unknown): EditTrack | undefined {
   if (finite(smooth)) track.smooth = clampTo(Math.round(smooth * 100) / 100, 0, 1);
   const seams = normaliseSeams(value['seams'], track.atMs);
   if (seams.length > 0) track.seams = seams;
+  const look = normaliseTrackLook(value['look']);
+  if (look) track.look = look;
+  if (quads) track.corners = corners;
 
   return sameTrack(value as unknown as EditTrack, track) ? (value as unknown as EditTrack) : track;
+}
+
+/** How strong a look is when nothing says: enough to hide a face, not so much the frame looks broken. */
+export const DEFAULT_LOOK_AMOUNT = 0.7;
+
+/** A track's look as it is kept, or `undefined` for none: a kind this version knows, and an amount over 0. */
+export function normaliseTrackLook(value: unknown): TrackLook | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = value['kind'];
+  if (typeof kind !== 'string' || !(TRACK_LOOKS as readonly string[]).includes(kind)) return undefined;
+  const raw = value['amount'];
+  const amount = finite(raw) ? clampTo(Math.round(raw * 100) / 100, 0, 1) : DEFAULT_LOOK_AMOUNT;
+  return amount > 0 ? { kind: kind as TrackLook['kind'], amount } : undefined;
 }
 
 /** "Track 1", "Track 2", ...: the name a new track lands with, the lowest number no track of the post is called. */
@@ -183,6 +206,7 @@ export function normaliseOverlayFollow(value: unknown): OverlayFollow | undefine
   const follow: OverlayFollow = { trackId, pin };
   if (value['scaleWith'] === true) follow.scaleWith = true;
   if (value['turnWith'] === true) follow.turnWith = true;
+  if (value['onSurface'] === true) follow.onSurface = true;
   return sameFollow(value as unknown as OverlayFollow, follow) ? (value as unknown as OverlayFollow) : follow;
 }
 
@@ -298,10 +322,18 @@ export function sameTrack(a: EditTrack | undefined, b: EditTrack | undefined): b
     sameArray(a.turn, b.turn) &&
     sameArray(a.sure ?? [], b.sure ?? []) &&
     sameArray(a.lost ?? [], b.lost ?? []) &&
+    sameArray(a.corners ?? [], b.corners ?? []) &&
     sameSeams(a.seams ?? [], b.seams ?? []) &&
+    sameLook(a.look, b.look) &&
     sameKeys(a, b) &&
     sameKeys(a.box, b.box)
   );
+}
+
+function sameLook(a: TrackLook | undefined, b: TrackLook | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  return a.kind === b.kind && a.amount === b.amount && sameKeys(a, b);
 }
 
 /** Two follows that say the same thing. */
@@ -316,6 +348,7 @@ export function sameFollow(a: OverlayFollow | undefined, b: OverlayFollow | unde
     a.pin?.grow === b.pin?.grow &&
     a.scaleWith === b.scaleWith &&
     a.turnWith === b.turnWith &&
+    a.onSurface === b.onSurface &&
     sameKeys(a, b) &&
     !!a.pin &&
     !!b.pin &&
@@ -847,6 +880,8 @@ export function mendTrack(track: EditTrack, run: RunSamples): EditTrack {
     if (b > a) lost.push(a, b);
   }
   const mended: EditTrack = { ...track, atMs, x, y, scale, turn };
+  // A surface is tracked again whole, never mended: what a mend leaves follows the surface's middle.
+  delete mended.corners;
   if (sure.some(s => s < 100)) mended.sure = sure;
   else delete mended.sure;
   if (lost.length > 0) mended.lost = lost;

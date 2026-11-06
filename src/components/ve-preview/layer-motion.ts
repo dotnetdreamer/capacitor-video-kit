@@ -1,5 +1,7 @@
+import { isConvexQuad, multiplyH, squareToQuad } from '../../editor/homography';
 import { overlayMotionAt, type OverlayMotionSample } from '../../editor/motion';
-import type { ComposeOverlayMotion } from '../../video-composer/definitions';
+import { quadAt } from '../../editor/surface';
+import type { ComposeOverlayMotion, ComposeOverlayQuad } from '../../video-composer/definitions';
 
 import { layerTransform } from './overlay-gestures';
 
@@ -20,6 +22,11 @@ export interface RestingLayer {
    * is typed - a layer that fades in would otherwise be invisible under a playhead before its window.
    */
   held?: boolean;
+  /**
+   * A layer ON a flat surface: its `<img>` is a box this share of the frame's width across, at rest in the
+   * frame's top-left corner, and every frame puts it on its quad ([quadTransform]). Absent for every other layer.
+   */
+  quad?: { widthFrac: number; aspect: number };
 }
 
 /**
@@ -42,20 +49,32 @@ export interface RestingLayer {
  *
  * The selection box and its handles stay at rest: they are how a layer is taken hold of, and a
  * handle that danced with a pulsing sticker would be a handle nobody could hit.
+ *
+ * A layer ON a flat surface is put on its quad every frame instead - the render's own keys, read through
+ * the one reading of them (`quadAt`) - as a CSS `matrix3d` that takes its box onto the quad, so it is
+ * foreshortened in the preview exactly as in the file, its opacity its motion's as any layer's. The vdom
+ * rests it unseen in the frame's corner, and an instant whose quad no engine would draw leaves it unseen.
  */
 export class LayerMotion {
   private readonly elements = new Map<string, HTMLElement>();
   private readonly refs = new Map<string, (el?: HTMLElement) => void>();
   private layers: readonly RestingLayer[] = [];
   private motions: ReadonlyMap<string, ComposeOverlayMotion> = new Map();
+  private quads: ReadonlyMap<string, { quad: ComposeOverlayQuad }> = new Map();
   /** The layers this has written a pose into, which have to be put back at rest if their motion goes. */
   private readonly moved = new Set<string>();
   private playing = false;
   private rafId = 0;
   private destroyed = false;
 
-  /** @param clock the output instant the preview is showing: the player's, which runs smoothly while it plays. */
-  constructor(private readonly clock: () => number) {}
+  /**
+   * @param clock the output instant the preview is showing: the player's, which runs smoothly while it plays.
+   * @param frame the frame's size on screen, in CSS pixels, which a quad's matrix is worked out in; null before it is measured.
+   */
+  constructor(
+    private readonly clock: () => number,
+    private readonly frame: () => { width: number; height: number } | null = () => null,
+  ) {}
 
   /**
    * The ref for one layer's `<img>`, made once per id and never again: a fresh arrow every render is
@@ -76,9 +95,10 @@ export class LayerMotion {
    * What is on screen and how each of it moves, after a render or an edit, and every moving layer put
    * where it is at this instant. Nothing is kept for a layer that has left.
    */
-  update(layers: readonly RestingLayer[], motions: ReadonlyMap<string, ComposeOverlayMotion>): void {
+  update(layers: readonly RestingLayer[], motions: ReadonlyMap<string, ComposeOverlayMotion>, quads: ReadonlyMap<string, { quad: ComposeOverlayQuad }> = this.quads): void {
     this.layers = layers;
     this.motions = motions;
+    this.quads = quads;
     const shown = new Set(layers.map(layer => layer.id));
     for (const id of this.refs.keys()) if (!shown.has(id) && !this.elements.has(id)) this.refs.delete(id);
     // A layer whose animation was just taken away, or that is now held at rest, may have been left
@@ -104,8 +124,17 @@ export class LayerMotion {
 
   /** Every moving layer on screen, at `atMs` - the clock's instant unless told otherwise. */
   apply(atMs: number = this.clock()): void {
-    if (this.destroyed || this.motions.size === 0) return;
+    if (this.destroyed || (this.motions.size === 0 && this.quads.size === 0)) return;
     for (const layer of this.layers) {
+      const surface = layer.quad && this.quads.get(layer.id);
+      if (surface && layer.quad) {
+        const el = this.elements.get(layer.id);
+        if (el) {
+          this.writeQuad(el, layer, layer.quad, surface.quad, atMs);
+          this.moved.add(layer.id);
+        }
+        continue;
+      }
       const motion = layer.held ? undefined : this.motions.get(layer.id);
       const el = motion && this.elements.get(layer.id);
       if (!motion || !el) continue;
@@ -124,7 +153,19 @@ export class LayerMotion {
   }
 
   private moves(layer: RestingLayer): boolean {
-    return !layer.held && this.motions.has(layer.id);
+    return (!layer.held && this.motions.has(layer.id)) || (!!layer.quad && this.quads.has(layer.id));
+  }
+
+  /** A layer on a surface put on its quad at `atMs`, its opacity its own times its motion's; unseen where the quad draws nothing. */
+  private writeQuad(el: HTMLElement, layer: RestingLayer, box: { widthFrac: number; aspect: number }, quad: ComposeOverlayQuad, atMs: number): void {
+    const frame = this.frame();
+    const corners = quadAt(quad, atMs);
+    const width = frame ? box.widthFrac * frame.width : 0;
+    const transform = frame && corners && width > 0 && box.aspect > 0 ? quadTransform(corners, frame.width, frame.height, width, width / box.aspect) : null;
+    const pose = this.motions.get(layer.id);
+    const opacity = transform ? String(layer.opacity * (overlayMotionAt(pose, atMs)?.opacity ?? 1)) : '0';
+    if (el.style.opacity !== opacity) el.style.opacity = opacity;
+    if (transform && el.style.transform !== transform) el.style.transform = transform;
   }
 
   /** The frame loop runs only while the post plays AND something on screen moves. */
@@ -141,6 +182,25 @@ export class LayerMotion {
       this.rafId = 0;
     }
   }
+}
+
+/**
+ * The CSS `matrix3d` that takes a box `boxW` by `boxH` pixels, its origin at its top-left, onto the quad
+ * `corners` (fractions of a frame `frameW` by `frameH`, a picture's corner order): the homography of the
+ * box onto the quad, as the 4 by 4 matrix CSS reads in column order. Null for a quad an engine draws nothing
+ * for - not convex, or three corners in a line.
+ */
+export function quadTransform(corners: readonly number[], frameW: number, frameH: number, boxW: number, boxH: number): string | null {
+  const px = corners.map((v, k) => v * (k % 2 === 0 ? frameW : frameH));
+  const square = isConvexQuad(px) && boxW > 0 && boxH > 0 ? squareToQuad(px) : null;
+  if (!square) return null;
+  const h = multiplyH(square, [1 / boxW, 0, 0, 0, 1 / boxH, 0, 0, 0, 1]);
+  const s = h[8]!;
+  if (!(Math.abs(s) > 1e-12)) return null;
+  const m = h.map(v => v / s);
+  const cells = [m[0]!, m[3]!, 0, m[6]!, m[1]!, m[4]!, 0, m[7]!, 0, 0, 1, 0, m[2]!, m[5]!, 0, 1];
+  if (!cells.every(Number.isFinite)) return null;
+  return `matrix3d(${cells.map(v => String(Number(v.toPrecision(10)))).join(', ')})`;
 }
 
 /**

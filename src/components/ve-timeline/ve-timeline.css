@@ -990,6 +990,17 @@
   box-shadow: 0 0 0 1.5px var(--ve-lane-ink, #2a0a33);
 }
 
+/*
+ * A lane whose layer is behind the people wears two of them after its words: a note beside the name, as a
+ * track's look is, and gone with the words on a lane too short for them.
+ */
+.item__behind {
+  flex: 0 0 auto;
+  display: inline-flex;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
 .item--glyph .item__label > .item__follow {
   top: 5px;
   right: 5px;
@@ -1111,6 +1122,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The look the track puts on its thing, as its tool's glyph: a note beside the name, as the pins are. */
+.item__label .item__look {
+  font-size: 12px;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+}
+
 /* A bar too short for the name is its dot alone, centred. The name is still the button's. */
 .item--tracked-short .item__label {
   justify-content: center;
@@ -1119,6 +1136,7 @@
 }
 
 .item--tracked-short .item__text,
+.item--tracked-short .item__look,
 .item--tracked-short .item__pinned {
   display: none;
 }

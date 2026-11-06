@@ -362,6 +362,102 @@ describe('composerRenderHost: focus', () => {
   });
 });
 
+describe('composerRenderHost: track looks', () => {
+  /** A render of `sources` whose first clip's footage has a blurred thing tracked through its first second. */
+  function looked(sources: EditorSource[] = [CLIP]): RenderRequest {
+    const plain = request({}, sources);
+    const clip = plain.manifest.clips[0]!;
+    const atMs = [0, 500, 1000];
+    const manifest: EditManifest = {
+      ...plain.manifest,
+      tracks: [
+        {
+          id: 'trk',
+          name: 'Face',
+          hue: 0,
+          clipId: clip.id,
+          clipKey: clip.clipKey,
+          aspect: 9 / 16,
+          box: { w: 0.2, h: 0.1 },
+          atMs,
+          x: atMs.map(() => 0.5),
+          y: atMs.map(() => 0.4),
+          scale: atMs.map(() => 1),
+          turn: atMs.map(() => 0),
+          look: { kind: 'blur', amount: 0.7 },
+        },
+      ],
+    };
+    return { ...plain, manifest, raster: raster(manifest) };
+  }
+
+  it('draws a looked clip from a subject track it makes, handed over as a blob and let go of once the job has settled', async () => {
+    const made = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:https://example.test/look');
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    let revokedBeforeTheJob = -1;
+    bridge.compose.mockImplementation(async (spec) => {
+      revokedBeforeTheJob = revoked.mock.calls.length;
+      queueMicrotask(() => emit('completed', { ...RESULT, jobId: spec.jobId }));
+      return { jobId: spec.jobId };
+    });
+
+    await host().render(looked());
+    expect(bridge.findSubjects).not.toHaveBeenCalled();
+    const focus = composed().clips[0]!.focus!;
+    expect(focus).toMatchObject({ uri: 'blob:https://example.test/look', atMs: [0], blur: 0.021, invert: true });
+    expect(focus.subjects.map((subject) => subject.id)).toEqual([1, 2, 3, 4, 5]);
+    // The blob is the subject track itself.
+    expect(made).toHaveBeenCalledTimes(1);
+    const bytes = new Uint8Array(await (made.mock.calls[0]![0] as Blob).arrayBuffer());
+    expect(String.fromCharCode(...bytes.subarray(0, 4))).toBe('VKST');
+    expect(revokedBeforeTheJob).toBe(0);
+    expect(revoked).toHaveBeenCalledWith('blob:https://example.test/look');
+  });
+
+  it('hands the two halves of a cut the one track, under one URL', async () => {
+    finishing();
+    const made = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:https://example.test/look');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    const whole = looked();
+    const clip = whole.manifest.clips[0]!;
+    const manifest: EditManifest = { ...whole.manifest, clips: [{ ...clip, outMs: 1000 }, { ...clip, id: `${clip.id}-2`, inMs: 1000 }] };
+
+    await host().render({ ...whole, manifest, raster: raster(manifest) });
+    expect(made).toHaveBeenCalledTimes(1);
+    expect(composed().clips.map((c) => c.focus?.uri)).toEqual(['blob:https://example.test/look', 'blob:https://example.test/look']);
+  });
+
+  it('stages the made track with the clip on a phone, as the page’s own search is', async () => {
+    bridge.native = true;
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:capacitor://localhost/look');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob([new Uint8Array([86, 75, 83, 84])], { type: 'application/octet-stream' }) })));
+    bridge.stageRenderInput.mockImplementation(async ({ uri, extension }) => ({ uri: uri ?? `file:///tmp/videokit-render-inputs/1${extension ? `.${extension}` : ''}` }));
+    finishing();
+
+    await host().render(looked());
+    expect(composed().clips[0]!.uri).toBe(CLIP.sourcePath);
+    expect(composed().clips[0]!.focus?.uri).toBe('file:///tmp/videokit-render-inputs/1');
+  });
+
+  it('lets go of the made tracks when the render fails too', async () => {
+    failing({ code: 'unknown' });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:https://example.test/look');
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+
+    await expect(host().render(looked())).rejects.toBeInstanceOf(RenderFailedError);
+    expect(revoked).toHaveBeenCalledWith('blob:https://example.test/look');
+  });
+
+  it('makes nothing for a post with no look', async () => {
+    finishing();
+    const made = vi.spyOn(URL, 'createObjectURL');
+    await host().render(request());
+    expect(made).not.toHaveBeenCalled();
+    expect(composed().clips[0]!.focus).toBeUndefined();
+  });
+});
+
 describe('composerRenderHost: failures', () => {
   it.each([
     ['no_space', 'no_space'],

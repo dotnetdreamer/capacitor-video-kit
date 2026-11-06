@@ -47,6 +47,8 @@ import { computedWith } from '../../state/computed-with';
 import type { EditorStore } from '../../state/editor-store';
 import { clipWaveKey, type EditorSelection, type TrackRunView } from '../../state/editor.types';
 import { SOUND_EFFECT_ICONS } from '../ve-audio-effects-sheet/effect-icons';
+import { TRACK_LOOK_NAMES } from '../ve-track-sheet/look-names';
+import { ZOOM_FRAMING_LABELS } from '../ve-zoom-sheet/zoom-labels';
 import {
   musicEndTrim,
   musicStartTrim,
@@ -299,6 +301,8 @@ interface LayerLaneView {
   image: string | null;
   /** The colour of the track the layer follows, as its dot is drawn in, or null for a layer that follows none. */
   follow: string | null;
+  /** The layer is behind the people in the picture, where the editor draws it there: a people glyph after its words. */
+  behind: boolean;
 }
 
 /**
@@ -312,6 +316,8 @@ interface TrackedRowView {
   name: string;
   /** `2 pinned`: how many layers follow the track, or null when none does. */
   pinned: string | null;
+  /** The look the track puts on its thing, as its tool's glyph beside the name, or null for none. */
+  look: EditorIconName | null;
   selected: boolean;
   /** The whole accessible name: `Track 1, 2 spots to check`, or with `, selected` on the end. */
   label: string;
@@ -393,9 +399,11 @@ interface ZoomBarView {
   rampInPx: number;
   rampOutPx: number;
   selected: boolean;
-  /** `2.0x`, on the bar. */
+  /** The zoom follows a track (Follow cam): a video camera on the bar rather than a magnifier. */
+  follows: boolean;
+  /** `2.0x`, on the bar, or a following zoom's framing, `Medium`. */
   text: string;
-  /** `Zoom 2.0x`, or `Zoom 2.0x, selected`. */
+  /** `Zoom 2.0x`, or `Zoom 2.0x, selected`; `Follow cam, Medium` for one that follows. */
   label: string;
 }
 
@@ -934,6 +942,7 @@ export class VeTimeline {
           hue: trackHue(track.hue),
           name: track.name,
           pinned: followers > 0 ? `${followers} pinned` : null,
+          look: track.look ? TRACK_LOOK_NAMES[track.look.kind].icon : null,
           selected,
           label: trackedRowLabel(track.name, spots, selected),
           version: pathVersion(track),
@@ -952,6 +961,7 @@ export class VeTimeline {
           x.hue === y.hue &&
           x.name === y.name &&
           x.pinned === y.pinned &&
+          x.look === y.look &&
           x.selected === y.selected &&
           x.label === y.label &&
           x.version === y.version &&
@@ -1060,6 +1070,7 @@ export class VeTimeline {
           ...zoomBar({ startMs: start, endMs: end, rampInMs: spans?.inMs ?? 0, rampOutMs: spans?.outMs ?? 0 }, pps, pad),
           selected: selection?.kind === 'overlay' && selection.id === overlay.id,
           follow: followed ? trackHue(followed.track.hue) : null,
+          behind: overlay.behind === true && overlay.kind !== 'effect' && store.canPutBehind.value,
           ...this.laneContent(overlay),
         });
       }
@@ -1079,7 +1090,8 @@ export class VeTimeline {
           x.label === y.label &&
           x.emoji === y.emoji &&
           x.image === y.image &&
-          x.follow === y.follow,
+          x.follow === y.follow &&
+          x.behind === y.behind,
       ),
   );
 
@@ -1491,18 +1503,34 @@ export class VeTimeline {
       const pps = store.pps.value;
       const pad = this.pad.value;
       const selection = store.selection.value;
-      const scales = new Map(zooms.map(zoom => [zoom.id, zoom.scale]));
+      const byId = new Map(zooms.map(zoom => [zoom.id, zoom]));
+      const tracks = store.tracks.value;
       return zoomSlots(zooms, store.totalMs.value).map(slot => {
         const selected = selection?.kind === 'zoom' && selection.id === slot.id;
-        const scale = scales.get(slot.id) ?? 1;
-        return { id: slot.id, ...zoomBar(slot, pps, pad), selected, text: `${scale.toFixed(1)}x`, label: zoomBarLabel(scale, selected) };
+        const zoom = byId.get(slot.id);
+        const scale = zoom?.scale ?? 1;
+        // Only a track the post has: a zoom whose track was taken off holds its own area, and says its level.
+        const framing = zoom?.follow && tracks.some(track => track.id === zoom.follow!.trackId) ? ZOOM_FRAMING_LABELS[zoom.follow.framing] : null;
+        if (framing) {
+          const name = `Follow cam, ${framing}`;
+          return { id: slot.id, ...zoomBar(slot, pps, pad), selected, follows: true, text: framing, label: selected ? `${name}, selected` : name };
+        }
+        return { id: slot.id, ...zoomBar(slot, pps, pad), selected, follows: false, text: `${scale.toFixed(1)}x`, label: zoomBarLabel(scale, selected) };
       });
     },
     (a, b) =>
       sameList(
         a,
         b,
-        (x, y) => x.id === y.id && x.x === y.x && x.w === y.w && x.rampInPx === y.rampInPx && x.rampOutPx === y.rampOutPx && x.selected === y.selected && x.label === y.label,
+        (x, y) =>
+          x.id === y.id &&
+          x.x === y.x &&
+          x.w === y.w &&
+          x.rampInPx === y.rampInPx &&
+          x.rampOutPx === y.rampOutPx &&
+          x.selected === y.selected &&
+          x.follows === y.follows &&
+          x.label === y.label,
       ),
   );
 
@@ -4143,7 +4171,7 @@ export class VeTimeline {
             <span class="item__ramp item__ramp--in" aria-hidden="true"></span>
             <span class="item__ramp item__ramp--out" aria-hidden="true"></span>
             <span class="item__label" aria-hidden="true">
-              <ve-icon name="search-outline"></ve-icon>
+              <ve-icon name={bar.follows ? 'videocam-outline' : 'search-outline'}></ve-icon>
               <span class="item__text">{bar.text}</span>
             </span>
           </button>
@@ -4204,6 +4232,7 @@ export class VeTimeline {
               <span class="item__text" key="text">
                 {row.name}
               </span>
+              {row.look ? <ve-icon class="item__look" key="look" name={row.look}></ve-icon> : null}
               {row.pinned ? (
                 <span class="item__pinned" key="pinned">
                   {row.pinned}
@@ -4466,14 +4495,24 @@ export class VeTimeline {
   /**
    * A lane's glyph first, then which one it is: a sticker's picture, a photo's thumbnail, its words -
    * and before the words, on a layer that follows a track, a dot in that track's colour, so what
-   * follows what reads down the timeline from the track's row to the lanes under it.
+   * follows what reads down the timeline from the track's row to the lanes under it. After the words,
+   * on a layer behind the people, two people, and the words say so to a screen reader too.
    */
   private laneLabel(lane: LayerLaneView) {
-    const text = (
+    const words = (
       <span class="item__text" key="text">
         {lane.label}
       </span>
     );
+    const text = lane.behind
+      ? [
+          words,
+          <span class="item__behind" key="behind">
+            <ve-icon name="people" aria-hidden="true"></ve-icon>
+            <span class="tl__hidden-name">, behind people</span>
+          </span>,
+        ]
+      : words;
     const follow = lane.follow ? <span class="item__follow" key="follow" aria-hidden="true" style={{ background: lane.follow }}></span> : null;
     switch (lane.kind) {
       case 'sticker':

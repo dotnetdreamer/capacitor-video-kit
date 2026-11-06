@@ -3,9 +3,9 @@ import { Component, Prop } from '@stencil/core';
 import { closeWhenGone } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, zoomRampMs, zoomRampPatch, type ZoomEase } from '../../editor';
+import { MAX_ZOOM_RAMP_MS, MAX_ZOOM_SCALE, MIN_ZOOM_SCALE, ZOOM_FRAMINGS, zoomRampMs, zoomRampPatch, type ZoomEase, type ZoomFraming } from '../../editor';
 import type { CoalesceKey } from '../../state/editor-store';
-import { zoomLevelLabel, zoomRampLabel } from './zoom-labels';
+import { ZOOM_FRAMING_LABELS, zoomLevelLabel, zoomRampLabel } from './zoom-labels';
 
 /** The three curves, in the order the row shows them, with the word each is shown by. */
 const EASES: readonly { id: ZoomEase; label: string }[] = [
@@ -46,6 +46,11 @@ const RAMP_STEP_MS = 100;
  * never reach the tree uiautomator reads on Android (see ve-slider): the word and the number are
  * what Maestro has. Google's TalkBack on WebView 153 reads the slider's own name, and the pair is
  * still there for a screen reader that does not.
+ *
+ * A zoom that FOLLOWS a track (Follow cam) has no level or area of its own to set: its camera keeps
+ * the thing in frame. The Level row and the hint give way to the track it follows, in its colour,
+ * with a quiet Stop following, and to its three framings, named like the curves (`Medium, selected`).
+ * Four rows still, inside the same budget.
  */
 @Component({
   tag: 've-zoom-sheet',
@@ -145,35 +150,84 @@ export class VeZoomSheet {
     this.ctx.store.haptic('selection');
   }
 
+  /** A framing tapped on a zoom that follows: the store makes it one step, and buzzes. */
+  private chooseFraming(framing: ZoomFraming): void {
+    const zoom = this.ctx.store.selectedZoom.value;
+    if (!zoom?.follow || zoom.follow.framing === framing) return;
+    this.ctx.store.setZoomFollowFraming(zoom.id, framing);
+  }
+
+  private readonly onStopFollowing = () => {
+    const zoom = this.ctx.store.selectedZoom.value;
+    if (zoom) this.ctx.store.stopZoomFollow(zoom.id);
+  };
+
   render() {
     return this.watcher.run(() => {
       const zoom = this.ctx.store.selectedZoom.value;
+      // Only a track the post still has: a zoom whose track was taken off holds its own area, and is set like one.
+      const track = zoom?.follow ? this.ctx.store.selectedZoomTrack.value : null;
+      const framing = zoom?.follow?.framing;
 
       return (
         <ve-sheet heading="Zoom" onVeConfirm={this.onConfirm}>
           {zoom ? (
             <div class="zs" key="zoom">
               {/* Every row keyed: the body is conditional, and the vdom pairs unkeyed siblings by position. */}
-              <div class="zs__row" key="level">
-                <span class="zs__word">Level</span>
-                <ve-slider
-                  class="zs__slider"
-                  ctx={this.ctx}
-                  label="Zoom level"
-                  value={Math.round(zoom.scale * LEVEL_UNITS)}
-                  min={Math.round(MIN_ZOOM_SCALE * LEVEL_UNITS)}
-                  max={Math.round(MAX_ZOOM_SCALE * LEVEL_UNITS)}
-                  step={1}
-                  pin="none"
-                  format={this.formatLevel}
-                  onVeGestureStart={this.onGestureStart}
-                  onVeLive={this.onLevel}
-                />
-                {/* The number a test can read: the slider reaches uiautomator unnamed (see ve-slider). */}
-                <span class="zs__value" data-readout="level">
-                  {zoomLevelLabel(zoom.scale)}
-                </span>
-              </div>
+              {track ? (
+                <div class="zs__row zs__row--follow" key="follow" style={{ '--zs-hue': `var(--ve-track-${track.hue})` }}>
+                  <span class="zs__dot" aria-hidden="true"></span>
+                  <span class="zs__follows">{`Follows ${track.name}`}</span>
+                  <button type="button" class="zs__stop" data-action="stop-following" onClick={this.onStopFollowing}>
+                    Stop following
+                  </button>
+                </div>
+              ) : null}
+              {track ? (
+                <div class="zs__row zs__row--chips" key="framing">
+                  <span class="zs__word">Framing</span>
+                  <div class="zs__chips">
+                    {ZOOM_FRAMINGS.map(id => {
+                      const on = id === framing;
+                      const label = ZOOM_FRAMING_LABELS[id];
+                      return (
+                        <button
+                          type="button"
+                          key={id}
+                          data-framing={id}
+                          class={{ 'zs__chip': true, 'zs__chip--on': on }}
+                          aria-label={on ? `${label}, selected` : label}
+                          onClick={() => this.chooseFraming(id)}
+                        >
+                          <span class="zs__pill">{label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+              {track ? null : (
+                <div class="zs__row" key="level">
+                  <span class="zs__word">Level</span>
+                  <ve-slider
+                    class="zs__slider"
+                    ctx={this.ctx}
+                    label="Zoom level"
+                    value={Math.round(zoom.scale * LEVEL_UNITS)}
+                    min={Math.round(MIN_ZOOM_SCALE * LEVEL_UNITS)}
+                    max={Math.round(MAX_ZOOM_SCALE * LEVEL_UNITS)}
+                    step={1}
+                    pin="none"
+                    format={this.formatLevel}
+                    onVeGestureStart={this.onGestureStart}
+                    onVeLive={this.onLevel}
+                  />
+                  {/* The number a test can read: the slider reaches uiautomator unnamed (see ve-slider). */}
+                  <span class="zs__value" data-readout="level">
+                    {zoomLevelLabel(zoom.scale)}
+                  </span>
+                </div>
+              )}
 
               {/* The word is left readable rather than made a group's name: a group's name does not reach Android. */}
               <div class="zs__row zs__row--eases" key="eases">
@@ -219,10 +273,13 @@ export class VeZoomSheet {
               </div>
 
               {/* Says what a touch on the video does NOW: with the zoomed picture on screen (after a
-                  scrub or while playing) a tap brings the box back, and only then does a drag move it. */}
-              <p class="zs__hint" key="hint">
-                {this.ctx.store.cameraLive.value ? 'Tap the video to change the area' : 'Drag or pinch the box on the video to pick the area'}
-              </p>
+                  scrub or while playing) a tap brings the box back, and only then does a drag move it.
+                  Not while following, when the box only shows where the camera looks. */}
+              {track ? null : (
+                <p class="zs__hint" key="hint">
+                  {this.ctx.store.cameraLive.value ? 'Tap the video to change the area' : 'Drag or pinch the box on the video to pick the area'}
+                </p>
+              )}
             </div>
           ) : null}
         </ve-sheet>

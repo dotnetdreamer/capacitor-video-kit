@@ -1,12 +1,17 @@
+import { signal } from '@preact/signals-core';
 import { Component, Prop } from '@stencil/core';
 
 import { activeElementDeep } from '../../bridge/active-element';
 import { closeWhenGone } from '../../bridge/deferred-effect';
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { MAX_TRACK_NAME, trackSmooth, weakSpots, type EditOverlay, type EditTrack, type OverlayKind } from '../../editor';
+import { MAX_TRACK_NAME, TRACK_LOOKS, trackSmooth, weakSpots, type EditOverlay, type EditTrack, type OverlayKind, type TrackLook } from '../../editor';
+import { isSurfaceTrack } from '../../editor/surface';
 import type { CoalesceKey } from '../../state/editor-store';
 import type { TrackRunView } from '../../state/editor.types';
+import type { SheetTab } from '../sheet.types';
+
+import { TRACK_LOOK_NAMES } from './look-names';
 
 /** What the hints call the layer being pinned. */
 const NOUN: Readonly<Record<OverlayKind, string>> = { text: 'text', sticker: 'sticker', image: 'photo', effect: 'effect' };
@@ -17,6 +22,26 @@ const NOUN: Readonly<Record<OverlayKind, string>> = { text: 'text', sticker: 'st
  * track's box dragged off its path; and the track itself.
  */
 type Face = 'run' | 'choose' | 'aim' | 'fix' | 'track';
+
+/** The track's face in two: its path - how smooth, and how a layer follows it - and the look it puts on its thing. */
+type TrackTab = 'path' | 'look';
+
+const TABS: readonly SheetTab[] = [
+  { id: 'path', label: 'Path' },
+  { id: 'look', label: 'Look' },
+];
+
+/** Every other face has one thing to do, and no tabs. */
+const NO_TABS: readonly SheetTab[] = [];
+
+/** The looks a track can put on its thing, None first, then in the order the track's tool row offers them. */
+const LOOK_CHIPS: readonly { kind: TrackLook['kind'] | null; label: string }[] = [
+  { kind: null, label: 'None' },
+  ...TRACK_LOOKS.map(kind => ({ kind, label: TRACK_LOOK_NAMES[kind].label })),
+];
+
+/** The weakest a look's Strength slider goes, in percent: a look fainter than this is one nobody sees. */
+const MIN_STRENGTH = 10;
 
 /**
  * How long the name's field waits to take the focus. Android raises the keyboard for a programmatic focus
@@ -50,7 +75,7 @@ function hueOf(track: Pick<EditTrack, 'hue'>): string {
  *  - Fixing: the shown track's box dragged off its path. Fix track follows the thing again from this
  *    frame, both ways, until each way meets the old path.
  *  - The track: how sure it is, how smooth its path is and, on a layer that follows it, whether the layer
- *    grows and turns with the thing.
+ *    grows and turns with the thing - and on its Look tab, the look it puts on the thing and how strong.
  *
  * A shown track's name heads the body rather than the frame: `ve-sheet` takes its heading as a string,
  * and the name is a button that becomes a field - on a tap, or from Rename on the track's row, which opens
@@ -73,8 +98,10 @@ export class VeTrackSheet {
   @Prop() ctx!: EditorContext;
 
   private readonly watcher = new SignalWatcher(this);
+  /** Which half of the track's face is shown. Path, each time the sheet opens. */
+  private readonly tab = signal<TrackTab>('path');
   private stopClosing?: () => void;
-  /** The coalesce key of the slider drag under way; see `VeZoomSheet.gestureKey`. */
+  /** The coalesce key of the slider drag under way, Smooth's or Strength's; see `VeZoomSheet.gestureKey`. */
   private gestureKey?: CoalesceKey;
   /** The name's field, while the name is being typed. */
   private field?: HTMLInputElement;
@@ -82,6 +109,9 @@ export class VeTrackSheet {
   private keyboardTimer?: ReturnType<typeof setTimeout>;
 
   connectedCallback() {
+    // Each time the sheet opens it aims a box, and whether the export draws a surface is asked once.
+    this.ctx.store.resetSurfaceAim();
+    this.ctx.store.loadRenderFeatures();
     // Nothing left to show is nothing left to do: the track the sheet showed undone away, with no box
     // drawn and no run going. A layer undone or deleted away is not watched for here, because it takes
     // the selection with it and the selection takes the sheet. Only while this is the open sheet: another
@@ -117,7 +147,14 @@ export class VeTrackSheet {
   };
   private readonly onTrack = () => void this.ctx.store.startTracking();
   private readonly onStop = () => this.ctx.store.stopTracking();
-  private readonly onCancelFix = () => this.ctx.store.cancelTrackAim();
+  private readonly onCancelFix = () => {
+    const store = this.ctx.store;
+    if (isSurfaceTrack(store.trackShown.value)) store.cancelSurfaceAim();
+    else store.cancelTrackAim();
+  };
+  private readonly onBox = () => this.ctx.store.setTrackAimKind('box');
+  private readonly onSurface = () => this.ctx.store.setTrackAimKind('surface');
+  private readonly onRetrack = () => this.ctx.store.retrackSurface();
   private readonly onNewTrack = () => this.ctx.store.chooseTrack(null);
   private readonly onFindPeople = () => this.ctx.store.findTrackPeople();
   private readonly onNextSpot = () => {
@@ -131,6 +168,17 @@ export class VeTrackSheet {
     this.gestureKey = this.ctx.store.coalesceKey('track-smooth');
   };
   private readonly onSmooth = (event: CustomEvent<number>) => this.ctx.store.setTrackSmooth(event.detail / 100, { coalesce: this.gestureKey });
+  private readonly onTab = (event: CustomEvent<string>) => {
+    this.tab.value = event.detail === 'look' ? 'look' : 'path';
+  };
+  private readonly onLookGestureStart = () => {
+    this.gestureKey = this.ctx.store.coalesceKey('track-look');
+  };
+  private readonly onStrength = (event: CustomEvent<number>) => {
+    const track = this.ctx.store.trackShown.value;
+    const kind = track?.look?.kind;
+    if (track && kind) this.ctx.store.setTrackLook(track.id, kind, event.detail / 100, { coalesce: this.gestureKey });
+  };
   private readonly formatPercent = (value: number): string => `${Math.round(value)}%`;
 
   /**
@@ -209,8 +257,18 @@ export class VeTrackSheet {
       const layer = store.trackLayer.value;
       const none = this.noneAction();
       const face: Face = run ? 'run' : layer && store.trackChoosing.value ? 'choose' : !track ? 'aim' : store.trackAimMoved.value ? 'fix' : 'track';
+      const tab = this.tab.value;
       return (
-        <ve-sheet heading="Track" showNone={none !== null} noneLabel={none === 'unpin' ? 'Remove tracking' : 'Remove track'} onVeNone={this.onNone} onVeConfirm={this.onConfirm}>
+        <ve-sheet
+          heading="Track"
+          tabs={face === 'track' ? TABS : NO_TABS}
+          activeTab={face === 'track' ? tab : null}
+          showNone={none !== null}
+          noneLabel={none === 'unpin' ? 'Remove tracking' : 'Remove track'}
+          onVeTab={this.onTab}
+          onVeNone={this.onNone}
+          onVeConfirm={this.onConfirm}
+        >
           <div class={{ 'tk': true, 'tk--layer': !!layer }} style={track ? { '--tk-hue': hueOf(track) } : undefined}>
             {/* Every child keyed: all of them are conditional, and the vdom pairs unkeyed siblings by position. */}
             {track ? this.renderName(track, face) : null}
@@ -218,7 +276,7 @@ export class VeTrackSheet {
             {face === 'choose' && layer ? this.renderChoose(layer.kind) : null}
             {face === 'aim' ? this.renderAim() : null}
             {face === 'fix' ? this.renderFix() : null}
-            {face === 'track' && track ? this.renderTrack(track, layer) : null}
+            {face === 'track' && track ? (tab === 'look' ? this.renderLook(track) : this.renderTrack(track, layer)) : null}
           </div>
         </ve-sheet>
       );
@@ -365,16 +423,53 @@ export class VeTrackSheet {
    * The people line under the hint is quiet on purpose - the picture is where people are picked.
    */
   private renderAim() {
+    const store = this.ctx.store;
+    const surface = store.trackAimKind.value === 'surface';
+    const kinds = store.canTrackSurfaces.value;
     return (
       <div class="tk__face tk__face--aim" key="aim">
-        <p class="tk__hint" key="hint">
-          Tap what to follow, or drag a box
+        <p class="tk__hint" key={surface ? 'hint-surface' : 'hint'}>
+          {surface ? 'Drag the four corners onto a flat surface' : 'Tap what to follow, or drag a box'}
         </p>
-        {this.renderPeople()}
+        {kinds ? this.renderAimKind(surface) : this.renderPeople()}
         <button type="button" key="go" class="tk__go" onClick={this.onTrack}>
           <ve-icon name="track-outline"></ve-icon>
           <span>Track</span>
         </button>
+      </div>
+    );
+  }
+
+  /**
+   * What the aim goes on, where the export can draw a layer on a flat surface: a thing in a box, or a flat
+   * surface by its four corners. Two radios named by their own words, the one on saying so (see [switchChip]),
+   * and in a box the people finder beside them, on the one line, so the face keeps the sheet's one height.
+   */
+  private renderAimKind(surface: boolean) {
+    const chip = (key: string, label: string, on: boolean, pick: () => void) => (
+      <button
+        type="button"
+        key={key}
+        role="radio"
+        aria-checked={String(on)}
+        aria-label={on ? `${label}, on` : label}
+        class={{ 'tk__chip': true, 'tk__chip--on': on }}
+        onClick={pick}
+      >
+        <span class="tk__pill">{label}</span>
+      </button>
+    );
+    const people = surface ? null : this.renderPeople();
+    return (
+      <div class="tk__chips tk__chips--kind" key="kind">
+        <div class="tk__chips-run">
+          <div class="tk__kinds" role="radiogroup" aria-label="What to track">
+            {chip('box', 'Box', !surface, this.onBox)}
+            {chip('surface', 'Flat surface', surface, this.onSurface)}
+          </div>
+          {people ? <span class="tk__rule" key="rule"></span> : null}
+          {people}
+        </div>
       </div>
     );
   }
@@ -408,10 +503,12 @@ export class VeTrackSheet {
    * Side by side rather than one under the other, so the face fits under the track's name.
    */
   private renderFix() {
+    // A surface is tracked again whole from here rather than mended both ways.
+    const surface = isSurfaceTrack(this.ctx.store.trackShown.value);
     return (
-      <div class="tk__face tk__face--fix" key="fix">
+      <div class="tk__face tk__face--fix" key={surface ? 'fix-surface' : 'fix'}>
         <p class="tk__hint" key="hint">
-          Fixes the track both ways from here
+          {surface ? 'Drag the four corners onto the surface' : 'Fixes the track both ways from here'}
         </p>
         <div class="tk__pair" key="pair">
           <button type="button" key="cancel" class="sheet__apply-all tk__cancel" onClick={this.onCancelFix}>
@@ -419,7 +516,7 @@ export class VeTrackSheet {
           </button>
           <button type="button" key="go" class="tk__go" onClick={this.onTrack}>
             <ve-icon name="track-outline"></ve-icon>
-            <span>Fix track</span>
+            <span>{surface ? 'Track' : 'Fix track'}</span>
           </button>
         </div>
       </div>
@@ -433,9 +530,11 @@ export class VeTrackSheet {
   private renderTrack(track: EditTrack, layer: EditOverlay | null) {
     const store = this.ctx.store;
     const smooth = Math.round(trackSmooth(track) * 100);
-    const follow = layer?.follow?.trackId === track.id ? layer.follow : null;
+    const surface = isSurfaceTrack(track);
+    // A layer pinned to a surface is drawn on it, growing and turning with it whatever it is told: no Follow row.
+    const follow = layer?.follow?.trackId === track.id && !surface ? layer.follow : null;
     return (
-      <div class="tk__face tk__face--rows" key="track">
+      <div class={{ 'tk__face': true, 'tk__face--rows': true, 'tk__face--surface': surface }} key={surface ? 'surface' : 'track'}>
         <div class="tk__row" key="smooth">
           <span class="tk__word">Smooth</span>
           <ve-slider
@@ -463,10 +562,84 @@ export class VeTrackSheet {
             {this.switchChip('turn', 'Rotation', !!follow.turnWith, () => store.setTrackFollow({ turnWith: !follow.turnWith }))}
           </div>
         ) : null}
-        <p class="tk__hint" key="hint">
-          Drag the box to fix the track from here
-        </p>
+        {surface ? (
+          store.canTrackSurfaces.value ? (
+            <button type="button" key="retrack" class="tk__chip tk__retrack" onClick={this.onRetrack}>
+              <span class="tk__pill">Fix by tracking again</span>
+            </button>
+          ) : null
+        ) : (
+          <p class="tk__hint" key="hint">
+            Drag the box to fix the track from here
+          </p>
+        )}
       </div>
+    );
+  }
+
+  /**
+   * The look the track puts on its thing - None, Blur, Spotlight or Colour pop, one at a time - and, while
+   * one is on, how strong it is. Where the segment the track was found in has a Focus of its own, that wins
+   * there, and one quiet line says so in place of the strength. Laid out from the top, so the strength
+   * coming and going moves nothing above it.
+   */
+  private renderLook(track: EditTrack) {
+    const look = track.look ?? null;
+    const strength = look ? Math.round(look.amount * 100) : 0;
+    return (
+      <div class="tk__face tk__face--rows tk__face--look" key="look">
+        <div class="tk__chips tk__chips--look" key="kinds">
+          <div class="tk__chips-run" role="radiogroup" aria-label="Look">
+            {LOOK_CHIPS.map(({ kind, label }) => this.lookChip(track, kind, label, (look?.kind ?? null) === kind))}
+          </div>
+        </div>
+        {this.ctx.store.trackFocusWins.value ? (
+          <p class="tk__hint" key="wins">
+            Focus on this clip wins over the look
+          </p>
+        ) : look ? (
+          <div class="tk__row" key="strength">
+            <span class="tk__word">Strength</span>
+            <ve-slider
+              class="tk__slider"
+              ctx={this.ctx}
+              label="Strength"
+              value={strength}
+              min={MIN_STRENGTH}
+              max={100}
+              step={1}
+              pin="none"
+              format={this.formatPercent}
+              onVeGestureStart={this.onLookGestureStart}
+              onVeLive={this.onStrength}
+            />
+            {/* The number a test can read: the slider reaches uiautomator unnamed (see ve-slider). */}
+            <span class="tk__value" data-readout="strength">
+              {strength}%
+            </span>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  /**
+   * One look to pick, a radio named by its own words - and while it is the one on, the name says so too, for
+   * the reason [switchChip] gives: a changed `aria-checked` in a shadow root may never reach Android's tree.
+   */
+  private lookChip(track: EditTrack, kind: TrackLook['kind'] | null, label: string, on: boolean) {
+    return (
+      <button
+        type="button"
+        key={kind ?? 'none'}
+        role="radio"
+        aria-checked={String(on)}
+        aria-label={on ? `${label}, on` : label}
+        class={{ 'tk__chip': true, 'tk__chip--on': on }}
+        onClick={() => this.ctx.store.setTrackLook(track.id, kind)}
+      >
+        <span class="tk__pill">{label}</span>
+      </button>
     );
   }
 

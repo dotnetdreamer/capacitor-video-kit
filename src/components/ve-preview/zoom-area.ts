@@ -16,6 +16,11 @@ import type { FrameBox } from '../../state/clip-framing';
  * the output cannot show, and a centre and a scale cannot. The box is then only a way of drawing
  * `(cx, cy, scale)`, and every gesture below goes box -> view -> [clampView], so the one rule that
  * keeps the area inside the frame (the parser's own) is applied in one place.
+ *
+ * A zoom that FOLLOWS a track (Follow cam) has no area of its own: the store hands the preview its
+ * view at the playhead as the selected zoom's `cx`, `cy` and `scale`, so this draws the moving view
+ * like any other, and the store refuses the area every gesture here computes for it. Nothing in this
+ * file needs to know which kind of zoom it is drawing.
  */
 
 /** The four corners a finger can resize the area by. */

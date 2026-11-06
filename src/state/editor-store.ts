@@ -24,6 +24,18 @@ import {
   updateZoom as updateZoomOp,
   type EditZoom,
   type ZoomPatch,
+  MIN_ZOOM_MS,
+  compileCameraWith,
+  followPath,
+  followPaths,
+  followReframes,
+  followRest,
+  followViewAt,
+  zoomTrack,
+  type CameraFollow,
+  type CameraView,
+  type FollowPath,
+  type ZoomFraming,
   addOverlay,
   addAudioClip as addAudioClipOp,
   addVideoTrack,
@@ -186,6 +198,10 @@ import {
   UNSURE_BELOW,
   weakSpots,
   parseSubjectTrack,
+  DEFAULT_LOOK_AMOUNT,
+  normaliseTrackLook,
+  type SubjectTrack,
+  type TrackLook,
   type EditTrack,
   type Footage,
   type ShownPose,
@@ -197,6 +213,8 @@ import {
 
 import type { EditorSource, HapticKind, ResolvedEditorHost } from '../host/host.types';
 import { fitBoxAt, type FitFrame } from '../editor/fit-box';
+import { hasTrackLooks, segmentLook, type SegmentLook } from '../editor/track-looks';
+import { PeopleMask, anyoneIn, hasBehindLayers, isBehind, peopleSourceKeys, type PeopleMaskFrame, type PeopleSources } from '../editor/people-matte';
 import { resolve } from '../web-runtime/files';
 import { isPictureSource } from '../web-runtime/picture';
 import type { Peaks } from '../web-runtime/waveform';
@@ -219,6 +237,21 @@ import type {
 } from './editor.types';
 import { sameUrl } from './same-url';
 import { startTrackRun, type TrackRunLive, type TrackRunOutcome } from './track-session';
+import { isConvexQuad, quadMiddle } from '../editor/homography';
+import {
+  compileOverlayQuad,
+  isSurfaceTrack,
+  nextSurfaceName,
+  placeOnSurface,
+  surfaceFollowPatch,
+  surfaceOf,
+  surfaceQuadAt,
+  surfaceTrackFromRun,
+  type SurfaceQuad,
+  type SurfaceRunResult,
+} from '../editor/surface';
+import { RENDER_FEATURES, type RenderFeature } from '../video-composer/definitions';
+import { startPlaneRun, type PlaneRunLive, type PlaneRunOutcome } from './plane-session';
 
 /** One layer's compiled motion and the three things it was compiled from; see [EditorStore.overlayMotions]. */
 interface CompiledMotion {
@@ -270,6 +303,15 @@ const NO_TRACKS: readonly EditTrack[] = [];
 
 /** Each track's health and how many spots of it are worth a second look, read once per track object. */
 const TRACK_HEALTH = new WeakMap<EditTrack, { health: TrackHealthSpan[]; spots: number }>();
+
+/** A segment's track looks as the preview reads them: what [segmentLook] made, and the frames read off it. */
+interface LookFrames {
+  look: SegmentLook;
+  frames: FocusFrames;
+}
+
+/** Each made look's subject track, parsed once however many segments and redraws read it. */
+const PARSED_LOOKS = new WeakMap<Uint8Array, SubjectTrack>();
 
 /** How long Pin text, Pin sticker and Pin photo wait for the layer they pin: a picker is slow, a forgotten one is not pinned later. */
 const PIN_NEXT_MS = 120_000;
@@ -2146,6 +2188,149 @@ export class EditorStore {
     this.commit(edge === 'start' ? 'Start here' : 'End here', m => setOverlayWindow(m, overlay.id, s, e, total));
   }
 
+  /* -- behind the people -------------------------------------------------------------------- */
+
+  /**
+   * Whether a layer can go behind the people in the picture: the export draws the people back over it (the
+   * `peopleMatte` [RenderFeature]) and the platform has a people finder ([EditorMediaHost.findSubjects]). The
+   * layer row offers Behind people only then, and the preview draws a layer behind only then - anywhere else the
+   * export draws it on top, and so does the preview.
+   */
+  readonly canPutBehind = computed(() => this.renderFeatures.value.includes('peopleMatte') && typeof this.host.media.findSubjects === 'function');
+
+  /** The layer waiting for the people under it to be found before it goes behind them, or null. */
+  readonly behindPending = signal<string | null>(null);
+
+  /** Stops waiting for [behindPending]'s people; see [setLayerBehind]. */
+  private stopBehindWait: (() => void) | null = null;
+
+  /**
+   * Puts layer `id` behind the people in the picture, or back over it. Never an effect, which covers the frame.
+   *
+   * Behind needs the people of every source on screen while the layer is - the picture over them included, which
+   * covers them - so those are looked for first, by Focus's own finder and filed where Focus files its answers
+   * ([subjectTracks]), each source looked at once whoever asked. "Finding people..." while that runs; then the
+   * layer goes behind as ONE undo step, or, with nobody on screen there, it stays where it is and the customer is
+   * told so. Asked again while the people are being found, it says so again; anything else it is asked cancels.
+   */
+  setLayerBehind(id: string, on: boolean): void {
+    const overlay = findOverlay(this.manifest.value, id);
+    if (!overlay || overlay.kind === 'effect') return;
+    if (!on) {
+      this.cancelBehind();
+      if (this.commit('Behind people', m => patchOverlay(m, id, { behind: undefined }))) this.haptic('selection');
+      return;
+    }
+    if (overlay.behind || !this.canPutBehind.value) return;
+    if (this.behindPending.value === id) {
+      this.showToast(FINDING_PEOPLE, FINDING_PEOPLE_MS);
+      return;
+    }
+    this.cancelBehind();
+    const window = overlayWireWindow(overlay, this.totalMs.value);
+    const keys = peopleSourceKeys(this.manifest.value, [window]);
+    for (const key of keys) {
+      if (this.subjectTracks.peek().has(key)) continue;
+      const source = this.clipByKey(key);
+      if (source) this.lookForPeople(source);
+    }
+    // Null while a source is still being looked at; then whether anybody found is on screen with the layer.
+    const answer = (): boolean | null => {
+      const tracks = this.subjectTracks.value;
+      if (keys.some(key => tracks.get(key)?.status === 'finding')) return null;
+      return anyoneIn(this.manifest.peek(), window, key => {
+        const state = tracks.get(key);
+        return state?.status === 'ready' ? state.result.subjects : null;
+      });
+    };
+    const decide = (found: boolean): void => {
+      this.dropFindingToast();
+      if (!findOverlay(this.manifest.value, id)) return;
+      if (!found) {
+        this.showToast('No people found');
+        this.haptic('warning');
+        return;
+      }
+      if (this.commit('Behind people', m => patchOverlay(m, id, { behind: true }))) this.haptic('success');
+    };
+    const now = answer();
+    if (now !== null) {
+      decide(now);
+      return;
+    }
+    this.behindPending.value = id;
+    this.showToast(FINDING_PEOPLE, FINDING_PEOPLE_MS);
+    const dispose = effect(() => {
+      const found = answer();
+      if (found === null) return;
+      // Out of the effect, which reads what the commit writes.
+      queueMicrotask(() => {
+        if (this.stopBehindWait !== stop) return;
+        this.cancelBehind();
+        decide(found);
+      });
+    });
+    const stop = (): void => dispose();
+    this.stopBehindWait = stop;
+  }
+
+  /** Stops waiting for the people [behindPending] is waiting for, leaving the layer where it is. */
+  private cancelBehind(): void {
+    this.stopBehindWait?.();
+    this.stopBehindWait = null;
+    if (this.behindPending.peek() === null) return;
+    this.behindPending.value = null;
+    this.dropFindingToast();
+  }
+
+  /** "Finding people..." taken down, the moment the people are found or the wait for them is over. */
+  private dropFindingToast(): void {
+    if (this.toast.peek()?.text === FINDING_PEOPLE) this.toast.value = null;
+  }
+
+  /**
+   * The people the preview's layers behind them are drawn under: every source's people Focus's finder has found and
+   * that has somebody in it, by clip key, and the shapes the preview's elements reported - the same [PeopleSources]
+   * the export's matte is made from.
+   */
+  readonly peopleSources = computed<PeopleSources>(() => {
+    const people = new Map<string, SubjectTrack>();
+    for (const [key, state] of this.subjectTracks.value) if (state.status === 'ready' && state.result.subjects.length > 0) people.set(key, state.track);
+    return { people, aspects: this.sourceShapes.value };
+  });
+
+  /** Whether the preview draws any layer behind the people: one is behind, and the export would draw it there. */
+  readonly behindShown = computed(() => this.canPutBehind.value && hasBehindLayers(this.manifest.value));
+
+  /** Whether a layer behind the people is on screen at output instant `atMs`. */
+  behindOnScreenAt(atMs: number): boolean {
+    if (!this.behindShown.value) return false;
+    const total = this.totalMs.value;
+    return this.manifest.value.overlays.some(overlay => isBehind(overlay) && isOverlayVisibleAt(overlay, atMs, total));
+  }
+
+  /**
+   * The preview's people on the frame, kept from one frame to the next; see [peopleMaskAt]. The playhead's are
+   * kept apart, so a selector read between two painted frames never makes the matte work its grid out again.
+   */
+  private readonly peopleMask = new PeopleMask();
+  private readonly playheadMask = new PeopleMask();
+
+  /**
+   * The people on the output frame at output instant `atMs`, as the preview's matte puts them back over the layers
+   * behind them: the very grid the export's matte has there, through the camera only while the preview draws one
+   * ([cameraLive]). Null while no layer behind the people is on screen then. The grid is the store's own, handed back
+   * unchanged while nothing it is made from has moved - [PeopleMaskFrame.version] says when it has.
+   */
+  peopleMaskAt(atMs: number, mask: PeopleMask = this.peopleMask): PeopleMaskFrame | null {
+    if (!this.behindOnScreenAt(atMs)) return null;
+    const scene = { manifest: this.manifest.value, camera: this.cameraLive.value ? this.camera.value : null, layout: this.layoutMotions.value };
+    return mask.at(scene, this.peopleSources.value, atMs);
+  }
+
+  /** [peopleMaskAt] the playhead: the people a paused preview's matte puts back, for whatever shows them. */
+  readonly peopleMaskNow = computed(() => this.peopleMaskAt(this.playheadMs.value, this.playheadMask));
+
   /* ========================================================================================= */
   /* Layer animation                                                                           */
   /* ========================================================================================= */
@@ -2514,12 +2699,32 @@ export class EditorStore {
     }
   }
 
+  /**
+   * A layer dragged on the frame and let go over track `trackId`'s thing: pinned there, where the finger left
+   * it, as part of the drag - so the move and the pin are ONE step, and one undo takes both back. Ends the
+   * drag's gesture either way: as "Move" alone where the track's footage is not on the post. Whether it pinned.
+   */
+  dropOnTrack(overlayId: string, trackId: string): boolean {
+    const m = this.manifest.value;
+    const layer = findOverlay(m, overlayId);
+    const track = trackById(m, trackId);
+    const patch = layer && track ? this.pinPatch(layer, track, this.sceneOf(m), this.playheadMs.value) : null;
+    if (!patch) {
+      this.endGesture('Move');
+      return false;
+    }
+    this.preview(next => patchOverlay(next, overlayId, patch));
+    this.endGesture('Pin to track');
+    this.haptic('success');
+    return true;
+  }
+
   /** Pins layer `overlayId` to track `trackId`, exactly where it is drawn at the playhead. Whether it could. */
   pinToTrack(overlayId: string, trackId: string): boolean {
     const done = this.commit('Pin to track', m => {
       const layer = findOverlay(m, overlayId);
       const track = trackById(m, trackId);
-      const patch = layer && track ? followPatch(layer, track, this.sceneOf(m), this.playheadMs.value) : null;
+      const patch = layer && track ? this.pinPatch(layer, track, this.sceneOf(m), this.playheadMs.value) : null;
       return patch && layer ? patchOverlay(m, layer.id, patch) : null;
     });
     if (done) this.haptic('success');
@@ -2555,6 +2760,7 @@ export class EditorStore {
     const layer = findOverlay(m, id);
     const track = trackById(m, trackId);
     if (!layer || !track || layer.kind === 'effect') return null;
+    if (isSurfaceTrack(track)) return this.pinnedOnSurface(m, id, track);
     const at = this.playheadMs.value;
     const thing = trackedThingAt(track, this.sceneOf(m), at);
     if (!thing) return null;
@@ -2968,6 +3174,8 @@ export class EditorStore {
    * being done - it keeps what was found.
    */
   async startTracking(): Promise<void> {
+    // Four corners on a flat surface, or a surface track shown: the surface's own run.
+    if (this.trackAimKind.peek() === 'surface' || isSurfaceTrack(this.trackShown.peek())) return this.startSurfaceTracking();
     // A tap's fit still reading its two frames: waited for, so the run follows the fitted box rather than
     // the thumb-wide one put down while the fit reads - and the tap on Track is not lost meanwhile.
     for (const until = performance.now() + FIT_WAIT_MS; this.trackLockOn.peek()?.fitted === false && performance.now() < until; ) {
@@ -3290,6 +3498,46 @@ export class EditorStore {
     );
   }
 
+  /**
+   * Track `trackId`'s look ([EditTrack.look]): `kind` at `amount`, 0..1 - when absent, the strength the track
+   * had, or [DEFAULT_LOOK_AMOUNT] - or no look for null. A look is never 0: a Strength dragged to nothing
+   * keeps the least the manifest holds, so the look and its slider do not vanish under the finger. A
+   * Strength drag is one step by its coalesce key; a new kind is a step of its own, felt as a selection.
+   * Whether anything changed.
+   */
+  setTrackLook(trackId: string, kind: TrackLook['kind'] | null, amount?: number, opts?: { coalesce?: CoalesceKey }): boolean {
+    const was = trackById(this.manifest.value, trackId)?.look?.kind ?? null;
+    const changed = this.commitCoalesced(
+      kind ? 'Look' : 'Remove look',
+      m => {
+        const track = trackById(m, trackId);
+        if (!track) return null;
+        const strength = amount ?? track.look?.amount ?? DEFAULT_LOOK_AMOUNT;
+        const look = kind ? normaliseTrackLook({ kind, amount: Math.max(0.01, within(strength, 0, 1)) }) : undefined;
+        if (look?.kind === track.look?.kind && look?.amount === track.look?.amount) return null;
+        const { look: _was, ...rest } = track;
+        const next: EditTrack = look ? { ...rest, look } : rest;
+        return { ...m, tracks: (m.tracks ?? []).map(t => (t.id === trackId ? next : t)) };
+      },
+      opts?.coalesce,
+    );
+    if (changed && kind !== was) this.haptic('selection');
+    return changed;
+  }
+
+  /** Whether track `trackId` was found in a segment with a Focus of its own, which wins over the track's look there. */
+  focusWinsOverLook(trackId: string | null | undefined): boolean {
+    const m = this.manifest.value;
+    const track = trackById(m, trackId);
+    return !!track && focusChangesPicture(findClip(m, track.clipId)?.focus);
+  }
+
+  /**
+   * [focusWinsOverLook] for the Track sheet's track, which the sheet says in a line of its own. A boolean, so
+   * the sheet is not drawn again for every other change to the post.
+   */
+  readonly trackFocusWins = computed(() => this.focusWinsOverLook(this.trackShown.value?.id));
+
   /** A track's name, as the customer typed it: trimmed and held to a short length, "Track" when left empty. */
   renameTrack(trackId: string, name: string): void {
     const clean = trackName(name);
@@ -3322,6 +3570,17 @@ export class EditorStore {
       const at = this.playheadMs.value;
       let next: EditManifest = m;
       for (const layer of followersOf(m.overlays, trackId)) next = patchOverlay(next, layer.id, unfollowOverlay(layer, scene, at)) ?? next;
+      // A camera that followed the track holds still, at the view kept on the zoom for that, in the same step.
+      if (next.zooms.some(zoom => zoom.follow?.trackId === trackId)) {
+        next = {
+          ...next,
+          zooms: next.zooms.map(zoom => {
+            if (zoom.follow?.trackId !== trackId) return zoom;
+            const { follow: _follow, ...still } = zoom;
+            return still;
+          }),
+        };
+      }
       const tracks = (next.tracks ?? []).filter(t => t.id !== trackId);
       const { tracks: _gone, ...rest } = next;
       return tracks.length > 0 ? { ...rest, tracks } : rest;
@@ -3393,7 +3652,8 @@ export class EditorStore {
   /** The parts of `m` a following layer is drawn through. */
   private sceneOf(m: EditManifest): TrackScene {
     if (m === this.manifest.value) return this.trackScene.value;
-    return { manifest: m, camera: compileCamera(m.zooms ?? [], totalDurationMs(m)), layout: compileLayoutMotions(m) };
+    const layout = compileLayoutMotions(m);
+    return { manifest: m, camera: compileCamera(m.zooms ?? [], totalDurationMs(m), { manifest: m, layout }), layout };
   }
 
   /** A box to start from: a square a thumb wide, round where the layer is drawn at `outputMs`. */
@@ -3455,6 +3715,425 @@ export class EditorStore {
     if (source.playbackUrl) return source.playbackUrl;
     return source.sourcePath ? this.host.platform.fileUrl(source.sourcePath) : '';
   }
+
+  /* -- flat surfaces ------------------------------------------------------------------------ */
+
+  /**
+   * What the export draws beyond every build ([RenderFeature]), as the host's render says once asked
+   * ([loadRenderFeatures]): which tools are offered. None until it answers, and none from a host that cannot.
+   */
+  readonly renderFeatures = signal<readonly RenderFeature[]>([]);
+
+  /** Whether the export draws a layer on a flat surface in perspective: the Track sheet offers Flat surface. */
+  readonly canTrackSurfaces = computed(() => this.renderFeatures.value.includes('overlayQuad'));
+
+  private renderFeaturesAsked = false;
+
+  /** Asks the host's render what it draws, once; [renderFeatures] holds the answer. */
+  loadRenderFeatures(): void {
+    if (this.renderFeaturesAsked) return;
+    this.renderFeaturesAsked = true;
+    const render = this.host.render;
+    const ask = render?.renderFeatures;
+    if (typeof ask !== 'function') return;
+    void Promise.resolve()
+      .then(() => ask.call(render))
+      .then(
+        features => {
+          const known = Array.isArray(features) ? RENDER_FEATURES.filter(feature => features.includes(feature)) : [];
+          if (known.length > 0) this.renderFeatures.value = known;
+        },
+        () => undefined,
+      );
+  }
+
+  /** What the Track sheet's aim goes on: a thing, in a box, or a flat surface, by its four corners. */
+  readonly trackAimKind = signal<'box' | 'surface'>('box');
+
+  /**
+   * The four corners the Track sheet puts on a flat surface, as fractions of the frame - x0, y0, ... top-left,
+   * top-right, bottom-right, bottom-left. Null while a box is aimed, and on a surface track's own sheet until
+   * the customer tracks it again ([retrackSurface]).
+   */
+  readonly surfaceAim = signal<readonly number[] | null>(null);
+
+  /** The frame a surface run reads and the surface in it, a frame at a time: the preview's alone. */
+  readonly surfaceLive = signal<PlaneRunLive | null>(null);
+
+  /** The run under way is a surface's: what the preview draws it as. */
+  readonly surfaceRunning = signal(false);
+
+  /** The shown surface track's quad at the playhead, fractions of the frame: null for no surface, or one off the post. */
+  readonly surfaceThing = computed(() => {
+    const track = this.trackShown.value;
+    return track && isSurfaceTrack(track) ? surfaceQuadAt(track, null, this.trackScene.value, this.playheadMs.value) : null;
+  });
+
+  /** Whether the Track sheet's frame belongs to four corners: a surface aimed, or a surface track shown. */
+  readonly surfaceAiming = computed(
+    () => this.panel.value === 'track' && !this.trackChoosing.value && (this.trackAimKind.value === 'surface' || isSurfaceTrack(this.trackShown.value)),
+  );
+
+  /** Box or Flat surface on the Track sheet: a surface's corners start on the box. Flat surface only where the export draws one. */
+  setTrackAimKind(kind: 'box' | 'surface'): void {
+    if (this.panel.value !== 'track' || this.trackRun.value || this.trackChoosing.value || kind === this.trackAimKind.value) return;
+    if (kind === 'surface') {
+      if (!this.canTrackSurfaces.value) return;
+      const aim = this.shownAim() ?? this.heldAim({ cx: 0.5, cy: 0.45, w: DEFAULT_AIM, h: DEFAULT_AIM * this.frameAspect.value });
+      const x0 = aim.cx - aim.w / 2;
+      const x1 = aim.cx + aim.w / 2;
+      const y0 = aim.cy - aim.h / 2;
+      const y1 = aim.cy + aim.h / 2;
+      this.surfaceAim.value = this.heldSurface([x0, y0, x1, y0, x1, y1, x0, y1]);
+    } else {
+      this.surfaceAim.value = null;
+    }
+    this.trackAimKind.value = kind;
+    this.haptic('selection');
+  }
+
+  /**
+   * The four corners moved on the frame: held to it, and taken only while they still make a surface - convex,
+   * no corner across another, no side shorter than the smallest box. On a surface track's own sheet this is the
+   * customer tracking it again from here, which the sheet then offers. Whether they were taken.
+   */
+  setSurfaceAim(corners: readonly number[]): boolean {
+    if (this.panel.value !== 'track' || this.trackRun.value || this.trackChoosing.value) return false;
+    const held = this.heldSurface(corners);
+    if (!held) return false;
+    this.holdTrackFrame();
+    this.surfaceAim.value = held;
+    if (this.trackShown.value) this.trackAimMoved.value = true;
+    return true;
+  }
+
+  /** The corners as the frame shows them: the ones being put down, or the shown surface track's at the playhead. */
+  shownSurfaceAim(): readonly number[] | null {
+    return this.surfaceAim.value ?? this.surfaceThing.value?.corners ?? null;
+  }
+
+  /** Fix by tracking again: the shown surface's corners at the playhead, to put right and track again whole. */
+  retrackSurface(): void {
+    const track = this.trackShown.value;
+    const at = this.surfaceThing.value;
+    if (!track || !isSurfaceTrack(track) || !at || this.trackRun.value || this.panel.value !== 'track') return;
+    this.pause();
+    this.endAudition();
+    this.surfaceAim.value = this.heldSurface(at.corners) ?? at.corners;
+    this.trackAimMoved.value = true;
+    this.haptic('light');
+  }
+
+  /** Cancel on a surface tracked again: back to the surface as it was tracked. */
+  cancelSurfaceAim(): void {
+    this.surfaceAim.value = null;
+    this.cancelTrackAim();
+  }
+
+  /** The corners put down and the aim back to a box: what the Track sheet opens with. */
+  resetSurfaceAim(): void {
+    this.trackAimKind.value = 'box';
+    this.surfaceAim.value = null;
+  }
+
+  /**
+   * `corners` held near the frame, or null for four that make no surface. A finger only ever drags a corner
+   * within the frame, but a surface tracked again may reach past its edge, and is kept the shape it is.
+   */
+  private heldSurface(corners: readonly number[]): number[] | null {
+    if (corners.length !== 8 || !corners.every(Number.isFinite)) return null;
+    const aspect = this.frameAspect.value;
+    const held = corners.map(v => within(v, -0.5, 1.5));
+    // In units of the frame's height, where a fold and a length mean what they look like.
+    const square = held.map((v, k) => (k % 2 === 0 ? v * aspect : v));
+    if (!isConvexQuad(square)) return null;
+    const least = MIN_AIM * Math.min(1, aspect);
+    for (let k = 0; k < 4; k++) {
+      const j = (k + 1) % 4;
+      if (Math.hypot(square[2 * j]! - square[2 * k]!, square[2 * j + 1]! - square[2 * k + 1]!) < least) return null;
+    }
+    return held;
+  }
+
+  /** [followPatch], or on a surface [surfaceFollowPatch]: a layer pinned to a surface is drawn on it. */
+  private pinPatch(layer: EditOverlay, track: EditTrack, scene: TrackScene, outputMs: number): Partial<EditOverlay> | null {
+    return isSurfaceTrack(track) ? surfaceFollowPatch(layer, track, scene, outputMs) : followPatch(layer, track, scene, outputMs);
+  }
+
+  /** Layer `id` of `m` put ON surface `track` at the playhead ([placeOnSurface]): a photo filling it, a text or a sticker in its middle. */
+  private pinnedOnSurface(m: EditManifest, id: string, track: EditTrack): EditManifest | null {
+    const layer = findOverlay(m, id);
+    if (!layer || layer.kind === 'effect') return null;
+    const patch = placeOnSurface(layer, track, this.sceneOf(m), this.playheadMs.value, this.bitmaps.peek().get(id) ?? null);
+    return patch ? patchOverlay(m, id, patch) : null;
+  }
+
+  /**
+   * Track on four corners ([startTracking] while they are put down): the surface under them followed from the
+   * frame the playhead is on - through the layer's time on screen when the sheet came from a layer, which is
+   * then put on it, or through the whole segment under them. On a surface track's own sheet it tracks that
+   * surface again WHOLE, since a surface is never mended, keeping its name, its colour and what is on it.
+   * Lands as ONE step; stopped, or the sheet shut under it, it keeps what it found.
+   */
+  private async startSurfaceTracking(): Promise<void> {
+    const shown = this.trackShown.value;
+    const again = shown && isSurfaceTrack(shown) ? shown : null;
+    const corners = this.surfaceAim.value;
+    if (!corners || this.trackRun.value || this.trackChoosing.value || (shown && !again)) return;
+    const overlay = again ? null : this.trackLayer.value;
+    if (overlay?.kind === 'effect') return;
+    if (!again && this.tracks.value.length >= MAX_TRACKS) {
+      this.showToast(`You can track up to ${MAX_TRACKS} things`);
+      this.haptic('warning');
+      return;
+    }
+    this.pause();
+    this.endAudition();
+    const at = this.playheadMs.value;
+    const m = this.manifest.value;
+    const middle = quadMiddle(corners) ?? { x: (corners[0]! + corners[4]!) / 2, y: (corners[1]! + corners[5]!) / 2 };
+    const under = this.footageUnder({ cx: middle.x, cy: middle.y, w: 0, h: 0 }, at);
+    if (!under) {
+      this.showToast('Put the corners on the video');
+      this.haptic('warning');
+      return;
+    }
+    const { clip, laneStart, slot } = under;
+    if (again && clip.clipKey !== again.clipKey) {
+      this.showToast('Put the corners on the tracked video');
+      this.haptic('warning');
+      return;
+    }
+    const uri = this.trackUri(clip.clipKey);
+    const trackId = again?.id ?? null;
+    const overlayId = overlay?.id ?? null;
+    const land = (found: SurfaceRunResult, reveal: boolean): void =>
+      trackId ? this.landSurfaceAgain(trackId, at, found, reveal) : this.landSurface(overlayId, at, found, reveal);
+
+    // Under way from the tap, as a box's run is: Stop, or the sheet shutting, calls it off at any point.
+    const abort = new AbortController();
+    const session = { abort, found: (): TrackRunResult | null => null, land: (found: TrackRunResult) => land(found as SurfaceRunResult, false) };
+    this.trackSession = session;
+    const view: TrackRunView = { trackId, overlayId, clipId: clip.id, clipKey: clip.clipKey, outputMs: at, mode: trackId ? 'fix' : 'new', progress: 0 };
+    this.trackRun.value = view;
+    this.trackLive.value = null;
+    this.surfaceLive.value = null;
+    this.surfaceRunning.value = true;
+    abort.signal.addEventListener('abort', () => {
+      this.surfaceRunning.value = false;
+      this.surfaceLive.value = null;
+    });
+    const giveUp = (message?: string): void => {
+      if (this.trackSession !== session) return;
+      this.endSurfaceRun();
+      if (!message) return;
+      this.showToast(message);
+      this.haptic('warning');
+    };
+
+    let aspect = again?.aspect ?? this.sourceShapes.value.get(clip.clipKey) ?? 0;
+    if (!(aspect > 0) && !clip.image && uri) {
+      const probed = await this.probeTrackFootage(uri).catch(() => null);
+      if (this.trackSession !== session) return;
+      aspect = probed && probed.width > 0 && probed.height > 0 ? probed.width / probed.height : 0;
+    }
+    if (!(aspect > 0)) aspect = clip.image ? this.frameAspect.value : 0;
+    if (!(aspect > 0) || (!clip.image && !uri)) {
+      giveUp('This clip cannot be tracked');
+      return;
+    }
+
+    // The corners on the source: taken back through the clip's own framing at this instant.
+    const footage = trackedFootage({ clipId: clip.id, clipKey: clip.clipKey, aspect }, this.sceneOf(m), at);
+    if (!footage) {
+      giveUp();
+      return;
+    }
+    const output = m.output;
+    const onSource: number[] = [];
+    for (let k = 0; k < 4; k++) {
+      const p = footage.map.toSourceAnywhere(corners[2 * k]! * output.width, corners[2 * k + 1]! * output.height);
+      onSource.push(p.u, p.v);
+    }
+    if (!onSource.every(v => v > -0.5 && v < 1.5) || !isConvexQuad(onSource.map((v, k) => (k % 2 === 0 ? v * aspect : v)))) {
+      giveUp('Put the corners on the video');
+      return;
+    }
+
+    const spanStart = laneStart + slot.startMs;
+    const spanEnd = spanStart + Math.max(0, slot.durationMs) + slot.tailMs;
+    const window = overlay ? overlayWireWindow(overlay, this.totalMs.value) : { startMs: spanStart, endMs: spanEnd };
+    const sourceAt = (outputMs: number) => sourceMsThrough(slot, outputMs - laneStart);
+    const anchorMs = footage.sourceMs;
+    const fromMs = sourceAt(Math.max(window.startMs, spanStart));
+    const toMs = sourceAt(Math.min(window.endMs, spanEnd));
+    const round5 = (v: number) => Math.round(v * 1e5) / 1e5 + 0;
+
+    if (clip.image) {
+      // A picture never moves in itself: one sample of the surface, through every zoom and layout.
+      const xs = [onSource[0]!, onSource[2]!, onSource[4]!, onSource[6]!];
+      const ys = [onSource[1]!, onSource[3]!, onSource[5]!, onSource[7]!];
+      const mid = quadMiddle(onSource) ?? { x: (xs[0]! + xs[2]!) / 2, y: (ys[0]! + ys[2]!) / 2 };
+      const still: SurfaceRunResult = {
+        clipId: clip.id,
+        clipKey: clip.clipKey,
+        aspect,
+        box: { w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) },
+        atMs: [Math.round(anchorMs)],
+        x: [round5(mid.x)],
+        y: [round5(mid.y)],
+        scale: [1],
+        turn: [0],
+        sure: [100],
+        lost: [],
+        anchorMs: Math.round(anchorMs),
+        corners: onSource.map(round5),
+      };
+      this.endSurfaceRun();
+      land(still, false);
+      return;
+    }
+
+    this.haptic('light');
+    let shownAt = -Infinity;
+    const run = startPlaneRun(
+      { uri, clipId: clip.id, clipKey: clip.clipKey, anchorMs, corners: onSource, fromMs: Math.min(fromMs, anchorMs), toMs: Math.max(toMs, anchorMs), direction: 'both' },
+      live => {
+        if (this.trackSession !== session) return;
+        const now = performance.now();
+        if (now - shownAt >= LIVE_EVERY_MS) {
+          shownAt = now;
+          this.surfaceLive.value = live;
+        }
+        const progress = Math.floor(live.progress * 100) / 100;
+        if (progress !== this.trackRun.peek()?.progress) this.trackRun.value = { ...view, progress };
+      },
+      abort.signal,
+      this.openTrackFootage,
+    );
+    session.found = () => run.found();
+    let outcome: PlaneRunOutcome;
+    try {
+      outcome = await run.done;
+    } catch {
+      if (this.trackSession !== session) return;
+      this.endSurfaceRun();
+      this.showToast('This clip cannot be tracked');
+      this.haptic('warning');
+      return;
+    }
+    if (this.trackSession !== session) return;
+    this.endSurfaceRun();
+    if (!outcome.result) {
+      this.showToast('Nothing to follow on this surface');
+      this.haptic('warning');
+      return;
+    }
+    land(outcome.result, !outcome.stopped);
+  }
+
+  /** A surface run over: the run let go of, and the frame it drew with it. */
+  private endSurfaceRun(): void {
+    this.endTrackRun();
+    this.surfaceLive.value = null;
+    this.surfaceRunning.value = false;
+  }
+
+  /**
+   * A new surface from a run, as ONE step: "Surface 1", "Surface 2", ... in the next free colour, and the layer
+   * the sheet came from put on it ([placeOnSurface]) on the frame the corners were put on. `reveal` plays it
+   * back once, as a new track's does.
+   */
+  private landSurface(overlayId: string | null, outputMs: number, found: SurfaceRunResult, reveal: boolean): void {
+    const id = this.newId('track');
+    const name = nextSurfaceName(this.tracks.value);
+    const hue = nextTrackHue(this.tracks.value);
+    const applied = this.commit('Track', m => {
+      if ((m.tracks?.length ?? 0) >= MAX_TRACKS) return null;
+      const track = surfaceTrackFromRun(found, id, name, hue);
+      let next: EditManifest = { ...m, tracks: [...(m.tracks ?? []), track] };
+      const layer = overlayId ? findOverlay(next, overlayId) : null;
+      const patch = layer ? placeOnSurface(layer, track, this.sceneOf(next), outputMs, this.bitmaps.peek().get(layer.id) ?? null) : null;
+      if (layer && patch) next = patchOverlay(next, layer.id, patch) ?? next;
+      return next;
+    });
+    if (!applied) return;
+    this.trackOpen.value = id;
+    this.trackAim.value = null;
+    this.trackAimMoved.value = false;
+    this.resetSurfaceAim();
+    if (!overlayId && !this.selection.value) {
+      this.selection.value = { kind: 'track', id };
+      this.toolbarMode.value = 'root';
+    }
+    this.haptic('success');
+    if (!reveal || this.panel.value !== 'track') return;
+    const layer = overlayId ? findOverlay(this.manifest.value, overlayId) : null;
+    const track = trackById(this.manifest.value, id);
+    const stretch = track ? trackStretches(track, this.manifest.value)[0] : undefined;
+    const shown = layer ? overlayWireWindow(layer, this.totalMs.value) : stretch ? { startMs: stretch.startMs, endMs: stretch.endMs } : null;
+    if (shown) this.playOnce(shown.startMs, Math.min(shown.endMs, this.totalMs.value, shown.startMs + REVEAL_MS), outputMs);
+  }
+
+  /** Surface `trackId` tracked again whole, as ONE step: its samples replaced, its name, colour, smoothing and look kept, and so every layer on it. */
+  private landSurfaceAgain(trackId: string, outputMs: number, found: SurfaceRunResult, reveal: boolean): void {
+    const applied = this.commit('Fix track', m => {
+      const old = trackById(m, trackId);
+      if (!old || old.clipKey !== found.clipKey || found.atMs.length === 0) return null;
+      const fresh = surfaceTrackFromRun(found, old.id, old.name, old.hue, old.smooth);
+      if (old.look) fresh.look = old.look;
+      return { ...m, tracks: (m.tracks ?? []).map(t => (t.id === trackId ? fresh : t)) };
+    });
+    if (!applied) return;
+    this.trackAim.value = null;
+    this.trackAimMoved.value = false;
+    this.resetSurfaceAim();
+    this.haptic('success');
+    if (reveal && this.panel.value === 'track') this.playOnce(Math.max(0, outputMs - FIX_REVEAL_BEFORE_MS), Math.min(this.totalMs.value, outputMs + FIX_REVEAL_AFTER_MS), outputMs);
+  }
+
+  /**
+   * Every layer on a flat surface, by id: its quad, and the part of its bitmap drawn - compiled as
+   * [toComposeSpec] compiles them ([compileOverlayQuad]), over its wire window and against its own bitmap, so
+   * the preview draws it in perspective by the very keys the render is handed. No entry for a layer whose
+   * bitmap is not drawn yet. Recomputed when the post changes, a layer kept whole while nothing it is compiled
+   * from has: a drag across the frame changes one layer.
+   */
+  readonly overlayQuads = computed<ReadonlyMap<string, SurfaceQuad>>(() => {
+    const m = this.manifest.value;
+    const bitmaps = this.bitmaps.value;
+    if (!m.overlays.some(o => o.follow?.onSurface)) {
+      this.compiledQuads.clear();
+      return this.noQuads;
+    }
+    const total = this.totalMs.value;
+    const scene = this.trackScene.value;
+    const quads = new Map<string, SurfaceQuad>();
+    const kept: typeof this.compiledQuads = new Map();
+    for (const overlay of m.overlays) {
+      const on = surfaceOf(m, overlay);
+      const bitmap = on ? bitmaps.get(overlay.id) : undefined;
+      if (!on || !bitmap) continue;
+      const { startMs, endMs } = overlayWireWindow(overlay, total);
+      // A bitmap drawn at an older size - a pinch running ahead of the redraw - stands for the size the layer is now.
+      const k = bitmap.scale > 0 ? overlay.scale / bitmap.scale : 1;
+      const size = { wPx: bitmap.wPx * k, hPx: bitmap.hPx * k };
+      const from = [overlay, on.track, size.wPx, size.hPx, startMs, endMs, m.clips, m.videoTracks, m.output, m.fit, scene.camera, scene.layout];
+      const known = this.compiledQuads.get(overlay.id);
+      const quad = known && known.from.every((v, i) => v === from[i]) ? known.quad : compileOverlayQuad(overlay, scene, { startMs, endMs }, size);
+      kept.set(overlay.id, { from, quad });
+      if (quad) quads.set(overlay.id, quad);
+    }
+    this.compiledQuads = kept;
+    return quads;
+  });
+
+  /** What [overlayQuads] compiled last time, and from what, so an unchanged layer is not compiled again. */
+  private compiledQuads = new Map<string, { from: unknown[]; quad: SurfaceQuad | null }>();
+
+  private readonly noQuads: ReadonlyMap<string, SurfaceQuad> = new Map();
+
+  /* -- end of flat surfaces ----------------------------------------------------------------- */
 
   /* ========================================================================================= */  /* Colour                                                                                    */
   /* ========================================================================================= */
@@ -3872,16 +4551,85 @@ export class EditorStore {
 
   /** Every zoom on the post, in time order. */
   readonly zooms = computed(() => this.manifest.value.zooms ?? []);
+  /**
+   * The selected zoom. One that follows a track is handed out as the zoom area box draws it while the
+   * box is on screen - the zoom sheet open, the camera off - its centre and level where its camera
+   * looks at the playhead, so the box shows the moving view; everywhere else it is the zoom as stored.
+   * The box cannot be dragged off that view: [updateZoom] refuses an area to a zoom that follows.
+   */
   readonly selectedZoom = computed(() => {
     const sel = this.selection.value;
-    return sel?.kind === 'zoom' ? findZoom(this.manifest.value, sel.id) : null;
+    const zoom = sel?.kind === 'zoom' ? findZoom(this.manifest.value, sel.id) : null;
+    if (!zoom?.follow || this.panel.value !== 'zoom' || this.cameraLive.value) return zoom;
+    const path = this.zoomPaths.value.get(zoom.id);
+    if (!path) return zoom;
+    const view = followViewAt(path, this.playheadMs.value);
+    return { ...zoom, cx: view.cx, cy: view.cy, scale: view.scale };
   });
+  /** The track the selected zoom follows, while it follows one the post has: what the zoom sheet names. */
+  readonly selectedZoomTrack = computed(() => {
+    const sel = this.selection.value;
+    const zoom = sel?.kind === 'zoom' ? findZoom(this.manifest.value, sel.id) : null;
+    return zoom ? zoomTrack(zoom, this.manifest.value) : null;
+  });
+  /** Whether a zoom follows the selected track: the Follow cam tile's state, a tap on which then opens that zoom. */
+  readonly followCamOn = computed(() => {
+    const track = this.selectedTrack.value;
+    return !!track && this.zooms.value.some(zoom => zoom.follow?.trackId === track.id);
+  });
+  /**
+   * Every following zoom's path by id, as [followPaths] makes it: what [camera] is compiled from, and
+   * where the box of one that follows is drawn. Made again only when something the thing is aimed
+   * through changes - a caption dragged rewrites the manifest every frame and touches none of it -
+   * and, while no zoom follows, empty without reading anything but the zooms.
+   */
+  readonly zoomPaths = computed<ReadonlyMap<string, FollowPath>>(() => {
+    const zooms = this.zooms.value;
+    if (!zooms.some(zoom => zoom.follow)) return this.noFollowPaths;
+    const total = this.totalMs.value;
+    const m = this.manifest.value;
+    const layout = this.layoutMotions.value;
+    const made = this.followMade;
+    if (
+      made &&
+      made.zooms === zooms &&
+      made.total === total &&
+      made.clips === m.clips &&
+      made.videoTracks === m.videoTracks &&
+      made.tracks === m.tracks &&
+      made.output === m.output &&
+      made.fit === m.fit &&
+      // A new map on every change to the post, empty on nearly every post: two empty ones lay out alike.
+      (made.layout === layout || (made.layout.size === 0 && layout.size === 0))
+    ) {
+      return made.paths;
+    }
+    const paths = followPaths(zooms, total, { manifest: m, layout });
+    this.followMade = { zooms, total, clips: m.clips, videoTracks: m.videoTracks, tracks: m.tracks, output: m.output, fit: m.fit, layout, paths };
+    return paths;
+  });
+  /** The last [zoomPaths] made, and what from. */
+  private followMade: {
+    zooms: readonly EditZoom[];
+    total: number;
+    clips: EditManifest['clips'];
+    videoTracks: EditManifest['videoTracks'];
+    tracks: EditManifest['tracks'];
+    output: EditManifest['output'];
+    fit: EditManifest['fit'];
+    layout: LayoutMotions;
+    paths: ReadonlyMap<string, FollowPath>;
+  } | null = null;
+  /** [zoomPaths] while no zoom follows: one map, so nothing reading it is told of a change. */
+  private readonly noFollowPaths: ReadonlyMap<string, FollowPath> = new Map();
   /**
    * The zooms compiled to the camera track the render gets - the one the preview samples, exactly as
    * it samples [compileTransition] for a transition, so what is on screen is what is exported. Only
    * recomputed when the manifest changes, never per frame; the preview reads it through [cameraAt].
+   * A zoom that follows a track is compiled from its path, [compileCamera] with the post to follow
+   * through; with none following this is the camera there always was.
    */
-  readonly camera = computed(() => compileCamera(this.zooms.value, this.totalMs.value));
+  readonly camera = computed(() => compileCameraWith(this.zooms.value, this.totalMs.value, this.zoomPaths.value));
   /**
    * Every clip a layer's arrangement opens and closes around, with its keys, compiled exactly as
    * [toComposeSpec] compiles them - so the preview reads the same keys through `rectMotionAt` that
@@ -4079,7 +4827,132 @@ export class EditorStore {
    * folds into that one step, so a drag across the frame is one undo and not sixty.
    */
   updateZoom(id: string, patch: ZoomPatch, opts?: { coalesce?: CoalesceKey }): void {
-    this.commitCoalesced('Zoom', m => updateZoomOp(m, id, patch), opts?.coalesce);
+    // A zoom following its thing has no area of its own to set: the box shows where its camera looks,
+    // and a drag or a pinch on it changes nothing. Stop following, or a framing, is the way to move it.
+    const zoom = findZoom(this.manifest.value, id);
+    const held = zoom && patch.follow === undefined && zoomTrack(zoom, this.manifest.value) ? { ...patch, cx: undefined, cy: undefined, scale: undefined } : patch;
+    this.commitCoalesced('Zoom', m => updateZoomOp(m, id, held), opts?.coalesce);
+  }
+
+  /**
+   * Follow cam on track `trackId`: a zoom over the first stretch of the post its thing is on, trimmed to
+   * the room the other zooms leave, that keeps the thing in frame. A picture of another shape from its
+   * frame - a wide shot in a tall post - is REFRAMED: the whole shot (`fill`), with a covered one
+   * contained in the same step so the whole width is there to pan across. A picture that fills its
+   * frame is closed in on (`mid`). Selected, with its sheet open. A zoom already following the track is
+   * opened instead, and no room says so.
+   */
+  followCam(trackId: string): void {
+    const m = this.manifest.value;
+    if (!trackById(m, trackId)) return;
+    const following = m.zooms.find(zoom => zoom.follow?.trackId === trackId);
+    if (following) {
+      this.openZoom(following.id);
+      return;
+    }
+    if (!this.host.editing.zoom) return;
+    if (m.zooms.length >= MAX_ZOOMS) {
+      this.showToast(`You can add up to ${MAX_ZOOMS} zooms`);
+      this.haptic('warning');
+      return;
+    }
+    const id = this.newId('zoom');
+    const total = this.totalMs.value;
+    if (!this.commit('Follow cam', next => this.withFollowCam(next, trackId, id, total))) {
+      this.showToast('No room for a zoom on this track');
+      this.haptic('warning');
+      return;
+    }
+    this.openZoom(id);
+    this.haptic('success');
+  }
+
+  /** How close following zoom `id` frames its thing: one step, its still view moved to suit ([followRest]). */
+  setZoomFollowFraming(id: string, framing: ZoomFraming): void {
+    const done = this.commit('Zoom', m => {
+      const zoom = findZoom(m, id);
+      if (!zoom?.follow || zoom.follow.framing === framing) return null;
+      return this.withFollowRest(updateZoomOp(m, id, { follow: { trackId: zoom.follow.trackId, framing } }), id);
+    });
+    if (done) this.haptic('selection');
+  }
+
+  /**
+   * Following zoom `id` let go of its thing: held from now on where its camera looks at the playhead -
+   * the nearer end of its window when the playhead is outside it - an area like any other zoom's.
+   */
+  stopZoomFollow(id: string): void {
+    const done = this.commit('Stop following', m => {
+      const zoom = findZoom(m, id);
+      if (!zoom?.follow) return null;
+      const path = followPath(zoom, m.zooms, totalDurationMs(m), this.followOf(m));
+      const view: CameraView = path ? followViewAt(path, this.playheadMs.value) : zoom;
+      return updateZoomOp(m, id, { follow: null, cx: view.cx, cy: view.cy, scale: view.scale });
+    });
+    if (done) this.haptic('light');
+  }
+
+  /** [followCam]'s step on `m`: the clip's fit and the new zoom together, or null where no room is left. */
+  private withFollowCam(m: EditManifest, trackId: string, id: string, total: number): EditManifest | null {
+    const track = trackById(m, trackId);
+    const room = track ? this.followRoom(m, track, total) : null;
+    if (!track || !room) return null;
+    const footage = trackedFootage(track, { manifest: m, camera: null, layout: compileLayoutMotions(m) }, (room.startMs + room.endMs) / 2);
+    if (!footage) return null;
+    const clip = footage.clip;
+    const reframe = followReframes(clip, track, m.output);
+    // Cover took the sides off before any camera could see them: contained, the whole width is there.
+    const contained = reframe && (clip.fit ?? m.fit) === 'cover' ? patchClip(m, clip.id, { fit: 'contain' }) : m;
+    const zoom: EditZoom = {
+      id,
+      startMs: room.startMs,
+      endMs: room.endMs,
+      cx: 0.5,
+      cy: 0.5,
+      scale: DEFAULT_ZOOM_SCALE,
+      // The whole shot is a reframe rather than a move: on from its first frame, so no bar shows at the cut.
+      rampMs: reframe ? 0 : DEFAULT_ZOOM_RAMP_MS,
+      ease: 'smooth',
+      follow: { trackId, framing: reframe ? 'fill' : 'mid' },
+    };
+    const added = addZoomOp(contained, zoom, total);
+    return added ? this.withFollowRest(added, id) : null;
+  }
+
+  /**
+   * Where a follow of `track` goes: the first of its stretches with [MIN_ZOOM_MS] free of other zooms,
+   * and the longest free piece of that one.
+   */
+  private followRoom(m: EditManifest, track: EditTrack, total: number): { startMs: number; endMs: number } | null {
+    const zooms = [...m.zooms].sort((a, b) => a.startMs - b.startMs);
+    for (const stretch of trackStretches(track, m)) {
+      const from = Math.max(0, Math.ceil(stretch.startMs));
+      const to = Math.min(total, Math.floor(stretch.endMs));
+      let best: { startMs: number; endMs: number } | null = null;
+      let at = from;
+      for (const zoom of [...zooms, { startMs: to, endMs: to }]) {
+        const end = Math.min(zoom.startMs, to);
+        if (end - at >= MIN_ZOOM_MS && (!best || end - at > best.endMs - best.startMs)) best = { startMs: at, endMs: end };
+        at = Math.max(at, zoom.endMs);
+        if (at >= to) break;
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  /** Zoom `id`'s still view set to its path's [followRest]: what it holds wherever it cannot follow. */
+  private withFollowRest(m: EditManifest, id: string): EditManifest {
+    const zoom = findZoom(m, id);
+    const path = zoom ? followPath(zoom, m.zooms, totalDurationMs(m), this.followOf(m)) : null;
+    if (!path) return m;
+    const rest = followRest(path);
+    return updateZoomOp(m, id, { cx: rest.cx, cy: rest.cy, scale: rest.scale });
+  }
+
+  /** What a zoom on `m` follows its thing through. */
+  private followOf(m: EditManifest): CameraFollow {
+    return { manifest: m, layout: m === this.manifest.value ? this.layoutMotions.value : compileLayoutMotions(m) };
   }
 
   /**
@@ -4175,10 +5048,17 @@ export class EditorStore {
   /** The last [focusFrames] made for each segment, kept while what they were made from is the same. */
   private focusMade = new Map<string, { focus: EditFocus; inMs: number; outMs: number; state: SubjectTrackState; frames: FocusFrames }>();
 
+  /** The last [focusFrames] made for each segment's track looks, kept while the looks are the same. */
+  private lookMade = new Map<string, LookFrames>();
+
   /**
    * Each focused segment's focus as the preview draws it, by segment id: compiled against its source's
    * track exactly as the render compiles it ([compileFocus]), and read frame by frame. A segment whose
    * source has no track ready yet is drawn as it is until it has one.
+   *
+   * A segment with no Focus of its own that changes the picture shows its tracks' looks instead
+   * ([EditTrack.look]): the very subject track and focus the render is handed ([segmentLook]), so a
+   * blurred face is blurred on the frame exactly as it will be in the file.
    *
    * A segment's frames are kept from one manifest to the next while its focus, its trim and its track
    * are the same objects, so a drag somewhere else on the timeline makes nothing new.
@@ -4187,9 +5067,20 @@ export class EditorStore {
     const manifest = this.manifest.value;
     const tracks = this.subjectTracks.value;
     const made = new Map<string, { focus: EditFocus; inMs: number; outMs: number; state: SubjectTrackState; frames: FocusFrames }>();
+    const lookMade = new Map<string, LookFrames>();
     const frames = new Map<string, FocusFrames>();
+    // The post's tracks when one of them has a look, so a post with none does no work for looks at all.
+    const looked = hasTrackLooks(manifest) ? manifest.tracks : undefined;
     for (const clip of [...manifest.clips, ...manifest.videoTracks.flatMap(track => track.clips)]) {
       const focus = clip.focus;
+      if (looked && !focusChangesPicture(focus)) {
+        const look = this.lookFramesFor(clip, looked);
+        if (look) {
+          lookMade.set(clip.id, look);
+          frames.set(clip.id, look.frames);
+        }
+        continue;
+      }
       const state = tracks.get(clip.clipKey);
       if (!focus || !focusChangesPicture(focus) || state?.status !== 'ready') continue;
       const kept = this.focusMade.get(clip.id);
@@ -4205,8 +5096,31 @@ export class EditorStore {
       frames.set(clip.id, entry.frames);
     }
     this.focusMade = made;
+    this.lookMade = lookMade;
     return frames;
   });
+
+  /**
+   * Segment `clip`'s track looks as the preview reads them, or null for none. The segment's last ones are
+   * handed back while [segmentLook] answers the same look, and its bytes are parsed once ([PARSED_LOOKS]), so a
+   * Strength drag makes a new focus over the very frames, and a trim dragged makes nothing at all.
+   */
+  private lookFramesFor(clip: EditClip, tracks: readonly EditTrack[]): LookFrames | null {
+    const look = segmentLook(clip, tracks);
+    if (!look) return null;
+    const kept = this.lookMade.get(clip.id);
+    if (kept && kept.look === look) return kept;
+    try {
+      let track = PARSED_LOOKS.get(look.bytes);
+      if (!track) PARSED_LOOKS.set(look.bytes, (track = parseSubjectTrack(look.bytes)));
+      // A reader of its own for each segment, as a focused one has: the frames it fills are its own.
+      return { look, frames: new FocusFrames(track, { uri: `look:${clip.id}`, ...look.focus }) };
+    } catch {
+      // Bytes made a moment ago that will not read are this package's bug, not the customer's: the
+      // segment is drawn as it is rather than not at all.
+      return null;
+    }
+  }
 
   /** Where `clip` is in its own footage at the playhead, or its first frame when the playhead is elsewhere. */
   focusSourceMs(clip: EditClip): number {
@@ -4401,6 +5315,7 @@ export class EditorStore {
     // A run reading footage for an editor that has gone: there is nothing left to put its path on.
     this.trackSession?.abort.abort();
     this.trackSession = null;
+    this.cancelBehind();
     this.player = null;
   }
 }
@@ -4422,6 +5337,11 @@ function sameValue(a: unknown, b: unknown): boolean {
   if (ka.length !== kb.length) return false;
   return ka.every(key => Object.prototype.hasOwnProperty.call(b, key) && sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
 }
+
+/** What a layer going behind the people says while they are looked for. */
+const FINDING_PEOPLE = 'Finding people...';
+/** How long that stays up at most: a minute of footage through a phone's segmenter, and more. */
+const FINDING_PEOPLE_MS = 90_000;
 
 /** How much of the frame before a layer arrives, or before it starts to leave, an audition shows. */
 const AUDITION_LEAD_MS = 300;

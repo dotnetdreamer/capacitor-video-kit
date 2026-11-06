@@ -615,6 +615,44 @@ describe('overlay motion', () => {
   });
 });
 
+describe('layers behind the people', () => {
+  const layer = (over: Record<string, unknown> = {}): ComposeSpec['overlays'][number] =>
+    ({ id: 'o', png: PNG, cx: 0.5, cy: 0.5, wPx: 100, hPx: 50, rotationDeg: 0, startMs: 0, endMs: 1000, opacity: 1, ...over }) as ComposeSpec['overlays'][number];
+  const matte = { uri: 'blob:app/matte', atMs: [0], subjects: [{ id: 1, focus: [1] }] };
+  const path = (input: ComposeSpec): string | undefined => {
+    try {
+      validateSpec(input);
+      return undefined;
+    } catch (error) {
+      return (error as SpecError).path;
+    }
+  };
+
+  it('keeps a layer behind and the matte, as the native parsers read them', () => {
+    const read = validateSpec(spec({ overlays: [layer({ behind: true }), layer({ id: 'p', behind: 'yes' })], matte: { ...matte, extra: 1 } as never }));
+    expect(read.overlays[0]!.behind).toBe(true);
+    expect('behind' in read.overlays[1]!).toBe(false);
+    expect(read.matte).toEqual(matte);
+  });
+
+  it('leaves both off a spec with neither, which is every spec written before them', () => {
+    const read = validateSpec(spec({ overlays: [layer()] }));
+    expect('matte' in read).toBe(false);
+    expect('behind' in read.overlays[0]!).toBe(false);
+    expect('matte' in validateSpec(spec({ matte: null as never }))).toBe(false);
+  });
+
+  it('clamps the matte levels and refuses what a focus is refused for, under matte', () => {
+    expect(validateSpec(spec({ matte: { ...matte, subjects: [{ id: 1, focus: [3] }] } })).matte!.subjects[0]!.focus).toEqual([1]);
+    expect(path(spec({ matte: 'x' as never }))).toBe('matte');
+    expect(path(spec({ matte: { ...matte, uri: '' } }))).toBe('matte.uri');
+    expect(path(spec({ matte: { ...matte, atMs: [] } }))).toBe('matte.atMs');
+    expect(path(spec({ matte: { ...matte, atMs: [5, 1], subjects: [{ id: 1, focus: [1, 1] }] } }))).toBe('matte.atMs[1]');
+    expect(path(spec({ matte: { ...matte, subjects: [{ id: 0, focus: [1] }] } }))).toBe('matte.subjects[0].id');
+    expect(path(spec({ matte: { ...matte, subjects: [{ id: 1, focus: [1, 1] }] } }))).toBe('matte.subjects[0].focus');
+  });
+});
+
 describe('a sound’s speed and effect', () => {
   const music = { uri: 'file:///sound.m4a', startMs: 0, inMs: 0, outMs: 900, volume: 1, loop: false, fadeInMs: 0, fadeOutMs: 0 };
   const withMusic = (over: Record<string, unknown>) => spec({ audio: { ...spec().audio, music: { ...music, ...over } } });

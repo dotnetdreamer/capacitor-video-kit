@@ -23,7 +23,7 @@ or one for it to follow), and a track's own row. It shows one of five faces, the
  - Fixing: the shown track's box dragged off its path. Fix track follows the thing again from this
    frame, both ways, until each way meets the old path.
  - The track: how sure it is, how smooth its path is and, on a layer that follows it, whether the layer
-   grows and turns with the thing.
+   grows and turns with the thing - and on its Look tab, the look it puts on the thing and how strong.
 
 A shown track's name heads the body rather than the frame: `ve-sheet` takes its heading as a string,
 and the name is a button that becomes a field - on a tap, or from Rename on the track's row, which opens

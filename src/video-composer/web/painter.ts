@@ -10,7 +10,9 @@ import { INTERPOLATE_FRAMES_GLSL, interpolateFrames2d } from './frame-interpolat
 import { Focus2d } from './focus-2d';
 import { FocusGl, type FocusDraw } from './focus-gl';
 import { FULL_FRAME, drawRects, sourceWindow, type Frame, type Framing } from './geometry';
+import { Matte2d, MatteGl, drawUnder2d, drawsSomething, type MatteDraw } from './matte-pass';
 import { FlowEstimator, type FlowResult } from './optical-flow-gl';
+import { QuadGl, drawQuad2d, type QuadDraw } from './quad-layers';
 import { Transition2d } from './transition-2d';
 import { TransitionGl } from './transition-gl';
 
@@ -350,8 +352,28 @@ void main() {
   fragColor = vec4(rgb * u_opacity, u_opacity);
 }`;
 
+/** No layer on a surface: one empty list for every frame with none. */
+const NO_QUADS: readonly QuadDraw[] = [];
+
+/**
+ * What a frame draws between its video and its ordinary overlays, in this order, as every engine draws it: the
+ * layers BEHIND the people, each through its quad - a flat one's corners where its pose puts them (`flatCorners`)
+ * - then the people put back over them, the frame's video again through the matte, then the layers on a surface
+ * that are not behind anybody. The people are put back only on a frame where a layer behind them draws something.
+ */
+export interface Underlay {
+  behind: readonly QuadDraw[];
+  /** The matte at this frame; null puts nobody back. */
+  matte: MatteDraw | null;
+  quads: readonly QuadDraw[];
+}
+
 const IDENTITY_GL = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 const ZERO_OFFSET = new Float32Array([0, 0, 0]);
+
+function isUnderlay(under: readonly QuadDraw[] | Underlay): under is Underlay {
+  return !Array.isArray(under);
+}
 
 export class Painter {
   /** Not readonly only for [resize]. */
@@ -377,6 +399,11 @@ export class Painter {
   private transition2d: Transition2d | null = null;
   /** Built the first time a layer has a focus, and never for a post that has none; null once a context refused it. */
   private focusGl: FocusGl | null | undefined = undefined;
+  /** Built the first time a frame has a layer on a surface, and never for a post that has none; null once a context refused it. */
+  private quadGl: QuadGl | null | undefined = undefined;
+  /** Built the first time a frame puts people back over a layer, and never for a post with none; null once a context refused it. */
+  private matteGl: MatteGl | null | undefined = undefined;
+  private matte2d: Matte2d | null = null;
   private focus2d: Focus2d | null = null;
   /** Where the 2D fallback makes a synthesised frame; built the first time it needs one. */
   private tweenSurface: HTMLCanvasElement | null = null;
@@ -519,8 +546,16 @@ export class Painter {
    * Everything before the overlays: black, then each video layer bottom to top. A [TransitionDraw]
    * stands where the base track's layer would, and paints the whole frame - the outgoing clip over
    * black and the incoming one over that - with the layers after it drawn over the result.
+   *
+   * Then what goes between the video and every other layer ([Underlay]): the layers behind the people, the
+   * people put back over them, and the layers ON a flat surface (`quad-layers.ts`), in perspective - over the
+   * video and under every other layer, which [paintOverlay] draws after. A list is the layers on surfaces
+   * alone. None is the frame every painter drew before layers went on surfaces, by the very same calls.
    */
-  paintLayers(layers: ReadonlyArray<LayerDraw | TransitionDraw>): void {
+  paintLayers(layers: ReadonlyArray<LayerDraw | TransitionDraw>, under: readonly QuadDraw[] | Underlay = NO_QUADS): void {
+    const underlay: Underlay = isUnderlay(under) ? under : { behind: NO_QUADS, matte: null, quads: under };
+    const quads = underlay.quads;
+    const plain = underlay.behind.length === 0;
     const gl = this.gl;
     if (gl && this.glCanvas && this.program) {
       // A LOST context - the GPU reclaimed while the page was in the background, or the browser
@@ -528,10 +563,16 @@ export class Painter {
       // this check the frame below would be the last one the context drew, over and over: a preview
       // frozen on one picture, and a web render encoding that picture to the end of the post.
       if (!gl.isContextLost() && this.paintLayersGl(gl, layers)) {
+        // In the GL pass where it can be, so they are sampled through their homography; on the 2D canvas otherwise.
+        const onGpu = plain ? quads.length === 0 || this.paintQuadsGl(gl, quads) : this.paintUnderGl(gl, underlay);
         this.ctx.globalAlpha = 1;
         this.ctx.globalCompositeOperation = 'source-over';
         this.ctx.filter = 'none';
         this.ctx.drawImage(this.glCanvas, 0, 0);
+        if (!onGpu) {
+          if (plain) for (const quad of quads) drawQuad2d(this.ctx, quad, this.output);
+          else this.paintUnder2d(underlay);
+        }
         return;
       }
       // Lost, or the shader refused a source and said so once: every frame after this one takes the
@@ -541,6 +582,58 @@ export class Painter {
       this.dropGl();
     }
     this.paintLayers2d(layers);
+    if (plain) for (const quad of quads) drawQuad2d(this.ctx, quad, this.output);
+    else this.paintUnder2d(underlay);
+  }
+
+  /**
+   * The layers behind the people, the people over them and the layers on surfaces, in the GL pass, into the canvas's
+   * own framebuffer, which holds the video. Everything that could refuse - a program, a bitmap's upload - is asked
+   * before anything is drawn, so a false leaves the video as it was for the 2D canvas to draw all of it over.
+   */
+  private paintUnderGl(gl: WebGL2RenderingContext, underlay: Underlay): boolean {
+    if (this.quadGl === undefined) this.quadGl = QuadGl.build(gl);
+    const quads = this.quadGl;
+    if (!quads || !quads.prepare(underlay.behind) || !quads.prepare(underlay.quads)) return false;
+    const putBack = underlay.matte !== null && underlay.behind.some(quad => drawsSomething(quad, this.output));
+    if (putBack && this.matteGl === undefined) this.matteGl = MatteGl.build(gl, this.position);
+    const matte = putBack ? this.matteGl : null;
+    if (putBack && !matte) return false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // The video kept before anything goes over it: it is what the people are put back from.
+    matte?.keep(this.output);
+    quads.draw(underlay.behind, this.output);
+    if (matte && underlay.matte) matte.draw(underlay.matte, this.output);
+    if (underlay.quads.length > 0) quads.draw(underlay.quads, this.output);
+    // The layer program is the one every other paint assumes is in use.
+    gl.useProgram(this.program);
+    return true;
+  }
+
+  /** [paintUnderGl] on the 2D canvas, over the video it holds: a browser with no WebGL2, or a context that refused. */
+  private paintUnder2d(underlay: Underlay): void {
+    const putBack = underlay.matte !== null && underlay.behind.some(quad => drawsSomething(quad, this.output));
+    const matte = putBack ? (this.matte2d ??= new Matte2d()) : null;
+    matte?.keep(this.ctx, this.output);
+    for (const quad of underlay.behind) drawUnder2d(this.ctx, quad, this.output);
+    if (matte && underlay.matte) matte.draw(this.ctx, underlay.matte, this.output);
+    for (const quad of underlay.quads) drawQuad2d(this.ctx, quad, this.output);
+  }
+
+  /** The layers on a surface through the GL quad program, into the canvas's own framebuffer; false where it will not draw them. */
+  private paintQuadsGl(gl: WebGL2RenderingContext, quads: readonly QuadDraw[]): boolean {
+    if (this.quadGl === undefined) this.quadGl = QuadGl.build(gl);
+    if (!this.quadGl) return false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const drawn = this.quadGl.draw(quads, this.output);
+    // The layer program is the one every other paint assumes is in use.
+    gl.useProgram(this.program);
+    return drawn;
+  }
+
+  /** Lets go of a layer-on-a-surface's texture, once its window has closed and its bitmap with it. */
+  forgetQuad(bitmap: QuadDraw['bitmap']): void {
+    this.quadGl?.forget(bitmap);
   }
 
   /** One overlay, centred, rotated clockwise and blended - the same three lines in both paths. */
@@ -711,6 +804,8 @@ export class Painter {
     this.transition2d = null;
     this.focus2d?.dispose();
     this.focus2d = null;
+    this.matte2d?.dispose();
+    this.matte2d = null;
     if (this.tweenSurface) {
       this.tweenSurface.width = 0;
       this.tweenSurface.height = 0;
@@ -730,6 +825,10 @@ export class Painter {
     this.transitionGl = null;
     this.focusGl?.dispose();
     this.focusGl = undefined;
+    this.quadGl?.dispose();
+    this.quadGl = undefined;
+    this.matteGl?.dispose();
+    this.matteGl = undefined;
     this.flowEstimator?.dispose();
     this.flowEstimator = undefined;
     this.flows.length = 0;
@@ -747,6 +846,8 @@ export class Painter {
     this.spareTextures = [];
     this.transitionGl = null;
     this.focusGl = undefined;
+    this.quadGl = undefined;
+    this.matteGl = undefined;
     // Its textures went with the context; the 2D path draws the cross-fade and needs none of it.
     this.flowEstimator = undefined;
     this.flows.length = 0;

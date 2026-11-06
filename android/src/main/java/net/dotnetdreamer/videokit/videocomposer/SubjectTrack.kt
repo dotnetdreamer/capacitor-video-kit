@@ -174,14 +174,18 @@ class SubjectTrackContent(
 
 /**
  * A focus's keys as a frame reads them: [Focus.atMs] and each listed subject's values as plain arrays,
- * made once per clip rather than unboxed from the spec's lists on every frame.
+ * made once per clip rather than unboxed from the spec's lists on every frame. A [Matte]'s keys are the
+ * same shape and are read by the same code.
  */
 class FocusKeys(val atMs: DoubleArray, val ids: IntArray, val values: Array<DoubleArray>) {
     companion object {
-        fun of(focus: Focus): FocusKeys = FocusKeys(
-            atMs = focus.atMs.toDoubleArray(),
-            ids = IntArray(focus.subjects.size) { focus.subjects[it].id },
-            values = Array(focus.subjects.size) { focus.subjects[it].focus.toDoubleArray() },
+        fun of(focus: Focus): FocusKeys = of(focus.atMs, focus.subjects)
+
+        /** The keys of anything shaped as a focus is: a focus's, or a [Matte]'s. */
+        fun of(atMs: List<Double>, subjects: List<FocusSubject>): FocusKeys = FocusKeys(
+            atMs = atMs.toDoubleArray(),
+            ids = IntArray(subjects.size) { subjects[it].id },
+            values = Array(subjects.size) { subjects[it].focus.toDoubleArray() },
         )
     }
 }

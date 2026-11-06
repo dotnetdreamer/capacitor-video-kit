@@ -1,5 +1,6 @@
 /*
- * The Zoom sheet: the level, the curve and the ramp, and one line about the box on the picture.
+ * The Zoom sheet: the level, the curve and the ramp, and one line about the box on the picture. A
+ * zoom that follows a track has the track and its framings where the level and the line were.
  *
  * Budgeted against the compact sheet like the transition sheet: the 53px head, two 52px slider rows,
  * a 48px row of curves, a 36px hint and 6px of air come to 247px - under the 259px that sheet is held
@@ -32,7 +33,8 @@
   padding: 0 16px 0 20px;
 }
 
-.zs__row--eases {
+.zs__row--eases,
+.zs__row--chips {
   height: 48px;
 }
 
@@ -124,6 +126,78 @@
 @media (hover: hover) and (pointer: fine) {
   .zs__chip:not(.zs__chip--on):hover .zs__pill {
     background: var(--ve-raised-2, #3a3a3c);
+  }
+}
+
+/* --------------------------------------------------------------------------------- following */
+
+/*
+ * The track a following zoom follows, in its colour, and the quiet way back to an area. A 44px row
+ * where the 52px Level row was, so with the framings it comes to 44 + 48 + 48 + 52 and 8px of air
+ * under the 53px head: 253px, inside the budget above.
+ */
+.zs__row--follow {
+  gap: 8px;
+  height: 44px;
+  padding-right: 4px;
+}
+
+.zs__dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--zs-hue, var(--ve-accent, #a6ff2e));
+}
+
+.zs__follows {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ve-text, #fff);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * Quiet, as the speed sheet's Apply to all is: letting go of the thing is never the next tap anybody
+ * is looking for. The 44px target is the button; the words are all that shows.
+ */
+.zs__stop {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ve-dim, rgba(255, 255, 255, 0.6));
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  outline-offset: -2px;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 120ms ease;
+}
+
+.zs__stop:active {
+  color: var(--ve-text, #fff);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .zs__stop:hover {
+    color: var(--ve-text, #fff);
+  }
+}
+
+/* The chips' colour change is the only movement in the sheet, and it can go too. */
+@media (prefers-reduced-motion: reduce) {
+  .zs__pill,
+  .zs__stop {
+    transition: none;
   }
 }
 

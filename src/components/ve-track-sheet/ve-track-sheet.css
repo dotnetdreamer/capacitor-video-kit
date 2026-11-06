@@ -15,6 +15,10 @@
  *    button, and the body scrolls, so it cuts off whatever is drawn past its edge: the button's glow ended
  *    in a hard line there without it. The sheet is 205px, and the picture keeps the other 40px.
  *
+ * The track's Look tab fits the shorter of the two: the name, the looks and the strength - or the line that
+ * says a Focus wins - at 52 + 44 + 44. Its tabs share the head with the name and the buttons, which is the
+ * head's one height with tabs or without.
+ *
  * The `:host` block and the rule that sizes `ve-sheet` are in `sheet-common.css`, which this
  * component includes ahead of this file.
  */
@@ -211,6 +215,23 @@ button.tk__name:active {
   gap: 0;
 }
 
+/*
+ * The Look tab, laid out from the top, so the strength coming and going moves nothing above it. Its rows
+ * are 44px - a finger's height still - where the Path tab's are 52, which is how it fits the budget above.
+ */
+.tk__face--look {
+  justify-content: flex-start;
+}
+
+.tk__face--look .tk__row {
+  height: 44px;
+}
+
+/* "Strength" is longer than "Smooth" and "Follow", and has this tab to itself. */
+.tk__face--look .tk__word {
+  flex-basis: 64px;
+}
+
 /* ------------------------------------------------------------------------------------ words */
 
 .tk__hint {
@@ -404,6 +425,19 @@ button.tk__name:active {
   display: none;
 }
 
+/*
+ * The looks run the sheet's width already: the rows' face has no padding for them to reach past. Their
+ * pills are a little narrower than the tracks', so all four fit a 360px phone without scrolling.
+ */
+.tk__chips--look {
+  height: 44px;
+  margin: 0;
+}
+
+.tk__chips--look .tk__pill {
+  padding: 0 12px;
+}
+
 .tk__chips-run {
   display: flex;
   flex: 0 0 auto;
@@ -468,6 +502,50 @@ button.tk__name:active {
 .tk__chip--on:active .tk__pill {
   background: #fff;
   color: #000;
+}
+
+/* ---------------------------------------------------------------------------------- surface */
+
+/*
+ * What the aim goes on - Box or Flat surface - with the people finder beside them while it is a box: one
+ * 44px line in the people line's place, so the aim's face is the hint, this and Track, 140px as before.
+ */
+.tk__chips--kind {
+  height: 44px;
+}
+
+.tk__kinds {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.tk__rule {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 20px;
+  background: var(--ve-line, rgba(255, 255, 255, 0.16));
+}
+
+.tk__chips--kind .tk__people {
+  flex: 0 0 auto;
+}
+
+.tk__chips--kind .tk__note {
+  white-space: nowrap;
+}
+
+/*
+ * A surface's track face: its name, Smooth and Fix by tracking again, at the Look tab's 44px rows so the
+ * button's touch target fits where the box's one-line hint was.
+ */
+.tk__face--surface .tk__row {
+  height: 44px;
+}
+
+.tk__retrack {
+  align-self: center;
 }
 
 /* ----------------------------------------------------------------------------------- people */

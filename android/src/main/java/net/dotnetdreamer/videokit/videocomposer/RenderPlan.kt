@@ -67,6 +67,13 @@ class RenderPlan private constructor(
      * windows existed.
      */
     val audioEffects: List<AudioEffectWindow> = emptyList(),
+    /**
+     * The people matte the layers behind are drawn under - decided HERE, once, like [camera]: the spec's
+     * [ComposeSpec.matte] when at least one layer asks to be behind, and null otherwise, since a matte with
+     * nothing behind it changes no pixel and a layer behind nothing is an ordinary layer. Null is the old
+     * path in full: no placement is [OverlayPlacement.behind] and the pre-flight reads no mask.
+     */
+    val matte: Matte? = null,
 ) {
 
     data class PlannedClip(
@@ -342,7 +349,21 @@ class RenderPlan private constructor(
          * off it - the keys themselves stay in the web's terms, as the camera's do.
          */
         val motion: OverlayMotion? = null,
-    )
+        /** Where the bitmap's corners go, key by key, for a layer in perspective - see [OverlayQuad] - or null. */
+        val quad: OverlayQuad? = null,
+        /**
+         * Drawn behind the people, under [RenderPlan.matte]: the layer's own `behind`, kept only where the post
+         * has a matte to put the people back with. Without one the layer is drawn over the picture as always.
+         */
+        val behind: Boolean = false,
+    ) {
+        /**
+         * Whether [LayerUnderlayEffect] draws this layer rather than Media3's overlays: one in perspective,
+         * which they cannot foreshorten, or one behind the people, which has to come before the matte. Every
+         * layer of every spec written before either key answers false, and is handed to Media3 as it always was.
+         */
+        val drawnUnder: Boolean get() = behind || quad != null
+    }
 
     /**
      * One pass of the music: [inUs]..[outUs] of the file, played from [atUs] on the output timeline
@@ -474,6 +495,9 @@ class RenderPlan private constructor(
             val totalUs = max(baseUs, spec.durationMs * 1000L)
             val colorMatrix = if (spec.filter.isEmpty()) null else ColorMatrix.fold(spec.filter)
 
+            // A matte only matters to a layer behind it, and a layer is only behind anything with a matte to
+            // put the people back with: each without the other is the post as it always was.
+            val matte = spec.matte?.takeIf { spec.overlays.any { it.behind } }
             val overlays = spec.overlays.map { o ->
                 OverlayPlacement(
                     id = o.id,
@@ -489,6 +513,8 @@ class RenderPlan private constructor(
                     wPx = o.wPx,
                     hPx = o.hPx,
                     motion = o.motion,
+                    quad = o.quad,
+                    behind = o.behind && matte != null,
                 )
             }
 
@@ -546,6 +572,7 @@ class RenderPlan private constructor(
                 // One that starts after the post has ended is never heard - every sequence stops at the
                 // end - and is dropped here, as a layer that starts after the base is.
                 audioEffects = spec.audio.effects.filter { it.startMs * 1000.0 < totalUs },
+                matte = matte,
             )
         }
 

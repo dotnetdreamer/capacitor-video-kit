@@ -226,8 +226,27 @@
 }
 
 /*
- * The Track sheet's box, its run and its path (`TrackOverlay`): the frame's size, drawn in its own
- * pixels, OVER the layers so the box is never hidden under the text it is moving.
+ * The people put back over the layers behind them (`MatteCanvas`): the picture again, cut out where the people
+ * are, between those layers and every other one. The frame's size, drawn in the picture's own pixels, and out of
+ * the page's compositing while there is nobody to put back.
+ */
+.pv__matte {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.pv__matte[hidden] {
+  display: none;
+}
+
+/*
+ * The Track sheet's box, its run and its path, and the things a dragged layer can be pinned to
+ * (`TrackOverlay`): the frame's size, drawn in its own pixels, OVER the layers so a box is never hidden
+ * under the text it is moving or the sticker being dropped on it.
  */
 .pv__track {
   position: absolute;

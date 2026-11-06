@@ -1,3 +1,5 @@
+import type { ReadonlySignal } from '@preact/signals-core';
+
 import {
   TRACK_HUES,
   UNSURE_BELOW,
@@ -11,16 +13,19 @@ import {
   type TrackScene,
   type TrackStretch,
 } from '../../editor';
+import { squareToQuad } from '../../editor/homography';
 import type { EditorStore, TrackPersonBox } from '../../state/editor-store';
 import type { TrackAim } from '../../state/editor.types';
+import type { DropTarget } from './overlay-gestures';
 
 /**
  * The Track sheet on the picture: the box the customer aims, the run as it reads the footage, and the path
  * of the track the sheet shows - which may have come from a layer, from the track's own row, or from the
  * main row's Track tool, with no layer at all.
  *
- * Chrome, not picture, like the Focus sheet's outlines: a canvas of its own over the preview's, drawn only
- * while the sheet is open, and cleared otherwise. One look for each thing the customer is doing:
+ * Chrome, not picture, like the Focus sheet's outlines: a canvas of its own over the preview's, drawn while
+ * the sheet is open or a layer is dragged over things it can be pinned to, and cleared otherwise. One look
+ * for each thing the customer is doing:
  *
  *  - CHOOSING: each of the post's tracks boxed where its thing is, in its own colour, so the sheet's chips
  *    name things the customer can see.
@@ -36,6 +41,9 @@ import type { TrackAim } from '../../state/editor.types';
  *    was - the track's colour where sure, amber where unsure, red and dotted where it lost the thing -
  *    solid behind the playhead and faint ahead of it, and the box round the thing now in the track's
  *    colour, red and dashed where the thing was lost.
+ *  - DROPPING, with the sheet shut: a text, sticker or photo dragged over the picture lights up each thing
+ *    it can be pinned to, boxed faintly in its track's colour with its name in a pill above it, and the one
+ *    under the finger bright, "Drop to pin" beside its name, its brackets swelling once as it lights up.
  *
  * Everything is placed through the same arithmetic the render places the footage with ([trackedFootage]),
  * so the box is where the thing is however the clip is cropped, fitted, placed, turned or zoomed into.
@@ -67,6 +75,24 @@ const PULSE_MS = 260;
 const BREATHE_MS = 900;
 const BREATHE_FOR_MS = 4000;
 
+/** How strong a thing a dragged layer can be dropped on is drawn while the finger is not on it. */
+const FAINT = 0.5;
+
+/** As the finger reaches a thing to drop on, its brackets swell and settle over this long. */
+const LIGHT_MS = 200;
+
+/** The pill naming a thing to drop on: its height and its type size, in CSS pixels. */
+const PILL_PX = 20;
+const PILL_FONT_PX = 11;
+
+/** A pill's ground while its thing is one of those on offer, and its ink while the finger is on it. */
+const PILL_GROUND = 'rgba(0, 0, 0, 0.6)';
+const PILL_INK = '#0b0b0b';
+const PILL_INK_SOFT = 'rgba(11, 11, 11, 0.72)';
+
+/** Beside the name of the thing under the finger: what letting go does. */
+const DROP_HINT = 'Drop to pin';
+
 /** The track colours the tokens name (`--ve-track-0` on), for a page that does not load them. */
 const FALLBACK_HUES = ['#a6ff2e', '#4dd8ff', '#ff6bd6', '#c77dff', '#6b8cff', '#5cffc8'];
 
@@ -77,6 +103,15 @@ const LOST = 2;
 
 /** No dashes: one array, handed to `setLineDash` as often as it likes, which copies it. */
 const NO_DASH: number[] = [];
+
+/**
+ * A layer being dragged over the picture, as the preview's gestures report it: what it can be dropped on to
+ * pin it to a track, and the track whose thing the finger is over.
+ */
+export interface TrackDrop {
+  targets: ReadonlySignal<readonly DropTarget[]>;
+  hot: ReadonlySignal<string | null>;
+}
 
 export class TrackOverlay {
   private readonly ctx: CanvasRenderingContext2D | null;
@@ -95,10 +130,14 @@ export class TrackOverlay {
   private stretches: { track: EditTrack; manifest: TrackScene['manifest']; list: TrackStretch[] } | null = null;
   /** The path last worked out, kept while its track, the post, its stretch and the canvas's size are the same. */
   private path: PathPoints | null = null;
+  /** The thing to drop on that the finger is over, and when it lit up: what its swell is timed from. */
+  private lit: { id: string; start: number } | null = null;
 
   constructor(
     private readonly store: EditorStore,
     private readonly canvas: HTMLCanvasElement,
+    /** A layer being dragged with the sheet shut; see [drawTargets]. */
+    private readonly drop: TrackDrop | null = null,
   ) {
     this.ctx = canvas.getContext('2d');
     this.calm = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
@@ -122,6 +161,7 @@ export class TrackOverlay {
     this.path = null;
     this.stretches = null;
     this.lock = null;
+    this.lit = null;
   }
 
   private draw(): void {
@@ -140,11 +180,17 @@ export class TrackOverlay {
     const store = this.store;
     if (store.panel.value !== 'track') {
       this.lock = null;
+      // With the sheet shut, all there is to draw is a layer being dragged over things it can be pinned to.
+      const targets = this.drop?.targets.value;
+      if (targets && targets.length > 0) this.drawTargets(ctx, this.viewOf(w, h, ratio), targets, this.drop?.hot.value ?? null);
+      else this.lit = null;
       return;
     }
-    const view: View = { w, h, ratio, colours: this.colours(), now: performance.now(), calm: !!this.calm?.matches };
+    this.lit = null;
+    const view = this.viewOf(w, h, ratio);
     if (store.trackRun.value) {
-      this.drawRun(ctx, view);
+      if (store.surfaceRunning.value) this.drawSurfaceRun(ctx, view);
+      else this.drawRun(ctx, view);
       return;
     }
     if (store.trackChoosing.value) {
@@ -152,6 +198,12 @@ export class TrackOverlay {
       return;
     }
     const shown = store.trackShown.value;
+    // Four corners: a flat surface being aimed, tracked again, or shown.
+    if (store.surfaceAiming.value) {
+      if (!shown || store.trackAimMoved.value) this.drawSurfaceAim(ctx, view, shown);
+      else this.drawShownSurface(ctx, view, shown);
+      return;
+    }
     if (!shown || store.trackAimMoved.value) {
       this.drawAim(ctx, view, shown);
       return;
@@ -164,6 +216,14 @@ export class TrackOverlay {
     // the thing, which the path dots in the same red.
     const lost = lostAt(shown, thing.sourceMs);
     this.drawBox(ctx, thing.corners.map(c => ({ x: c.x * w, y: c.y * h })), view, boxStyle(lost ? view.colours.lost : hueOf(shown, view), 6 * ratio, { dashed: lost }));
+  }
+
+  /**
+   * What a frame is drawn with: the canvas's size, the tokens' colours, the time, and whether to keep still.
+   * Only once there is something to draw, so a canvas that only ever clears never reads the tokens.
+   */
+  private viewOf(w: number, h: number, ratio: number): View {
+    return { w, h, ratio, colours: this.colours(), now: performance.now(), calm: !!this.calm?.matches };
   }
 
   /**
@@ -180,6 +240,7 @@ export class TrackOverlay {
       hues: FALLBACK_HUES.map((fallback, i) => read(`--ve-track-${i}`, fallback)),
       unsure: read('--ve-track-unsure', '#ffb340'),
       lost: read('--ve-track-lost', '#ff4d6a'),
+      font: style.fontFamily || 'system-ui, sans-serif',
     };
     if (this.canvas.isConnected) this.palette = palette;
     return palette;
@@ -223,6 +284,87 @@ export class TrackOverlay {
     if (store.trackPeople.value === 'ready') this.drawPeople(ctx, view, settled ? aim : null);
     if (fixing) this.drawPath(ctx, fixing, view, true);
     this.drawBox(ctx, corners, view, boxStyle(fixing ? hueOf(fixing, view) : view.colours.accent, 10 * r, { handles: settled, pulse }));
+  }
+
+  /**
+   * Four corners being put on a flat surface - a new surface's in the accent, a surface's being tracked again
+   * in its colour over its faint path: the picture dimmed everywhere but the quad, its edges, a faint grid of
+   * the plane inside it, and a handle at each corner to drag.
+   */
+  private drawSurfaceAim(ctx: CanvasRenderingContext2D, view: View, again: EditTrack | null): void {
+    const corners = this.store.shownSurfaceAim();
+    if (!corners) return;
+    const quad = pointsOf(corners, view.w, view.h);
+    ctx.save();
+    ctx.fillStyle = SPOTLIGHT;
+    ctx.fillRect(0, 0, view.w, view.h);
+    ctx.globalCompositeOperation = 'destination-out';
+    polygonPath(ctx, quad);
+    ctx.fill();
+    ctx.restore();
+    if (again) this.drawPath(ctx, again, view, true);
+    drawPlane(ctx, quad, view, again ? hueOf(again, view) : view.colours.accent, { handles: true, dashed: false });
+  }
+
+  /** A surface track's quad at the playhead in its colour, its plane's grid inside - red and dashed where it was lost - over its path. */
+  private drawShownSurface(ctx: CanvasRenderingContext2D, view: View, track: EditTrack): void {
+    this.drawPath(ctx, track, view, false);
+    const thing = this.store.surfaceThing.value;
+    if (!thing) return;
+    const lost = lostAt(track, thing.sourceMs);
+    drawPlane(ctx, pointsOf(thing.corners, view.w, view.h), view, lost ? view.colours.lost : hueOf(track, view), { handles: false, dashed: lost });
+  }
+
+  /** A surface run as it reads: the frame being read through the clip's framing, the way the surface's middle has come, and the quad on it. */
+  private drawSurfaceRun(ctx: CanvasRenderingContext2D, view: View): void {
+    const store = this.store;
+    const run = store.trackRun.value!;
+    const again = run.trackId ? trackById(store.manifest.value, run.trackId) : null;
+    const colour = again ? hueOf(again, view) : view.colours.accent;
+    const live = store.surfaceLive.value;
+    if (!live) {
+      // Before the first frame: the corners as they were put down, so nothing jumps.
+      const corners = store.surfaceAim.value;
+      if (corners) drawPlane(ctx, pointsOf(corners, view.w, view.h), view, colour, { handles: false, dashed: false });
+      return;
+    }
+    const output = store.output.value;
+    const footage = trackedFootage({ clipId: run.clipId, clipKey: run.clipKey, aspect: live.frame.width / live.frame.height }, store.trackScene.value, run.outputMs);
+    if (!footage) return;
+    const k = view.w / output.width;
+    const map = footage.map;
+    const at = (u: number, v: number): Point => {
+      const out = map.toOutput(u, v);
+      return { x: out.x * k, y: out.y * k };
+    };
+    const picture = this.framePicture(live.frame.width, live.frame.height, live.frame.luma);
+    if (picture) {
+      ctx.save();
+      polygonPath(
+        ctx,
+        map.outline().map(p => ({ x: p.x * k, y: p.y * k })),
+      );
+      ctx.clip();
+      const o = at(0, 0);
+      const ex = at(1, 0);
+      const ey = at(0, 1);
+      ctx.setTransform((ex.x - o.x) / picture.width, (ex.y - o.y) / picture.width, (ey.x - o.x) / picture.height, (ey.y - o.y) / picture.height, o.x, o.y);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(picture, 0, 0);
+      ctx.restore();
+    }
+    const trail = live.trail;
+    if (trail.length > 1) {
+      const points = trail.map(p => ({ ...at(p.x, p.y), lost: p.lost }));
+      ctx.save();
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      strokeRuns(ctx, points, colour, view.colours.unsure, 9 * view.ratio, () => 0.16);
+      strokeRuns(ctx, points, colour, view.colours.unsure, 3 * view.ratio, i => 0.3 + 0.7 * (i / (points.length - 1)));
+      ctx.restore();
+    }
+    const quad = [0, 1, 2, 3].map(c => at(live.corners[2 * c]!, live.corners[2 * c + 1]!));
+    drawPlane(ctx, quad, view, live.lost ? view.colours.unsure : colour, { handles: false, dashed: live.lost });
   }
 
   /** The picture dimmed everywhere but the box. */
@@ -273,6 +415,98 @@ export class TrackOverlay {
       const thing = trackedThingAt(track, scene, at);
       if (thing) this.drawBox(ctx, thing.corners.map(c => ({ x: c.x * view.w, y: c.y * view.h })), view, boxStyle(hueOf(track, view), 6 * view.ratio));
     }
+  }
+
+  /**
+   * A layer being dragged with the sheet shut: every thing it can be dropped on boxed faintly in its track's
+   * colour with its name in a pill above it, so the customer sees what letting go there would pin the layer
+   * to - and the one under the finger bright, "Drop to pin" beside its name, its brackets swelling once as it
+   * lights up and not again while the finger stays on it. Drawn last, so it is on top of any it overlaps.
+   */
+  private drawTargets(ctx: CanvasRenderingContext2D, view: View, targets: readonly DropTarget[], hot: string | null): void {
+    if (this.lit?.id !== hot) this.lit = hot ? { id: hot, start: view.now } : null;
+    let pulse = 0;
+    if (this.lit && !view.calm) {
+      const since = view.now - this.lit.start;
+      if (since < LIGHT_MS) {
+        pulse = Math.sin((Math.PI * since) / LIGHT_MS);
+        this.request();
+      }
+    }
+    let lit: DropTarget | null = null;
+    for (const target of targets) {
+      if (target.trackId === hot) lit = target;
+      else this.drawTarget(ctx, view, target, false, 0);
+    }
+    if (lit) this.drawTarget(ctx, view, lit, true, pulse);
+  }
+
+  /** One thing a dragged layer can be dropped on: its box, faint unless the finger is on it, and its name. */
+  private drawTarget(ctx: CanvasRenderingContext2D, view: View, target: DropTarget, hot: boolean, pulse: number): void {
+    const colour = hueOf(target, view);
+    ctx.save();
+    if (!hot) ctx.globalAlpha = FAINT;
+    this.drawBox(
+      ctx,
+      target.corners.map(c => ({ x: c.x * view.w, y: c.y * view.h })),
+      view,
+      boxStyle(colour, 6 * view.ratio, { pulse }),
+    );
+    ctx.restore();
+    this.drawPill(ctx, view, target, colour, hot);
+  }
+
+  /**
+   * The name over a thing to drop on, in a pill: dark with a dot of the track's colour while it is one of the
+   * things on offer, and in the track's colour with "Drop to pin" after the name while the finger is on it.
+   * Placed by [pillSpot].
+   */
+  private drawPill(ctx: CanvasRenderingContext2D, view: View, target: DropTarget, colour: string, hot: boolean): void {
+    const r = view.ratio;
+    const strong = `600 ${PILL_FONT_PX * r}px ${view.colours.font}`;
+    const plain = `500 ${PILL_FONT_PX * r}px ${view.colours.font}`;
+    const pad = 8 * r;
+    const gap = 6 * r;
+    const dot = 3 * r;
+    ctx.save();
+    ctx.font = strong;
+    const nameWidth = ctx.measureText(target.name).width;
+    ctx.font = plain;
+    const hintWidth = hot ? ctx.measureText(DROP_HINT).width : 0;
+    // On offer: a dot of the track's colour, then the name. Under the finger: the name, then what letting go does.
+    const lead = hot ? 0 : dot * 2 + gap;
+    const width = pad * 2 + lead + nameWidth + (hot ? gap + hintWidth : 0);
+    const height = PILL_PX * r;
+    const at = pillSpot({ cx: target.cx * view.w, top: target.top * view.h, bottom: target.bottom * view.h }, width, height, view.w, view.h, gap, 4 * r);
+    roundedPath(
+      ctx,
+      [
+        { x: at.x, y: at.y },
+        { x: at.x + width, y: at.y },
+        { x: at.x + width, y: at.y + height },
+        { x: at.x, y: at.y + height },
+      ],
+      height / 2,
+    );
+    ctx.fillStyle = hot ? colour : PILL_GROUND;
+    ctx.fill();
+    const middle = at.y + height / 2;
+    if (!hot) {
+      ctx.beginPath();
+      ctx.arc(at.x + pad + dot, middle, dot, 0, Math.PI * 2);
+      ctx.fillStyle = colour;
+      ctx.fill();
+    }
+    ctx.textBaseline = 'middle';
+    ctx.font = strong;
+    ctx.fillStyle = hot ? PILL_INK : '#fff';
+    ctx.fillText(target.name, at.x + pad + lead, middle);
+    if (hot) {
+      ctx.font = plain;
+      ctx.fillStyle = PILL_INK_SOFT;
+      ctx.fillText(DROP_HINT, at.x + pad + nameWidth + gap, middle);
+    }
+    ctx.restore();
   }
 
   /**
@@ -522,6 +756,74 @@ export class TrackOverlay {
   }
 }
 
+/** Corners as fractions of the frame (x0, y0, ...) as points on a canvas `w` by `h`. */
+function pointsOf(corners: readonly number[], w: number, h: number): Point[] {
+  return [0, 1, 2, 3].map(k => ({ x: corners[2 * k]! * w, y: corners[2 * k + 1]! * h }));
+}
+
+/** How many cells each way the grid of a surface's plane is drawn in. */
+const PLANE_CELLS = 4;
+
+/**
+ * A flat surface's quad: a faint grid of its own plane inside - straight lines, since a plane's lines stay
+ * straight in perspective, which is what makes it read as a surface and not a box - its edges in white,
+ * dashed in `colour` where it was lost, and at each corner a dot in `colour`, a white-ringed handle to drag
+ * while it is being put down.
+ */
+function drawPlane(ctx: CanvasRenderingContext2D, quad: Point[], view: View, colour: string, style: { handles: boolean; dashed: boolean }): void {
+  const r = view.ratio;
+  const h = squareToQuad(quad.flatMap(p => [p.x, p.y]));
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  if (h) {
+    const at = (u: number, v: number): Point => {
+      const w = h[6]! * u + h[7]! * v + h[8]!;
+      return { x: (h[0]! * u + h[1]! * v + h[2]!) / w, y: (h[3]! * u + h[4]! * v + h[5]!) / w };
+    };
+    ctx.beginPath();
+    for (let i = 1; i < PLANE_CELLS; i++) {
+      const f = i / PLANE_CELLS;
+      for (const [a, b] of [
+        [at(f, 0), at(f, 1)],
+        [at(0, f), at(1, f)],
+      ] as const) {
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+      }
+    }
+    ctx.lineWidth = 1 * r;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+    ctx.stroke();
+  }
+  polygonPath(ctx, quad);
+  ctx.lineWidth = 1.5 * r;
+  ctx.strokeStyle = style.dashed ? colour : 'rgba(255, 255, 255, 0.9)';
+  if (style.dashed) ctx.setLineDash([6 * r, 5 * r]);
+  ctx.stroke();
+  ctx.setLineDash(NO_DASH);
+  // The corners, glowing a little in the colour: where the surface is held.
+  ctx.shadowColor = colour;
+  ctx.shadowBlur = 8 * r;
+  ctx.fillStyle = colour;
+  for (const p of quad) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, (style.handles ? 7 : 4) * r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (style.handles) {
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 2 * r;
+    ctx.strokeStyle = '#fff';
+    for (const p of quad) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 7 * r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 /** Whether this platform keeps a 32-bit word's lowest byte first, which is how a pixel's red lands first. */
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
@@ -532,7 +834,7 @@ function healthAt(track: EditTrack, sourceMs: number): number {
 }
 
 /** The colour `track` is drawn in: its row's, its box's and its followers' marks'. */
-function hueOf(track: EditTrack, view: View): string {
+function hueOf(track: Pick<EditTrack, 'hue'>, view: View): string {
   const hue = ((Math.round(track.hue) % TRACK_HUES) + TRACK_HUES) % TRACK_HUES;
   return view.colours.hues[hue] ?? view.colours.accent;
 }
@@ -616,6 +918,8 @@ interface Palette {
   hues: string[];
   unsure: string;
   lost: string;
+  /** The page's type, for the words drawn: the canvas's own font family. */
+  font: string;
 }
 
 interface View {
@@ -623,7 +927,7 @@ interface View {
   h: number;
   ratio: number;
   colours: Palette;
-  /** The frame's time, for what moves: the lock-on. */
+  /** The frame's time, for what moves: the lock-on, and a thing to drop on lighting up. */
   now: number;
   /** The customer asked for less motion. */
   calm: boolean;
@@ -683,6 +987,18 @@ export function squareAt(x: number, y: number, half: number): Point[] {
     { x: x + half, y: y + half },
     { x: x - half, y: y + half },
   ];
+}
+
+/**
+ * Where a pill `width` by `height` goes over a thing to drop on whose box runs from `top` to `bottom` down a
+ * canvas `w` by `h`: centred across on the thing, `gap` above the box - or as far under it, where above would
+ * put it within `edge` of the top - and never within `edge` of either side. Its top-left corner, in pixels.
+ */
+export function pillSpot(box: { cx: number; top: number; bottom: number }, width: number, height: number, w: number, h: number, gap: number, edge: number): Point {
+  const above = box.top - gap - height;
+  const y = above >= edge ? above : Math.min(h - edge - height, box.bottom + gap);
+  const x = Math.max(edge, Math.min(w - edge - width, box.cx - width / 2));
+  return { x, y };
 }
 
 /** Corners `k` of the way from `from` to `to`, corner by corner. */

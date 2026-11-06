@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { aimCorners, between, boxedBy, easeOut, squareAt } from './track-overlay';
+import { aimCorners, between, boxedBy, easeOut, pillSpot, squareAt } from './track-overlay';
 
 /*
  * The arithmetic of the Track sheet's picture that does not need a canvas: how a box locks on - opening out
@@ -45,5 +45,24 @@ describe('the people the finder found', () => {
   it('are outlined where the box is off them, or only half on them', () => {
     expect(boxedBy(person, { cx: 0.6, cy: 0.5, w: 0.2, h: 0.4 })).toBe(false);
     expect(boxedBy(person, { cx: 0.1, cy: 0.1, w: 0.1, h: 0.1 })).toBe(false);
+  });
+});
+
+describe('the name over a thing a dragged layer can be dropped on', () => {
+  // An 80x20 pill on a 400x800 canvas, 6px off the box and never within 4px of an edge.
+  const spot = (cx: number, top: number, bottom: number) => pillSpot({ cx, top, bottom }, 80, 20, 400, 800, 6, 4);
+
+  it('sits above the box, centred on the thing', () => {
+    expect(spot(200, 300, 400)).toEqual({ x: 160, y: 274 });
+  });
+
+  it('goes under a box with no room above it, and stays on the canvas under one that fills it', () => {
+    expect(spot(200, 20, 120)).toEqual({ x: 160, y: 126 });
+    expect(spot(200, 0, 800)).toEqual({ x: 160, y: 776 });
+  });
+
+  it('never leaves the canvas at the sides', () => {
+    expect(spot(10, 300, 400).x).toBe(4);
+    expect(spot(395, 300, 400).x).toBe(316);
   });
 });

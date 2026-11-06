@@ -72,8 +72,8 @@ object JobRegistry {
         /**
          * Every focused clip's subject track, by [Focus.uri], read and checked by the pre-flight - so a
          * track that cannot be read fails the render there, naming its clip, rather than in the middle
-         * of the export. Held for the job like [overlays], because a relaxed retry builds the
-         * composition again from them.
+         * of the export - and the people matte's, by [Matte.uri], when the plan keeps one. Held for the
+         * job like [overlays], because a relaxed retry builds the composition again from them.
          */
         @Volatile var subjectTracks: Map<String, SubjectTrack> = emptyMap()
 

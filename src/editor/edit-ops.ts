@@ -22,6 +22,7 @@ import {
   normalisePlacement,
   normaliseSpeed,
   normaliseZoom,
+  sameZoomFollow,
   normaliseRect,
   sameRect,
   totalDurationMs,
@@ -41,6 +42,7 @@ import {
   type EditVideoTrack,
   type EditVoiceover,
   type EditZoom,
+  type ZoomFollow,
   type FocusSubjects,
   type LayoutAnimation,
 } from './edit-manifest';
@@ -1199,6 +1201,10 @@ function normaliseLayer<T extends EditOverlay>(overlay: T): T {
   const follow = overlay.kind === 'effect' ? undefined : normaliseOverlayFollow(overlay.follow);
   if (follow) layer.follow = follow;
   else delete layer.follow;
+  // Behind the people by the reader's rule, the KEY off otherwise: a patch of `behind: undefined` is how the
+  // tool brings a layer back over the picture, and a key left under an `undefined` would survive a clone.
+  if (overlay.behind === true && overlay.kind !== 'effect') layer.behind = true;
+  else delete layer.behind;
   return layer;
 }
 
@@ -1252,17 +1258,20 @@ export function addZoom(manifest: EditManifest, zoom: EditZoom, totalMs: number)
 }
 
 /** The parts of a zoom that are not its window. Timing has one owner, [setZoomWindow], which keeps the lane apart. */
-export type ZoomPatch = Partial<Pick<EditZoom, 'cx' | 'cy' | 'scale' | 'rampMs' | 'rampOutMs' | 'ease' | 'chain'>>;
+export type ZoomPatch = Partial<Pick<EditZoom, 'cx' | 'cy' | 'scale' | 'rampMs' | 'rampOutMs' | 'ease' | 'chain'>> & {
+  /** The track to follow and how close, or `null` to hold an area again. Absent leaves it as it is. */
+  follow?: ZoomFollow | null;
+};
 
 /**
- * Changes a zoom's area, level, ramps, ease or chaining, held to what the editor offers
+ * Changes a zoom's area, level, ramps, ease, chaining or follow, held to what the editor offers
  * ([normaliseZoom]). The same manifest when nothing changed, so a slider let go where it started
  * records no undo step.
  */
 export function updateZoom(manifest: EditManifest, id: string, patch: ZoomPatch): EditManifest {
   const current = findZoom(manifest, id);
   if (!current) return manifest;
-  const picked: ZoomPatch = {};
+  const picked: Partial<EditZoom> = {};
   if (patch.cx !== undefined) picked.cx = patch.cx;
   if (patch.cy !== undefined) picked.cy = patch.cy;
   if (patch.scale !== undefined) picked.scale = patch.scale;
@@ -1270,7 +1279,12 @@ export function updateZoom(manifest: EditManifest, id: string, patch: ZoomPatch)
   if (patch.rampOutMs !== undefined) picked.rampOutMs = patch.rampOutMs;
   if (patch.ease !== undefined) picked.ease = patch.ease;
   if (patch.chain !== undefined) picked.chain = patch.chain;
-  const next = normaliseZoom({ ...current, ...picked });
+  const merged: EditZoom = { ...current, ...picked };
+  // `null` takes the KEY off, as a layer's follow goes: an `undefined` left under it would survive a
+  // structured clone. A follow equal to the one there keeps that object, so it is no change.
+  if (patch.follow === null) delete merged.follow;
+  else if (patch.follow !== undefined && !sameZoomFollow(current.follow, patch.follow)) merged.follow = patch.follow;
+  const next = normaliseZoom(merged);
   if (sameFields(current, next)) return manifest;
   return { ...manifest, zooms: manifest.zooms.map(zoom => (zoom.id === id ? next : zoom)) };
 }

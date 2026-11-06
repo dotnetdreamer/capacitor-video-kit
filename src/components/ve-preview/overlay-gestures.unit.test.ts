@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_SCALE, MIN_SCALE } from '../../editor';
+import { MAX_SCALE, MIN_SCALE, compileLayoutMotions, emptyManifest, type EditManifest, type EditTrack, type TrackScene } from '../../editor';
 
-import { aimGripAt, gripAim, handleSpot, hitsLayer, pinchedScale, pressBelongsToLayer, type LayerBox } from './overlay-gestures';
+import { aimGripAt, dropTargetAt, dropTargets, gripAim, handleSpot, hitsLayer, pinchedScale, pressBelongsToLayer, type DropTarget, type LayerBox } from './overlay-gestures';
 
 /**
  * The frame the tests measure on, and a layer centred in it. A 40px-wide square on a 400px frame is
@@ -179,5 +179,114 @@ describe("the Track sheet's box", () => {
     const flipped = gripAim(aim, 'tl', 0.4, 0);
     expect(flipped.w).toBeCloseTo(0.15, 9);
     expect(flipped.cx - flipped.w / 2).toBeCloseTo(0.625, 9);
+  });
+});
+
+describe('what a dragged layer can be dropped on', () => {
+  /** A still thing in the middle of a 9:16 source over its first five seconds, a fifth of it across and a tenth down. */
+  function track(id: string, over: Partial<EditTrack> = {}): EditTrack {
+    return {
+      id,
+      name: id,
+      hue: 2,
+      clipId: 'seg-a',
+      clipKey: 'clip-a',
+      aspect: 9 / 16,
+      box: { w: 0.2, h: 0.1 },
+      atMs: [0, 1000, 2000, 3000, 4000, 5000],
+      x: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+      y: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+      scale: [1, 1, 1, 1, 1, 1],
+      turn: [0, 0, 0, 0, 0, 0],
+      ...over,
+    };
+  }
+
+  /** The 9:16 post a ten second clip of that source fills, with `tracks` on it. */
+  function scene(tracks: EditTrack[]): TrackScene {
+    const manifest: EditManifest = {
+      ...emptyManifest(),
+      clips: [{ id: 'seg-a', clipKey: 'clip-a', inMs: 0, outMs: 10_000, speed: 1, volume: 1, muted: false }],
+      tracks,
+    };
+    return { manifest, camera: null, layout: compileLayoutMotions(manifest) };
+  }
+
+  it('boxes each thing where it is on the frame, with its name and colour', () => {
+    const runner = track('runner');
+    const [target] = dropTargets([runner], scene([runner]), 1000, null);
+    expect(target).toMatchObject({ trackId: 'runner', name: 'runner', hue: 2 });
+    // The source fills the frame exactly, so its fractions are the frame's.
+    expect(target!.cx).toBeCloseTo(0.5, 6);
+    expect(target!.cy).toBeCloseTo(0.5, 6);
+    expect(target!.left).toBeCloseTo(0.4, 6);
+    expect(target!.right).toBeCloseTo(0.6, 6);
+    expect(target!.top).toBeCloseTo(0.45, 6);
+    expect(target!.bottom).toBeCloseTo(0.55, 6);
+    expect(target!.corners).toHaveLength(4);
+  });
+
+  it('leaves out the track the layer follows already, and one whose thing is not on screen at the playhead', () => {
+    const later = track('later', { atMs: [6000, 7000, 8000], x: [0.5, 0.5, 0.5], y: [0.5, 0.5, 0.5], scale: [1, 1, 1], turn: [0, 0, 0] });
+    const tracks = [track('runner'), track('dog'), later];
+    const at = scene(tracks);
+    expect(dropTargets(tracks, at, 1000, null).map(t => t.trackId)).toEqual(['runner', 'dog']);
+    expect(dropTargets(tracks, at, 1000, 'runner').map(t => t.trackId)).toEqual(['dog']);
+    expect(dropTargets(tracks, at, 7000, null).map(t => t.trackId)).toEqual(['later']);
+  });
+});
+
+describe('letting a dragged layer go on a thing', () => {
+  /** A target round the box from (`left`, `top`) to (`right`, `bottom`), its middle in the middle. */
+  function target(trackId: string, left: number, top: number, right: number, bottom: number): DropTarget {
+    return {
+      trackId,
+      name: trackId,
+      hue: 0,
+      corners: [
+        { x: left, y: top },
+        { x: right, y: top },
+        { x: right, y: bottom },
+        { x: left, y: bottom },
+      ],
+      left,
+      top,
+      right,
+      bottom,
+      cx: (left + right) / 2,
+      cy: (top + bottom) / 2,
+    };
+  }
+
+  // The 400x800 frame: its shorter side is its width, so the pad is 32px - 0.08 across and 0.04 down.
+  const portrait = FRAME_W / FRAME_H;
+  const face = target('face', 0.4, 0.4, 0.6, 0.5);
+
+  it('takes a finger on the thing, and one a little way off it', () => {
+    expect(dropTargetAt([face], 0.5, 0.45, portrait)?.trackId).toBe('face');
+    expect(dropTargetAt([face], 0.33, 0.45, portrait)?.trackId).toBe('face');
+    expect(dropTargetAt([face], 0.5, 0.53, portrait)?.trackId).toBe('face');
+  });
+
+  it('takes nothing for a finger well off every thing', () => {
+    expect(dropTargetAt([face], 0.31, 0.45, portrait)).toBeNull();
+    expect(dropTargetAt([face], 0.5, 0.55, portrait)).toBeNull();
+    expect(dropTargetAt([], 0.5, 0.45, portrait)).toBeNull();
+  });
+
+  it('gives a finger where two overlap to the one whose middle is nearer', () => {
+    const big = target('big', 0.2, 0.2, 0.8, 0.8);
+    const small = target('small', 0.6, 0.6, 0.7, 0.7);
+    expect(dropTargetAt([big, small], 0.64, 0.66, portrait)?.trackId).toBe('small');
+    expect(dropTargetAt([small, big], 0.64, 0.66, portrait)?.trackId).toBe('small');
+    expect(dropTargetAt([big, small], 0.45, 0.45, portrait)?.trackId).toBe('big');
+  });
+
+  it('pads as far across as down on a frame of any shape', () => {
+    // 2:1, so the shorter side is the height: 0.04 across and 0.08 down.
+    const thing = target('thing', 0.4, 0.4, 0.6, 0.6);
+    expect(dropTargetAt([thing], 0.5, 0.33, 2)?.trackId).toBe('thing');
+    expect(dropTargetAt([thing], 0.37, 0.5, 2)?.trackId).toBe('thing');
+    expect(dropTargetAt([thing], 0.35, 0.5, 2)).toBeNull();
   });
 });

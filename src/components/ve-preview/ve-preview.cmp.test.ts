@@ -9,12 +9,16 @@ import {
   emptyManifest,
   encodeSubjectTrack,
   parseSubjectTrack,
+  trackedThingAt,
   type EditManifest,
+  type EditTrack,
   type FindSubjectsResult,
 } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
+
+import { TRASH_BOTTOM_PX, TRASH_SIZE_PX } from './overlay-gestures';
 
 /*
  * A browser rather than the mock DOM, because what is being pinned here is a PICTURE: the preview is
@@ -2080,6 +2084,21 @@ describe('ve-preview taking up a preview copy', () => {
   );
 });
 
+/** A pointer event at (`fx`, `fy`) of the frame. */
+function touch(stage: HTMLElement, frame: DOMRect, type: string, pointerId: number, fx: number, fy: number): void {
+  stage.dispatchEvent(
+    new PointerEvent(type, {
+      pointerId,
+      pointerType: 'touch',
+      isPrimary: pointerId === 1,
+      clientX: frame.left + fx * frame.width,
+      clientY: frame.top + fy * frame.height,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
 describe("ve-preview: the Track sheet's box under the fingers", () => {
   /*
    * A finger that lands off the box puts the box on it - but only once it is a tap or a drag. On landing
@@ -2103,21 +2122,6 @@ describe("ve-preview: the Track sheet's box under the fingers", () => {
     await until('the frame to have a size', () => stage.getBoundingClientRect().width > 0);
     await until('the box to be on the frame', () => !!store.shownAim());
     return { store, stage, frame: stage.getBoundingClientRect() };
-  }
-
-  /** A pointer event at (`fx`, `fy`) of the frame. */
-  function touch(stage: HTMLElement, frame: DOMRect, type: string, pointerId: number, fx: number, fy: number): void {
-    stage.dispatchEvent(
-      new PointerEvent(type, {
-        pointerId,
-        pointerType: 'touch',
-        isPrimary: pointerId === 1,
-        clientX: frame.left + fx * frame.width,
-        clientY: frame.top + fy * frame.height,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
   }
 
   it('sizes the box where it is when a pinch starts with both fingers off it', async () => {
@@ -2234,5 +2238,171 @@ describe("ve-preview: the Track sheet's box under the fingers", () => {
     expect(aim.w, 'their box, a little bigger').toBeCloseTo(Math.min(1, person.w * 1.12), 3);
     expect(store.trackLockOn.value?.fitted).toBe(true);
     expect(read, 'nothing read for a person').toBe(0);
+  });
+});
+
+describe('ve-preview: dropping a layer on a track', () => {
+  /*
+   * A text, sticker or photo dragged over the picture lights up every thing a track follows that is on
+   * screen at the playhead, the one under the finger brighter, and let go on that one is pinned to its
+   * track where it was let go: the move and the pin one undo step. The things are drawn on the Track
+   * canvas, so they are read off its pixels - each box has a dot at its middle, faint while the finger is
+   * elsewhere and solid under it. The bin still throws a layer away, and an effect, which is never picked
+   * up off the frame, lights nothing.
+   */
+
+  /** A still thing at (`x`, `y`) of the 9:16 source over the clip's first five seconds, a fifth of it across. */
+  function track(id: string, name: string, x: number, y: number): EditTrack {
+    return {
+      id,
+      name,
+      hue: id === 'trk-a' ? 1 : 2,
+      clipId: 'seg-a',
+      clipKey: 'clip-a',
+      aspect: 9 / 16,
+      box: { w: 0.2, h: 0.1 },
+      atMs: [0, 1000, 2000, 3000, 4000, 5000],
+      x: [x, x, x, x, x, x],
+      y: [y, y, y, y, y, y],
+      scale: [1, 1, 1, 1, 1, 1],
+      turn: [0, 0, 0, 0, 0, 0],
+    };
+  }
+
+  /**
+   * The post with two things low on the frame, clear of the bin either side of it - a runner on the left and
+   * a dog on the right - and a sticker over them, drawn, a second in. Every `dropOnTrack` asked for is noted.
+   */
+  async function setUp(): Promise<{ store: EditorStore; preview: HTMLElement; stage: HTMLElement; frame: DOMRect; id: string; drops: string[] }> {
+    const { store, preview } = await mount(false);
+    store.commit('Track', m => ({ ...m, tracks: [track('trk-a', 'Runner', 0.25, 0.7), track('trk-b', 'Dog', 0.75, 0.7)] }));
+    const id = store.addSticker({ emoji: '⭐' })!;
+    store.bitmaps.value = new Map([[id, { png: TRANSPARENT_PNG, wPx: 100, hPx: 100, key: 'k', scale: 1, frameW: 720, frameH: 1280 }]]);
+    store.playheadMs.value = 1000;
+    const drops: string[] = [];
+    const drop = store.dropOnTrack.bind(store);
+    store.dropOnTrack = (overlayId, trackId) => {
+      drops.push(`${overlayId} on ${trackId}`);
+      return drop(overlayId, trackId);
+    };
+    const stage = preview.querySelector('.pv__stage') as HTMLElement;
+    await until('the frame to have a size', () => stage.getBoundingClientRect().width > 0);
+    await until('the sticker to be drawn', () => layerImg(preview) !== null);
+    return { store, preview, stage, frame: stage.getBoundingClientRect(), id, drops };
+  }
+
+  /** Where track `id`'s thing is on the frame at the playhead. */
+  function thing(store: EditorStore, id: string): { cx: number; cy: number } {
+    return trackedThingAt(
+      store.tracks.value.find(t => t.id === id)!,
+      store.trackScene.value,
+      store.playheadMs.value,
+    )!;
+  }
+
+  /** How opaque the Track canvas is at (`fx`, `fy`) of the frame, 0 to 255: what it has drawn there. */
+  function ink(preview: HTMLElement, fx: number, fy: number): number {
+    const canvas = preview.querySelector('canvas.pv__track') as HTMLCanvasElement;
+    const x = Math.min(canvas.width - 1, Math.floor(fx * canvas.width));
+    const y = Math.min(canvas.height - 1, Math.floor(fy * canvas.height));
+    return canvas.getContext('2d')!.getImageData(x, y, 1, 1).data[3]!;
+  }
+
+  /** The sticker taken by its middle and carried past the tap's slop: a drag. */
+  async function pickUp(stage: HTMLElement, frame: DOMRect): Promise<void> {
+    touch(stage, frame, 'pointerdown', 1, 0.5, 0.42);
+    await frames(1);
+    touch(stage, frame, 'pointermove', 1, 0.5, 0.5);
+    await frames(1);
+  }
+
+  it('lights up the things on screen as a layer is picked up, and the one under the finger brighter', async () => {
+    const { store, preview, stage, frame } = await setUp();
+    const runner = thing(store, 'trk-a');
+    const dog = thing(store, 'trk-b');
+    expect(ink(preview, runner.cx, runner.cy), 'nothing lit before the drag').toBe(0);
+
+    await pickUp(stage, frame);
+    await until('the things to light up', () => ink(preview, runner.cx, runner.cy) > 0 && ink(preview, dog.cx, dog.cy) > 0);
+    expect(ink(preview, runner.cx, runner.cy), 'faint while the finger is elsewhere').toBeLessThan(230);
+
+    touch(stage, frame, 'pointermove', 1, runner.cx, runner.cy);
+    await until('the runner to light up', () => ink(preview, runner.cx, runner.cy) > 250);
+    expect(ink(preview, dog.cx, dog.cy), 'the dog still faint').toBeLessThan(230);
+    await until('the snap guides to go while a thing is lit', () => !preview.querySelector('.pv__guide'));
+
+    touch(stage, frame, 'pointermove', 1, 0.5, 0.3);
+    await until('the runner to go faint again', () => ink(preview, runner.cx, runner.cy) < 230);
+    touch(stage, frame, 'pointerup', 1, 0.5, 0.3);
+    await until('the things to go out with the drag', () => ink(preview, runner.cx, runner.cy) === 0 && ink(preview, dog.cx, dog.cy) === 0);
+  });
+
+  it('pins a layer let go on a thing to its track, where it was let go, as one undo step', async () => {
+    const { store, stage, frame, id, drops } = await setUp();
+    const runner = thing(store, 'trk-a');
+    const at = { x: runner.cx + 0.02, y: runner.cy - 0.03 };
+    await pickUp(stage, frame);
+    touch(stage, frame, 'pointermove', 1, at.x, at.y);
+    await frames(1);
+    touch(stage, frame, 'pointerup', 1, at.x, at.y);
+    await frames(1);
+
+    expect(drops).toEqual([`${id} on trk-a`]);
+    const pinned = store.manifest.value.overlays.find(o => o.id === id)!;
+    expect(pinned.follow?.trackId).toBe('trk-a');
+    const shown = store.shownOverlay(pinned);
+    expect(shown.cx, 'where the finger left it, across').toBeCloseTo(at.x, 3);
+    expect(shown.cy, 'and down').toBeCloseTo(at.y, 3);
+
+    store.undo();
+    expect(store.toast.value?.text).toBe('Undo: Pin to track');
+    const back = store.manifest.value.overlays.find(o => o.id === id)!;
+    expect(back.follow, 'one undo takes the pin').toBeUndefined();
+    expect(back.cx, 'and the move').toBeCloseTo(0.5, 6);
+    expect(back.cy).toBeCloseTo(0.42, 6);
+  });
+
+  it('leaves out the track the layer follows already', async () => {
+    const { store, preview, stage, frame, id } = await setUp();
+    store.pinToTrack(id, 'trk-a');
+    const runner = thing(store, 'trk-a');
+    const dog = thing(store, 'trk-b');
+    await pickUp(stage, frame);
+    await until('the dog to light up', () => ink(preview, dog.cx, dog.cy) > 0);
+    expect(ink(preview, runner.cx, runner.cy)).toBe(0);
+    touch(stage, frame, 'pointerup', 1, 0.5, 0.5);
+  });
+
+  it('still throws a layer let go over the bin away', async () => {
+    const { store, preview, stage, frame, id, drops } = await setUp();
+    await pickUp(stage, frame);
+    const binY = 1 - (TRASH_BOTTOM_PX + TRASH_SIZE_PX / 2) / frame.height;
+    touch(stage, frame, 'pointermove', 1, 0.5, binY);
+    await until('the bin to light up', () => !!preview.querySelector('.pv__trash--hot'));
+    touch(stage, frame, 'pointerup', 1, 0.5, binY);
+    await frames(1);
+    expect(
+      store.manifest.value.overlays.some(o => o.id === id),
+      'thrown away',
+    ).toBe(false);
+    expect(drops, 'and pinned to nothing').toEqual([]);
+  });
+
+  it('lights nothing for an effect, which is never picked up off the frame', async () => {
+    const { store, preview, stage, frame, id, drops } = await setUp();
+    store.deleteOverlay(id);
+    const effect = store.addEffect('vignette', 'Vignette')!;
+    store.bitmaps.value = new Map([[effect, { png: TRANSPARENT_PNG, wPx: 720, hPx: 1280, key: 'k', scale: 1, frameW: 720, frameH: 1280 }]]);
+    await until('the effect to be drawn', () => !!preview.querySelector('img.pv__effect'));
+    const runner = thing(store, 'trk-a');
+    touch(stage, frame, 'pointerdown', 1, 0.5, 0.42);
+    await frames(1);
+    touch(stage, frame, 'pointermove', 1, runner.cx, runner.cy);
+    await frames(3);
+    expect(ink(preview, runner.cx, runner.cy)).toBe(0);
+    touch(stage, frame, 'pointerup', 1, runner.cx, runner.cy);
+    await frames(1);
+    expect(drops).toEqual([]);
+    expect(store.manifest.value.overlays.find(o => o.id === effect)?.follow).toBeUndefined();
   });
 });

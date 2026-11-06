@@ -104,6 +104,8 @@ object ComposeSpecParser {
         // After the camera, for the same reason, by the tints' rule: exactly three finite numbers,
         // each held to 0..1, and anything else that is there refused as `background`.
         val background = parseTint(json.opt("background"), "background")
+        // After the canvas, for the same reason: the people matte the layers behind are drawn under.
+        val matte = parseMatte(json.opt("matte"))
 
         return ComposeSpec(
             jobId = jobId,
@@ -118,6 +120,7 @@ object ComposeSpecParser {
             tracks = tracks,
             camera = camera,
             background = background,
+            matte = matte,
         )
     }
 
@@ -242,6 +245,34 @@ object ComposeSpecParser {
     private fun parseFocus(value: Any?, path: String): Focus? {
         if (value == null || value == JSONObject.NULL) return null
         val o = value as? JSONObject ?: throw SpecException(path)
+        val keys = parseSubjectKeys(o, path)
+        // A number left out, or sent as null, is 0; one that is there has to be a number.
+        fun amount(key: String, max: Double): Float = when (val raw = o.opt(key)) {
+            null, JSONObject.NULL -> 0f
+            else -> (finiteNumber(raw) ?: throw SpecException("$path.$key")).coerceIn(0.0, max).toFloat()
+        }
+        val blur = amount("blur", MAX_FOCUS_BLUR)
+        val mono = amount("mono", 1.0)
+        val dim = amount("dim", 1.0)
+        if (blur == 0f && mono == 0f && dim == 0f) return null
+        return Focus(
+            uri = keys.uri,
+            atMs = keys.atMs,
+            subjects = keys.subjects,
+            blur = blur,
+            mono = mono,
+            dim = dim,
+            invert = o.opt("invert") == true,
+        )
+    }
+
+    /**
+     * What a focus and a matte share - the subject track's `uri`, the `atMs` and the `subjects` - read by
+     * the rules [parseFocus] states, check for check and in its order, at [path]. One reader, so a matte is
+     * refused for exactly what a focus would be: `ComposeMatte` is shaped as `ComposeFocus` is so that every
+     * engine reads the two with the same code.
+     */
+    private fun parseSubjectKeys(o: JSONObject, path: String): SubjectKeys {
         val uri = (o.opt("uri") as? String)?.takeIf { it.isNotEmpty() } ?: throw SpecException("$path.uri")
         val at = o.opt("atMs") as? JSONArray ?: throw SpecException("$path.atMs")
         val n = at.length()
@@ -272,24 +303,29 @@ object ComposeSpecParser {
             }
             FocusSubject(id, focus)
         }
-        // A number left out, or sent as null, is 0; one that is there has to be a number.
-        fun amount(key: String, max: Double): Float = when (val raw = o.opt(key)) {
-            null, JSONObject.NULL -> 0f
-            else -> (finiteNumber(raw) ?: throw SpecException("$path.$key")).coerceIn(0.0, max).toFloat()
-        }
-        val blur = amount("blur", MAX_FOCUS_BLUR)
-        val mono = amount("mono", 1.0)
-        val dim = amount("dim", 1.0)
-        if (blur == 0f && mono == 0f && dim == 0f) return null
-        return Focus(
-            uri = uri,
-            atMs = atMs,
-            subjects = subjects,
-            blur = blur,
-            mono = mono,
-            dim = dim,
-            invert = o.opt("invert") == true,
-        )
+        return SubjectKeys(uri, atMs, subjects)
+    }
+
+    /** [parseSubjectKeys]' answer. */
+    private class SubjectKeys(val uri: String, val atMs: List<Double>, val subjects: List<FocusSubject>)
+
+    /**
+     * The people matte - `ComposeSpec.matte` - or null for none: no key, or JSON null.
+     *
+     * REFUSED, as shape errors: a matte that is not an object, as `matte`, and then everything a focus is
+     * refused for, by [parseSubjectKeys] at `matte.` - a `uri` that is not a non-empty string, an `atMs` with
+     * no keys or more than [MAX_FOCUS_KEYS] or a time that is not a finite number or goes back, `subjects`
+     * that is not an array, and a subject that is not an object, an id that is not a whole number 1..255 or
+     * names a subject twice, or levels that are not an array of `atMs`'s length or hold a value that is not
+     * a finite number. CLAMPED: every level to 0..1. IGNORED: every key it does not know, as a focus's are.
+     * The times are OUTPUT ms, which nothing here needs to know. A matte nobody is behind is read all the same
+     * and let go of by [RenderPlan], which is where each layer's `behind` is read against it.
+     */
+    private fun parseMatte(value: Any?): Matte? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException("matte")
+        val keys = parseSubjectKeys(o, "matte")
+        return Matte(uri = keys.uri, atMs = keys.atMs, subjects = keys.subjects)
     }
 
     /**
@@ -762,7 +798,51 @@ object ComposeSpecParser {
             // Last of the layer's fields, so a layer broken somewhere else reports the same first
             // failure it always did.
             motion = parseOverlayMotion(o.opt("motion"), "overlays[$i].motion"),
+            // After the motion, by the same rule. A quad is a key of the layer's and never one of the
+            // motion's, which refuses a key it does not know.
+            quad = parseOverlayQuad(o.opt("quad"), "overlays[$i].quad"),
+            // Only a real `true` puts a layer behind, as only one inverts a focus.
+            behind = o.opt("behind") == true,
         )
+    }
+
+    /**
+     * A layer's quad - `ComposeOverlayQuad`: where its bitmap's corners go on the OUTPUT frame, key by key -
+     * or null for a layer placed by its fields and its motion alone.
+     *
+     * REFUSED, as shape errors with the path that broke, in this order: a quad that is not an object, an
+     * `atMs` that is missing or not an array, `corners` that is not an array of eight numbers a key, more
+     * than [OverlayQuad.MAX_KEYS] keys, a time that is not a finite number or does not move FORWARD - a
+     * tracked surface is in one place at a time - and a corner that is not a finite number. The corners are
+     * not clamped: a surface may run off the frame, and the frame cuts it there. IGNORED: every key it does
+     * not know.
+     *
+     * ABSENT, which is null: no key, JSON null, and an `atMs` with no keys, which leaves the layer to its
+     * motion - the layer an engine without the `overlayQuad` feature draws.
+     */
+    private fun parseOverlayQuad(value: Any?, path: String): OverlayQuad? {
+        if (value == null || value == JSONObject.NULL) return null
+        val o = value as? JSONObject ?: throw SpecException(path)
+        val times = o.opt("atMs") as? JSONArray ?: throw SpecException("$path.atMs")
+        val n = times.length()
+        if (n == 0) return null
+        val numbers = o.opt("corners") as? JSONArray
+        if (numbers == null || numbers.length().toLong() != n.toLong() * OverlayQuad.NUMBERS_PER_KEY) {
+            throw SpecException("$path.corners")
+        }
+        if (n > OverlayQuad.MAX_KEYS) {
+            throw SpecException("$path.atMs", "invalid_spec:$path.atMs at most ${OverlayQuad.MAX_KEYS} keys")
+        }
+        val atMs = DoubleArray(n)
+        for (k in 0 until n) {
+            val t = finiteNumber(times.opt(k)) ?: throw SpecException("$path.atMs[$k]")
+            if (k > 0 && !(t > atMs[k - 1])) throw SpecException("$path.atMs[$k]")
+            atMs[k] = t
+        }
+        val corners = DoubleArray(numbers.length()) { j ->
+            finiteNumber(numbers.opt(j)) ?: throw SpecException("$path.corners[$j]")
+        }
+        return OverlayQuad(atMs, corners)
     }
 
     /**

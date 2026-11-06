@@ -114,6 +114,21 @@ describe('withNativeRenderInputs', () => {
     expect(original.clips[0]?.focus?.uri).toBe('blob:app/track');
   });
 
+  /* The editor makes the post's people matte in the page, as a blob, for the layers behind the people. */
+  it('stages the people matte the post names, and leaves a file alone', async () => {
+    blobs.set('blob:app/matte', new Blob(['VKST'], { type: 'application/octet-stream' }));
+    const matte = { uri: 'blob:app/matte', atMs: [0], subjects: [{ id: 1, focus: [1] }] };
+    const original = { ...spec(), matte: { ...matte } };
+
+    const prepared = await withNativeRenderInputs(original, async (copy) => copy);
+
+    expect(prepared.matte?.uri).toMatch(/^file:\/\/\/tmp\/videokit-render-inputs\/\d+$/);
+    expect({ ...prepared.matte, uri: '' }).toEqual({ ...matte, uri: '' });
+    expect(original.matte.uri).toBe('blob:app/matte');
+    const filed = await withNativeRenderInputs({ ...spec(), matte: { ...matte, uri: 'file:///cache/matte.vkst' } }, async (copy) => copy);
+    expect(filed.matte?.uri).toBe('file:///cache/matte.vkst');
+  });
+
   it('stages every extra audio clip and reuses one staged file across lanes', async () => {
     const original = musicOnly('blob:app/music');
     const first = { ...original.audio.music!, endMs: 1000 };

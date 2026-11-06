@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { MAX_LAYERS, MAX_TRACKS, emptyManifest, type EditManifest, type EditTrack } from '../../editor';
+import { MAX_LAYERS, MAX_TRACKS, defaultFocus, emptyManifest, setClipFocus, type EditManifest, type EditTrack } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import type { VideoEditorHost } from '../../host/host.types';
 import { EditorMedia } from '../../state/editor-media';
@@ -406,6 +406,27 @@ describe('ve-toolbar', () => {
     tile(bar, 'track').click();
     expect(store.panel.value).toBe('track');
     expect(store.trackLayer.value?.id).toBe('ov-sticker');
+  });
+
+  it('offers Behind people beside Track where the export puts people back, its state in its name', async () => {
+    const { store, bar } = await mount();
+    store.select({ kind: 'overlay', id: 'ov-sticker' });
+    await until('the sticker row', () => label(bar) === 'Sticker tools');
+    // Not until the export says it draws a matte.
+    expect(ids(bar)).not.toContain('behind');
+
+    store.renderFeatures.value = ['peopleMatte'];
+    await until('Behind people', () => ids(bar).includes('behind'));
+    expect(ids(bar).slice(0, 3)).toEqual(['animation', 'track', 'behind']);
+    expect(tile(bar, 'behind').textContent?.trim()).toBe('Behind people');
+    expect(tile(bar, 'behind').getAttribute('aria-label')).toBeNull();
+
+    store.commitOverlay('ov-sticker', { behind: true }, 'Behind people');
+    await until('Behind people on', () => tile(bar, 'behind').getAttribute('aria-label') === 'Behind people, on');
+    expect(tile(bar, 'behind').classList.contains('tile--on')).toBe(true);
+    expect(tile(bar, 'behind').hasAttribute('aria-pressed')).toBe(false);
+    tile(bar, 'behind').click();
+    expect(store.selectedOverlay.value?.behind).toBeUndefined();
   });
 
   it('dims a tool that cannot do anything, and still lets it answer', async () => {
@@ -838,14 +859,90 @@ describe('ve-toolbar', () => {
 
     store.select({ kind: 'track', id: 'trk-1' });
     await until('the track row', () => label(bar) === 'Track tools');
-    expect(ids(bar)).toEqual(['pin-text', 'pin-sticker', 'pin-photo', 'fix', 'smooth', 'rename', 'delete']);
-    expect(tiles(bar).map(button => button.textContent?.trim())).toEqual(['Pin text', 'Pin sticker', 'Pin photo', 'Fix', 'Smooth', 'Rename', 'Remove']);
+    expect(ids(bar)).toEqual(['pin-text', 'pin-sticker', 'pin-photo', 'look-blur', 'look-spotlight', 'look-pop', 'follow-cam', 'fix', 'smooth', 'rename', 'delete']);
+    expect(tiles(bar).map(button => button.textContent?.trim())).toEqual([
+      'Pin text',
+      'Pin sticker',
+      'Pin photo',
+      'Blur',
+      'Spotlight',
+      'Colour pop',
+      'Follow cam',
+      'Fix',
+      'Smooth',
+      'Rename',
+      'Remove',
+    ]);
     const back = root(bar).querySelector<HTMLButtonElement>('.tile--collapse')!;
     expect(back.getAttribute('aria-label')).toBe('Close track tools');
 
     back.click();
     await until('the root row', () => label(bar) === 'Editing tools');
     expect(store.selection.value).toBeNull();
+  });
+
+  it('puts a look on the selected track from its row, one at a time, the one on saying so in its name', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+    const look = () => store.manifest.value.tracks?.[0]?.look;
+    expect(tile(bar, 'look-blur').getAttribute('aria-label')).toBeNull();
+    // Never a toggle button, whose name Android drops: the state is in the name.
+    expect(tile(bar, 'look-blur').hasAttribute('aria-pressed')).toBe(false);
+
+    tile(bar, 'look-blur').click();
+    expect(look()?.kind).toBe('blur');
+    await until('Blur on', () => tile(bar, 'look-blur').getAttribute('aria-label') === 'Blur, on');
+    expect(tile(bar, 'look-blur').classList.contains('tile--on')).toBe(true);
+
+    tile(bar, 'look-pop').click();
+    expect(look()?.kind).toBe('pop');
+    await until('Colour pop on', () => tile(bar, 'look-pop').getAttribute('aria-label') === 'Colour pop, on');
+    expect(tile(bar, 'look-blur').getAttribute('aria-label')).toBeNull();
+
+    // A tap on the one that is on takes the look off, and one undo puts it back.
+    tile(bar, 'look-pop').click();
+    expect(look()).toBeUndefined();
+    await until('no look on', () => root(bar).querySelector('.tile--on') === null);
+    store.undo();
+    expect(look()?.kind).toBe('pop');
+  });
+
+  it('makes a follow cam from the track row, the tile named on once a zoom follows the track', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+    expect(tile(bar, 'follow-cam').getAttribute('aria-label')).toBeNull();
+
+    tile(bar, 'follow-cam').click();
+    const made = store.manifest.value.zooms.find(zoom => zoom.follow?.trackId === 'trk-1');
+    expect(made?.follow?.framing).toBe('mid');
+    expect(store.panel.value).toBe('zoom');
+    expect(store.selection.value).toEqual({ kind: 'zoom', id: made!.id });
+
+    store.closePanel();
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('Follow cam on', () => tile(bar, 'follow-cam').getAttribute('aria-label') === 'Follow cam, on');
+    expect(tile(bar, 'follow-cam').classList.contains('tile--on')).toBe(true);
+    expect(tile(bar, 'follow-cam').hasAttribute('aria-pressed')).toBe(false);
+    // On, a tap opens that zoom rather than making another.
+    tile(bar, 'follow-cam').click();
+    expect(store.manifest.value.zooms.filter(zoom => zoom.follow)).toHaveLength(1);
+    expect(store.selection.value).toEqual({ kind: 'zoom', id: made!.id });
+  });
+
+  it('says so when a look goes on where a Focus of the segment’s own wins', async () => {
+    const { store, bar } = await mount();
+    store.commit('Tracks', m => ({ ...m, tracks: [followedThing('trk-1')] }));
+    store.commit('Focus', m => setClipFocus(m, 'seg-a', defaultFocus()));
+    store.select({ kind: 'track', id: 'trk-1' });
+    await until('the track row', () => label(bar) === 'Track tools');
+
+    tile(bar, 'look-spotlight').click();
+    expect(store.manifest.value.tracks?.[0]?.look?.kind).toBe('spotlight');
+    expect(store.toast.value?.text).toBe('Focus on this clip wins over the look');
   });
 
   it('opens the track’s own sheet from Smooth and Rename, Rename on its name, and takes the track off with Remove', async () => {

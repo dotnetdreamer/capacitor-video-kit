@@ -1477,6 +1477,8 @@ const OPS: Record<string, Apply> = {
     requireFreeZoomId(manifest, id);
     requireZoomRoom(manifest);
     const startMs = num(op, 'startMs');
+    // A patch's `follow: null` is "stop following", which a new zoom has nothing to stop: only a follow is kept.
+    const { follow, ...patch } = zoomPatchOf(op);
     const zoom: EditZoom = {
       id,
       startMs,
@@ -1486,7 +1488,8 @@ const OPS: Record<string, Apply> = {
       scale: DEFAULT_ZOOM_SCALE,
       rampMs: DEFAULT_ZOOM_RAMP_MS,
       ease: 'smooth',
-      ...zoomPatchOf(op),
+      ...patch,
+      ...(follow ? { follow } : {}),
     };
     const next = addZoom(manifest, zoom, totalDurationMs(manifest));
     if (!next) throw new Error(`there is no room for a zoom at ${startMs}ms - zooms never overlap, and a zoom runs at least ${MIN_ZOOM_MS}ms before the next one and the end`);

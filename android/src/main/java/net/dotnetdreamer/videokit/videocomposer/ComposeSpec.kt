@@ -168,6 +168,25 @@ data class Focus(
 data class FocusSubject(val id: Int, val focus: List<Double>)
 
 /**
+ * Where the people are on the OUTPUT frame, for the layers drawn behind them - the Kotlin mirror of
+ * `ComposeMatte`, shaped as a [Focus] is so it is read with the code a focus is read with
+ * ([FocusKeys], [SubjectTracks.focusLevels], [SubjectTracks.focusMask]). [uri] is a subject track whose
+ * grid is the output frame's - not a source's - and whose times are output ms, so it is read at an output
+ * frame's own time with no clip's geometry at all. Each listed subject's level, 0..1 at each of [atMs], is
+ * how far the picture is put back over the layers behind wherever that subject is.
+ *
+ * Every level is already held to 0..1 by the parser. A data class of lists, for [Focus]'s reason.
+ */
+data class Matte(
+    /** The output-frame subject track, read and checked by the pre-flight. */
+    val uri: String,
+    /** OUTPUT milliseconds, never going back; two equal times are a step. */
+    val atMs: List<Double>,
+    /** The subjects put back, each with its level at every key. One the track has and this does not list stays behind. */
+    val subjects: List<FocusSubject>,
+)
+
+/**
  * How one base clip gives way to the next: the Kotlin mirror of `ComposeTransition`, whose doc
  * comment in definitions.ts is the NORMATIVE drawing contract every engine implements, word for
  * word. What follows is only what this engine needs to know to read it.
@@ -356,6 +375,21 @@ data class Overlay(
      * one is built exactly as it was.
      */
     val motion: OverlayMotion? = null,
+    /**
+     * The layer drawn in PERSPECTIVE on a flat surface, its corners keyed on the output frame - see
+     * [OverlayQuad]. Null, which is every spec written before the key, is a layer placed by the fields
+     * above and [motion] alone. Present, the quad is where the bitmap goes and [motion]'s place, size and
+     * turn - the quad's best fit, which JS sends for an engine that cannot draw one - are not used; the
+     * window, [opacity] and the motion's opacity still are. Last and defaulted, with [behind], so every
+     * overlay built without them is built exactly as it was.
+     */
+    val quad: OverlayQuad? = null,
+    /**
+     * The layer drawn BEHIND the people in the picture, under [ComposeSpec.matte] - only a real `true` on
+     * the wire. Without a matte it means nothing, and [RenderPlan] draws the layer over the picture as
+     * always.
+     */
+    val behind: Boolean = false,
 )
 
 data class Music(
@@ -477,6 +511,13 @@ data class ComposeSpec(
      * finished picture by [BackgroundEffect], and under each transition side by [TransitionEffect].
      */
     val background: FloatArray? = null,
+    /**
+     * Where the people are on the output frame, for the layers drawn behind them - see [Matte]. Null, which
+     * is every spec written before the key, is no layer behind anyone; and [RenderPlan] lets go of a matte
+     * no layer is behind, which changes no pixel. Last and defaulted, so every spec built without one is
+     * built exactly as it was.
+     */
+    val matte: Matte? = null,
 )
 
 /**

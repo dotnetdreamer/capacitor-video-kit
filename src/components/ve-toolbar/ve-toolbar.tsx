@@ -3,9 +3,10 @@ import { Component, Element, Host, Prop } from '@stencil/core';
 
 import type { EditorContext } from '../../bridge/editor-context';
 import { SignalWatcher } from '../../bridge/signal-watcher';
-import { MAX_LAYERS, MAX_TRACKS, musicMovedTo, weakSpots } from '../../editor';
+import { MAX_LAYERS, MAX_TRACKS, TRACK_LOOKS, musicMovedTo, weakSpots } from '../../editor';
 import type { EditorIconName } from '../../icons/icons';
 import type { EditorPanel } from '../../state/editor.types';
+import { TRACK_LOOK_NAMES } from '../ve-track-sheet/look-names';
 
 /** Which set of tools the bottom row is showing. */
 export type ToolbarRowKind = 'root' | 'text' | 'clip' | 'layer' | 'track' | 'zoom' | 'music' | 'audio' | 'voice' | 'audioEffect';
@@ -30,6 +31,12 @@ export interface ToolTile {
   pressed?: boolean;
   /** For an on/off tool (Loop): its state. Undefined for tools that are not toggles. */
   toggled?: boolean;
+  /**
+   * For one of a set of tools only one of which is on at a time (a track's looks): whether this one is. Drawn
+   * as a toggled tile is, but its state is in its NAME - "Blur, on" - and never `aria-pressed`, which would
+   * make it a toggle button, whose name Android's WebView drops.
+   */
+  on?: boolean;
   /** For a tool that opens a menu: whether the menu is open. Undefined for every other tool. */
   expanded?: boolean;
 }
@@ -102,6 +109,8 @@ export class VeToolbar {
 
   private readonly clipSelected = computed(() => !!this.ctx.store.selectedClip.value);
   private readonly layerKind = computed(() => this.ctx.store.selectedOverlay.value?.kind ?? null);
+  /** Whether the selected layer is behind the people in the picture: Behind people's state, in its name. */
+  private readonly layerBehind = computed(() => this.ctx.store.selectedOverlay.value?.behind === true);
   private readonly voiceSelected = computed(() => !!this.ctx.store.selectedVoice.value);
   private readonly audioSelected = computed(() => !!this.ctx.store.selectedAudio.value);
   private readonly audioLoops = computed(() => !!this.ctx.store.selectedAudio.value?.loop);
@@ -117,6 +126,8 @@ export class VeToolbar {
    * the track itself is a new object after every change made to it - a fix, a rename, its smoothing.
    */
   private readonly trackSelected = computed(() => !!this.ctx.store.selectedTrack.value);
+  /** The selected track's look, by kind: which of Blur, Spotlight and Colour pop is on. A string for the reason [trackSelected] is a boolean. */
+  private readonly trackLook = computed(() => this.ctx.store.selectedTrack.value?.look?.kind ?? null);
   /** The selected track is sure the whole way, so Fix has no spot to go to: dimmed, and a tap says so. */
   private readonly trackAllSure = computed(() => {
     const track = this.ctx.store.selectedTrack.value;
@@ -768,6 +779,22 @@ export class VeToolbar {
     // Beside the other tool that moves a layer: pinned to something in the footage, it moves with it.
     // Never on an effect, which covers the frame and has nothing to be pinned by.
     if (!isEffect) tiles.push({ id: 'track', label: 'Track', icon: 'track-outline', run: () => store.openTrack() });
+    // Beside it, the other tool that is about the footage under the layer: the people in it walk in front. Only
+    // where the export draws that and the platform can find them, and never on an effect. "Behind people, on"
+    // says it is; a tap on it then brings the layer back over the picture.
+    if (!isEffect && store.canPutBehind.value) {
+      tiles.push({
+        id: 'behind',
+        label: 'Behind people',
+        icon: 'people-outline',
+        on: this.layerBehind.value,
+        // Read at tap time, as the track tiles are, so a tap never acts on a row a frame out of date.
+        run: () => {
+          const overlay = store.selectedOverlay.value;
+          if (overlay) store.setLayerBehind(overlay.id, overlay.behind !== true);
+        },
+      });
+    }
     // The move tools call the store even when they are dimmed: it answers "Already on top".
     tiles.push(
       {
@@ -841,10 +868,11 @@ export class VeToolbar {
   /**
    * The tools for a selected track: something in the footage, followed, which is a layer of its own on
    * the timeline. The first three add a text, a sticker or a photo through the very tools the root row
-   * adds them with, and the layer lands on the thing, pinned to it. The rest look after the track: Fix
-   * goes to its next spot worth a second look, Smooth and Rename open its sheet - Rename with its name
-   * ready to type over - and Remove takes it off the post, every layer that followed it left standing
-   * where it is.
+   * adds them with, and the layer lands on the thing, pinned to it. The next three put a look on the
+   * thing - Blur, Spotlight, Colour pop, one at a time - and a tap on the one that is on takes it off. The
+   * rest look after the track: Fix goes to its next spot worth a second look, Smooth and Rename open its
+   * sheet - Rename with its name ready to type over - and Remove takes it off the post, every layer that
+   * followed it left standing where it is.
    *
    * The track's id is read at tap time, as a zoom's is, for the reason [zoomSelected] gives.
    */
@@ -864,6 +892,24 @@ export class VeToolbar {
         { id: 'pin-text', label: 'Pin text', icon: 'text-outline', disabled: full, run: this.pinNew(() => store.startNewText()) },
         { id: 'pin-sticker', label: 'Pin sticker', icon: 'happy-outline', disabled: full, run: this.pinNew(() => this.openLayerPanel('stickers')) },
         { id: 'pin-photo', label: 'Pin photo', icon: 'image-outline', disabled: full, run: this.pinNew(() => void this.ctx.media.pickPhoto()) },
+        // Which look is on is read at tap time as well, so a tap never acts on a row a frame out of date.
+        ...TRACK_LOOKS.map(kind => ({
+          id: `look-${kind}`,
+          label: TRACK_LOOK_NAMES[kind].label,
+          icon: TRACK_LOOK_NAMES[kind].icon,
+          on: this.trackLook.value === kind,
+          run: withTrack(id => {
+            const putOn = store.selectedTrack.value?.look?.kind !== kind;
+            store.setTrackLook(id, putOn ? kind : null);
+            // A look put on where the segment's own Focus wins shows nowhere there: said, or the tap reads as broken.
+            if (putOn && store.focusWinsOverLook(id)) store.showToast('Focus on this clip wins over the look');
+          }),
+        })),
+        // A camera that keeps the thing in frame: a zoom of its own, made or - "Follow cam, on" - opened.
+        // Left out where the host offers no zoom, unless the post already has one following this track.
+        ...(store.host.editing.zoom || store.followCamOn.value
+          ? [{ id: 'follow-cam', label: 'Follow cam', icon: 'videocam-outline' as const, on: store.followCamOn.value, run: withTrack(id => store.followCam(id)) }]
+          : []),
         {
           id: 'fix',
           label: 'Fix',
@@ -1182,7 +1228,7 @@ export class VeToolbar {
                       'tile': true,
                       'tile--dim': !!tile.disabled,
                       'tile--pressed': !!tile.pressed,
-                      'tile--on': !!tile.toggled,
+                      'tile--on': !!tile.toggled || !!tile.on,
                     }}
                     // Strings on purpose: the vdom drops an attribute whose value is boolean false,
                     // and a toggle with no `aria-pressed` at all is announced as a plain button.
@@ -1191,10 +1237,11 @@ export class VeToolbar {
                     aria-haspopup={tile.expanded === undefined ? null : 'menu'}
                     aria-expanded={tile.expanded === undefined ? null : String(tile.expanded)}
                     // Only ever on a tile that neither toggles nor opens a menu: `soonTile` gives a
-                    // tile no `toggled` and no `expanded`. An `aria-label` BESIDE `aria-pressed` or
-                    // `aria-haspopup` is not the name on Android's WebView (see `.sheet__hidden-name`
-                    // in sheet-common.css), which is why Loop and Sound are named by their own words.
-                    aria-label={tile.soon ? `${tile.label}, coming soon` : null}
+                    // tile no `toggled` and no `expanded`, and a tile that is `on` has neither either.
+                    // An `aria-label` BESIDE `aria-pressed` or `aria-haspopup` is not the name on
+                    // Android's WebView (see `.sheet__hidden-name` in sheet-common.css), which is why
+                    // Loop and Sound are named by their own words.
+                    aria-label={tile.soon ? `${tile.label}, coming soon` : tile.on ? `${tile.label}, on` : null}
                     onClick={() => this.tap(tile)}
                   >
                     <ve-icon class="tile__icon" name={tile.icon}></ve-icon>

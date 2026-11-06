@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { EditorContext } from '../../bridge/editor-context';
-import { emptyManifest, type EditManifest, type EditOverlay, type EditTrack, type OverlayFollow } from '../../editor';
+import { defaultFocus, emptyManifest, setClipFocus, type EditManifest, type EditOverlay, type EditTrack, type OverlayFollow } from '../../editor';
 import { resolveEditorHost } from '../../host/defaults';
 import { EditorMedia } from '../../state/editor-media';
 import { EditorStore } from '../../state/editor-store';
@@ -114,6 +114,11 @@ function el<T extends HTMLElement = HTMLElement>(sheet: HTMLElement, selector: s
 
 function text(sheet: HTMLElement, selector: string): string | null {
   return el(sheet, selector)?.textContent?.trim() ?? null;
+}
+
+/** One of the head's tabs, by its words. */
+function tab(sheet: HTMLElement, name: string): HTMLElement | null {
+  return Array.from(frame(sheet)?.shadowRoot?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []).find(t => t.textContent?.trim() === name) ?? null;
 }
 
 /** Every button in the sheet's body by what it is called: its label, or its own words. */
@@ -359,6 +364,49 @@ describe('ve-track-sheet', () => {
 
     // Nothing in a face reaches past the body: each one fits the height it is given.
     for (const face of Array.from(onTrack.sheet.shadowRoot!.querySelectorAll<HTMLElement>('.tk__face'))) expect(face.scrollHeight).toBeLessThanOrEqual(face.clientHeight);
+  });
+
+  it('puts a look on the track from its Look tab, with a strength, and says when a Focus on the clip wins', async () => {
+    const { store, sheet } = await mount(manifest([track()], []), openOnTrack);
+    const look = () => store.manifest.value.tracks?.[0]?.look;
+    const chips = () => Array.from(sheet.shadowRoot!.querySelectorAll('[role="radio"]')).map(chip => chip.getAttribute('aria-label'));
+    expect(Array.from(frame(sheet)!.shadowRoot!.querySelectorAll('[role="tab"]')).map(t => t.textContent?.trim())).toEqual(['Path', 'Look']);
+
+    tab(sheet, 'Look')!.click();
+    await until('the looks', () => el(sheet, '[role="radiogroup"]') !== null);
+    expect(el(sheet, '[role="radiogroup"]')!.getAttribute('aria-label')).toBe('Look');
+    expect(chips()).toEqual(['None, on', 'Blur', 'Spotlight', 'Colour pop']);
+    expect(el(sheet, '[data-readout="strength"]')).toBe(null);
+    expect(sheet.shadowRoot!.querySelector('[aria-pressed]')).toBe(null);
+
+    button(sheet, 'Spotlight')!.click();
+    expect(look()).toEqual({ kind: 'spotlight', amount: 0.7 });
+    await until('Spotlight on', () => chips()[2] === 'Spotlight, on');
+    expect(text(sheet, '[data-readout="strength"]')).toBe('70%');
+
+    button(sheet, 'None')!.click();
+    expect(look()).toBeUndefined();
+    await until('no strength', () => el(sheet, '[data-readout="strength"]') === null);
+
+    store.commit('Focus', m => setClipFocus(m, 'seg-a', defaultFocus()));
+    await until('the line', () => text(sheet, '.tk__face--look .tk__hint') === 'Focus on this clip wins over the look');
+
+    // Back on Path, Smooth is where it was.
+    tab(sheet, 'Path')!.click();
+    await until('the path', () => text(sheet, '[data-readout="smooth"]') === '30%');
+  });
+
+  it('fits the Look tab, a look and its strength on, in the height the sheet keeps', async () => {
+    for (const open of [openOnTrack, openOnLayer]) {
+      const overlays = open === openOnLayer ? [caption(FOLLOWING)] : [];
+      const { sheet } = await mount(manifest([track({ look: { kind: 'blur', amount: 0.7 } })], overlays), open);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const kept = height(sheet);
+      tab(sheet, 'Look')!.click();
+      await until('the strength', () => el(sheet, '[data-readout="strength"]') !== null);
+      expect(height(sheet)).toBe(kept);
+      for (const face of Array.from(sheet.shadowRoot!.querySelectorAll<HTMLElement>('.tk__face'))) expect(face.scrollHeight).toBeLessThanOrEqual(face.clientHeight);
+    }
   });
 
   it('closes itself when the track it shows is gone and there is nothing else to show', async () => {

@@ -1,6 +1,22 @@
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 
-import { MissingClipError, focusChangesPicture, toComposeSpec, type ComposeSpecIds, type EditManifest, type SubjectTrackRef, type SubjectTracksByKey } from '../editor';
+import {
+  MissingClipError,
+  compileCamera,
+  compileLayoutMotions,
+  focusChangesPicture,
+  parseSubjectTrack,
+  toComposeSpec,
+  totalDurationMs,
+  type ComposeSpecIds,
+  type EditManifest,
+  type SubjectTrack,
+  type SubjectTrackRef,
+  type SubjectTracksByKey,
+  type TrackLooksByClip,
+} from '../editor';
+import { behindWindows, buildPeopleMatteAsync, hasBehindLayers, peopleSourceKeys } from '../editor/people-matte';
+import { segmentLooks } from '../editor/track-looks';
 import { debugError } from '../host/debug';
 import { browserSubjects } from '../host/defaults';
 import {
@@ -14,7 +30,7 @@ import {
 import { readFileBlob } from '../host/read-file';
 
 import { batchIdRefusal } from './batch-id';
-import type { ComposeFailureCode, ComposeResult, ComposeSpec } from './definitions';
+import { RENDER_FEATURES, type ComposeFailureCode, type ComposeFocus, type ComposeMatte, type ComposeResult, type ComposeSpec, type RenderFeature } from './definitions';
 import { VideoComposer } from './index';
 import { RenderInputError, withNativeRenderInputs } from './render-inputs';
 
@@ -153,6 +169,14 @@ export interface ComposerRenderHost extends EditorRenderHost {
   encodeSupport(frames: readonly { width: number; height: number; fps: number }[]): Promise<readonly EditorEncodeSupport[]>;
 
   /**
+   * What this build's render draws beyond every build's ([RenderFeature]), which the editor offers the tools
+   * of and no others: every one on the web, whose engine is this package's own, and on a phone what the plugin
+   * reports - none for a build that says nothing, which is every build before features were asked about, and
+   * none when the plugin cannot be asked. Never rejects. The editor's store reads it as `renderFeatures`.
+   */
+  renderFeatures(): Promise<readonly RenderFeature[]>;
+
+  /**
    * Deletes every render folder this host has remembered, keeping for next time any whose cleanup
    * failed and any whose render has not settled yet. Never rejects. Does nothing unless
    * [ComposerRenderHostOptions.discardPreviousRenders] is on; with it on, a host calls this when its
@@ -223,6 +247,18 @@ export function composerRenderHost(options: ComposerRenderHostOptions = {}): Com
       }
     },
 
+    async renderFeatures(): Promise<readonly RenderFeature[]> {
+      if (!Capacitor.isNativePlatform()) return [...RENDER_FEATURES];
+      try {
+        const features: unknown = (await VideoComposer.capabilities()).features;
+        // Only names this build knows, in the order it lists them: anything else is a feature it cannot offer a tool for.
+        return Array.isArray(features) ? RENDER_FEATURES.filter(feature => features.includes(feature)) : [];
+      } catch (error) {
+        log('[composerRenderHost] capabilities() failed', error);
+        return [];
+      }
+    },
+
     async render(request: RenderRequest): Promise<EditorSource> {
       const { manifest, sources, signal } = request;
       signal.throwIfAborted();
@@ -242,47 +278,60 @@ export function composerRenderHost(options: ComposerRenderHostOptions = {}): Com
       const subjects = await subjectTracksFor(manifest, uriByKey, sources, log);
       signal.throwIfAborted();
 
-      let spec: ComposeSpec;
+      // The tracks' looks, made with the spec ([trackLooksFor]) and let go of in the `finally` below however
+      // the render ends: after the job has settled, so nothing is still reading them.
+      let looks = NO_LOOKS;
+      // The people the layers behind them are drawn under ([peopleMatteFor]), let go of the same way.
+      let matte = NO_MATTE;
       try {
-        spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, request.raster, { maxBytes: request.maxBytes }, subjects);
-      } catch (error) {
-        /*
-         * Refused before any segment id was handed out, so a missing clip already names the host's
-         * source. `instanceof` is sound here because the class and the function that throws it are
-         * the one module this file imports. Logged as well as mapped: the editor shows one of four
-         * fixed sentences and none of them can carry a reason. Unless the customer called the
-         * render off while the layers were being drawn, which makes it the abort.
-         */
-        signal.throwIfAborted();
-        log('[composerRenderHost] toComposeSpec refused', error);
-        if (error instanceof MissingClipError) {
-          throw new RenderFailedError('unreadable_input', error.message, error.clipKey);
+        let spec: ComposeSpec;
+        try {
+          looks = trackLooksFor(manifest);
+          matte = await peopleMatteFor(manifest, uriByKey, sources, signal, log);
+          spec = await toComposeSpec(manifest, uriByKey, { jobId, batchId }, request.raster, { maxBytes: request.maxBytes }, subjects, looks.byClip, matte.matte);
+        } catch (error) {
+          /*
+           * Refused before any segment id was handed out, so a missing clip already names the host's
+           * source. `instanceof` is sound here because the class and the function that throws it are
+           * the one module this file imports. Logged as well as mapped: the editor shows one of four
+           * fixed sentences and none of them can carry a reason. Unless the customer called the
+           * render off while the layers were being drawn, which makes it the abort.
+           */
+          signal.throwIfAborted();
+          log('[composerRenderHost] toComposeSpec refused', error);
+          if (error instanceof MissingClipError) {
+            throw new RenderFailedError('unreadable_input', error.message, error.clipKey);
+          }
+          throw new RenderFailedError('unknown', String(error));
         }
-        throw new RenderFailedError('unknown', String(error));
-      }
-      // Drawing every layer takes a while on a phone, and a customer can call the export off in it.
-      signal.throwIfAborted();
-
-      // Written down BEFORE the encode starts, because the folder exists from the moment the
-      // composer touches it, and an app killed mid render is the case that strands one.
-      unsettled.add(batchId);
-      folders?.remember(batchId);
-      try {
-        /*
-         * Every `blob:` URL in the spec - a sound from the browser's library, a track the default
-         * picker read in, a clip a host kept as bytes - is written out as a file on a phone first
-         * and deleted once the job has settled. That is why the job settles on its own terminal
-         * event and never on `compose`'s answer: the staged files are deleted the moment it settles.
-         */
-        const result = await withNativeRenderInputs(spec, (prepared) => runJob(prepared, request, log), signal);
-        // A job that finished after all, its cancel having lost the race with the last frame: the
-        // editor has already let go of this render, so nothing is made of its file.
+        // Drawing every layer takes a while on a phone, and a customer can call the export off in it.
         signal.throwIfAborted();
-        return await toSource(result, { jobId, batchId, manifest });
-      } catch (error) {
-        throw asRenderFailure(error, manifest, signal, log);
+
+        // Written down BEFORE the encode starts, because the folder exists from the moment the
+        // composer touches it, and an app killed mid render is the case that strands one.
+        unsettled.add(batchId);
+        folders?.remember(batchId);
+        try {
+          /*
+           * Every `blob:` URL in the spec - a sound from the browser's library, a track the default
+           * picker read in, a clip a host kept as bytes, a track look's subject track - is written out
+           * as a file on a phone first and deleted once the job has settled. That is why the job
+           * settles on its own terminal event and never on `compose`'s answer: the staged files are
+           * deleted the moment it settles.
+           */
+          const result = await withNativeRenderInputs(spec, (prepared) => runJob(prepared, request, log), signal);
+          // A job that finished after all, its cancel having lost the race with the last frame: the
+          // editor has already let go of this render, so nothing is made of its file.
+          signal.throwIfAborted();
+          return await toSource(result, { jobId, batchId, manifest });
+        } catch (error) {
+          throw asRenderFailure(error, manifest, signal, log);
+        } finally {
+          unsettled.delete(batchId);
+        }
       } finally {
-        unsettled.delete(batchId);
+        looks.release();
+        matte.release();
       }
     },
 
@@ -317,22 +366,156 @@ async function subjectTracksFor(
   }
   const tracks = new Map<string, SubjectTrackRef>();
   for (const key of keys) {
-    const uri = uriByKey.get(key);
-    if (!uri) continue;
-    const source = sources.find(candidate => candidate.key === key);
-    const picture = source?.kind === 'image';
+    if (!uriByKey.get(key)) continue;
     try {
-      const found =
-        source && uri.startsWith('blob:') && Capacitor.isNativePlatform()
-          ? await browserSubjects(source, () => undefined)
-          : await VideoComposer.findSubjects({ uri, ...(picture ? { kind: 'image' as const } : {}) });
-      if (found) tracks.set(key, { uri: found.uri, subjects: found.subjects });
+      const found = await subjectsOf(key, uriByKey, sources);
+      if (found) tracks.set(key, found);
       else log('[composerRenderHost] no subjects for a focused clip; it is drawn as it is');
     } catch (error) {
       log('[composerRenderHost] no subjects for a focused clip; it is drawn as it is', error);
     }
   }
   return tracks;
+}
+
+/**
+ * One source's subject track: the composer's, or on a phone the page's own for a source it holds as a `blob:`
+ * URL, which the composer cannot open ([subjectTracksFor] says why). Null where the platform has nothing to look
+ * with, and for a source with no URL. Rejects as the search does.
+ */
+async function subjectsOf(key: string, uriByKey: ReadonlyMap<string, string>, sources: readonly EditorSource[]): Promise<SubjectTrackRef | null> {
+  const uri = uriByKey.get(key);
+  if (!uri) return null;
+  const source = sources.find(candidate => candidate.key === key);
+  const picture = source?.kind === 'image';
+  const found =
+    source && uri.startsWith('blob:') && Capacitor.isNativePlatform()
+      ? await browserSubjects(source, () => undefined)
+      : await VideoComposer.findSubjects({ uri, ...(picture ? { kind: 'image' as const } : {}) });
+  return found ? { uri: found.uri, subjects: found.subjects } : null;
+}
+
+/** The people matte of one render ([peopleMatteFor]): what the spec is sent with, and the URL to let go of after. */
+interface PeopleMatteRef {
+  matte: ComposeMatte | null;
+  release(): void;
+}
+
+/** A render's matte before it is made, and a post's with nobody behind: nothing sent, nothing to let go of. */
+const NO_MATTE: PeopleMatteRef = { matte: null, release: () => undefined };
+
+/**
+ * Where the people are, for a post with a layer behind them ([OverlayCommon.behind]): the matte `people-matte.ts`
+ * makes off the people of every source on screen behind such a layer - asked of `findSubjects` exactly as a
+ * focused clip's subjects are, at once for a source the editor has looked at and a search for one it has not - and
+ * read into the page. Handed over as a `blob:` URL, which the web engine reads as it is and `withNativeRenderInputs`
+ * writes out as a file on a phone with the clips, and revoked by `release` once the render has settled.
+ *
+ * None, and every layer behind drawn on top as an engine draws one with no matte: for a post with nobody behind, on
+ * a build whose render cannot draw one - iOS today, a plugin from before - and where nobody was found. A source
+ * whose people cannot be had has nobody in it, logged. Only the abort rejects: a matte is never why a post fails.
+ */
+async function peopleMatteFor(
+  manifest: EditManifest,
+  uriByKey: ReadonlyMap<string, string>,
+  sources: readonly EditorSource[],
+  signal: AbortSignal,
+  log: (message: string, error?: unknown) => void,
+): Promise<PeopleMatteRef> {
+  if (!hasBehindLayers(manifest)) return NO_MATTE;
+  try {
+    if (Capacitor.isNativePlatform()) {
+      const features: unknown = (await VideoComposer.capabilities()).features;
+      if (!Array.isArray(features) || !features.includes('peopleMatte')) return NO_MATTE;
+    }
+    const people = new Map<string, SubjectTrack>();
+    for (const key of peopleSourceKeys(manifest, behindWindows(manifest))) {
+      signal.throwIfAborted();
+      try {
+        const found = await subjectsOf(key, uriByKey, sources);
+        // A search that found nobody is nobody there, whatever its track holds.
+        if (found && found.subjects.length > 0) people.set(key, await peopleTrack(found.uri));
+      } catch (error) {
+        signal.throwIfAborted();
+        log('[composerRenderHost] no people for a clip behind a layer; nobody is put back over it', error);
+      }
+    }
+    signal.throwIfAborted();
+    // What the footage is drawn through, compiled as `toComposeSpec` compiles it for the same post.
+    const totalMs = Math.round(totalDurationMs(manifest));
+    const layout = compileLayoutMotions(manifest);
+    const scene = { manifest, camera: compileCamera(manifest.zooms ?? [], totalMs, { manifest, layout }), layout };
+    const file = await buildPeopleMatteAsync(manifest, scene, { people }, { signal });
+    if (!file) return NO_MATTE;
+    const uri = URL.createObjectURL(new Blob([file.bytes as BlobPart], { type: 'application/octet-stream' }));
+    return { matte: { uri, ...file.keys }, release: () => URL.revokeObjectURL(uri) };
+  } catch (error) {
+    signal.throwIfAborted();
+    log('[composerRenderHost] the people matte could not be made; the layers behind are drawn on top', error);
+    return NO_MATTE;
+  }
+}
+
+/**
+ * The people tracks read into the page lately, by URI, most recent last: the same track is the same object from
+ * one render to the next, so an export of the same post again is handed the matte it made ([buildPeopleMatte]).
+ */
+const peopleRead = new Map<string, SubjectTrack>();
+
+/** How many [peopleRead] keeps: a post's worth of sources. */
+const PEOPLE_KEPT = 8;
+
+/** The subject track at `uri`, read as the page reads any file of its own ([readFileBlob]) and kept a while. */
+async function peopleTrack(uri: string): Promise<SubjectTrack> {
+  const known = peopleRead.get(uri);
+  if (known) {
+    peopleRead.delete(uri);
+    peopleRead.set(uri, known);
+    return known;
+  }
+  const track = parseSubjectTrack(await (await readFileBlob(uri)).arrayBuffer());
+  peopleRead.set(uri, track);
+  if (peopleRead.size > PEOPLE_KEPT) peopleRead.delete(peopleRead.keys().next().value!);
+  return track;
+}
+
+/** The looks of one render ([trackLooksFor]): the focus each looked segment is sent with, and the URLs to let go of after. */
+interface TrackLooks {
+  byClip: TrackLooksByClip;
+  release(): void;
+}
+
+/** A render's looks before they are made, and a post's with none: nothing sent, nothing to let go of. */
+const NO_LOOKS: TrackLooks = { byClip: new Map(), release: () => undefined };
+
+/**
+ * The looks every segment's tracks put on it ([EditTrack.look]), as the focus each is sent with, by segment
+ * id. Made here off the tracks' own paths (`segmentLooks`), never asked of `findSubjects`: the tracks ARE the
+ * subjects, and there is nothing for a segmenter to find. Each segment's subject track is handed over as a
+ * `blob:` URL, which the web engine reads as it is and `withNativeRenderInputs` writes out as a file on a
+ * phone with the clips, as it does the page's own search's - so Android and iOS draw a look with the focus
+ * they already have. Segments over the same footage drawing the same looks share one subject track, and one
+ * URL. `release` revokes the URLs once the render has settled.
+ */
+function trackLooksFor(manifest: EditManifest): TrackLooks {
+  const made = segmentLooks(manifest);
+  if (made.size === 0) return NO_LOOKS;
+  const urls = new Map<Uint8Array, string>();
+  const byClip = new Map<string, ComposeFocus>();
+  for (const [segmentId, look] of made) {
+    let uri = urls.get(look.bytes);
+    if (!uri) {
+      uri = URL.createObjectURL(new Blob([look.bytes as BlobPart], { type: 'application/octet-stream' }));
+      urls.set(look.bytes, uri);
+    }
+    byClip.set(segmentId, { uri, ...look.focus });
+  }
+  return {
+    byClip,
+    release: () => {
+      for (const uri of urls.values()) URL.revokeObjectURL(uri);
+    },
+  };
 }
 
 /**

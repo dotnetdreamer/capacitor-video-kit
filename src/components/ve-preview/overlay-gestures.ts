@@ -1,6 +1,20 @@
 import type { Signal } from '@preact/signals-core';
 
-import { MAX_SCALE, MIN_SCALE, clamp, findClip, isOverlayVisibleAt, type ClipFramingPatch, type EditOverlay, type EditPlacement, type EditRect } from '../../editor';
+import {
+  MAX_SCALE,
+  MIN_SCALE,
+  clamp,
+  findClip,
+  isOverlayVisibleAt,
+  trackStretches,
+  trackedThingAt,
+  type ClipFramingPatch,
+  type EditOverlay,
+  type EditPlacement,
+  type EditRect,
+  type EditTrack,
+  type TrackScene,
+} from '../../editor';
 import {
   MIN_CLIP_RECT,
   MIN_CROP,
@@ -17,6 +31,8 @@ import {
   type CropSide,
   type FrameBox,
 } from '../../state/clip-framing';
+import { quadMiddle } from '../../editor/homography';
+import { isSurfaceTrack, surfaceQuadAt } from '../../editor/surface';
 import type { CoalesceKey, EditorStore } from '../../state/editor-store';
 import type { OverlayBitmap, TrackAim } from '../../state/editor.types';
 import { ZOOM_CORNER_CURSORS, moveZoomArea, pinchZoomArea, resizeZoomArea, zoomCornerAt, type ZoomAreaView, type ZoomCorner } from './zoom-area';
@@ -129,6 +145,69 @@ export function gripAim(aim0: TrackAim, grip: AimGrip, dx: number, dy: number): 
   return { cx: (left + right) / 2, cy: (top + bottom) / 2, w: right - left, h: bottom - top };
 }
 
+/** Where four corners on a flat surface are taken hold of: one corner (0 to 3, a picture's order), or the whole quad from inside it. */
+export type SurfaceGrip = 0 | 1 | 2 | 3 | 'move';
+
+/**
+ * The grip a point on the frame (`px`, `py`, pixels from its top-left) takes of four corners (fractions of
+ * the frame, x0, y0, ...): the nearest corner within [AIM_CORNER_PX] - and nearer than the quad's middle, so a
+ * small quad still has somewhere to be moved by - the quad itself from anywhere inside it, or null off it.
+ */
+export function surfaceGripAt(corners: readonly number[], px: number, py: number, frameWidth: number, frameHeight: number): SurfaceGrip | null {
+  const points = [0, 1, 2, 3].map(k => ({ x: corners[2 * k]! * frameWidth, y: corners[2 * k + 1]! * frameHeight }));
+  let sign = 0;
+  let inside = true;
+  for (let k = 0; k < 4; k++) {
+    const a = points[k]!;
+    const b = points[(k + 1) % 4]!;
+    const s = Math.sign((b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x));
+    if (s !== 0 && sign !== 0 && s !== sign) inside = false;
+    if (s !== 0) sign = s;
+  }
+  const mid = quadMiddle(points.flatMap(p => [p.x, p.y])) ?? points[0]!;
+  const middle = inside ? Math.hypot(px - mid.x, py - mid.y) : Infinity;
+  let grip: SurfaceGrip | null = null;
+  let best = AIM_CORNER_PX;
+  points.forEach((p, k) => {
+    const d = Math.hypot(px - p.x, py - p.y);
+    if (d <= best && d < middle) {
+      best = d;
+      grip = k as SurfaceGrip;
+    }
+  });
+  if (grip !== null) return grip;
+  return inside ? 'move' : null;
+}
+
+/**
+ * Four corners `corners0` with `grip` carried by (`dx`, `dy`), fractions of the frame: the one corner moved,
+ * held to the frame - or all four, as far as the frame lets the quad go without changing its shape.
+ */
+export function gripSurface(corners0: readonly number[], grip: SurfaceGrip, dx: number, dy: number): number[] {
+  const out = corners0.slice();
+  if (grip !== 'move') {
+    out[2 * grip] = clamp(corners0[2 * grip]! + dx, 0, 1);
+    out[2 * grip + 1] = clamp(corners0[2 * grip + 1]! + dy, 0, 1);
+    return out;
+  }
+  const xs = [corners0[0]!, corners0[2]!, corners0[4]!, corners0[6]!];
+  const ys = [corners0[1]!, corners0[3]!, corners0[5]!, corners0[7]!];
+  // A quad already past an edge may still be brought back from it, never taken further.
+  const mx = clamp(dx, Math.min(0, -Math.min(...xs)), Math.max(0, 1 - Math.max(...xs)));
+  const my = clamp(dy, Math.min(0, -Math.min(...ys)), Math.max(0, 1 - Math.max(...ys)));
+  for (let k = 0; k < 4; k++) {
+    out[2 * k] = corners0[2 * k]! + mx;
+    out[2 * k + 1] = corners0[2 * k + 1]! + my;
+  }
+  return out;
+}
+
+/** Four corners grown or shrunk by `factor` about their middle: a pinch on the quad. */
+export function scaleSurface(corners0: readonly number[], factor: number): number[] {
+  const mid = quadMiddle(corners0) ?? { x: (corners0[0]! + corners0[4]!) / 2, y: (corners0[1]! + corners0[5]!) / 2 };
+  return corners0.map((v, k) => (k % 2 === 0 ? mid.x + (v - mid.x) * factor : mid.y + (v - mid.y) * factor));
+}
+
 /** Where the selection chrome may be drawn, in frame pixels - so negative left/top, past the frame. */
 export interface ChromeBounds {
   left: number;
@@ -142,6 +221,94 @@ export const TRASH_SIZE_PX = 48;
 export const TRASH_BOTTOM_PX = 20;
 /** Generous on purpose: letting go of a layer "near" the bin should throw it away. */
 const TRASH_HIT_RADIUS_PX = 40;
+
+/**
+ * How far round a thing's box a finger still lets a layer go on it, as a fraction of the frame's shorter
+ * side: the thing is under the finger, and often under the layer being dragged as well.
+ */
+const DROP_PAD = 0.08;
+
+/**
+ * A track a layer being dragged can be dropped on, to be pinned to it: its thing as it is on screen at the
+ * playhead, in fractions of the frame - the four corners of its box, the box they fit in, and its middle.
+ */
+export interface DropTarget {
+  trackId: string;
+  name: string;
+  /** [EditTrack.hue], which it is drawn in. */
+  hue: number;
+  corners: { x: number; y: number }[];
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  cx: number;
+  cy: number;
+}
+
+/** Nothing to drop on: one empty list for every drag with nothing, rather than one each. */
+export const NO_TARGETS: readonly DropTarget[] = [];
+
+/**
+ * What a layer can be dropped on at output instant `atMs`: every track whose thing is on screen then - its
+ * footage playing there, inside the stretch it was followed over - but `following`, the track the layer
+ * follows already. In the order the tracks were made.
+ *
+ * The stretch is asked first because [trackedThingAt] answers outside it too: before and after its footage
+ * plays it holds the thing where the nearer end left it, which would light up a box over a picture that is
+ * not on screen.
+ */
+export function dropTargets(tracks: readonly EditTrack[], scene: TrackScene, atMs: number, following: string | null): DropTarget[] {
+  const out: DropTarget[] = [];
+  for (const track of tracks) {
+    if (track.id === following) continue;
+    if (!trackStretches(track, scene.manifest).some(stretch => atMs >= stretch.startMs && atMs <= stretch.endMs)) continue;
+    // A surface is lit up as its own quad, not the box round it.
+    const quad = isSurfaceTrack(track) ? surfaceQuadAt(track, null, scene, atMs) : null;
+    const middle = quad ? quadMiddle(quad.corners) : null;
+    const thing = quad && middle ? { corners: [0, 1, 2, 3].map(k => ({ x: quad.corners[2 * k]!, y: quad.corners[2 * k + 1]! })), cx: middle.x, cy: middle.y } : trackedThingAt(track, scene, atMs);
+    if (!thing) continue;
+    const xs = thing.corners.map(c => c.x);
+    const ys = thing.corners.map(c => c.y);
+    out.push({
+      trackId: track.id,
+      name: track.name,
+      hue: track.hue,
+      corners: thing.corners,
+      left: Math.min(...xs),
+      top: Math.min(...ys),
+      right: Math.max(...xs),
+      bottom: Math.max(...ys),
+      cx: thing.cx,
+      cy: thing.cy,
+    });
+  }
+  return out;
+}
+
+/**
+ * The target a finger at (`x`, `y`) - fractions of the frame, `aspect` its width over its height - lets a
+ * layer go on: one whose box the finger is inside, padded by [DROP_PAD] all round so a thing smaller than a
+ * fingertip can still be hit, and of two that overlap there the one whose middle is nearer. Null off every one.
+ */
+export function dropTargetAt(targets: readonly DropTarget[], x: number, y: number, aspect: number): DropTarget | null {
+  const k = aspect > 0 ? aspect : 1;
+  // The shorter side as fractions of the width and of the height, so the pad is as wide as it is tall.
+  const padX = DROP_PAD * Math.min(1, 1 / k);
+  const padY = DROP_PAD * Math.min(1, k);
+  let best: DropTarget | null = null;
+  let nearest = Infinity;
+  for (const target of targets) {
+    if (x < target.left - padX || x > target.right + padX || y < target.top - padY || y > target.bottom + padY) continue;
+    // In heights of the frame, so a step across weighs what a step down does.
+    const d = Math.hypot((x - target.cx) * k, y - target.cy);
+    if (d < nearest) {
+      nearest = d;
+      best = target;
+    }
+  }
+  return best;
+}
 
 /** What the preview draws while a layer is being moved or turned. */
 export interface SnapGuides {
@@ -163,6 +330,13 @@ export interface GestureUi {
   moving: Signal<boolean>;
   trashHot: Signal<boolean>;
   guides: Signal<SnapGuides>;
+  /**
+   * What the layer being dragged can be dropped on to pin it to a track, worked out as the drag starts (see
+   * [dropTargets]). Empty the rest of the time, a clip's drag included.
+   */
+  trackTargets: Signal<readonly DropTarget[]>;
+  /** The track whose thing the finger is over, which letting go pins the layer to; null off every one. */
+  trackHot: Signal<string | null>;
   /**
    * A tap on the frame while the Focus sheet is open, at (`fx`, `fy`) - 0..1 of the frame - which the
    * preview answers with the subject under it. The sheet owns the frame then: nothing is selected,
@@ -400,6 +574,10 @@ type TrackGesture =
   | { kind: 'place'; pointerId: number; x0: number; y0: number; t0: number; aiming: boolean }
   /** Two fingers anywhere on the frame: the box grows and shrinks with them about its middle. */
   | { kind: 'pinch'; aim0: TrackAim; dist0: number }
+  /** One finger on four corners on a flat surface: one corner dragged, or the whole quad. */
+  | { kind: 'surface'; pointerId: number; x0: number; y0: number; corners0: readonly number[]; grip: SurfaceGrip }
+  /** Two fingers while four corners are put down: the quad grows and shrinks about its middle. */
+  | { kind: 'surfacePinch'; corners0: readonly number[]; dist0: number }
   /** Finished, given up on, or a run going, while fingers are still down. */
   | { kind: 'spent' };
 
@@ -477,6 +655,8 @@ type Gesture =
       cx0: number;
       cy0: number;
       grip: ClipGrip | null;
+      /** What the layer can be dropped on to pin it to a track, worked out once as it was picked up; none for a clip. */
+      targets: readonly DropTarget[];
     }
   /** Scale and rotation, from two fingers or from the corner handle's one. */
   | {
@@ -579,6 +759,8 @@ export class OverlayGestures {
       this.flush();
       this.store.endGesture(gestureLabel(gesture));
     }
+    // The bin and the things to drop on go with the drag: a preview put back on the page would draw them still up.
+    if (gesture?.kind === 'drag') this.clearDrag();
     if (this.zoomGesture) this.flush();
     this.zoomGesture = null;
     this.trackGesture = null;
@@ -684,6 +866,9 @@ export class OverlayGestures {
         this.set(this.ui.moving, true);
         if (gesture.grip) this.pausePlayback();
         else this.set(this.ui.dragging, true);
+        // A layer lights up the things it can be dropped on to pin it, worked out once; see [dropTargetsFor].
+        const targets = gesture.grip ? NO_TARGETS : this.dropTargetsFor(gesture.id);
+        this.set(this.ui.trackTargets, targets);
         const drag: Gesture = {
           kind: 'drag',
           pointerId: gesture.pointerId,
@@ -693,6 +878,7 @@ export class OverlayGestures {
           cx0: gesture.cx0,
           cy0: gesture.cy0,
           grip: gesture.grip,
+          targets,
         };
         this.gesture = drag;
         this.moveDrag(drag, point);
@@ -913,10 +1099,7 @@ export class OverlayGestures {
     }
 
     if (gesture?.kind === 'drag') {
-      this.set(this.ui.dragging, false);
-      this.set(this.ui.moving, false);
-      this.set(this.ui.trashHot, false);
-      this.setGuides(NO_GUIDES);
+      this.clearDrag();
     } else {
       this.store.beginGesture();
       this.pausePlayback();
@@ -950,9 +1133,6 @@ export class OverlayGestures {
       this.moveClipDrag(gesture.grip, gesture, point, rect);
       return;
     }
-    const x = snapToCentre(gesture.cx0 + (point.x - gesture.x0) / rect.width, rect.width);
-    const y = snapToCentre(gesture.cy0 + (point.y - gesture.y0) / rect.height, rect.height);
-
     const bin = {
       x: rect.left + rect.width / 2,
       y: rect.bottom - TRASH_BOTTOM_PX - TRASH_SIZE_PX / 2,
@@ -960,8 +1140,24 @@ export class OverlayGestures {
     const overBin = distance(point, bin) <= TRASH_HIT_RADIUS_PX;
     if (overBin && !this.ui.trashHot.value) this.store.haptic('medium');
     this.set(this.ui.trashHot, overBin);
-    // Over the bin the guides would only be noise.
-    this.setGuides(overBin ? NO_GUIDES : { x: x.snapped, y: y.snapped, rotation: null });
+
+    // The FINGER says which thing the layer is let go on, not the layer's middle: a big sticker held by its
+    // edge covers things its middle is nowhere near, and what the customer points at is under the finger.
+    const hot =
+      overBin || gesture.targets.length === 0
+        ? null
+        : (dropTargetAt(gesture.targets, (point.x - rect.left) / rect.width, (point.y - rect.top) / rect.height, rect.width / rect.height)?.trackId ?? null);
+    if (hot && hot !== this.ui.trackHot.value) this.store.haptic('selection');
+    this.set(this.ui.trackHot, hot);
+
+    // Over a thing to pin to, the layer goes exactly where the finger takes it: snapped to the middle line
+    // out of sight of its guide, it would be pinned somewhere other than where it was let go.
+    const cx = gesture.cx0 + (point.x - gesture.x0) / rect.width;
+    const cy = gesture.cy0 + (point.y - gesture.y0) / rect.height;
+    const x = hot ? { value: cx, snapped: false } : snapToCentre(cx, rect.width);
+    const y = hot ? { value: cy, snapped: false } : snapToCentre(cy, rect.height);
+    // Over the bin, or over a thing to pin to, the guides would only be noise.
+    this.setGuides(overBin || hot ? NO_GUIDES : { x: x.snapped, y: y.snapped, rotation: null });
     this.queue({ kind: 'overlay', id: gesture.id, patch: { cx: round(x.value, 4), cy: round(y.value, 4) } });
   }
 
@@ -1090,15 +1286,17 @@ export class OverlayGestures {
       return;
     }
     const intoBin = this.ui.trashHot.value && !cancelled;
-    this.set(this.ui.dragging, false);
-    this.set(this.ui.moving, false);
-    this.set(this.ui.trashHot, false);
-    this.setGuides(NO_GUIDES);
+    // Read before the feedback is cleared, which forgets it: the track whose thing the finger let go over.
+    const pinTo = intoBin || cancelled ? null : this.ui.trackHot.value;
+    this.clearDrag();
     this.gesture = { kind: 'spent' };
     if (intoBin) {
       // The move is thrown away with the layer, so the undo step is "Delete", not "Move".
       this.store.cancelGesture();
       this.store.deleteOverlay(gesture.id);
+    } else if (pinTo) {
+      // Pinned where it was let go. The store ends the gesture, so the move and the pin are one undo step.
+      this.store.dropOnTrack(gesture.id, pinTo);
     } else {
       this.store.endGesture('Move');
     }
@@ -1283,6 +1481,11 @@ export class OverlayGestures {
     // The frame held first: the box is read against the frame under the finger, and a playback carrying
     // on underneath would leave it on one the next run does not start from.
     this.store.holdTrackFrame();
+    // Four corners on a flat surface own the frame instead, a surface track's own among them.
+    if (this.store.surfaceAiming.value) {
+      this.surfaceDown(e, rect);
+      return;
+    }
     if (this.pointers.size === 1) {
       const shown = this.store.shownAim();
       const grip = shown ? aimGripAt(shown, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height) : null;
@@ -1307,6 +1510,16 @@ export class OverlayGestures {
     point.y = e.clientY;
     const rect = this.stage.getBoundingClientRect();
     if (!(rect.width > 0) || !(rect.height > 0)) return;
+    if (gesture.kind === 'surface') {
+      if (gesture.pointerId !== e.pointerId) return;
+      this.store.setSurfaceAim(gripSurface(gesture.corners0, gesture.grip, (e.clientX - gesture.x0) / rect.width, (e.clientY - gesture.y0) / rect.height));
+      return;
+    }
+    if (gesture.kind === 'surfacePinch') {
+      const pair = this.firstTwo();
+      if (pair) this.store.setSurfaceAim(scaleSurface(gesture.corners0, distance(pair[0], pair[1]) / gesture.dist0));
+      return;
+    }
     if (gesture.kind === 'place') {
       if (gesture.pointerId !== e.pointerId || distance(point, { x: gesture.x0, y: gesture.y0 }) <= TAP_SLOP_PX) return;
       // A drag: the box goes where the finger landed, and from there on it is carried like any box.
@@ -1350,6 +1563,7 @@ export class OverlayGestures {
     }
     // A pinch that loses a finger is over, as the zoom area's is, rather than turning into a jumpy drag.
     if (gesture?.kind === 'pinch' || ((gesture?.kind === 'one' || gesture?.kind === 'place') && gesture.pointerId === e.pointerId)) this.trackGesture = { kind: 'spent' };
+    if (gesture?.kind === 'surfacePinch' || (gesture?.kind === 'surface' && gesture.pointerId === e.pointerId)) this.trackGesture = { kind: 'spent' };
     if (this.pointers.size === 0) this.endTrackTouch();
   }
 
@@ -1363,6 +1577,24 @@ export class OverlayGestures {
     const person = this.store.trackPersonAt(point);
     if (person) this.store.aimTrackAtPerson(person, point);
     else void this.store.fitTrackAimAt(point);
+  }
+
+  /**
+   * A finger landing while four corners own the frame: on a corner it takes that corner, inside the quad the
+   * whole of it, and two fingers pinch its size. Off the quad nothing moves - a surface is put down by its
+   * corners, and a stray touch beside it must not drag one across the frame. On a surface track's own quad
+   * this starts tracking it again ([EditorStore.setSurfaceAim]).
+   */
+  private surfaceDown(e: PointerEvent, rect: DOMRect): void {
+    const corners = this.store.shownSurfaceAim();
+    if (this.pointers.size === 1) {
+      const grip = corners ? surfaceGripAt(corners, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height) : null;
+      this.trackGesture = corners && grip !== null ? { kind: 'surface', pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, corners0: corners, grip } : { kind: 'spent' };
+      if (grip !== null && grip !== 'move') this.store.haptic('selection');
+      return;
+    }
+    const pair = this.firstTwo();
+    this.trackGesture = this.pointers.size === 2 && pair && corners ? { kind: 'surfacePinch', corners0: corners, dist0: Math.max(1, distance(pair[0], pair[1])) } : { kind: 'spent' };
   }
 
   /** The box put with its middle at (`x`, `y`) on the screen, its size kept: a drag off it, a press held too long to be a tap, a tap on a track's own box. */
@@ -1383,6 +1615,14 @@ export class OverlayGestures {
     if (!this.trackTool()) return null;
     if (this.store.trackRun.value || this.store.trackChoosing.value) return '';
     const gesture = this.trackGesture;
+    if (gesture?.kind === 'surface') return gesture.grip === 'move' ? 'move' : 'grabbing';
+    if (gesture?.kind === 'surfacePinch') return 'move';
+    if (this.store.surfaceAiming.value) {
+      const corners = this.store.shownSurfaceAim();
+      const rect = this.stage.getBoundingClientRect();
+      const grip = corners ? surfaceGripAt(corners, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height) : null;
+      return grip === null ? '' : grip === 'move' ? 'move' : 'grab';
+    }
     if (gesture?.kind === 'one') return gesture.grip === 'move' ? 'move' : AIM_CURSORS[gesture.grip];
     if (gesture?.kind === 'pinch') return 'move';
     if (gesture?.kind === 'place') return 'crosshair';
@@ -1635,6 +1875,32 @@ export class OverlayGestures {
     if (this.store.playing.value) this.store.pause();
   }
 
+  /**
+   * What layer `id`, picked up off the frame, can be dropped on to pin it to a track: every track whose thing
+   * is on screen at the playhead but the one it follows already. Worked out once, as the drag starts, because
+   * nothing it depends on moves until the layer is let go - the press paused the post, and the drag moves the
+   * layer alone. None for an effect, which follows nothing, and none while the Track sheet has the frame.
+   */
+  private dropTargetsFor(id: string): readonly DropTarget[] {
+    const store = this.store;
+    const tracks = store.tracks.value;
+    if (tracks.length === 0 || this.trackTool()) return NO_TARGETS;
+    const overlay = store.manifest.value.overlays.find(o => o.id === id);
+    if (!overlay || overlay.kind === 'effect') return NO_TARGETS;
+    const targets = dropTargets(tracks, store.trackScene.value, store.playheadMs.value, overlay.follow?.trackId ?? null);
+    return targets.length > 0 ? targets : NO_TARGETS;
+  }
+
+  /** A layer's drag over, its feedback goes: the bin, the guides, and the things to drop on. */
+  private clearDrag(): void {
+    this.set(this.ui.dragging, false);
+    this.set(this.ui.moving, false);
+    this.set(this.ui.trashHot, false);
+    this.setGuides(NO_GUIDES);
+    this.set(this.ui.trackHot, null);
+    this.set(this.ui.trackTargets, NO_TARGETS);
+  }
+
   /** Writes the target at most once a frame, however fast the pointer events come. */
   private queue(next: Pending): void {
     const prev = this.pending;
@@ -1673,7 +1939,7 @@ export class OverlayGestures {
     this.ui.guides.value = next;
   }
 
-  private set(sig: Signal<boolean>, value: boolean): void {
+  private set<T>(sig: Signal<T>, value: T): void {
     if (sig.value !== value) sig.value = value;
   }
 

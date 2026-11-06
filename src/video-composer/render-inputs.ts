@@ -27,8 +27,9 @@ const CHUNK_BYTES = 1024 * 1024;
  * Every place a spec names media is covered, because a blob left in any of them fails the render:
  * the base clips, every track's clips, each clip's `transitionIn.from`, the subject track each of
  * those clips' `focus` names - the page's own search writes one as a blob, for a clip the page holds
- * - the music and every voiceover. One URL named several times - a split clip, a transition's
- * outgoing side, the same sound as music and as a take - is staged once.
+ * - the post's people matte, which the editor makes in the page and names as a blob too, the music
+ * and every voiceover. One URL named several times - a split clip, a transition's outgoing side, the
+ * same sound as music and as a take - is staged once.
  *
  * An input that cannot be staged rejects with a [RenderInputError] in the composer's own terms, and
  * `render` is never started: a blob that will not read - revoked, or empty - is `unreadable_input`,
@@ -89,6 +90,8 @@ export async function withNativeRenderInputs<T>(
     for (const track of prepared.tracks ?? []) {
       for (const clip of track.clips) await stageClip(clip);
     }
+    // The people the layers behind them are drawn under: a subject track like a focus's, of no one clip.
+    if (prepared.matte) prepared.matte.uri = await nativeUri(prepared.matte.uri);
     const music = prepared.audio.music;
     if (music) music.uri = await nativeUri(music.uri);
     for (const track of prepared.audio.musicTracks ?? []) {

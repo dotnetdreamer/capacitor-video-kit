@@ -1,3 +1,4 @@
+import type { ZoomFraming } from '../../editor';
 import { durationChip } from '../ve-timeline/timeline-geometry';
 
 /*
@@ -18,3 +19,13 @@ export function zoomLevelLabel(scale: number): string {
 export function zoomRampLabel(ms: number): string {
   return ms <= 0 ? 'Instant' : durationChip(ms);
 }
+
+/**
+ * The word for each framing of a zoom that follows a track, as the sheet's chips and the timeline's bar
+ * both say it: the shot sizes a camera operator would name.
+ */
+export const ZOOM_FRAMING_LABELS: Readonly<Record<ZoomFraming, string>> = {
+  fill: 'Whole shot',
+  mid: 'Medium',
+  close: 'Close',
+};
